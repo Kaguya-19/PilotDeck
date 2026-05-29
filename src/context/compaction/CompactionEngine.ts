@@ -68,6 +68,8 @@ export type CompactionInput = {
   messages: CanonicalMessage[];
   /** Optional ratio of messages to preserve verbatim past the boundary. */
   keepTailRatio?: number;
+  /** Optional target for the post-compact message budget. */
+  targetPostTokens?: number;
   /** Provider summarize prompt addition (e.g. "user wants you to focus on X"). */
   userInstruction?: string;
   /** Free-form attachments to fold into post-compact messages. */
@@ -99,7 +101,7 @@ export class CompactionEngine {
   async run(input: CompactionInput): Promise<CompactionResult> {
     const preTokens = this.tokenBudget.estimateMessagesTokens(input.messages);
     const tailRatio = clamp(input.keepTailRatio ?? DEFAULT_KEEP_TAIL_RATIO, 0, 1);
-    const keepCount = Math.max(1, Math.floor(input.messages.length * tailRatio));
+    const keepCount = this.selectKeepCount(input.messages, tailRatio, input.targetPostTokens);
     const messagesToSummarize = input.messages.slice(0, input.messages.length - keepCount);
 
     // Tool pair integrity: the summarize portion will be replaced by a
@@ -192,6 +194,31 @@ export class CompactionEngine {
     });
 
     return result;
+  }
+
+  private selectKeepCount(
+    messages: CanonicalMessage[],
+    tailRatio: number,
+    targetPostTokens: number | undefined,
+  ): number {
+    if (messages.length === 0) return 0;
+    const ratioCount = Math.max(1, Math.floor(messages.length * tailRatio));
+    if (targetPostTokens === undefined || targetPostTokens <= 0) {
+      return ratioCount;
+    }
+    const targetTailTokens = Math.max(1, Math.floor(targetPostTokens * tailRatio));
+
+    let selected = 1;
+    let tailTokens = this.tokenBudget.estimateForMessage(messages[messages.length - 1]!);
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (index === messages.length - 1) continue;
+      const messageTokens = this.tokenBudget.estimateForMessage(messages[index]!);
+      if (selected >= ratioCount) break;
+      if (tailTokens + messageTokens > targetTailTokens) break;
+      tailTokens += messageTokens;
+      selected = messages.length - index;
+    }
+    return selected;
   }
 
   private async summarize(

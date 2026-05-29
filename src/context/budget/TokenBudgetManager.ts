@@ -158,7 +158,7 @@ export class TokenBudgetManager {
   }
 
   evaluate(messages: CanonicalMessage[], maxContextTokens: number): TokenBudgetSnapshot {
-    const tokens = this.estimateMessagesTokens(messages);
+    const tokens = this.estimateForMessagesWithPadding(messages);
     const ratio = maxContextTokens > 0 ? tokens / maxContextTokens : 0;
     let state: TokenWarningState = "ok";
     if (ratio >= this.blockingRatio) {

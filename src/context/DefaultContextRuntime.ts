@@ -91,6 +91,7 @@ const DEFAULT_MAX_CONTEXT_TOKENS = 8192;
 const DEFAULT_TRUNCATE_FIRST_RATIO = 0.5;
 const DEFAULT_TRUNCATE_SECOND_RATIO = 0.25;
 const DEFAULT_MEMORY_RETRIEVAL_TIMEOUT_MS = 5_000;
+const FULL_COMPACTION_TAIL_RATIOS = [0.35, 0.2, 0.1] as const;
 
 export class DefaultContextRuntime implements ContextRuntime {
   private readonly extension: ExtensionResolver;
@@ -344,20 +345,32 @@ export class DefaultContextRuntime implements ContextRuntime {
 
     // Tier 3: CompactionEngine — full summarization via model call.
     if (this.compactionEngine) {
-      const result = await this.compactionEngine.run({
-        trigger: "auto",
-        messages,
-        signal: input.abortSignal,
-      });
-      const postCompactMessages = ensureTrailingUserMessage(buildPostCompactMessages(result));
-      const snapshot = this.tokenBudget.evaluate(postCompactMessages, effectiveMaxContextTokens);
-      return {
-        type: "compacted",
-        messages: postCompactMessages,
-        tier: "full",
-        snapshot,
-        result,
-      };
+      let lastCompacted: Extract<AutoCompactResult, { type: "compacted" }> | undefined;
+      const targetPostTokens = Math.floor(effectiveMaxContextTokens * decision.snapshot.warningRatio);
+      for (const keepTailRatio of FULL_COMPACTION_TAIL_RATIOS) {
+        const result = await this.compactionEngine.run({
+          trigger: "auto",
+          messages,
+          signal: input.abortSignal,
+          keepTailRatio,
+          targetPostTokens,
+        });
+        const postCompactMessages = ensureTrailingUserMessage(buildPostCompactMessages(result));
+        const snapshot = this.tokenBudget.evaluate(postCompactMessages, effectiveMaxContextTokens);
+        lastCompacted = {
+          type: "compacted",
+          messages: postCompactMessages,
+          tier: "full",
+          snapshot,
+          result,
+        };
+        if (snapshot.state === "ok") {
+          return lastCompacted;
+        }
+      }
+      if (lastCompacted) {
+        return lastCompacted;
+      }
     }
 
     return { type: "skipped", snapshot: decision.snapshot };
