@@ -15,6 +15,8 @@ export type AgentError = {
   code: AgentErrorCode;
   message: string;
   details?: unknown;
+  /** User-facing actionable hint for resolving this error. */
+  userHint?: string;
 };
 
 export class AgentRuntimeError extends Error {
@@ -29,8 +31,12 @@ export class AgentRuntimeError extends Error {
   }
 }
 
-export function agentError(code: AgentErrorCode, message: string, details?: unknown): AgentError {
-  return { code, message, details };
+export function agentError(code: AgentErrorCode, message: string, details?: unknown, userHint?: string): AgentError {
+  const result: AgentError = { code, message, details };
+  if (userHint) {
+    result.userHint = userHint;
+  }
+  return result;
 }
 
 export function normalizeAgentError(error: unknown): AgentError {

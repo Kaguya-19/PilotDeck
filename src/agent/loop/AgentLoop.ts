@@ -812,6 +812,8 @@ export class AgentLoop {
             errors: [agentError(
               "agent_tool_error_loop",
               `Terminated: ${consecutiveAllInvalidTurns} consecutive turns with all tool calls failing input validation. The model appears stuck in a loop.`,
+              undefined,
+              "The model is repeatedly producing invalid tool calls. Consider switching to a more capable model via settings.",
             )],
           });
           yield { type: "turn_failed", sessionId: input.sessionId, turnId: input.turnId, error: result.errors![0]! };
@@ -852,7 +854,12 @@ export class AgentLoop {
           startedAt,
           finalMessage,
           structuredOutput,
-          errors: [agentError("agent_max_turns_reached", `Reached maximum number of turns (${input.maxTurns}).`)],
+          errors: [agentError(
+            "agent_max_turns_reached",
+            `Reached maximum number of turns (${input.maxTurns}).`,
+            undefined,
+            "Max turn limit reached. Increase maxTurns in config or break the task into smaller steps.",
+          )],
         });
         await captureTurn(result.type === "error");
         yield { type: "turn_completed", sessionId: input.sessionId, turnId: input.turnId, result };
@@ -1548,12 +1555,17 @@ function classifyModelError(error: CanonicalModelError): {
   if (isPromptTooLong(error)) {
     return {
       stopReason: "prompt_too_long",
-      error: agentError("agent_prompt_too_long", error.message, error),
+      error: agentError(
+        "agent_prompt_too_long",
+        error.message,
+        error,
+        error.userHint ?? "Input exceeds the model context window. Try /compact to compress history or /new for a fresh session.",
+      ),
     };
   }
   return {
     stopReason: "model_error",
-    error: agentError("agent_model_error", error.message, error),
+    error: agentError("agent_model_error", error.message, error, error.userHint),
   };
 }
 

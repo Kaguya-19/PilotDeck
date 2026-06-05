@@ -1,12 +1,20 @@
 import type { ModelProtocol } from "../protocol/canonical.js";
 import {
+  BILLING_PATTERN,
+  CONTEXT_OVERFLOW_PATTERN,
+  IMAGE_TOO_LARGE_PATTERN,
   MAX_OUTPUT_REACHED_PATTERN,
+  MODEL_NOT_FOUND_PATTERN,
   MULTIMODAL_PROCESSOR_PATTERN,
   PROMPT_TOO_LONG_ANTHROPIC_PATTERN,
   PROMPT_TOO_LONG_OPENAI_PATTERN,
+  RATE_LIMIT_MESSAGE_PATTERN,
   REQUEST_TOO_LARGE_PATTERN,
+  TRANSIENT_USAGE_SIGNAL_PATTERN,
+  USAGE_LIMIT_PATTERN,
   type CanonicalModelError,
   type CanonicalModelErrorCode,
+  type SettingsFix,
 } from "../protocol/errors.js";
 
 export function normalizeModelError(
@@ -20,14 +28,18 @@ export function normalizeModelError(
   const nestedError = record && isRecord(record.error) ? record.error : undefined;
   const source = nestedError ?? record;
 
-  const message =
+  const rawMessage =
     readString(source?.message) ??
     (error instanceof Error ? error.message : undefined) ??
     "Model provider request failed.";
 
+  const message = sanitizeErrorMessage(rawMessage);
+
   const semanticCode = classifySemanticError(message, status, protocol);
   const code: CanonicalModelErrorCode | (string & {}) =
-    semanticCode ?? readString(source?.code) ?? readString(source?.type) ?? statusCodeToCode(status);
+    semanticCode ?? readString(source?.code) ?? readString(source?.type) ?? statusCodeToCode(status, message);
+
+  const hint = resolveUserHint(code, message, status, provider);
 
   const result: CanonicalModelError = {
     provider,
@@ -37,44 +49,70 @@ export function normalizeModelError(
     message,
     retryable: isRetryable(status, code),
     raw,
+    ...hint,
   };
-  if (code === "prompt_too_long") {
+  if (code === "prompt_too_long" || code === "context_overflow") {
     result.recoverableViaCompact = true;
   }
   if (MULTIMODAL_PROCESSOR_PATTERN.test(message)) {
     result.recoverableViaImageStrip = true;
   }
+  if (code === "image_too_large") {
+    result.recoverableViaImageStrip = true;
+  }
   return result;
 }
 
+/**
+ * Priority-ordered semantic classification pipeline.
+ * Matches provider-agnostic error message patterns to canonical codes.
+ */
 function classifySemanticError(
   message: string,
   status: number | undefined,
   protocol: ModelProtocol,
 ): CanonicalModelErrorCode | undefined {
-  // Legacy upstream matches "prompt is too long" case-insensitively for Anthropic and Vertex.
   if (PROMPT_TOO_LONG_ANTHROPIC_PATTERN.test(message)) {
     return "prompt_too_long";
   }
-  // Legacy OpenAI withRetry path matches the standard OpenAI 400 message.
   if (PROMPT_TOO_LONG_OPENAI_PATTERN.test(message)) {
     return "prompt_too_long";
   }
-  // Legacy splits "request too large" (PDF / body size) from PTL token overruns.
   if (REQUEST_TOO_LARGE_PATTERN.test(message)) {
     return "request_too_large";
   }
   if (MAX_OUTPUT_REACHED_PATTERN.test(message)) {
     return "max_output_reached";
   }
+
+  if (IMAGE_TOO_LARGE_PATTERN.test(message)) {
+    return "image_too_large";
+  }
+  if (CONTEXT_OVERFLOW_PATTERN.test(message)) {
+    return "context_overflow";
+  }
+  if (MODEL_NOT_FOUND_PATTERN.test(message)) {
+    return "model_not_found";
+  }
+  if (BILLING_PATTERN.test(message)) {
+    return "billing";
+  }
+  if (RATE_LIMIT_MESSAGE_PATTERN.test(message)) {
+    return "rate_limit_error";
+  }
+
   if (status === 413) {
-    // 413 with no PTL phrase is treated as request_too_large (Vertex pattern noted in legacy).
-    return protocol === "anthropic" ? "request_too_large" : "request_too_large";
+    return "payload_too_large";
   }
   return undefined;
 }
 
 function isRetryable(status: number | undefined, code: string): boolean {
+  const nonRetryable = ["auth_error", "billing", "model_not_found", "invalid_request"];
+  if (nonRetryable.includes(code)) {
+    return false;
+  }
+
   if (status === 408 || status === 409 || status === 429 || (status !== undefined && status >= 500)) {
     return true;
   }
@@ -82,9 +120,29 @@ function isRetryable(status: number | undefined, code: string): boolean {
   return ["rate_limit_error", "overloaded_error", "timeout", "server_error"].includes(code);
 }
 
-function statusCodeToCode(status: number | undefined): string {
+/**
+ * Map HTTP status to canonical code when message-based classification
+ * didn't match. Includes 402 disambiguation: some providers return
+ * transient usage-limit errors as 402 instead of 429.
+ */
+function statusCodeToCode(status: number | undefined, message?: string): string {
   if (status === 401 || status === 403) {
     return "auth_error";
+  }
+  if (status === 402) {
+    const msg = message ?? "";
+    const hasUsageLimit = USAGE_LIMIT_PATTERN.test(msg);
+    const hasTransient = TRANSIENT_USAGE_SIGNAL_PATTERN.test(msg);
+    if (hasUsageLimit && hasTransient) {
+      return "rate_limit_error";
+    }
+    return "billing";
+  }
+  if (status === 404) {
+    return "model_not_found";
+  }
+  if (status === 413) {
+    return "payload_too_large";
   }
   if (status === 429) {
     return "rate_limit_error";
@@ -93,6 +151,95 @@ function statusCodeToCode(status: number | undefined): string {
     return "server_error";
   }
   return "provider_error";
+}
+
+/**
+ * Generate user-facing actionable hints based on classified error code.
+ */
+function resolveUserHint(
+  code: string,
+  message: string,
+  status?: number,
+  provider?: string,
+): { userHint?: string; settingsFix?: SettingsFix } {
+  switch (code) {
+    case "billing":
+      return {
+        userHint: "API account balance exhausted or quota depleted.",
+        settingsFix: {
+          description: "Top up credits or switch to a different provider.",
+          configPath: "model.provider",
+        },
+      };
+    case "auth_error":
+      return {
+        userHint: "API key rejected by the provider. Verify the key is valid and not expired.",
+        settingsFix: {
+          description: "Reconfigure API key via setup.",
+          command: "pilotdeck setup",
+        },
+      };
+    case "model_not_found":
+      return {
+        userHint: "The requested model does not exist or your account lacks access.",
+        settingsFix: {
+          description: "Switch to a valid model.",
+          configPath: "model.default",
+        },
+      };
+    case "context_overflow":
+    case "prompt_too_long":
+      return {
+        userHint: "Input exceeds the model context window. Try /compact to compress history or /new for a fresh session.",
+      };
+    case "image_too_large":
+      return {
+        userHint: "Image exceeds the provider per-image size limit (typically 5 MB). Resize and retry.",
+      };
+    case "payload_too_large":
+    case "request_too_large":
+      return {
+        userHint: "Request payload too large. Try /compact to reduce context, or start a new session with /new.",
+      };
+    case "rate_limit_error":
+      return {
+        userHint: "Rate limited by the provider. The request will be retried automatically after a short wait.",
+      };
+    case "overloaded_error":
+      return {
+        userHint: "Provider is temporarily overloaded. Retrying with backoff.",
+      };
+    case "max_output_reached":
+      return {
+        userHint: "Model output hit the token limit. The system will attempt to resume automatically.",
+      };
+    case "timeout":
+      return {
+        userHint: "Request timed out. Check your network connection; the system will retry.",
+      };
+    case "server_error":
+      return {
+        userHint: "Provider returned a server error. Retrying automatically.",
+      };
+    default:
+      return {};
+  }
+}
+
+/**
+ * Clean raw error messages for user display:
+ * - Extract <title> from Cloudflare / proxy HTML error pages
+ * - Normalize whitespace
+ * - Truncate overly long messages
+ */
+function sanitizeErrorMessage(raw: string): string {
+  if (raw.includes("<!DOCTYPE") || raw.includes("<html")) {
+    const match = raw.match(/<title[^>]*>([^<]+)<\/title>/i);
+    return match?.[1]?.trim() ?? "Service temporarily unavailable (HTML error page returned).";
+  }
+
+  const cleaned = raw.replace(/\s+/g, " ").trim();
+  return cleaned.length > 300 ? cleaned.slice(0, 297) + "..." : cleaned;
 }
 
 function readString(value: unknown): string | undefined {
