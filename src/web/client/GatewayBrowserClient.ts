@@ -61,6 +61,8 @@ export class GatewayBrowserClient {
   private readonly streams = new Map<string, AsyncEventQueue<WebGatewayEvent>>();
   private connectError?: Error;
   private closed = false;
+  private helloResolve?: (hello: WebHelloOk) => void;
+  private helloReject?: (error: Error) => void;
 
   constructor(private readonly options: GatewayBrowserClientOptions) {}
 
@@ -251,18 +253,32 @@ export class GatewayBrowserClient {
     this.ws.send(JSON.stringify(frame));
   }
 
-  private async waitForHello(timeoutMs: number): Promise<WebHelloOk> {
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-      if (this.hello) {
-        return this.hello;
-      }
-      if (this.connectError || this.closed) {
-        throw this.connectError ?? new Error("Gateway WebSocket closed before hello.");
-      }
-      await sleep(10);
+  private waitForHello(timeoutMs: number): Promise<WebHelloOk> {
+    if (this.hello) return Promise.resolve(this.hello);
+    if (this.connectError || this.closed) {
+      return Promise.reject(
+        this.connectError ?? new Error("Gateway WebSocket closed before hello."),
+      );
     }
-    throw new Error("Gateway hello timed out.");
+    return new Promise<WebHelloOk>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.helloResolve = undefined;
+        this.helloReject = undefined;
+        reject(new Error("Gateway hello timed out."));
+      }, timeoutMs);
+      this.helloResolve = (hello) => {
+        clearTimeout(timer);
+        this.helloResolve = undefined;
+        this.helloReject = undefined;
+        resolve(hello);
+      };
+      this.helloReject = (err) => {
+        clearTimeout(timer);
+        this.helloResolve = undefined;
+        this.helloReject = undefined;
+        reject(err);
+      };
+    });
   }
 
   private ensureConnected(): void {
@@ -283,6 +299,7 @@ export class GatewayBrowserClient {
     }
     if ((frame as WebHelloOk).type === "hello_ok") {
       this.hello = frame as WebHelloOk;
+      this.helloResolve?.(this.hello);
       return;
     }
     if (frame.type === "response") {
@@ -326,6 +343,7 @@ export class GatewayBrowserClient {
     );
     if (!this.hello) {
       this.connectError ??= error;
+      this.helloReject?.(error);
     }
     this.failPendingAndStreams(error);
   }
@@ -441,8 +459,4 @@ function waitForOpen(ws: WebSocketLike): Promise<void> {
     ws.addEventListener("open", onOpen, { once: true });
     ws.addEventListener("error", onError, { once: true });
   });
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }

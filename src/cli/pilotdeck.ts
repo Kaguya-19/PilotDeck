@@ -261,6 +261,11 @@ async function main(argv = process.argv.slice(2)): Promise<void> {
     return;
   }
 
+  if (command === "update") {
+    await handleUpdateCommand(argv.slice(1));
+    return;
+  }
+
   if (command === "skills") {
     await handleSkillsCommand(argv.slice(1));
     return;
@@ -297,6 +302,64 @@ async function main(argv = process.argv.slice(2)): Promise<void> {
 
   const { gateway: fallbackGateway } = createLocalGateway({ projectRoot: process.cwd() });
   await new CliChannel({ argv, projectKey: process.cwd() }).start({ gateway: fallbackGateway });
+}
+
+async function handleUpdateCommand(argv: string[]): Promise<void> {
+  const { execFileSync } = await import("node:child_process");
+  const { resolve: resolvePath, dirname } = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+
+  const __filename = fileURLToPath(import.meta.url);
+  const projectRoot = resolvePath(dirname(__filename), "..", "..", "..");
+  const scriptPath = resolvePath(projectRoot, "scripts", "update.sh");
+
+  const doRestart = argv.includes("--restart");
+  const checkOnly = argv.includes("--check");
+
+  if (checkOnly) {
+    try {
+      const branch = execFileSync("git", ["branch", "--show-current"], { cwd: projectRoot, encoding: "utf-8" }).trim() || "main";
+      execFileSync("git", ["fetch", "origin", branch], { cwd: projectRoot, encoding: "utf-8", stdio: "pipe" });
+      const local = execFileSync("git", ["rev-parse", "HEAD"], { cwd: projectRoot, encoding: "utf-8" }).trim();
+      const remote = execFileSync("git", ["rev-parse", `origin/${branch}`], { cwd: projectRoot, encoding: "utf-8" }).trim();
+
+      if (local === remote) {
+        console.log(`Already up-to-date (${local.slice(0, 8)}) on branch ${branch}`);
+      } else {
+        const countStr = execFileSync("git", ["rev-list", "--count", `HEAD..origin/${branch}`], { cwd: projectRoot, encoding: "utf-8" }).trim();
+        console.log(`Update available: ${countStr} new commit(s) on branch ${branch}`);
+        console.log(`  local:  ${local.slice(0, 8)}`);
+        console.log(`  remote: ${remote.slice(0, 8)}`);
+        const log = execFileSync("git", ["log", "--oneline", `HEAD..origin/${branch}`, "-5"], { cwd: projectRoot, encoding: "utf-8" }).trim();
+        if (log) {
+          console.log("\nRecent commits:");
+          console.log(log);
+        }
+      }
+    } catch (e: unknown) {
+      console.error(`Failed to check for updates: ${e instanceof Error ? e.message : String(e)}`);
+      process.exitCode = 1;
+    }
+    return;
+  }
+
+  const args = doRestart ? [scriptPath, "--restart"] : [scriptPath];
+
+  try {
+    execFileSync("bash", args, {
+      cwd: projectRoot,
+      stdio: "inherit",
+      env: { ...process.env, FORCE_COLOR: "1" },
+    });
+  } catch (e: unknown) {
+    const err = e as { status?: number };
+    if (err.status === 2) {
+      // Already up-to-date — not an error
+      return;
+    }
+    console.error(`Update failed with exit code ${err.status ?? "unknown"}`);
+    process.exitCode = 1;
+  }
 }
 
 async function handleCronCommand(argv: string[]): Promise<void> {

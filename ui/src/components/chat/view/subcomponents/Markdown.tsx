@@ -12,6 +12,8 @@ import { copyTextToClipboard } from '../../../../utils/clipboard';
 type MarkdownProps = {
   children: React.ReactNode;
   className?: string;
+  /** When set, relative image paths are resolved via the project files API. */
+  projectName?: string;
 };
 
 type CodeBlockProps = {
@@ -116,7 +118,14 @@ const CodeBlock = ({ node, inline, className, children, ...props }: CodeBlockPro
   );
 };
 
-const markdownComponents = {
+function resolveImageSrc(src: string | undefined, projectName: string | undefined): string | undefined {
+  if (!src || !projectName) return src;
+  if (src.startsWith('data:') || src.startsWith('http://') || src.startsWith('https://')) return src;
+  const cleaned = src.replace(/^\.\//, '');
+  return `/api/projects/${encodeURIComponent(projectName)}/files/content?path=${encodeURIComponent(cleaned)}`;
+}
+
+const baseMarkdownComponents = {
   code: CodeBlock,
   blockquote: ({ children }: { children?: React.ReactNode }) => (
     <blockquote className="my-2 border-l-4 border-gray-300 pl-4 italic text-gray-600 dark:border-gray-600 dark:text-gray-400">
@@ -143,14 +152,30 @@ const markdownComponents = {
   ),
 };
 
-export function Markdown({ children, className }: MarkdownProps) {
+export function Markdown({ children, className, projectName }: MarkdownProps) {
   const content = normalizeInlineCodeFences(String(children ?? ''));
   const remarkPlugins = useMemo(() => [remarkGfm, remarkMath], []);
   const rehypePlugins = useMemo(() => [rehypeKatex], []);
 
+  const components = useMemo(() => {
+    if (!projectName) return baseMarkdownComponents;
+    return {
+      ...baseMarkdownComponents,
+      img: ({ src, alt, ...rest }: React.ImgHTMLAttributes<HTMLImageElement>) => (
+        <img
+          src={resolveImageSrc(src, projectName)}
+          alt={alt || ''}
+          className="my-2 max-w-full rounded-lg"
+          loading="lazy"
+          {...rest}
+        />
+      ),
+    };
+  }, [projectName]);
+
   return (
     <div className={className}>
-      <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={rehypePlugins} components={markdownComponents as any}>
+      <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={rehypePlugins} components={components as any}>
         {content}
       </ReactMarkdown>
     </div>

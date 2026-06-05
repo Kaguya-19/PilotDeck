@@ -319,6 +319,12 @@ function flushBlock(
       const resultText = flattenToolResultBlockText(block);
       const errorCode = readToolResultErrorCode(block.raw);
       const planData = readPlanData(block.raw);
+      const resultImages: NonNullable<WebMessage["images"]> = [];
+      for (const sub of block.content) {
+        if (sub.type === "image") {
+          resultImages.push(toWebMessageImage(sub));
+        }
+      }
       out.push({
         id: `${context.sessionKey}-tool-${block.toolCallId}-result`,
         sessionKey: context.sessionKey,
@@ -332,6 +338,7 @@ function flushBlock(
         text: resultText,
         ...(errorCode ? { errorCode } : {}),
         ...(planData ? { payload: planData } : {}),
+        ...(resultImages.length > 0 ? { images: resultImages } : {}),
         source: "history",
       });
       return;

@@ -628,6 +628,10 @@
         "label": "Always-On",
         "description": "Automatic discovery and workspace opt-in"
       },
+      "cron": {
+        "label": "Cron",
+        "description": "Scheduled background task runtime"
+      },
       "memory": {
         "label": "Memory",
         "description": "PilotDeck memory service"
@@ -777,6 +781,22 @@
           "title": "Workspace opt-in",
           "description": "Only enabled workspaces receive Always-On heartbeats and scheduled discovery checks.",
           "empty": "No recognized projects yet. Add or open a workspace first."
+        }
+      },
+      "cron": {
+        "title": "Cron",
+        "description": "Configure the background scheduler used by Cron jobs. Create and manage jobs from Always-On > Plans & Cron Jobs.",
+        "enabled": {
+          "label": "Enabled",
+          "description": "Master switch for scheduled Cron background tasks."
+        },
+        "timezone": {
+          "label": "Timezone",
+          "description": "IANA timezone used as the scheduler default."
+        },
+        "maxConcurrentRuns": {
+          "label": "Max concurrent runs",
+          "description": "Maximum number of Cron runs that may execute at the same time."
         }
       },
       "memory": {
@@ -991,5 +1011,18 @@
     "installAriaLabel": "Plugin git repository URL",
     "tab": "tab",
     "runningStatus": "running"
+  },
+  "about": {
+    "title": "About",
+    "version": "Version",
+    "checking": "Checking for updates...",
+    "upToDate": "Up to date",
+    "updateAvailable": "Update available",
+    "updateNow": "Update Now",
+    "updating": "Updating...",
+    "updateComplete": "Update complete!",
+    "updateFailed": "Update failed",
+    "restartToApply": "Restart to Apply",
+    "dismiss": "Dismiss"
   }
 }

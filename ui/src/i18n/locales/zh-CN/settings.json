@@ -628,6 +628,10 @@
         "label": "常驻",
         "description": "自动发现和工作区启用设置"
       },
+      "cron": {
+        "label": "Cron",
+        "description": "定时后台任务运行时"
+      },
       "memory": {
         "label": "记忆",
         "description": "PilotDeck 记忆服务"
@@ -777,6 +781,22 @@
           "title": "工作区接入",
           "description": "只有勾选的工作区会收到常驻模式心跳和定时发现检查。",
           "empty": "尚未识别到项目。请先添加或打开一个工作区。"
+        }
+      },
+      "cron": {
+        "title": "Cron",
+        "description": "配置 Cron 任务使用的后台调度器。任务创建和管理仍在 Always-On > Plans & Cron Jobs 中完成。",
+        "enabled": {
+          "label": "启用",
+          "description": "定时 Cron 后台任务的总开关。"
+        },
+        "timezone": {
+          "label": "时区",
+          "description": "调度器默认使用的 IANA 时区。"
+        },
+        "maxConcurrentRuns": {
+          "label": "最大并发运行数",
+          "description": "同一时间允许执行的 Cron 运行数量上限。"
         }
       },
       "memory": {
@@ -985,5 +1005,18 @@
     "installAriaLabel": "插件 git 仓库 URL",
     "tab": "标签",
     "runningStatus": "运行中"
+  },
+  "about": {
+    "title": "关于",
+    "version": "版本",
+    "checking": "正在检查更新...",
+    "upToDate": "已是最新版本",
+    "updateAvailable": "有新版本可用",
+    "updateNow": "立即更新",
+    "updating": "更新中...",
+    "updateComplete": "更新完成！",
+    "updateFailed": "更新失败",
+    "restartToApply": "重启以应用",
+    "dismiss": "关闭"
   }
 }

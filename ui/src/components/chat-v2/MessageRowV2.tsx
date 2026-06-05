@@ -272,7 +272,7 @@ function MessageRowV2({
                 </div>
               ) : null}
               {formattedContent ? (
-                <Markdown className="min-w-0 break-words [overflow-wrap:anywhere]">{formattedContent}</Markdown>
+                <Markdown className="min-w-0 break-words [overflow-wrap:anywhere]" projectName={selectedProject?.name}>{formattedContent}</Markdown>
               ) : null}
             </>
           )}
@@ -296,7 +296,7 @@ function MessageRowV2({
           <AlertTriangle className="h-3.5 w-3.5" strokeWidth={2} />
         </div>
         <div className="min-w-0 flex-1 pt-0.5 text-[14px] leading-relaxed text-red-500">
-          <Markdown>{formattedContent}</Markdown>
+          <Markdown projectName={selectedProject?.name}>{formattedContent}</Markdown>
         </div>
       </div>,
     );
@@ -312,7 +312,7 @@ function MessageRowV2({
             <span>{t('thinking.title', { defaultValue: 'Thinking...' })}</span>
           </summary>
           <div className="mt-1.5 border-l-2 border-neutral-300 pl-3 text-[13px] text-neutral-500 dark:border-neutral-700 dark:text-neutral-400">
-            <Markdown>{formattedContent}</Markdown>
+            <Markdown projectName={selectedProject?.name}>{formattedContent}</Markdown>
           </div>
         </details>
       </div>,
@@ -326,7 +326,7 @@ function MessageRowV2({
         <span className="inline-block h-4 w-2 animate-pulse bg-neutral-400 dark:bg-neutral-500" />
       ) : (
         <>
-          <Markdown className="prose prose-sm prose-neutral max-w-none dark:prose-invert prose-headings:mb-2 prose-headings:mt-4 prose-h2:text-lg prose-h3:text-base prose-p:my-2 prose-pre:my-3 prose-ol:my-2 prose-ul:my-2 prose-table:my-0 prose-hr:my-4">{formattedContent}</Markdown>
+          <Markdown className="prose prose-sm prose-neutral max-w-none dark:prose-invert prose-headings:mb-2 prose-headings:mt-4 prose-h2:text-lg prose-h3:text-base prose-p:my-2 prose-pre:my-3 prose-ol:my-2 prose-ul:my-2 prose-table:my-0 prose-hr:my-4" projectName={selectedProject?.name}>{formattedContent}</Markdown>
           {formattedContent.trim() &&
            (!nextMessage || nextMessage.type === 'user' || nextMessage.type === 'error') ? (
             <div className="mt-1.5 flex justify-end">

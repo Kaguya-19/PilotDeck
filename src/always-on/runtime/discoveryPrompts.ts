@@ -224,7 +224,8 @@ export function buildReportPrompt(input: BuildReportPromptInput): string {
     "2. Summarize the execution: what steps were performed, which files were changed, command outputs, and verification results.",
     `3. Call \`${ALWAYS_ON_REPORT_TOOL_NAME}\` exactly once with the full work-report markdown.`,
     "",
-    "Required report sections in order: Plan Reference, Steps Performed, Files Changed, Command Output, Verification Results, Follow-ups, Notes.",
+    "Each section MUST use `##` (h2) headers — e.g. `## Plan Reference`, `## Steps Performed`, etc.",
+    "Required sections in order: Plan Reference, Steps Performed, Files Changed, Command Output, Verification Results, Follow-ups, Notes.",
     "Missing sections will be filled by the runtime fallback.",
   ].join("\n");
 }

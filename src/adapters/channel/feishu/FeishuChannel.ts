@@ -2,6 +2,7 @@ import { createDecipheriv, createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Gateway } from "../../../gateway/index.js";
 import type { ChannelAdapter, ChannelHandle, ChannelLogger, ChannelStartDeps } from "../protocol/ChannelAdapter.js";
+import { executeChannelCommand, resolveCommand } from "../protocol/ChannelCommandRegistry.js";
 import { ImElicitationHelper } from "../protocol/ImElicitationHelper.js";
 import { FeishuSessionMapper } from "./FeishuSessionMapper.js";
 
@@ -253,14 +254,19 @@ export class FeishuChannel implements ChannelAdapter {
       return;
     }
 
-    if (mapped.command === "projects") {
-      await this.handleListProjects(chatId);
-      return;
-    }
-
-    if (mapped.command === "switch-project") {
-      await this.handleSwitchProject(chatId, mapped.commandArg);
-      return;
+    // Delegate system-level commands (e.g. /projects, /update, /status) to
+    // the centralized registry — no need to handle them individually here.
+    if (text.trim().startsWith("/")) {
+      const handled = await executeChannelCommand(text, {
+        gateway: this.gateway,
+        chatId,
+        channelKey: "feishu",
+        reply: (msg) => this.send({ chatId, text: msg }),
+        bindProject: (projectKey) => this.mapper.bindProject(chatId, projectKey),
+        getProject: () => this.mapper.getProject(chatId),
+        logger: this.logger as any,
+      });
+      if (handled) return;
     }
 
     if (!mapped.message) return;
@@ -324,66 +330,6 @@ export class FeishuChannel implements ChannelAdapter {
         await this.removeReaction(messageId, reactionId);
       }
       this.activeChats.delete(chatId);
-    }
-  }
-
-  private async handleListProjects(chatId: string): Promise<void> {
-    if (!this.gateway) return;
-    try {
-      const result = await this.gateway.listProjects();
-      const projects = result.projects;
-      if (projects.length === 0) {
-        await this.send({ chatId, text: "暂无项目。使用 Web UI 创建 WorkSpace 后即可在此切换。" });
-        return;
-      }
-
-      const currentProject = this.mapper.getProject(chatId);
-      const lines = ["📂 项目列表：", ""];
-      for (const p of projects) {
-        const marker = currentProject === p.projectKey ? " ✅" : "";
-        lines.push(`• ${p.name}${marker}`);
-      }
-      lines.push("", '发送 /switch-project <项目名> 切换 WorkSpace');
-      await this.send({ chatId, text: lines.join("\n") });
-    } catch (e) {
-      this.logger?.error?.(`feishu: listProjects error: ${e}`);
-      await this.send({ chatId, text: "获取项目列表失败，请重试。" });
-    }
-  }
-
-  private async handleSwitchProject(chatId: string, projectName?: string): Promise<void> {
-    if (!this.gateway) return;
-
-    if (!projectName) {
-      await this.send({ chatId, text: "用法：/switch-project <项目名>\n\n发送 /projects 查看可用项目。" });
-      return;
-    }
-
-    try {
-      const result = await this.gateway.listProjects();
-      const lower = projectName.toLowerCase();
-      const target =
-        result.projects.find((p) => p.name === projectName) ??
-        result.projects.find((p) => p.name.toLowerCase() === lower) ??
-        result.projects.find((p) => p.name.toLowerCase().includes(lower));
-
-      if (!target) {
-        await this.send({
-          chatId,
-          text: `未找到匹配「${projectName}」的项目。\n\n发送 /projects 查看可用项目。`,
-        });
-        return;
-      }
-
-      this.mapper.bindProject(chatId, target.projectKey);
-      const sessionKey = `feishu:chat=${chatId}:s_${Date.now().toString(36)}`;
-      await this.send({
-        chatId,
-        text: `已切换到项目：${target.name}\n路径：${target.fullPath}`,
-      });
-    } catch (e) {
-      this.logger?.error?.(`feishu: switchProject error: ${e}`);
-      await this.send({ chatId, text: "切换项目失败，请重试。" });
     }
   }
 

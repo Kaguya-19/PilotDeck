@@ -85,6 +85,7 @@ import configRoutes from './routes/config.js';
 import { startPilotDeckConfigWatcher, stopPilotDeckConfigWatcher } from './services/pilotdeckConfigWatcher.js';
 import { getAlwaysOnDashboardEvents } from './services/always-on-events.js';
 import agentRoutes from './routes/agent.js';
+import updateRoutes from './routes/update.js';
 import projectsRoutes, { WORKSPACES_ROOT, validateWorkspacePath } from './routes/projects.js';
 import userRoutes from './routes/user.js';
 import pluginsRoutes from './routes/plugins.js';
@@ -560,6 +561,9 @@ app.use('/api/sessions', authenticateToken, messagesRoutes);
 
 // Agent API Routes (uses API key authentication)
 app.use('/api/agent', agentRoutes);
+
+// Self-update API Routes (protected)
+app.use('/api/update', authenticateToken, updateRoutes);
 
 // Legacy four-provider config endpoints have been removed. The runtime
 // model is read from PilotDeck config; fall back to a static stub so any

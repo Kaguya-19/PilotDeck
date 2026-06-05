@@ -9,6 +9,7 @@ import {
   ChevronLeft,
   ChevronDown,
   ChevronRight,
+  Clock,
   Database,
   FileCog,
   FolderOpen,
@@ -128,6 +129,11 @@ type PilotDeckConfig = {
     };
     projects?: Record<string, { enabled?: boolean }>;
   };
+  cron?: {
+    enabled?: boolean;
+    timezone?: string;
+    maxConcurrentRuns?: number;
+  };
   customEnv?: Record<string, string>;
   router?: {
     enabled?: boolean;
@@ -179,13 +185,14 @@ type PilotDeckConfig = {
   };
 };
 
-type SectionId = 'models' | 'agents' | 'memory' | 'tools' | 'router' | 'gateway' | 'customEnv' | 'alwaysOn' | 'advanced';
+type SectionId = 'models' | 'agents' | 'memory' | 'tools' | 'router' | 'gateway' | 'customEnv' | 'alwaysOn' | 'cron' | 'advanced';
 
 const SECTIONS: Array<{ id: SectionId; labelKey: string; descriptionKey: string }> = [
   { id: 'advanced',  labelKey: 'runtime',   descriptionKey: 'runtime' },
   { id: 'models',    labelKey: 'models',    descriptionKey: 'models' },
   { id: 'agents',    labelKey: 'agents',    descriptionKey: 'agents' },
   { id: 'alwaysOn',  labelKey: 'alwaysOn',  descriptionKey: 'alwaysOn' },
+  { id: 'cron',      labelKey: 'cron',      descriptionKey: 'cron' },
   { id: 'memory',    labelKey: 'memory',    descriptionKey: 'memory' },
   { id: 'tools',     labelKey: 'tools',     descriptionKey: 'tools' },
   { id: 'router',    labelKey: 'router',    descriptionKey: 'router' },
@@ -195,7 +202,7 @@ const SECTIONS: Array<{ id: SectionId; labelKey: string; descriptionKey: string 
 
 const SECTION_GROUPS: Array<{ id: 'basic' | 'features' | 'advanced'; sections: SectionId[] }> = [
   { id: 'basic', sections: ['models', 'agents'] },
-  { id: 'features', sections: ['router', 'memory', 'tools', 'alwaysOn', 'gateway'] },
+  { id: 'features', sections: ['router', 'memory', 'tools', 'alwaysOn', 'cron', 'gateway'] },
   { id: 'advanced', sections: ['advanced', 'customEnv'] },
 ];
 
@@ -206,6 +213,7 @@ const SECTION_ICONS: Record<SectionId, LucideIcon> = {
   memory: Brain,
   tools: Search,
   alwaysOn: Zap,
+  cron: Clock,
   gateway: Wifi,
   advanced: Server,
   customEnv: FileCog,
@@ -1278,7 +1286,7 @@ function AgentsSection({ config, onChange }: { config: PilotDeckConfig; onChange
                     type="number"
                     min={1}
                     value={caps.maxOutputTokensOverride ?? ''}
-                    placeholder="8192"
+                    placeholder="16384"
                     onChange={(e) => {
                       const v = e.target.value;
                       if (v === '') return setMaxOutputTokens(undefined);
@@ -1740,6 +1748,53 @@ function AlwaysOnSection({
           </>
         )}
       </div>
+    </SettingsSection>
+  );
+}
+
+function CronSection({ config, onChange }: { config: PilotDeckConfig; onChange: (next: PilotDeckConfig) => void }) {
+  const { t } = useTranslation('settings');
+  const cron = config.cron ?? {};
+  const enabled = cron.enabled !== false;
+
+  return (
+    <SettingsSection
+      title={t('pilotDeckConfig.panels.cron.title')}
+      description={t('pilotDeckConfig.panels.cron.description')}
+    >
+      <SettingsCard divided>
+        <SettingsRow
+          label={t('pilotDeckConfig.panels.cron.enabled.label')}
+          description={t('pilotDeckConfig.panels.cron.enabled.description')}
+        >
+          <SettingsToggle
+            checked={enabled}
+            ariaLabel={t('pilotDeckConfig.panels.cron.enabled.label')}
+            onChange={(value) => onChange(patch(config, ['cron', 'enabled'], value))}
+          />
+        </SettingsRow>
+        <FormRow
+          label={t('pilotDeckConfig.panels.cron.timezone.label')}
+          description={t('pilotDeckConfig.panels.cron.timezone.description')}
+        >
+          <TextInput
+            value={cron.timezone}
+            placeholder="Asia/Shanghai"
+            monospace
+            onChange={(value) => onChange(patch(config, ['cron', 'timezone'], value || undefined))}
+          />
+        </FormRow>
+        <FormRow
+          label={t('pilotDeckConfig.panels.cron.maxConcurrentRuns.label')}
+          description={t('pilotDeckConfig.panels.cron.maxConcurrentRuns.description')}
+        >
+          <NumberInput
+            value={cron.maxConcurrentRuns}
+            placeholder="2"
+            onChange={(value) => onChange(patch(config, ['cron', 'maxConcurrentRuns'], value))}
+          />
+        </FormRow>
+      </SettingsCard>
     </SettingsSection>
   );
 }
@@ -3188,6 +3243,7 @@ export default function PilotDeckConfigTab({ projects = [] }: { projects?: Setti
               {activeSection === 'gateway' && <GatewaySection config={parsedConfig} onChange={onFormChange} />}
               {activeSection === 'customEnv' && <CustomEnvSection config={parsedConfig} onChange={onFormChange} />}
               {activeSection === 'alwaysOn' && <AlwaysOnSection config={parsedConfig} projects={projects} onChange={onFormChange} />}
+              {activeSection === 'cron' && <CronSection config={parsedConfig} onChange={onFormChange} />}
               {activeSection === 'advanced' && <ServiceSection config={parsedConfig} onChange={onFormChange} />}
             </div>
           </div>

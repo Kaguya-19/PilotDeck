@@ -100,7 +100,7 @@ export async function* streamModel(
       return;
     }
 
-    const state = createStreamNormalizerState();
+    const state = createStreamNormalizerState(provider.protocol);
     let streamCompleted = false;
 
     try {

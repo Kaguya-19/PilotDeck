@@ -13,21 +13,37 @@ export type LargeFileRepairToolContext = {
   finishReason?: string;
 };
 
-const MAX_PRE_DRAFT_REPAIR_ATTEMPTS = 3;
-const MAX_POST_DRAFT_REPAIR_ATTEMPTS = 3;
-const LARGE_FILE_OUTPUT_RETRY_TOKENS = 8_192;
+const MAX_PRE_DRAFT_REPAIR_ATTEMPTS = 5;
+const MAX_POST_DRAFT_REPAIR_ATTEMPTS = 5;
+const MAX_TRUNCATION_RECOVERIES = 10;
+const LARGE_FILE_OUTPUT_RETRY_TOKENS = 16_384;
 const FILE_WRITE_TOOLS = new Set(["write_file", "edit_file"]);
 const FILE_READ_TOOLS = new Set(["read_file", "grep", "glob"]);
 
 export class LargeFileRepair {
   private preDraftAttempts = 0;
   private postDraftAttempts = 0;
+  private truncationRecoveries = 0;
   private wroteFile = false;
   private pendingLargeFileRepair = false;
   private recentFilePaths: string[] = [];
 
   get recommendedMaxOutputTokens(): number {
     return LARGE_FILE_OUTPUT_RETRY_TOKENS;
+  }
+
+  get hasPendingRepair(): boolean {
+    return this.pendingLargeFileRepair;
+  }
+
+  onInvalidToolInput(): LargeFileRepairDecision | undefined {
+    if (!this.pendingLargeFileRepair) {
+      return undefined;
+    }
+    if (this.wroteFile) {
+      return this.tryPostDraft("large_file_invalid_input_after_write");
+    }
+    return this.tryPreDraft("large_file_invalid_input", "error_pair");
   }
 
   onNoToolCalls(): LargeFileRepairDecision | undefined {
@@ -46,7 +62,9 @@ export class LargeFileRepair {
     if (this.wroteFile) {
       const risk = hasPostDraftRisk(results);
       if (!risk) {
-        this.pendingLargeFileRepair = false;
+        if (results.every((r) => r.type === "success")) {
+          this.pendingLargeFileRepair = false;
+        }
         return undefined;
       }
       return this.tryPostDraft("large_file_post_draft_repair");
@@ -64,11 +82,35 @@ export class LargeFileRepair {
     if (!toolCalls.some((call) => FILE_WRITE_TOOLS.has(call.name))) {
       return undefined;
     }
-    if (this.wroteFile) {
-      return this.tryPostDraft("large_file_repaired_truncation_after_write");
+    if (this.truncationRecoveries >= MAX_TRUNCATION_RECOVERIES) {
+      return undefined;
     }
+    this.truncationRecoveries++;
     this.pendingLargeFileRepair = true;
-    return this.tryPreDraft("large_file_repaired_truncation", "assistant");
+    if (this.wroteFile) {
+      return this.truncationRecovery("large_file_repaired_truncation_after_write", "post");
+    }
+    return this.truncationRecovery("large_file_repaired_truncation", "pre");
+  }
+
+  private truncationRecovery(
+    purpose: string,
+    phase: "pre" | "post",
+  ): LargeFileRepairDecision {
+    if (phase === "post") {
+      return {
+        type: "continue",
+        purpose,
+        strip: "assistant" as const,
+        prompt: postDraftPrompt(this.recentFilePaths, this.postDraftAttempts),
+      };
+    }
+    return {
+      type: "continue",
+      purpose,
+      strip: "assistant" as const,
+      prompt: preDraftPrompt(this.preDraftAttempts + 1),
+    };
   }
 
   private tryPreDraft(purpose: string, strip: "assistant" | "error_pair"): LargeFileRepairDecision {
@@ -123,14 +165,26 @@ export class LargeFileRepair {
 
 function preDraftPrompt(attempt: number): string {
   const lastAttempt = attempt >= MAX_PRE_DRAFT_REPAIR_ATTEMPTS;
+  const maxLines = attempt <= 2 ? 80 : attempt <= 4 ? 40 : 20;
   return [
-    "Your previous attempt at a large file did not create a workspace file.",
-    "Recover using the normal file tools. Create a real draft file inside the workspace now.",
-    "Use write_file with a complete, smaller draft: include the required filename and a content field. Keep the draft well under the output budget, but make it structurally valid and useful.",
-    "For HTML, write a complete document with doctype, head, style, body, script if needed, and closing tags. For prose or reports, write the opening sections plus clear continuation markers.",
-    "After this draft exists, inspect it with read_file and extend or patch it in later turns instead of trying to emit the full final artifact in one tool call.",
-    "Do not use shell heredocs, terminal append tricks, or paths outside the workspace. Do not only describe the plan; call a file tool now.",
-    lastAttempt ? "This is the final pre-draft repair attempt; prioritize creating any valid draft file over completeness." : "",
+    `[CRITICAL] Your previous ${attempt} attempt(s) to write a file FAILED because your output was too long and got truncated.`,
+    `You MUST write a VERY SHORT file this time — absolutely no more than ${maxLines} lines of code.`,
+    "",
+    "MANDATORY RULES:",
+    `1. The write_file content MUST be under ${maxLines} lines. This is a hard limit.`,
+    "2. You MUST provide BOTH required parameters: file_path (string) and content (string).",
+    "3. Write a minimal but structurally valid skeleton:",
+    "   - For HTML: doctype + head + minimal style + body with ONE section + closing tags.",
+    "   - For code: imports + ONE class/function stub + exports.",
+    "   - For prose: title + first paragraph + a <!-- CONTINUE HERE --> marker.",
+    "4. After the file is created, you will extend it incrementally in later turns using edit_file.",
+    "5. Do NOT try to write the complete content. Write only a skeleton/stub now.",
+    "",
+    "EXACT TOOL CALL FORMAT — follow this precisely:",
+    'write_file({ "file_path": "output.html", "content": "<!DOCTYPE html>\\n<html>\\n<head><title>Draft</title></head>\\n<body>\\n<h1>Draft</h1>\\n<!-- CONTINUE HERE -->\\n</body>\\n</html>" })',
+    "",
+    "Do not use shell commands, heredocs, or echo. Call write_file directly with a short content string.",
+    lastAttempt ? "⚠️ FINAL ATTEMPT: Write the absolute minimum viable file — even just 10 lines is fine. Any valid file is better than no file." : "",
   ].filter(Boolean).join("\n");
 }
 
@@ -141,11 +195,21 @@ function postDraftPrompt(filePaths: string[], attempt: number): string {
   const lastAttempt = attempt >= MAX_POST_DRAFT_REPAIR_ATTEMPTS;
   return [
     fileText,
-    "Continue with the ordinary repair chain: read the existing file if you need context, then use edit_file or write_file with small focused changes to fill the missing parts.",
-    "Do not regenerate the whole artifact from scratch. Do not overwrite a useful draft unless you have just read it and are preserving the existing work.",
-    "If a mechanical size requirement is still short, append or insert compact sections around stable markers. For HTML, keep the document valid and preserve closing tags.",
-    "When the file satisfies the request, stop and report the path plus a concise summary.",
-    lastAttempt ? "This is the final post-draft repair attempt; make one focused fix or report the current file and remaining gap." : "",
+    "",
+    `[IMPORTANT] This is post-draft repair attempt ${attempt}/${MAX_POST_DRAFT_REPAIR_ATTEMPTS}. Add ONE small section at a time (under 60 lines per call).`,
+    "",
+    "Steps:",
+    "1. First call read_file to see the current file content.",
+    "2. Then use edit_file to insert or append ONE section (e.g. one component, one function, one CSS block).",
+    "3. Do NOT rewrite the entire file. Only add the next missing piece.",
+    "4. Keep each edit under 60 lines of new content.",
+    "5. When the file meets the requirements, stop and report the file path.",
+    "",
+    "EXACT edit_file CALL FORMAT — follow this precisely:",
+    'edit_file({ "file_path": "<path>", "old_string": "<!-- CONTINUE HERE -->", "new_string": "<nav>...</nav>\\n<!-- CONTINUE HERE -->" })',
+    "",
+    "Do not regenerate from scratch. Do not overwrite existing content unless you have just read it.",
+    lastAttempt ? "⚠️ FINAL ATTEMPT: Make one focused edit or report the current file path and what remains to be done." : "",
   ].filter(Boolean).join("\n");
 }
 
@@ -163,7 +227,7 @@ function hasPreDraftLargeFileRisk(
     const issues = readIssues(result);
     if (
       result.toolName === "write_file" &&
-      hasRequiredIssue(issues, "content")
+      issues.some((issue) => issue.code === "required")
     ) {
       return true;
     }
@@ -207,16 +271,6 @@ function readIssues(result: PilotDeckToolResult): { path: string; code: string }
   });
 }
 
-function hasRequiredIssue(issues: { path: string; code: string }[], pathPart: string): boolean {
-  return issues.some((issue) =>
-    issue.code === "required" &&
-    normalizeIssuePath(issue.path).includes(pathPart)
-  );
-}
-
-function normalizeIssuePath(path: string): string {
-  return path.replace(/^\$\.?/u, "");
-}
 
 function readResultFilePath(data: unknown): string | undefined {
   if (!isRecord(data)) {
