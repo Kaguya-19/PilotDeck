@@ -151,6 +151,7 @@ export class BackgroundTaskRuntime {
       child.unref();
     } catch (err) {
       task.status = "failed";
+      task.completionStatusSentInAttachment = true;
       task.endedAt = this.options.now();
       const message = err instanceof Error ? err.message : String(err);
       output.append(Buffer.from(`spawn error: ${message}\n`));
@@ -186,6 +187,7 @@ export class BackgroundTaskRuntime {
       } else {
         task.status = "failed";
       }
+      task.completionStatusSentInAttachment = true;
       resolveDone();
     });
 

@@ -90,6 +90,7 @@ export function parseReportMarkdown(
   metadata: ReportMetadata,
 ): ReportParseResult {
   const fallbacks: string[] = [];
+  const requiredSet = new Set<string>(REPORT_REQUIRED_SECTIONS);
   const normalized = content.replace(/\r\n/g, "\n");
   const lines = normalized.split("\n");
 
@@ -98,8 +99,14 @@ export function parseReportMarkdown(
   const titleLine = lines[cursor] ?? "";
   let title: string;
   if (titleLine.startsWith("# ")) {
-    title = titleLine.slice(2).trim();
-    cursor += 1;
+    const titleCandidate = titleLine.slice(2).trim();
+    if (requiredSet.has(titleCandidate)) {
+      title = "Always-On Discovery Run";
+      fallbacks.push("title-missing");
+    } else {
+      title = titleCandidate;
+      cursor += 1;
+    }
   } else {
     title = "Always-On Discovery Run";
     fallbacks.push("title-missing");
@@ -130,6 +137,16 @@ export function parseReportMarkdown(
       currentSection = line.slice(3).trim();
       buffer = [];
       continue;
+    }
+    if (!line.startsWith("## ") && line.startsWith("# ")) {
+      const candidate = line.slice(2).trim();
+      if (requiredSet.has(candidate)) {
+        flush();
+        currentSection = candidate;
+        buffer = [];
+        fallbacks.push(`h1-downgraded(${candidate})`);
+        continue;
+      }
     }
     if (currentSection !== null) {
       buffer.push(line);

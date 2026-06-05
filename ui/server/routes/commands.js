@@ -11,6 +11,7 @@ import { getClaudeRuntimeModelConfig, getClaudeRuntimeModelValues } from '../uti
 import { readPilotDeckConfigFile, resolveModel } from '../services/pilotdeckConfig.js';
 import { resolvePilotHome } from '../utils/pilotPaths.js';
 import { executeTurnkeySlashCommand } from '../turnkey-slash.js';
+import { getRegisteredCommands } from '../../../src/adapters/channel/protocol/ChannelCommandRegistry.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -182,15 +183,13 @@ async function scanSkillsDirectory(dir, namespace) {
 }
 
 /**
- * Built-in commands that are always available
+ * Built-in commands that are always available.
+ *
+ * Web-UI-only commands (that don't make sense in IM channels) are defined here.
+ * Commands shared with IM channels (/update, /projects, /switch-project, /status,
+ * /help) are auto-merged from ChannelCommandRegistry — single source of truth.
  */
-const builtInCommands = [
-  {
-    name: '/help',
-    description: 'Show help documentation for PilotDeck',
-    namespace: 'builtin',
-    metadata: { type: 'builtin' }
-  },
+const webOnlyBuiltInCommands = [
   {
     name: '/clear',
     description: 'Clear the conversation history',
@@ -222,12 +221,6 @@ const builtInCommands = [
     metadata: { type: 'builtin' }
   },
   {
-    name: '/status',
-    description: 'Show system status and version information',
-    namespace: 'builtin',
-    metadata: { type: 'builtin' }
-  },
-  {
     name: '/rewind',
     description: 'Rewind the conversation to a previous state',
     namespace: 'builtin',
@@ -246,12 +239,6 @@ const builtInCommands = [
     metadata: { type: 'builtin' }
   },
   {
-    name: '/switch-project',
-    description: 'Switch to another project by name (for example: /switch-project xhs-voxcpm)',
-    namespace: 'builtin',
-    metadata: { type: 'builtin' }
-  },
-  {
     name: '/skill_install',
     description:
       'Install a skill from clawhub.com. Auto-targets ~/.pilotdeck/skills/<slug> in general chat and <project>/.pilotdeck/skills/<slug> when a project is active. Use --global / --project to override.',
@@ -261,6 +248,25 @@ const builtInCommands = [
       argumentHint: '<slug> [--version <v>] [--force] [--global|--project] [--registry <url>]',
     },
   },
+];
+
+// Merge commands from the centralized ChannelCommandRegistry.
+// This ensures /update, /projects, /switch-project, etc. appear in the
+// Web UI menu automatically when added to the registry.
+const registryCommands = getRegisteredCommands()
+  .filter((cmd) => cmd.name !== 'new') // /new is implicit (new session button)
+  .map((cmd) => ({
+    name: '/' + cmd.name,
+    description: cmd.description,
+    namespace: 'builtin',
+    metadata: { type: 'builtin', source: 'registry' },
+  }));
+
+const builtInCommands = [
+  ...webOnlyBuiltInCommands,
+  ...registryCommands.filter(
+    (rc) => !webOnlyBuiltInCommands.some((w) => w.name === rc.name),
+  ),
 ];
 
 /**
@@ -537,6 +543,55 @@ Custom commands can be created in:
   },
 
   '/turnkey': async (args) => executeTurnkeySlashCommand(args),
+
+  '/update': async (args, context) => {
+    const subcommand = (args && args[0]) || 'apply';
+
+    if (subcommand === 'check') {
+      try {
+        const result = await execFileAsync('bash', [
+          '-c',
+          'cd "$(git rev-parse --show-toplevel)" && git fetch origin "$(git branch --show-current)" 2>/dev/null && ' +
+          'LOCAL=$(git rev-parse HEAD) && REMOTE=$(git rev-parse "origin/$(git branch --show-current)") && ' +
+          'if [ "$LOCAL" = "$REMOTE" ]; then echo "up-to-date"; else echo "update-available"; fi'
+        ], { timeout: 30000 });
+        const hasUpdate = result.stdout.trim() === 'update-available';
+        return {
+          type: 'builtin',
+          action: 'update',
+          data: {
+            subcommand: 'check',
+            hasUpdate,
+            message: hasUpdate
+              ? 'New version available! Run `/update` to apply.'
+              : 'Already up-to-date.',
+          },
+        };
+      } catch (e) {
+        return {
+          type: 'builtin',
+          action: 'update',
+          data: {
+            subcommand: 'check',
+            error: true,
+            message: `Failed to check for updates: ${e.message}`,
+          },
+        };
+      }
+    }
+
+    // Default: trigger the update via the API endpoint.
+    // The frontend will call /api/update/apply and stream progress.
+    return {
+      type: 'builtin',
+      action: 'update',
+      data: {
+        subcommand: 'apply',
+        message: 'Starting update... pulling latest code, rebuilding, and restarting.',
+        triggerApi: '/api/update/apply',
+      },
+    };
+  },
 
   '/switch-project': async (args) => {
     // Trim quotes / whitespace; the rest of the project resolution (matching

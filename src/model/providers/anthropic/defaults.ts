@@ -10,7 +10,7 @@ export const ANTHROPIC_DEFAULT_CAPABILITIES: ModelCapabilities = {
   supportsSystemPrompt: true,
   supportsPromptCache: true,
   maxContextTokens: 200000,
-  maxOutputTokens: 8192,
+  maxOutputTokens: 16384,
 };
 
 export const ANTHROPIC_DEFAULT_MULTIMODAL: MultimodalConstraints = {

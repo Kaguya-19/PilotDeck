@@ -172,6 +172,7 @@ export function buildReportPromptZh(input: BuildReportPromptInput): string {
     "2. 总结执行情况: 执行了哪些步骤、修改了哪些文件、命令输出、验证结果。",
     `3. 调用 \`${ALWAYS_ON_REPORT_TOOL_NAME}\` 恰好一次, 提交完整的工作报告 markdown。`,
     "",
+    "每个章节必须使用 `##`（h2）标题——例如 `## Plan Reference`、`## Steps Performed` 等。",
     "报告章节按以下顺序排列: Plan Reference, Steps Performed, Files Changed, Command Output, Verification Results, Follow-ups, Notes。",
     "缺失的章节将由运行时自动补全。",
   ].join("\n");

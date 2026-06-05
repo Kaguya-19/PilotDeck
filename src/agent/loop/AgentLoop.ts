@@ -191,10 +191,10 @@ export class AgentLoop {
         content: [{ type: "text", text: decision.prompt }],
         metadata: { synthetic: true, purpose: decision.purpose },
       });
-      this.config.maxOutputTokens = Math.max(
-        this.config.maxOutputTokens ?? 0,
-        largeFileRepair.recommendedMaxOutputTokens,
-      );
+      if (this.config.maxOutputTokens !== undefined
+        && this.config.maxOutputTokens < largeFileRepair.recommendedMaxOutputTokens) {
+        this.config.maxOutputTokens = largeFileRepair.recommendedMaxOutputTokens;
+      }
       return {
         type: "continue",
         event: {
@@ -606,7 +606,7 @@ export class AgentLoop {
       // was cut by max_tokens, the tool call arguments are likely incomplete
       // (e.g. half-written file content). Apply the same recovery as
       // max_output_reached: token doubling → continuation prompt → give up.
-      if (assembled.hasRepairedToolCalls && assembled.finishReason === "length") {
+      if (assembled.hasRepairedToolCalls && (assembled.finishReason === "length" || assembled.finishReason === "tool_call" || assembled.finishReason === "stop")) {
         console.warn(
           `[AgentLoop] Blocking ${toolCalls.length} repaired-but-truncated tool call(s) — entering max_output recovery`,
         );
@@ -667,7 +667,7 @@ export class AgentLoop {
       let results: PilotDeckToolResult[];
       try {
         const toolContext = this.createToolContext(input, messages);
-        if (assembled.finishReason === "length") {
+        if (assembled.finishReason === "length" || assembled.hasRepairedToolCalls) {
           toolContext.outputTruncated = true;
         }
         results = yield* this.executeToolsWithEventPump(
@@ -698,7 +698,7 @@ export class AgentLoop {
 
       const pairedResults = ensureToolResultPairing(toolCalls, results, this.now);
       const toolResultRepair = largeFileRepair.analyzeToolResults(pairedResults, {
-        outputTruncated: assembled.finishReason === "length",
+        outputTruncated: assembled.finishReason === "length" || assembled.hasRepairedToolCalls === true,
         repairedToolCalls: assembled.hasRepairedToolCalls === true,
         finishReason: assembled.finishReason,
       });
@@ -794,9 +794,25 @@ export class AgentLoop {
       // Circuit breaker: detect turns where ALL tool calls returned
       // invalid_tool_input. If the model is stuck (e.g. repeatedly emitting
       // empty-param bash), terminate early after MAX_CONSECUTIVE_ALL_INVALID_TURNS.
+      // When LargeFileRepair is actively managing recovery, defer to its own
+      // attempt limits instead of terminating here.
       const allInvalid = pairedResults.length > 0 && pairedResults.every(
         (r) => r.type === "error" && r.error.code === "invalid_tool_input",
       );
+      if (allInvalid && largeFileRepair.hasPendingRepair) {
+        const fallbackRepair = largeFileRepair.onInvalidToolInput();
+        if (fallbackRepair) {
+          const continued = await continueWithSyntheticPrompt(fallbackRepair);
+          if (continued.type === "completed") {
+            yield { type: "turn_failed", sessionId: input.sessionId, turnId: input.turnId, error: continued.result.errors![0]! };
+            await captureTurn(continued.result.type === "error");
+            yield { type: "turn_completed", sessionId: input.sessionId, turnId: input.turnId, result: continued.result };
+            return { result: continued.result, messages };
+          }
+          yield continued.event;
+          continue;
+        }
+      }
       if (allInvalid) {
         consecutiveAllInvalidTurns++;
         if (consecutiveAllInvalidTurns >= MAX_CONSECUTIVE_ALL_INVALID_TURNS) {

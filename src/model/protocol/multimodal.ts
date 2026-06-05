@@ -1,5 +1,9 @@
 import { ModelRequestError } from "./errors.js";
-import type { CanonicalContentBlock } from "./canonical.js";
+import type {
+  CanonicalContentBlock,
+  CanonicalMessage,
+  CanonicalToolResultContentBlock,
+} from "./canonical.js";
 
 export const SUPPORTED_INPUT_MODALITIES = ["text", "image", "pdf", "audio"] as const;
 
@@ -22,6 +26,69 @@ export const DEFAULT_MULTIMODAL_CONSTRAINTS: MultimodalConstraints = {
 
 export function isInputModality(value: unknown): value is InputModality {
   return typeof value === "string" && SUPPORTED_INPUT_MODALITIES.includes(value as InputModality);
+}
+
+/**
+ * Pre-flight downgrade: replace media blocks the target model cannot accept
+ * with descriptive text placeholders.  Mutates `messages` in-place so the
+ * caller's cloned request is updated without copying the entire array.
+ *
+ * Only tool_result sub-blocks and top-level content blocks are converted;
+ * tool_call / thinking blocks are left untouched.
+ */
+export function downgradeUnsupportedContent(
+  messages: CanonicalMessage[],
+  constraints: MultimodalConstraints,
+): void {
+  const allowed = new Set<InputModality>(constraints.input);
+  if (allowed.has("image") && allowed.has("pdf") && allowed.has("audio")) return;
+
+  for (const msg of messages) {
+    for (let i = 0; i < msg.content.length; i++) {
+      const block = msg.content[i];
+
+      if (block.type === "tool_result") {
+        let changed = false;
+        const newContent: CanonicalToolResultContentBlock[] = [];
+        for (const sub of block.content) {
+          const placeholder = mediaBlockToPlaceholder(sub, allowed);
+          if (placeholder) {
+            newContent.push({ type: "text", text: placeholder });
+            changed = true;
+          } else {
+            newContent.push(sub);
+          }
+        }
+        if (changed) {
+          (block as { content: CanonicalToolResultContentBlock[] }).content = newContent;
+        }
+        continue;
+      }
+
+      const placeholder = mediaBlockToPlaceholder(block, allowed);
+      if (placeholder) {
+        (msg.content as CanonicalContentBlock[])[i] = { type: "text", text: placeholder };
+      }
+    }
+  }
+}
+
+function mediaBlockToPlaceholder(
+  block: CanonicalContentBlock | CanonicalToolResultContentBlock,
+  allowed: Set<InputModality>,
+): string | undefined {
+  if (block.type === "image" && !allowed.has("image")) {
+    const sizeHint = block.bytes ? `, ${Math.round(block.bytes / 1024)}KB` : "";
+    return `[Image: ${block.mimeType}${sizeHint} — omitted, model does not support image input]`;
+  }
+  if (block.type === "pdf" && !allowed.has("pdf")) {
+    const pagesHint = block.pages ? `, ${block.pages} pages` : "";
+    return `[PDF: ${block.mimeType}, ${Math.round(block.bytes / 1024)}KB${pagesHint} — omitted, model does not support PDF input]`;
+  }
+  if (block.type === "audio" && !allowed.has("audio")) {
+    return `[Audio: ${block.mimeType} — omitted, model does not support audio input]`;
+  }
+  return undefined;
 }
 
 export function contentBlockToInputModality(block: CanonicalContentBlock): InputModality | undefined {

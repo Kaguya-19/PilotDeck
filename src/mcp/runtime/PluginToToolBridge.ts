@@ -10,10 +10,11 @@
  *          reflected onto the PilotDeck tool flags so the permission
  *          engine can decide whether to ask.
  *
- * Result transformation (M14): we currently emit a single `json` result
- * block. The existing `ToolRuntime` already truncates oversized payloads
- * via `maxResultBytes`; deferring the persisted-large-blob path for now
- * (recorded as `intentional_difference` in the parity table).
+ * Result transformation (M14): MCP ContentBlock types `text` and `image`
+ * are mapped to their PilotDeck equivalents so that images (e.g. Playwright
+ * screenshots) render inline in the chat UI. Remaining block types
+ * (`audio`, `resource`, `resource_link`) fall through as a single `json`
+ * block until the downstream pipeline supports them.
  */
 
 import { PilotDeckToolRuntimeError } from "../../tool/protocol/errors.js";
@@ -21,6 +22,7 @@ import type {
   PilotDeckToolDefinition,
   PilotDeckToolExecutionOutput,
   PilotDeckToolInputSchema,
+  PilotDeckToolResultContent,
 } from "../../tool/index.js";
 import type { McpClient } from "../client/McpClient.js";
 import type { McpRuntime } from "./McpRuntime.js";
@@ -85,7 +87,7 @@ function buildToolDefinition(
           );
         }
         return {
-          content: [{ type: "json", value: content }],
+          content: marshalMcpContent(content),
           data: content,
           metadata: {
             mcp: { serverId: spec.serverId, toolName: spec.toolName, wireName: spec.wireName },
@@ -116,6 +118,48 @@ function buildToolDefinition(
       }
     },
   };
+}
+
+type McpContentBlock = { type: string; [key: string]: unknown };
+
+/**
+ * Map MCP `ContentBlock[]` → `PilotDeckToolResultContent[]`.
+ *
+ * `TextContent`  → `{ type: "text" }`
+ * `ImageContent` → `{ type: "image" }` (renders inline in chat)
+ * Everything else falls through as a single `json` block.
+ */
+function marshalMcpContent(raw: unknown): PilotDeckToolResultContent[] {
+  if (!Array.isArray(raw)) return [{ type: "json", value: raw }];
+
+  const result: PilotDeckToolResultContent[] = [];
+  const remainder: unknown[] = [];
+
+  for (const block of raw as McpContentBlock[]) {
+    if (!block || typeof block !== "object" || typeof block.type !== "string") {
+      remainder.push(block);
+      continue;
+    }
+    if (block.type === "text" && typeof block.text === "string") {
+      result.push({ type: "text", text: block.text });
+    } else if (
+      block.type === "image" &&
+      typeof block.data === "string" &&
+      typeof block.mimeType === "string"
+    ) {
+      result.push({ type: "image", mimeType: block.mimeType as string, data: block.data as string });
+    } else {
+      remainder.push(block);
+    }
+  }
+
+  if (remainder.length > 0) {
+    result.push({ type: "json", value: remainder });
+  }
+  if (result.length === 0) {
+    result.push({ type: "json", value: raw });
+  }
+  return result;
 }
 
 function extractMcpErrorText(
