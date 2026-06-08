@@ -85,20 +85,20 @@ function classifySemanticError(
     return "max_output_reached";
   }
 
-  if (IMAGE_TOO_LARGE_PATTERN.test(message)) {
-    return "image_too_large";
-  }
-  if (CONTEXT_OVERFLOW_PATTERN.test(message)) {
-    return "context_overflow";
-  }
-  if (MODEL_NOT_FOUND_PATTERN.test(message)) {
-    return "model_not_found";
+  if (RATE_LIMIT_MESSAGE_PATTERN.test(message)) {
+    return "rate_limit_error";
   }
   if (BILLING_PATTERN.test(message)) {
     return "billing";
   }
-  if (RATE_LIMIT_MESSAGE_PATTERN.test(message)) {
-    return "rate_limit_error";
+  if (IMAGE_TOO_LARGE_PATTERN.test(message)) {
+    return "image_too_large";
+  }
+  if (MODEL_NOT_FOUND_PATTERN.test(message)) {
+    return "model_not_found";
+  }
+  if (CONTEXT_OVERFLOW_PATTERN.test(message)) {
+    return "context_overflow";
   }
 
   if (status === 413) {
@@ -131,9 +131,10 @@ function statusCodeToCode(status: number | undefined, message?: string): string 
   }
   if (status === 402) {
     const msg = message ?? "";
-    const hasUsageLimit = USAGE_LIMIT_PATTERN.test(msg);
-    const hasTransient = TRANSIENT_USAGE_SIGNAL_PATTERN.test(msg);
-    if (hasUsageLimit && hasTransient) {
+    if (BILLING_PATTERN.test(msg)) {
+      return "billing";
+    }
+    if (USAGE_LIMIT_PATTERN.test(msg) && TRANSIENT_USAGE_SIGNAL_PATTERN.test(msg)) {
       return "rate_limit_error";
     }
     return "billing";
