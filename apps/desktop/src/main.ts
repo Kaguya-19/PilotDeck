@@ -273,6 +273,7 @@ async function createWindow(): Promise<void> {
     return { action: "deny" };
   });
 
+  await mainWindow.webContents.session.clearCache();
   await mainWindow.loadURL(`http://127.0.0.1:${info.serverPort}`);
 }
 
