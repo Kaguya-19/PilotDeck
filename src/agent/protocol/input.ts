@@ -10,5 +10,7 @@ export type AgentSubmitOptions = {
   maxTurns?: number;
   metadata?: Record<string, unknown>;
   permissionMode?: PermissionMode;
+  /** The user's actual permission preference before plan-mode override. */
+  basePermissionMode?: PermissionMode;
   permissionRules?: Partial<PermissionRuleSet>;
 };

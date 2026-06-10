@@ -60,6 +60,8 @@ export type AgentLoopInput = {
   messages: CanonicalMessage[];
   maxTurns?: number;
   permissionMode?: PermissionMode;
+  /** The user's actual permission preference before plan-mode override. */
+  basePermissionMode?: PermissionMode;
   permissionRules?: Partial<PermissionRuleSet>;
   abortSignal?: AbortSignal;
   onDurableMessage?: (message: CanonicalMessage) => void | Promise<void>;
@@ -96,7 +98,7 @@ export class AgentLoop {
   }
 
   async *run(input: AgentLoopInput): AsyncGenerator<AgentEvent, AgentLoopRunResult, unknown> {
-    this.applyPermissionOverrides(input.permissionMode, input.permissionRules);
+    this.applyPermissionOverrides(input.permissionMode, input.permissionRules, input.basePermissionMode);
     const startedAt = this.now().toISOString();
     let messages = [...input.messages];
     let turnCount = 1;
@@ -1351,10 +1353,11 @@ export class AgentLoop {
   private applyPermissionOverrides(
     permissionMode?: PermissionMode,
     permissionRules?: Partial<PermissionRuleSet>,
+    basePermissionMode?: PermissionMode,
   ): void {
     if (permissionMode) {
       if (permissionMode === "plan" && this.config.permissionMode !== "plan") {
-        this.config.permissionModeBeforePlan = this.config.permissionMode;
+        this.config.permissionModeBeforePlan = basePermissionMode ?? this.config.permissionMode;
       }
       this.config.permissionMode = permissionMode;
       this.config.permissionContext.mode = permissionMode;

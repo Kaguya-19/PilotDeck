@@ -161,7 +161,7 @@ export type PilotDeckTodoItem = {
 export type PilotDeckPlanTodoStateSnapshot = {
   approvedPlan?: string;
   requiresInitialization: boolean;
-  requiresRefresh: boolean;
+  toolCallsSinceLastTodoWrite: number;
   lastMarkdown?: string;
   todos: PilotDeckTodoItem[];
 };

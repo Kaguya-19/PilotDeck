@@ -45,6 +45,7 @@ interface UseChatComposerStateArgs {
   currentSessionId: string | null;
   model: string;
   permissionMode: PermissionMode | string;
+  basePermissionMode?: PermissionMode | string;
   cycleRunMode: () => void;
   isLoading: boolean;
   canAbortSession: boolean;
@@ -141,6 +142,7 @@ export function useChatComposerState({
   currentSessionId,
   model,
   permissionMode,
+  basePermissionMode,
   cycleRunMode,
   isLoading,
   canAbortSession,
@@ -788,6 +790,7 @@ export function useChatComposerState({
         temporarySessionId: sessionToActivate,
         toolsSettings,
         permissionMode,
+        basePermissionMode,
         model,
         sessionSummary,
         images: uploadedImages,
@@ -820,6 +823,7 @@ export function useChatComposerState({
       onSessionProcessing,
       pendingViewSessionRef,
       permissionMode,
+      basePermissionMode,
       resetCommandMenuState,
       scrollToBottom,
       selectedProject,

@@ -75,6 +75,8 @@ export type GatewaySubmitTurnInput = {
   workspaceCwd?: string;
   attachments?: ChannelAttachment[];
   mode?: GatewayMode;
+  /** The user's actual permission preference before plan-mode override. */
+  basePermissionMode?: GatewayMode;
   runId?: string;
   maxTurns?: number;
   telemetry?: {

@@ -736,6 +736,7 @@ export async function runChatViaGateway(
         ...(uiFilesToAttachments(options?.attachments) || []),
     ];
     const resolvedMode = resolvePermissionMode(options);
+    const basePermissionMode = options?.basePermissionMode || undefined;
     console.log(`[pilotdeck-bridge] submitTurn mode=${resolvedMode} (options.permissionMode=${options?.permissionMode}, options.mode=${options?.mode})`);
 
     try {
@@ -746,6 +747,7 @@ export async function runChatViaGateway(
             message: command ?? '',
             mode: resolvedMode,
             runId,
+            ...(basePermissionMode ? { basePermissionMode } : {}),
             ...(attachments.length > 0 ? { attachments } : {}),
             ...(options.workspaceCwd ? { workspaceCwd: options.workspaceCwd } : {}),
         });
