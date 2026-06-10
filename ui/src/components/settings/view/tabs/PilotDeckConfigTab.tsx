@@ -123,6 +123,7 @@ type PilotDeckConfig = {
       snapshotBaseDir?: string;
       snapshotMaxBytes?: number;
       gitLfs?: boolean;
+      maxPlansPerCycle?: number;
     };
     execution?: {
       maxTurns?: number;
@@ -1675,6 +1676,13 @@ function AlwaysOnSection({
                     value={workspace.snapshotMaxBytes}
                     placeholder="1073741824"
                     onChange={(value) => onChange(patch(config, ['alwaysOn', 'workspace', 'snapshotMaxBytes'], value))}
+                  />
+                </FormRow>
+                <FormRow label={t('pilotDeckConfig.panels.alwaysOn.workspace.maxPlansPerCycle.label')} description={t('pilotDeckConfig.panels.alwaysOn.workspace.maxPlansPerCycle.description')}>
+                  <NumberInput
+                    value={workspace.maxPlansPerCycle}
+                    placeholder="3"
+                    onChange={(value) => onChange(patch(config, ['alwaysOn', 'workspace', 'maxPlansPerCycle'], value))}
                   />
                 </FormRow>
                 <SettingsRow

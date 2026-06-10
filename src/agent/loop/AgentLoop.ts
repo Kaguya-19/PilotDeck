@@ -1353,6 +1353,9 @@ export class AgentLoop {
     permissionRules?: Partial<PermissionRuleSet>,
   ): void {
     if (permissionMode) {
+      if (permissionMode === "plan" && this.config.permissionMode !== "plan") {
+        this.config.permissionModeBeforePlan = this.config.permissionMode;
+      }
       this.config.permissionMode = permissionMode;
       this.config.permissionContext.mode = permissionMode;
     }

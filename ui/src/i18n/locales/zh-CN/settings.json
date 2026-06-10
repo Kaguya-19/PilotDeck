@@ -773,6 +773,7 @@
           "gitWorktree": { "label": "Git 工作树根目录", "description": "基于 Git 工作树隔离的根目录。" },
           "snapshotDir": { "label": "快照根目录", "description": "基于快照隔离的根目录。" },
           "snapshotMaxBytes": { "label": "快照最大字节数", "description": "工作区快照的最大大小。" },
+          "maxPlansPerCycle": { "label": "每周期最大计划数", "description": "单个隔离环境周期内最多可累计执行的计划数量。" },
           "gitLfs": { "label": "Git LFS", "description": "在工作区快照中包含 Git LFS 对象。" }
         },
         "execution": {

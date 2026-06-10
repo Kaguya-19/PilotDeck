@@ -71,8 +71,9 @@ const GATEWAY_TOKEN_PATH =
 // parallel by `concurrently`. We allow up to 30 s for the gateway to
 // come up before failing the first call — covers cold MCP startup on
 // slower machines.
-const GATEWAY_CONNECT_TIMEOUT_MS = 30_000;
-const GATEWAY_CONNECT_RETRY_INTERVAL_MS = 250;
+const GATEWAY_CONNECT_TIMEOUT_MS =
+    Number.parseInt(process.env.PILOTDECK_BRIDGE_TIMEOUT ?? '', 10) || 60_000;
+const GATEWAY_CONNECT_RETRY_INTERVAL_MS = 500;
 const subagentActivityStarts = new Map();
 
 function normalizeToolDisplayName(name) {

@@ -773,6 +773,7 @@
           "gitWorktree": { "label": "Git worktree base dir", "description": "Root directory for git worktree-based isolation." },
           "snapshotDir": { "label": "Snapshot base dir", "description": "Root directory for snapshot-based isolation." },
           "snapshotMaxBytes": { "label": "Snapshot max bytes", "description": "Maximum size of a workspace snapshot." },
+          "maxPlansPerCycle": { "label": "Max plans per cycle", "description": "Maximum number of plans that can be accumulated in a single isolation environment cycle." },
           "gitLfs": { "label": "Git LFS", "description": "Include Git LFS objects in workspace snapshots." }
         },
         "execution": {
