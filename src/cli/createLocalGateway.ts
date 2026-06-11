@@ -431,11 +431,17 @@ class ProjectRuntimeRegistry {
         renameSync(oldPath, eventsPath);
       }
     } catch { /* best-effort migration */ }
+    const self = this;
     return {
       emit(event: RouterEvent) {
         try {
           appendFileSync(eventsPath, JSON.stringify(event) + "\n");
         } catch { /* best-effort, never crash the agent loop */ }
+        if (event.type === "pilotdeck_router_retry_progress") {
+          try {
+            self.gateway?.broadcastRetryProgress(event);
+          } catch { /* best-effort */ }
+        }
       },
     };
   }

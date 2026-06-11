@@ -1,6 +1,6 @@
 import { jsonrepair } from "jsonrepair";
 import type { CanonicalModelEvent, CanonicalToolCall } from "../../protocol/canonical.js";
-import { ModelProviderError } from "../../protocol/errors.js";
+import { ModelProviderError, parseRetryAfterFromMessage } from "../../protocol/errors.js";
 import { normalizeAnthropicFinishReason } from "../../response/normalizeFinishReason.js";
 import { normalizeAnthropicUsage } from "../../response/normalizeUsage.js";
 
@@ -63,6 +63,8 @@ export function normalizeAnthropicStreamEvent(
       const TRANSIENT_ERROR_TYPES = new Set([
         "overloaded_error", "rate_limit_error", "api_error", "timeout_error",
       ]);
+      const errMessage = readString(errObj.message) ?? "Anthropic stream error.";
+      const retryAfterMs = parseRetryAfterFromMessage(errMessage);
       return [
         {
           type: "error",
@@ -70,8 +72,9 @@ export function normalizeAnthropicStreamEvent(
             provider: "anthropic",
             protocol: "anthropic",
             code: errType,
-            message: readString(errObj.message) ?? "Anthropic stream error.",
+            message: errMessage,
             retryable: TRANSIENT_ERROR_TYPES.has(errType),
+            ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
             raw,
           },
         },

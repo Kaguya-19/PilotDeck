@@ -11,6 +11,7 @@ import type {
   ModelDefinition,
   ModelProtocol,
   ProviderConfig,
+  ProviderRetryConfig,
 } from "../protocol/canonical.js";
 import { mergeCapabilities, type ModelCapabilities } from "../protocol/capabilities.js";
 import { ModelConfigError } from "../protocol/errors.js";
@@ -101,9 +102,29 @@ function parseProvider(providerId: string, rawProvider: unknown, env?: Credentia
     timeoutMs: readOptionalPositiveNumber(provider.timeoutMs, "timeoutMs"),
     headers: readStringRecord(provider.headers, "headers"),
     extraBody: isRecord(provider.extraBody) ? (provider.extraBody as Record<string, unknown>) : undefined,
-    retry: isRecord(provider.retry) ? provider.retry : undefined,
+    retry: parseRetryConfig(provider.retry),
     models,
   };
+}
+
+function parseRetryConfig(raw: unknown): ProviderRetryConfig | undefined {
+  if (raw === undefined) return undefined;
+  if (!isRecord(raw)) return undefined;
+  const result: ProviderRetryConfig = {};
+  const numFields = [
+    "requestMaxRetries", "streamMaxRetries", "streamIdleTimeoutMs",
+    "baseDelayMs", "maxDelayMs",
+  ] as const;
+  for (const key of numFields) {
+    const value = raw[key];
+    if (value !== undefined) {
+      if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+        throw new ModelConfigError("invalid_config_value", `retry.${key} must be a non-negative number.`);
+      }
+      result[key] = value;
+    }
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
 }
 
 function parseModelDefinition(

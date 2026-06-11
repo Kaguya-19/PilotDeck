@@ -12,6 +12,7 @@ import {
   REQUEST_TOO_LARGE_PATTERN,
   TRANSIENT_USAGE_SIGNAL_PATTERN,
   USAGE_LIMIT_PATTERN,
+  parseRetryAfterFromMessage,
   type CanonicalModelError,
   type CanonicalModelErrorCode,
   type SettingsFix,
@@ -60,6 +61,10 @@ export function normalizeModelError(
   if (code === "image_too_large") {
     result.recoverableViaImageStrip = true;
   }
+  const retryAfterMs = parseRetryAfterFromMessage(rawMessage);
+  if (retryAfterMs !== undefined) {
+    result.retryAfterMs = retryAfterMs;
+  }
   return result;
 }
 
@@ -85,11 +90,11 @@ function classifySemanticError(
     return "max_output_reached";
   }
 
-  if (RATE_LIMIT_MESSAGE_PATTERN.test(message)) {
-    return "rate_limit_error";
-  }
   if (BILLING_PATTERN.test(message)) {
     return "billing";
+  }
+  if (RATE_LIMIT_MESSAGE_PATTERN.test(message)) {
+    return "rate_limit_error";
   }
   if (IMAGE_TOO_LARGE_PATTERN.test(message)) {
     return "image_too_large";

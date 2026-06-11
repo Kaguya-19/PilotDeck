@@ -560,6 +560,25 @@ export function gatewayEventToFrames(event, sessionId, provider) {
                     }),
                 ];
             }
+            if (event.event === 'retry_progress') {
+                return [
+                    createNormalizedMessage({
+                        ...base,
+                        kind: 'status',
+                        text: `Reconnecting... ${detail.attempt}/${detail.maxAttempts}`,
+                        tokens: 0,
+                        canInterrupt: true,
+                        retryProgress: {
+                            attempt: detail.attempt,
+                            maxAttempts: detail.maxAttempts,
+                            delayMs: detail.delayMs,
+                            reason: detail.reason,
+                            provider: detail.provider,
+                            model: detail.model,
+                        },
+                    }),
+                ];
+            }
             return [];
         }
         default:

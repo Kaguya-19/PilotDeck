@@ -67,6 +67,18 @@ export type RouterTransientRetryEvent = {
   errorCode: string;
 };
 
+export type RouterRetryProgressEvent = {
+  type: "pilotdeck_router_retry_progress";
+  sessionId: string;
+  turnId?: string;
+  attempt: number;
+  maxAttempts: number;
+  delayMs: number;
+  reason: "rate_limit" | "server_error" | "network_error" | "zero_usage" | "overloaded";
+  provider: string;
+  model: string;
+};
+
 export type RouterEvent =
   | RouterDecisionEvent
   | RouterFallbackEvent
@@ -74,7 +86,8 @@ export type RouterEvent =
   | RouterTokenSaverFailedEvent
   | RouterCustomFailedEvent
   | RouterExecuteFailedEvent
-  | RouterTransientRetryEvent;
+  | RouterTransientRetryEvent
+  | RouterRetryProgressEvent;
 
 export type RouterEventBus = {
   emit(event: RouterEvent): void;
