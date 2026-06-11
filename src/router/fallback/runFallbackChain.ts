@@ -31,14 +31,16 @@ export function planFallback(
 const SELF_CORRECTABLE_CODES = new Set(["invalid_tool_arguments"]);
 
 /**
- * Non-retryable error codes that should still attempt provider fallback
- * because a different provider may succeed (e.g. billing exhaustion on
- * one provider, model not found on another).
+ * Error codes that should always attempt provider fallback regardless of
+ * retryable status — a different provider may succeed (e.g. billing
+ * exhaustion on one provider, model not found on another, or provider-
+ * specific rate limits that don't apply to an alternate provider).
  */
 const FALLBACK_ELIGIBLE_NON_RETRYABLE = new Set([
   "billing",
   "model_not_found",
   "auth_error",
+  "rate_limit_error",
 ]);
 
 export function isFallbackEligible(error: CanonicalModelError): boolean {
