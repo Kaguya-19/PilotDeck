@@ -131,6 +131,13 @@
     },
     "permissions": {
       "detail": "管理允许和禁用的工具规则"
+    },
+    "telemetry": {
+      "title": "遥测",
+      "detail": "发送匿名使用数据以帮助改进产品"
+    },
+    "gateway": {
+      "detail": "连接飞书、微信等 IM 通道"
     }
   },
   "notifications": {
@@ -662,11 +669,11 @@
           "host": { "label": "主机", "description": "HTTP/WebSocket 服务器的绑定接口。" },
           "serverPort": { "label": "服务器端口", "description": "Express + WebSocket 端口。" },
           "vitePort": { "label": "Vite 端口", "description": "前端开发服务器（仅在运行 npm run dev 时使用）。" },
-          "proxyPort": { "label": "代理端口", "description": "本地 LLM 代理（PilotDeck 智能体目标）。" },
           "apiTimeout": { "label": "API 超时（毫秒）", "description": "每次请求的上游超时。" },
           "databasePath": { "label": "数据库路径", "description": "SQLite 认证/项目数据库（~ 展开为主目录）。" },
           "workspacesRoot": { "label": "工作区根目录", "description": "项目扫描的根目录。" },
-          "httpsProxy": { "label": "HTTPS 代理", "description": "出站 HTTPS 代理 URL（HTTPS_PROXY / https_proxy）。" }
+          "proxyUrl": { "label": "HTTPS 代理", "description": "出站 HTTPS 代理 URL，同时作用于 Gateway 和 UI Server（对应 pilotdeck.yaml 中的 proxy.url）。" },
+          "proxyNoProxy": { "label": "代理排除列表", "description": "逗号分隔的主机名/IP，这些地址不走代理（对应 pilotdeck.yaml 中的 proxy.noProxy）。127.0.0.1 和 localhost 始终排除。" }
         }
       },
       "models": {
@@ -768,6 +775,7 @@
           "gitWorktree": { "label": "Git 工作树根目录", "description": "基于 Git 工作树隔离的根目录。" },
           "snapshotDir": { "label": "快照根目录", "description": "基于快照隔离的根目录。" },
           "snapshotMaxBytes": { "label": "快照最大字节数", "description": "工作区快照的最大大小。" },
+          "maxPlansPerCycle": { "label": "每周期最大计划数", "description": "单个隔离环境周期内最多可累计执行的计划数量。" },
           "gitLfs": { "label": "Git LFS", "description": "在工作区快照中包含 Git LFS 对象。" }
         },
         "execution": {
@@ -1018,5 +1026,44 @@
     "updateFailed": "更新失败",
     "restartToApply": "重启以应用",
     "dismiss": "关闭"
+  },
+  "gateway": {
+    "title": "IM 通道",
+    "description": "配置即时通讯通道（飞书、微信），让 Agent 可通过 IM 应用被访问。",
+    "connected": "已连接",
+    "notConfigured": "未配置",
+    "enabled": "已启用",
+    "edit": "编辑",
+    "setup": "配置",
+    "testConnection": "测试连接",
+    "save": "保存",
+    "disable": "停用",
+    "cancel": "取消",
+    "dismiss": "关闭",
+    "feishu": {
+      "title": "飞书 / Lark",
+      "label": "飞书机器人",
+      "domain": "域名",
+      "connectionMode": "连接方式",
+      "chooseMethod": "选择配置飞书机器人的方式：",
+      "qrScan": "扫码创建",
+      "qrScanDesc": "用飞书 App 扫码自动创建机器人",
+      "manualInput": "手动输入",
+      "manualInputDesc": "从开发者后台获取 App ID 和 Secret",
+      "startQr": "生成二维码",
+      "connecting": "正在连接飞书…",
+      "scanPrompt": "请打开飞书 / Lark App 扫描二维码",
+      "qrSuccess": "应用创建成功 — 配置已保存并启用",
+      "retry": "重试"
+    },
+    "weixin": {
+      "title": "微信 (iLink)",
+      "label": "微信机器人",
+      "qrLogin": "扫码登录",
+      "relogin": "重新登录",
+      "loadingQr": "正在生成二维码…",
+      "scanPrompt": "请打开微信扫描二维码登录",
+      "loginSuccess": "登录成功 — 凭据已保存"
+    }
   }
 }

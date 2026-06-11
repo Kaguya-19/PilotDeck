@@ -110,6 +110,7 @@ export function usePilotDeckConfig() {
   }, []);
 
   const updateRaw = useCallback((value: string) => {
+    rawRef.current = value;
     setRaw(value);
     scheduleValidation(value);
   }, [scheduleValidation]);

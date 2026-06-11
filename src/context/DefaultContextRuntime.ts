@@ -90,7 +90,7 @@ export type DefaultContextRuntimeOptions = {
 const DEFAULT_MAX_CONTEXT_TOKENS = 8192;
 const DEFAULT_TRUNCATE_FIRST_RATIO = 0.5;
 const DEFAULT_TRUNCATE_SECOND_RATIO = 0.25;
-const DEFAULT_MEMORY_RETRIEVAL_TIMEOUT_MS = 5_000;
+const DEFAULT_MEMORY_RETRIEVAL_TIMEOUT_MS = 30_000;
 
 export class DefaultContextRuntime implements ContextRuntime {
   private readonly extension: ExtensionResolver;

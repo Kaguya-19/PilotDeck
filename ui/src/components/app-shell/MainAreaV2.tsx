@@ -10,7 +10,14 @@ import {
   Sparkles,
   type LucideIcon,
 } from 'lucide-react';
-import type { AppTab, Project, ProjectDiscoveryPlansResponse, ProjectSession } from '../../types/app';
+import type {
+  AlwaysOnDashboardEvent,
+  AlwaysOnDashboardEventsResponse,
+  AlwaysOnSubTab,
+  AppTab,
+  Project,
+  ProjectSession,
+} from '../../types/app';
 import MainContent from '../main-content/view/MainContent';
 import type { MainContentProps } from '../main-content/types/types';
 import { cn } from '../../lib/utils.js';
@@ -35,7 +42,22 @@ const TABS: Tab[] = [
   { id: 'always-on', labelKey: 'tabs.alwaysOn',  icon: Radio },
 ];
 
-const ALWAYS_ON_READY_PLAN_POLL_INTERVAL_MS = 15_000;
+const ALWAYS_ON_EVENT_BADGE_POLL_INTERVAL_MS = 15_000;
+const ALWAYS_ON_LAST_VIEWED_MARKER_KEY = 'pilotdeck:always-on-last-viewed-marker';
+const ALWAYS_ON_EVENT_BADGE_LIMIT = 200;
+
+const BADGE_EVENT_PHASES = new Set<AlwaysOnDashboardEvent['phase']>([
+  'plan_produced',
+  'report_produced',
+]);
+
+const getBadgeEventMarker = (events: AlwaysOnDashboardEvent[]): string | null => {
+  const latestBadgeEvent = events
+    .filter((event) => BADGE_EVENT_PHASES.has(event.phase))
+    .sort((left, right) => right.timestamp.localeCompare(left.timestamp))[0];
+
+  return latestBadgeEvent ? `${latestBadgeEvent.timestamp}:${latestBadgeEvent.eventId}` : null;
+};
 
 // V2 main shell: breadcrumb on the left, tool switcher on the right, and the
 // active tool's content below. The sidebar stays focused on projects+sessions.
@@ -57,9 +79,11 @@ export default function MainAreaV2(props: MainAreaV2Props) {
     isSidebarCollapsed,
     onOpenSidebar,
   } = props;
-  const projectName = selectedProject?.name ?? null;
-  const [latestReadyPlanMarker, setLatestReadyPlanMarker] = useState<string | null>(null);
-  const [lastViewedReadyPlanMarker, setLastViewedReadyPlanMarker] = useState<string | null>(null);
+  const [alwaysOnSubTab, setAlwaysOnSubTab] = useState<AlwaysOnSubTab>('dashboard');
+  const [latestAlwaysOnEventMarker, setLatestAlwaysOnEventMarker] = useState<string | null>(null);
+  const [lastViewedAlwaysOnEventMarker, setLastViewedAlwaysOnEventMarker] = useState<string | null>(
+    () => localStorage.getItem(ALWAYS_ON_LAST_VIEWED_MARKER_KEY),
+  );
 
   useEffect(() => {
     if (activeTab === 'home') {
@@ -68,54 +92,48 @@ export default function MainAreaV2(props: MainAreaV2Props) {
   }, [activeTab, setActiveTab]);
 
   useEffect(() => {
-    if (!projectName) {
-      setLatestReadyPlanMarker(null);
-      setLastViewedReadyPlanMarker(null);
-      return undefined;
-    }
-
     let cancelled = false;
 
-    const refreshReadyPlanMarker = async () => {
+    const refreshAlwaysOnEventMarker = async () => {
       try {
-        const response = await api.projectDiscoveryPlans(projectName);
+        const response = await api.alwaysOnDashboardEvents(ALWAYS_ON_EVENT_BADGE_LIMIT);
         if (!response.ok) {
           return;
         }
 
-        const payload = (await response.json()) as ProjectDiscoveryPlansResponse;
-        const latestReadyPlan = Array.isArray(payload.plans)
-          ? payload.plans
-              .filter((plan) => plan.status === 'ready')
-              .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0]
-          : null;
+        const payload = (await response.json()) as AlwaysOnDashboardEventsResponse;
 
         if (!cancelled) {
-          setLatestReadyPlanMarker(
-            latestReadyPlan ? `${latestReadyPlan.updatedAt}:${latestReadyPlan.id}` : null,
-          );
+          const marker = Array.isArray(payload.events) ? getBadgeEventMarker(payload.events) : null;
+          setLatestAlwaysOnEventMarker(marker);
+
+          if (marker && !localStorage.getItem(ALWAYS_ON_LAST_VIEWED_MARKER_KEY)) {
+            setLastViewedAlwaysOnEventMarker(marker);
+            localStorage.setItem(ALWAYS_ON_LAST_VIEWED_MARKER_KEY, marker);
+          }
         }
       } catch {
         // Keep the previous marker when the lightweight notification poll fails.
       }
     };
 
-    void refreshReadyPlanMarker();
+    void refreshAlwaysOnEventMarker();
     const timer = window.setInterval(() => {
-      void refreshReadyPlanMarker();
-    }, ALWAYS_ON_READY_PLAN_POLL_INTERVAL_MS);
+      void refreshAlwaysOnEventMarker();
+    }, ALWAYS_ON_EVENT_BADGE_POLL_INTERVAL_MS);
 
     return () => {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [projectName]);
+  }, []);
 
   useEffect(() => {
-    if (activeTab === 'always-on' && latestReadyPlanMarker) {
-      setLastViewedReadyPlanMarker(latestReadyPlanMarker);
+    if (activeTab === 'always-on' && latestAlwaysOnEventMarker) {
+      setLastViewedAlwaysOnEventMarker(latestAlwaysOnEventMarker);
+      localStorage.setItem(ALWAYS_ON_LAST_VIEWED_MARKER_KEY, latestAlwaysOnEventMarker);
     }
-  }, [activeTab, latestReadyPlanMarker]);
+  }, [activeTab, latestAlwaysOnEventMarker]);
 
   // Re-render breadcrumb when the user renames a project/session via the
   // sidebar overlay (subscribes to localStorage + custom event).
@@ -134,9 +152,9 @@ export default function MainAreaV2(props: MainAreaV2Props) {
       : displayActiveTab;
   const sessionSummary = selectedSession ? sessionDisplayTitle(selectedSession) : '';
   const alwaysOnUnread = Boolean(
-    latestReadyPlanMarker &&
+    latestAlwaysOnEventMarker &&
     activeTab !== 'always-on' &&
-    latestReadyPlanMarker !== lastViewedReadyPlanMarker,
+    latestAlwaysOnEventMarker !== lastViewedAlwaysOnEventMarker,
   );
 
   return (
@@ -211,7 +229,11 @@ export default function MainAreaV2(props: MainAreaV2Props) {
 
       {/* Body */}
       <div className="min-h-0 flex-1 overflow-hidden">
-        <MainContent {...props} />
+        <MainContent
+          {...props}
+          alwaysOnSubTab={alwaysOnSubTab}
+          onAlwaysOnSubTabChange={setAlwaysOnSubTab}
+        />
       </div>
     </div>
   );

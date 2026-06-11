@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   Clock,
   FileText,
+  GitMerge,
   Loader2,
   Play,
   RefreshCw,
@@ -48,6 +49,12 @@ const PHASE_META: Record<
     labelKey: 'dashboard.phase.noPlan',
     defaultLabel: 'No Plan',
   },
+  workspace_started: {
+    icon: Loader2,
+    color: 'text-amber-500 dark:text-amber-400',
+    labelKey: 'dashboard.phase.workspaceStarted',
+    defaultLabel: 'Workspace Preparing',
+  },
   workspace_ready: {
     icon: Zap,
     color: 'text-amber-500 dark:text-amber-400',
@@ -66,11 +73,29 @@ const PHASE_META: Record<
     labelKey: 'dashboard.phase.executionCompleted',
     defaultLabel: 'Execution Completed',
   },
+  report_started: {
+    icon: FileText,
+    color: 'text-purple-500 dark:text-purple-400',
+    labelKey: 'dashboard.phase.reportStarted',
+    defaultLabel: 'Report Generating',
+  },
   report_produced: {
     icon: Sparkles,
     color: 'text-purple-600 dark:text-purple-400',
     labelKey: 'dashboard.phase.reportProduced',
     defaultLabel: 'Report Produced',
+  },
+  apply_started: {
+    icon: GitMerge,
+    color: 'text-indigo-500 dark:text-indigo-400',
+    labelKey: 'dashboard.phase.applyStarted',
+    defaultLabel: 'Apply Started',
+  },
+  apply_completed: {
+    icon: CheckCircle2,
+    color: 'text-emerald-600 dark:text-emerald-400',
+    labelKey: 'dashboard.phase.applyCompleted',
+    defaultLabel: 'Apply Completed',
   },
   run_completed: {
     icon: CheckCircle2,
@@ -217,7 +242,7 @@ export default function AlwaysOnDashboard({ onOpenExecutionSession }: AlwaysOnDa
 
     let todayEvents = 0;
     const activeProjects = new Set<string>();
-    let runningCount = 0;
+    const runningRuns = new Set<string>();
 
     for (const event of events) {
       if (Date.parse(event.timestamp) >= todayMs) {
@@ -232,11 +257,11 @@ export default function AlwaysOnDashboard({ onOpenExecutionSession }: AlwaysOnDa
         const hasTerminal = events.some(
           (e) => e.runId === event.runId && isTerminalPhase(e.phase),
         );
-        if (!hasTerminal) runningCount++;
+        if (!hasTerminal) runningRuns.add(event.runId);
       }
     }
 
-    return { todayEvents, activeProjectCount: activeProjects.size, runningCount };
+    return { todayEvents, activeProjectCount: activeProjects.size, runningCount: runningRuns.size };
   }, [events]);
 
   const handleEventClick = useCallback(

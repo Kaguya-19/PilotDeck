@@ -13,11 +13,11 @@ import {
 import { loadPilotConfig, resolvePilotHome } from "../pilot/index.js";
 import { createLocalGateway } from "./createLocalGateway.js";
 import { startPilotDeckServer } from "./pilotdeckServer.js";
-import { installGlobalProxy } from "./proxy.js";
+import { installGlobalProxy, reinstallGlobalProxy } from "./proxy.js";
 import { createShutdownAndExit } from "./shutdownCoordinator.js";
 import { createTelemetryCollector } from "../telemetry/index.js";
 
-installGlobalProxy();
+await installGlobalProxy();
 
 async function main(argv = process.argv.slice(2)): Promise<void> {
   const command = argv[0];
@@ -26,7 +26,16 @@ async function main(argv = process.argv.slice(2)): Promise<void> {
     const env = process.env;
     const pilotHome = resolvePilotHome(env);
     const snapshot = loadPilotConfig({ projectRoot, env });
-    const telemetry = createTelemetryCollector({ env, pilotHome });
+    const telemetry = createTelemetryCollector({
+      env, pilotHome,
+      enabled: snapshot.config.telemetry?.enabled,
+    });
+
+    // Apply proxy from config (env-based proxy from top-level installGlobalProxy
+    // takes precedence; this fills in when only pilotdeck.yaml has a proxy).
+    if (snapshot.config.proxy?.url) {
+      await installGlobalProxy(snapshot.config.proxy.url);
+    }
 
     let alwaysOn: AlwaysOnManager | undefined;
     let cron: CronRuntime | undefined;
@@ -128,8 +137,30 @@ async function main(argv = process.argv.slice(2)): Promise<void> {
     let reloadChain = Promise.resolve();
 
     configStore.subscribe((event) => {
+      if (event.changedPaths.some((p) => p.startsWith("telemetry."))) {
+        telemetry.setEnabled(event.nextSnapshot.config.telemetry?.enabled ?? false);
+      }
+
       const aoChanged = event.changedPaths.some((p) => p.startsWith("alwaysOn."));
       const cronChanged = event.changedPaths.some((p) => p.startsWith("cron."));
+      const proxyChanged = event.changedPaths.some((p) => p.startsWith("proxy.") || p === "proxy");
+      const adapterChanged = event.changedPaths.some((p) => p.startsWith("adapters."));
+
+      if (proxyChanged) {
+        const proxyConfig = event.nextSnapshot.config.proxy;
+        void reinstallGlobalProxy(proxyConfig?.url, proxyConfig?.noProxy);
+      }
+
+      if (adapterChanged) {
+        reloadChain = reloadChain
+          .then(() => handleAdapterHotReload(event.nextSnapshot.config))
+          .catch((err) =>
+            console.warn(
+              `[pilotdeck] adapter hot-reload failed: ${err instanceof Error ? err.message : String(err)}`,
+            ),
+          );
+      }
+
       if (!aoChanged && !cronChanged) return;
 
       reloadChain = reloadChain
@@ -192,6 +223,39 @@ async function main(argv = process.argv.slice(2)): Promise<void> {
       console.log(`[pilotdeck] Subsystem hot-reload complete: ${parts.join(", ")}`);
     }
 
+    // --- Adapter hot-reload ---
+
+    let serverRef: Awaited<ReturnType<typeof startPilotDeckServer>> | undefined;
+
+    async function handleAdapterHotReload(config: (typeof snapshot)["config"]): Promise<void> {
+      if (!serverRef) return;
+      const parts: string[] = [];
+
+      const fCfg = config.adapters?.feishu;
+      if (fCfg?.enabled === true) {
+        const ch = new FeishuChannel({
+          appId: fCfg.appId,
+          appSecret: fCfg.appSecret,
+          encryptKey: fCfg.encryptKey,
+          verifyToken: fCfg.verifyToken,
+          connectionMode: fCfg.connectionMode,
+          domainName: fCfg.domainName,
+        });
+        await serverRef.hotStartChannel(ch);
+        parts.push("feishu=started");
+      }
+
+      const wCfg = config.adapters?.weixin;
+      if (wCfg?.enabled === true) {
+        await serverRef.hotStartChannel(new WeixinChannel());
+        parts.push("weixin=started");
+      }
+
+      if (parts.length) {
+        console.log(`[pilotdeck] Adapter hot-reload complete: ${parts.join(", ")}`);
+      }
+    }
+
     // --- Server startup ---
 
     const envPort = Number.parseInt(env.PILOTDECK_GATEWAY_PORT ?? "", 10);
@@ -219,6 +283,7 @@ async function main(argv = process.argv.slice(2)): Promise<void> {
       channels: extraChannels,
       config: snapshot.config,
     });
+    serverRef = server;
     bindServer(server);
     deferredBroadcast = (name, payload) => server.broadcastNotification(name, payload);
     console.log(`PilotDeck server listening: ${server.url}`);
@@ -253,6 +318,18 @@ async function main(argv = process.argv.slice(2)): Promise<void> {
       void shutdownAndExit(0);
     });
     await new Promise(() => undefined);
+    return;
+  }
+
+  if (command === "gateway") {
+    const sub = argv[1];
+    if (sub === "setup") {
+      const { runGatewaySetup } = await import("./commands/gatewaySetup.js");
+      await runGatewaySetup(argv.slice(2));
+      return;
+    }
+    console.error("Usage: pilotdeck gateway setup [feishu|weixin]");
+    process.exitCode = 1;
     return;
   }
 

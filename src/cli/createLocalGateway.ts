@@ -583,6 +583,7 @@ class ProjectRuntimeRegistry {
     const memory = createEdgeClawMemoryProviderFromConfig({
       config: snapshot.config.memory,
       modelConfig: snapshot.config.model,
+      agentModel: snapshot.config.agent.model.id,
       projectRoot,
       now: this.options.now,
       telemetry: this.options.telemetry,
@@ -760,7 +761,7 @@ class ProjectRuntimeRegistry {
             sanitizeSessionIdForPath(context.sessionKey),
           );
           mkdirSyncFs(outDir, { recursive: true });
-          return { ...spec, args: [...(spec.args ?? []), `--output-dir=${outDir}`] };
+          return { ...spec, cwd: outDir, args: [...(spec.args ?? []), `--output-dir=${outDir}`] };
         }
         return spec;
       });

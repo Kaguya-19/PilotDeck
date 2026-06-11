@@ -63,6 +63,8 @@ function MainContent({
   selectedSession,
   activeTab,
   setActiveTab,
+  alwaysOnSubTab = 'dashboard',
+  onAlwaysOnSubTabChange,
   ws,
   sendMessage,
   latestMessage,
@@ -341,6 +343,8 @@ function MainContent({
           shouldShowTasksTab={shouldShowTasksTab}
           tasksEnabled={tasksEnabled}
           setActiveTab={setActiveTab}
+          alwaysOnSubTab={alwaysOnSubTab}
+          onAlwaysOnSubTabChange={onAlwaysOnSubTabChange}
           ws={ws}
           sendMessage={trackedSendMessage}
           latestMessage={latestMessage}
@@ -410,6 +414,8 @@ type SplitBodyProps = {
   shouldShowTasksTab: boolean;
   tasksEnabled: boolean;
   setActiveTab: (tab: any) => void;
+  alwaysOnSubTab: MainContentProps['alwaysOnSubTab'];
+  onAlwaysOnSubTabChange: MainContentProps['onAlwaysOnSubTabChange'];
   ws: any;
   sendMessage: any;
   latestMessage: any;
@@ -450,6 +456,8 @@ function SplitBody(props: SplitBodyProps) {
     shouldShowTasksTab,
     tasksEnabled,
     setActiveTab,
+    alwaysOnSubTab = 'dashboard',
+    onAlwaysOnSubTabChange,
     ws,
     sendMessage,
     latestMessage,
@@ -583,6 +591,8 @@ function SplitBody(props: SplitBodyProps) {
       return (
         <AlwaysOnV2
           selectedProject={selectedProject}
+          subTab={alwaysOnSubTab}
+          onSubTabChange={onAlwaysOnSubTabChange ?? (() => undefined)}
           onApplyWorkCycle={applyAndLaunchCycle}
           onOpenExecutionSession={handleOpenExecutionSession}
         />

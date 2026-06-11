@@ -27,7 +27,7 @@ export class TelemetrySender {
   private flushing = false;
 
   constructor(
-    private readonly config: TelemetryConfig,
+    private config: TelemetryConfig,
     deps: TelemetrySenderDeps = {},
   ) {
     this.fetchImpl = deps.fetchImpl ?? fetch;
@@ -37,6 +37,25 @@ export class TelemetrySender {
         void this.flush();
       }, this.config.flushIntervalMs);
       this.timer.unref();
+    }
+  }
+
+  setEnabled(enabled: boolean): void {
+    if (this.config.enabled === enabled) return;
+    this.config = { ...this.config, enabled };
+    if (enabled) {
+      if (!this.timer) {
+        this.timer = setInterval(() => {
+          void this.flush();
+        }, this.config.flushIntervalMs);
+        this.timer.unref();
+      }
+    } else {
+      if (this.timer) {
+        clearInterval(this.timer);
+        this.timer = undefined;
+      }
+      void this.flush();
     }
   }
 

@@ -1,13 +1,19 @@
 /**
  * Pure-JS port of `src/cli/proxy.ts` — installs a global undici
- * ProxyAgent so Node native `fetch()` honors `PILOTDECK_PROXY` /
- * `HTTPS_PROXY` / `HTTP_PROXY`. Node's native fetch does NOT respect
- * those env vars by default; this closes the gap.
+ * proxy agent so Node native `fetch()` and `WebSocket` honor
+ * `PILOTDECK_PROXY` / `HTTPS_PROXY` / `HTTP_PROXY`. Node's native
+ * fetch does NOT respect those env vars by default; this closes the
+ * gap.
+ *
+ * Uses `EnvHttpProxyAgent` instead of bare `ProxyAgent` so that
+ * `NO_PROXY` / `no_proxy` is honored. `127.0.0.1` and `localhost`
+ * are always excluded — the gateway WebSocket lives on loopback and
+ * must never be routed through an external proxy.
  *
  * Living in `ui/server/utils/` lets the express bridge run from
  * source without depending on `dist/src/cli/proxy.js`.
  */
-import { ProxyAgent, setGlobalDispatcher } from 'undici';
+import { EnvHttpProxyAgent, setGlobalDispatcher } from 'undici';
 
 function getProxyUrl(env = process.env) {
     return (
@@ -22,9 +28,9 @@ function getProxyUrl(env = process.env) {
 let installed = false;
 
 /**
- * Install a global undici ProxyAgent. Safe to call multiple times —
- * only the first effective call wins. Returns the proxy URL that was
- * activated, or undefined if no proxy is configured.
+ * Install a global undici EnvHttpProxyAgent. Safe to call multiple
+ * times — only the first effective call wins. Returns the proxy URL
+ * that was activated, or undefined if no proxy is configured.
  *
  * @param {string} [explicitUrl] Override the env-driven proxy URL.
  * @returns {string | undefined} The activated proxy URL.
@@ -34,10 +40,18 @@ export function installGlobalProxy(explicitUrl) {
     const proxyUrl = explicitUrl ?? getProxyUrl();
     if (!proxyUrl) return undefined;
     try {
-        const agent = new ProxyAgent(proxyUrl);
+        const userNoProxy = process.env.no_proxy || process.env.NO_PROXY || '';
+        const noProxy = [userNoProxy, '127.0.0.1', 'localhost']
+            .filter(Boolean)
+            .join(',');
+        const agent = new EnvHttpProxyAgent({
+            httpProxy: proxyUrl,
+            httpsProxy: proxyUrl,
+            noProxy,
+        });
         setGlobalDispatcher(agent);
         installed = true;
-        console.log(`[proxy] Global fetch proxy → ${proxyUrl}`);
+        console.log(`[proxy] Global fetch proxy → ${proxyUrl} (noProxy: ${noProxy})`);
         return proxyUrl;
     } catch (error) {
         console.warn(

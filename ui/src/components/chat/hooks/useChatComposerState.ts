@@ -45,6 +45,7 @@ interface UseChatComposerStateArgs {
   currentSessionId: string | null;
   model: string;
   permissionMode: PermissionMode | string;
+  basePermissionMode?: PermissionMode | string;
   cycleRunMode: () => void;
   isLoading: boolean;
   canAbortSession: boolean;
@@ -141,6 +142,7 @@ export function useChatComposerState({
   currentSessionId,
   model,
   permissionMode,
+  basePermissionMode,
   cycleRunMode,
   isLoading,
   canAbortSession,
@@ -518,6 +520,8 @@ export function useChatComposerState({
     setInput,
     textareaRef,
     onExecuteCommand: executeCommand,
+    inputValueRef,
+    handleSubmitRef,
   });
 
   const {
@@ -788,6 +792,7 @@ export function useChatComposerState({
         temporarySessionId: sessionToActivate,
         toolsSettings,
         permissionMode,
+        basePermissionMode,
         model,
         sessionSummary,
         images: uploadedImages,
@@ -820,6 +825,7 @@ export function useChatComposerState({
       onSessionProcessing,
       pendingViewSessionRef,
       permissionMode,
+      basePermissionMode,
       resetCommandMenuState,
       scrollToBottom,
       selectedProject,
@@ -1136,7 +1142,7 @@ export function useChatComposerState({
         }
 
         sendMessage({
-          type: 'pilotdeck-permission-response',
+          type: 'permission-response',
           requestId,
           allow: Boolean(decision?.allow),
           updatedInput: decision?.updatedInput,

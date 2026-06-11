@@ -145,6 +145,7 @@ export type TelemetryClient = {
   trackFeatureUsed(input: TelemetryFeatureUsedInput): void;
   trackFeatureLoopStage(input: TelemetryFeatureUsedInput): void;
   trackError(error: unknown, input?: TelemetryErrorInput): void;
+  setEnabled(enabled: boolean): void;
   flush(): Promise<void>;
   shutdown(): Promise<void>;
   snapshot(): TelemetrySenderMetrics;

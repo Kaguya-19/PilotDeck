@@ -131,6 +131,13 @@
     },
     "permissions": {
       "detail": "Manage allowed and blocked tool rules"
+    },
+    "telemetry": {
+      "title": "Telemetry",
+      "detail": "Send anonymous usage data to help improve the product"
+    },
+    "gateway": {
+      "detail": "Connect Feishu, WeChat, and other IM channels"
     }
   },
   "notifications": {
@@ -662,11 +669,11 @@
           "host": { "label": "Host", "description": "Bind interface for the HTTP/WebSocket server." },
           "serverPort": { "label": "Server port", "description": "Express + WebSocket port." },
           "vitePort": { "label": "Vite port", "description": "Frontend dev server (only used when running `npm run dev`)." },
-          "proxyPort": { "label": "Proxy port", "description": "Local LLM proxy (PilotDeck agent target)." },
           "apiTimeout": { "label": "API timeout (ms)", "description": "Per-request upstream timeout." },
           "databasePath": { "label": "Database path", "description": "SQLite auth/projects database (~ expands to home)." },
           "workspacesRoot": { "label": "Workspaces root", "description": "Directory under which projects are scanned." },
-          "httpsProxy": { "label": "HTTPS proxy", "description": "Outbound HTTPS proxy URL (HTTPS_PROXY / https_proxy)." }
+          "proxyUrl": { "label": "HTTPS proxy", "description": "Outbound HTTPS proxy URL. Applies to both Gateway and UI Server (proxy.url in pilotdeck.yaml)." },
+          "proxyNoProxy": { "label": "No-proxy list", "description": "Comma-separated hostnames/IPs that bypass the proxy (proxy.noProxy in pilotdeck.yaml). 127.0.0.1 and localhost are always excluded." }
         }
       },
       "models": {
@@ -768,6 +775,7 @@
           "gitWorktree": { "label": "Git worktree base dir", "description": "Root directory for git worktree-based isolation." },
           "snapshotDir": { "label": "Snapshot base dir", "description": "Root directory for snapshot-based isolation." },
           "snapshotMaxBytes": { "label": "Snapshot max bytes", "description": "Maximum size of a workspace snapshot." },
+          "maxPlansPerCycle": { "label": "Max plans per cycle", "description": "Maximum number of plans that can be accumulated in a single isolation environment cycle." },
           "gitLfs": { "label": "Git LFS", "description": "Include Git LFS objects in workspace snapshots." }
         },
         "execution": {
@@ -1024,5 +1032,44 @@
     "updateFailed": "Update failed",
     "restartToApply": "Restart to Apply",
     "dismiss": "Dismiss"
+  },
+  "gateway": {
+    "title": "IM Channels",
+    "description": "Configure instant messaging channels (Feishu, WeChat) so the agent can be reached from IM apps.",
+    "connected": "Connected",
+    "notConfigured": "Not configured",
+    "enabled": "Enabled",
+    "edit": "Edit",
+    "setup": "Set Up",
+    "testConnection": "Test Connection",
+    "save": "Save",
+    "disable": "Disable",
+    "cancel": "Cancel",
+    "dismiss": "Dismiss",
+    "feishu": {
+      "title": "Feishu / Lark",
+      "label": "Feishu Bot",
+      "domain": "Domain",
+      "connectionMode": "Connection Mode",
+      "chooseMethod": "Choose how to configure the Feishu bot:",
+      "qrScan": "QR Code Scan",
+      "qrScanDesc": "Scan with Feishu app to auto-create a bot",
+      "manualInput": "Manual Input",
+      "manualInputDesc": "Enter App ID and Secret from Developer Console",
+      "startQr": "Generate QR Code",
+      "connecting": "Connecting to Feishu…",
+      "scanPrompt": "Open Feishu / Lark app and scan the QR code",
+      "qrSuccess": "App created successfully — config saved and enabled",
+      "retry": "Retry"
+    },
+    "weixin": {
+      "title": "WeChat (iLink)",
+      "label": "WeChat Bot",
+      "qrLogin": "QR Code Login",
+      "relogin": "Re-login",
+      "loadingQr": "Generating QR code…",
+      "scanPrompt": "Open WeChat and scan the QR code to log in",
+      "loginSuccess": "Login successful — credentials saved"
+    }
   }
 }

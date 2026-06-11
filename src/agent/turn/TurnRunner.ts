@@ -17,6 +17,8 @@ export type TurnRunnerOptions = {
   input: AgentInput;
   maxTurns?: number;
   permissionMode?: PermissionMode;
+  /** The user's actual permission preference before plan-mode override. */
+  basePermissionMode?: PermissionMode;
   permissionRules?: Partial<PermissionRuleSet>;
   abortSignal?: AbortSignal;
 };
@@ -105,6 +107,7 @@ export class TurnRunner {
         messages,
         maxTurns: options.maxTurns,
         permissionMode: options.permissionMode,
+        basePermissionMode: options.basePermissionMode,
         permissionRules: options.permissionRules,
         abortSignal: options.abortSignal,
         onDurableMessage: (msg) => this.transcript.recordDurableMessage(options.sessionId, options.turnId, msg),

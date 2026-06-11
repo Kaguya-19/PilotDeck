@@ -23,6 +23,7 @@ export type AlwaysOnWorkspaceConfig = {
   snapshotBaseDir?: string;
   snapshotMaxBytes: number;
   gitLfs: boolean;
+  maxPlansPerCycle: number;
 };
 
 export type AlwaysOnExecutionConfig = {
@@ -78,6 +79,7 @@ export function defaultAlwaysOnConfig(): AlwaysOnConfig {
     workspace: {
       snapshotMaxBytes: DEFAULT_SNAPSHOT_MAX_BYTES,
       gitLfs: false,
+      maxPlansPerCycle: 3,
     },
     execution: {
       maxTurns: 30,
@@ -340,6 +342,12 @@ function parseWorkspace(
     diagnostics,
   );
   target.gitLfs = booleanField(raw, "gitLfs", target.gitLfs);
+  target.maxPlansPerCycle = positiveInteger(
+    raw.maxPlansPerCycle,
+    target.maxPlansPerCycle,
+    "alwaysOn.workspace.maxPlansPerCycle",
+    diagnostics,
+  );
 }
 
 function parseExecution(

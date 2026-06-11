@@ -45,7 +45,7 @@ import { promises as fsPromises } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 
 import { installGlobalProxy } from '../../src/cli/proxy.js';
-installGlobalProxy();
+await installGlobalProxy();
 
 import { resolvePilotHome, createProjectId, sanitizeSessionIdForPath } from './utils/pilotPaths.js';
 // Read the gateway client straight from TypeScript source via tsx — the UI
@@ -71,8 +71,9 @@ const GATEWAY_TOKEN_PATH =
 // parallel by `concurrently`. We allow up to 30 s for the gateway to
 // come up before failing the first call — covers cold MCP startup on
 // slower machines.
-const GATEWAY_CONNECT_TIMEOUT_MS = 30_000;
-const GATEWAY_CONNECT_RETRY_INTERVAL_MS = 250;
+const GATEWAY_CONNECT_TIMEOUT_MS =
+    Number.parseInt(process.env.PILOTDECK_BRIDGE_TIMEOUT ?? '', 10) || 60_000;
+const GATEWAY_CONNECT_RETRY_INTERVAL_MS = 500;
 const subagentActivityStarts = new Map();
 
 function normalizeToolDisplayName(name) {
@@ -735,6 +736,7 @@ export async function runChatViaGateway(
         ...(uiFilesToAttachments(options?.attachments) || []),
     ];
     const resolvedMode = resolvePermissionMode(options);
+    const basePermissionMode = options?.basePermissionMode || undefined;
     console.log(`[pilotdeck-bridge] submitTurn mode=${resolvedMode} (options.permissionMode=${options?.permissionMode}, options.mode=${options?.mode})`);
 
     try {
@@ -745,6 +747,7 @@ export async function runChatViaGateway(
             message: command ?? '',
             mode: resolvedMode,
             runId,
+            ...(basePermissionMode ? { basePermissionMode } : {}),
             ...(attachments.length > 0 ? { attachments } : {}),
             ...(options.workspaceCwd ? { workspaceCwd: options.workspaceCwd } : {}),
         });

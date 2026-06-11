@@ -94,6 +94,10 @@ export function createReadFileTool(): PilotDeckToolDefinition<ReadFileInput> {
           issues: [{ path: "limit", code: "invalid_schema", message: "limit must be greater than or equal to 0." }],
         };
       }
+      if (typeof input.pages === "string" && input.pages.trim().length === 0) {
+        const { pages: _pages, ...rest } = input;
+        input = rest as ReadFileInput;
+      }
       if (input.pages !== undefined) {
         const parsed = parsePdfPageRange(input.pages);
         if (!parsed) {

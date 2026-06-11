@@ -78,6 +78,7 @@ export class AgentSession {
       input,
       maxTurns: submitOptions.maxTurns,
       permissionMode: submitOptions.permissionMode,
+      basePermissionMode: submitOptions.basePermissionMode,
       permissionRules: submitOptions.permissionRules,
       abortSignal: this.state.abortController.signal,
     });

@@ -24,6 +24,8 @@ interface UseSlashCommandsOptions {
   setInput: Dispatch<SetStateAction<string>>;
   textareaRef: RefObject<HTMLTextAreaElement>;
   onExecuteCommand: (command: SlashCommand, rawInput?: string) => void | Promise<void>;
+  inputValueRef?: { current: string };
+  handleSubmitRef?: { current: ((event: any) => Promise<void>) | null };
 }
 
 const getCommandHistoryKey = (projectName: string) => `command_history_${projectName}`;
@@ -55,6 +57,8 @@ export function useSlashCommands({
   setInput,
   textareaRef,
   onExecuteCommand,
+  inputValueRef: externalInputValueRef,
+  handleSubmitRef: externalHandleSubmitRef,
 }: UseSlashCommandsOptions) {
   const [slashCommands, setSlashCommands] = useState<SlashCommand[]>([]);
   const [filteredCommands, setFilteredCommands] = useState<SlashCommand[]>([]);
@@ -232,6 +236,30 @@ export function useSlashCommands({
     [selectedProject],
   );
 
+  const shouldAutoExecute = useCallback((command: SlashCommand): boolean => {
+    const type = command.metadata?.type as string | undefined;
+    const hasArgHint = Boolean(command.metadata?.argumentHint);
+    return !hasArgHint && (type === 'skill' || type === 'bundled-skill');
+  }, []);
+
+  const autoExecuteCommand = useCallback(
+    (command: SlashCommand) => {
+      trackCommandUsage(command);
+      resetCommandMenuState();
+      const commandText = command.name;
+      setInput(commandText);
+      if (externalInputValueRef) {
+        externalInputValueRef.current = commandText;
+      }
+      setTimeout(() => {
+        if (externalHandleSubmitRef?.current) {
+          externalHandleSubmitRef.current({ preventDefault: () => {} });
+        }
+      }, 0);
+    },
+    [trackCommandUsage, resetCommandMenuState, setInput, externalInputValueRef, externalHandleSubmitRef],
+  );
+
   // Insert the picked command name into the textarea and leave the caret right
   // after `<command> `. We DO NOT auto-submit — the user reviews/edits args
   // and presses Enter themselves, mirroring how the TUI behaves and avoiding
@@ -275,9 +303,13 @@ export function useSlashCommands({
 
   const selectCommandFromKeyboard = useCallback(
     (command: SlashCommand) => {
+      if (shouldAutoExecute(command)) {
+        autoExecuteCommand(command);
+        return;
+      }
       insertCommandIntoInput(command);
     },
-    [insertCommandIntoInput],
+    [shouldAutoExecute, autoExecuteCommand, insertCommandIntoInput],
   );
 
   const handleCommandSelect = useCallback(
@@ -292,9 +324,13 @@ export function useSlashCommands({
       }
 
       trackCommandUsage(command);
+      if (shouldAutoExecute(command)) {
+        autoExecuteCommand(command);
+        return;
+      }
       insertCommandIntoInput(command);
     },
-    [selectedProject, trackCommandUsage, insertCommandIntoInput],
+    [selectedProject, trackCommandUsage, shouldAutoExecute, autoExecuteCommand, insertCommandIntoInput],
   );
 
   const handleToggleCommandMenu = useCallback(() => {
@@ -311,10 +347,33 @@ export function useSlashCommands({
   }, [showCommandMenu, slashCommands, textareaRef]);
 
   const handleCommandInputChange = useCallback(
-    () => {
-      resetCommandMenuState();
+    (value?: string, cursorPos?: number) => {
+      if (value === undefined || cursorPos === undefined) {
+        resetCommandMenuState();
+        return;
+      }
+
+      const textBeforeCursor = value.slice(0, cursorPos);
+      const slashMatch = textBeforeCursor.match(/(^|\s)(\/)(\S*)$/);
+
+      if (!slashMatch) {
+        resetCommandMenuState();
+        return;
+      }
+
+      const slashIdx = textBeforeCursor.lastIndexOf('/');
+      const query = slashMatch[3] || '';
+
+      setSlashPosition(slashIdx);
+      setShowCommandMenu(true);
+      setSelectedCommandIndex(query ? -1 : 0);
+
+      clearCommandQueryTimer();
+      commandQueryTimerRef.current = window.setTimeout(() => {
+        setCommandQuery(query);
+      }, COMMAND_QUERY_DEBOUNCE_MS);
     },
-    [resetCommandMenuState],
+    [resetCommandMenuState, clearCommandQueryTimer],
   );
 
   const handleCommandMenuKeyDown = useCallback(

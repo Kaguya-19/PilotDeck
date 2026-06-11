@@ -70,13 +70,33 @@ export class GatewayWsClient {
     );
 
     return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error("Gateway hello timed out.")), 5000);
-      const onHello = () => {
-        if (this.hello) {
+      let settled = false;
+      const timeout = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          reject(new Error("Gateway hello timed out."));
+        }
+      }, 10_000);
+
+      const onClose = (event: CloseEvent) => {
+        if (!settled) {
+          settled = true;
           clearTimeout(timeout);
+          const reason = event.reason || `code ${event.code}`;
+          reject(new Error(`Gateway closed during hello: ${reason}`));
+        }
+      };
+      ws.addEventListener("close", onClose, { once: true });
+
+      const onHello = () => {
+        if (settled) return;
+        if (this.hello) {
+          settled = true;
+          clearTimeout(timeout);
+          ws.removeEventListener("close", onClose);
           resolve(this.hello);
         } else {
-          setTimeout(onHello, 0);
+          setTimeout(onHello, 50);
         }
       };
       onHello();

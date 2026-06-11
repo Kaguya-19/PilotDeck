@@ -27,6 +27,8 @@ import {
   applyWorktreeToProject,
   disposeWorkspace as disposeWorkspaceImpl,
 } from '../../src/always-on/workspace/WorkspaceApply.js';
+import { resolveAlwaysOnPaths } from '../../src/always-on/storage/AlwaysOnPaths.js';
+import { DiscoveryStateStore } from '../../src/always-on/storage/DiscoveryStateStore.js';
 
 // ---------------------------------------------------------------------------
 // Wire dependencies for the service
@@ -48,6 +50,16 @@ function getService() {
     workspace: {
       applyWorktreeChanges: applyWorktreeToProject,
       disposeWorkspace: disposeWorkspaceImpl,
+    },
+    state: {
+      clearActiveWorkCycleId: async (projectRoot) => {
+        const paths = resolveAlwaysOnPaths({
+          pilotHome: resolvePilotHome(),
+          projectKey: projectRoot,
+        });
+        const store = new DiscoveryStateStore(paths);
+        await store.clearActiveWorkCycleId(new Date());
+      },
     },
   });
 }

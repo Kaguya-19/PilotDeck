@@ -39,6 +39,9 @@ function classifyPath(path: string): PilotConfigChangeClass {
   if (path.startsWith("tools.")) {
     return "next-runtime";
   }
+  if (path.startsWith("proxy.") || path === "proxy") {
+    return "runtime-live";
+  }
   return "next-runtime";
 }
 
@@ -70,6 +73,17 @@ function classifyRouterPath(path: string): PilotConfigChangeClass {
 function diffValues(left: unknown, right: unknown, prefix = ""): string[] {
   if (Object.is(left, right)) {
     return [];
+  }
+
+  if (Array.isArray(left) && Array.isArray(right)) {
+    if (left.length !== right.length) {
+      return [prefix || "<root>"];
+    }
+    const changes: string[] = [];
+    for (let i = 0; i < left.length; i++) {
+      changes.push(...diffValues(left[i], right[i], `${prefix}[${i}]`));
+    }
+    return changes;
   }
 
   if (!isDiffableObject(left) || !isDiffableObject(right)) {

@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { CheckCircle2, ClipboardList, MessageSquareText } from 'lucide-react';
+import { CheckCircle2, ChevronDown, ChevronUp, ClipboardList, MessageSquareText } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { PermissionPanelProps } from '../../configs/permissionPanelRegistry';
 import { MarkdownContent } from '../ContentRenderers/MarkdownContent';
@@ -70,6 +70,7 @@ export const ExitPlanModePanel: React.FC<PermissionPanelProps> = ({
 }) => {
   const { t } = useTranslation('chat');
   const [feedback, setFeedback] = useState('');
+  const [collapsed, setCollapsed] = useState(false);
   const plan = useMemo(() => {
     const extracted = extractPlanMarkdown(request.input);
     return extracted || t('plan.exitMode.syncingPlan');
@@ -123,15 +124,25 @@ export const ExitPlanModePanel: React.FC<PermissionPanelProps> = ({
               {t('plan.exitMode.subtitle')}
             </div>
           </div>
+          <button
+            type="button"
+            onClick={() => setCollapsed((prev) => !prev)}
+            className="ml-auto shrink-0 rounded-md p-1 text-neutral-500 transition hover:bg-neutral-200/60 hover:text-neutral-700 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
+            aria-label={collapsed ? 'Expand plan' : 'Collapse plan'}
+          >
+            {collapsed ? <ChevronDown className="h-4 w-4" /> : <ChevronUp className="h-4 w-4" />}
+          </button>
         </div>
       </div>
 
-      <div className="min-h-[200px] max-h-[50vh] overflow-y-auto px-4 py-3">
-        <MarkdownContent
-          content={plan}
-          className="prose prose-sm max-w-none text-neutral-800 dark:prose-invert dark:text-neutral-200"
-        />
-      </div>
+      {!collapsed && (
+        <div className="min-h-[200px] max-h-[50vh] overflow-y-auto px-4 py-3">
+          <MarkdownContent
+            content={plan}
+            className="prose prose-sm max-w-none text-neutral-800 dark:prose-invert dark:text-neutral-200"
+          />
+        </div>
+      )}
 
       <div className="border-t border-neutral-100 bg-neutral-50/70 px-4 py-3 dark:border-neutral-800 dark:bg-neutral-950/40">
         <label className="mb-2 block text-xs font-medium text-neutral-600 dark:text-neutral-400">

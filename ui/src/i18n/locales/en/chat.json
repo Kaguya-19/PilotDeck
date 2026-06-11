@@ -25,6 +25,10 @@
     "title": "Tool error",
     "description": ""
   },
+  "setupRequired": {
+    "title": "Configuration needed",
+    "openSettings": "Open Settings"
+  },
   "interrupted": {
     "label": "Interrupted by user"
   },

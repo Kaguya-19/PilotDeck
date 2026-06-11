@@ -103,6 +103,10 @@ export type WorkspaceManager = {
   ): Promise<void>;
 };
 
+export type StateManager = {
+  clearActiveWorkCycleId(projectRoot: string): Promise<void>;
+};
+
 export type DiscoveryPlanServiceDeps = {
   pilotHome: string;
   createProjectId: (projectRoot: string) => string;
@@ -111,6 +115,7 @@ export type DiscoveryPlanServiceDeps = {
   activity: SessionActivityChecker;
   events: RunEventSink;
   workspace?: WorkspaceManager;
+  state?: StateManager;
 };
 
 // ---------------------------------------------------------------------------
@@ -395,6 +400,14 @@ export class DiscoveryPlanService {
     }
     await writePlanStore(projectDir, store);
 
+    if (this.deps.state) {
+      try {
+        await this.deps.state.clearActiveWorkCycleId(projectRoot);
+      } catch {
+        // Best effort — state cleanup should not block archive.
+      }
+    }
+
     return { archived: true };
   }
 
@@ -500,6 +513,14 @@ export class DiscoveryPlanService {
           }
         }
         await writePlanStore(projectDir, store);
+
+        if (this.deps.state) {
+          try {
+            await this.deps.state.clearActiveWorkCycleId(projectRoot);
+          } catch {
+            // Best effort — state cleanup should not block apply finalization.
+          }
+        }
       }
     }
 

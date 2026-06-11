@@ -5,7 +5,7 @@ import type { Gateway, GatewayChannelKey, GatewayEvent } from "../../gateway/ind
 import { getPilotProjectChatDir } from "../../pilot/paths.js";
 import { buildChatDigest } from "../context/ChatDigestBuilder.js";
 import type { AlwaysOnConfig } from "../config/parseAlwaysOnConfig.js";
-import { buildFallbackReport, type ReportMetadata } from "../contracts/ReportContract.js";
+import { buildFallbackReport, parseReportMarkdown, type ReportMetadata } from "../contracts/ReportContract.js";
 import { AlwaysOnError } from "../protocol/errors.js";
 import type {
   AlwaysOnDiscoveryOutcome,
@@ -458,9 +458,10 @@ export class DiscoveryFire {
     };
     this.deps.runContexts.register(reportCtx);
 
+    let reportEvents: GatewayEvent[] = [];
     let reportError: { code?: string; message: string } | undefined;
     try {
-      const events = await this.drainTurn({
+      reportEvents = await this.drainTurn({
         sessionKey: reportSessionKey,
         channelKey: REPORT_CHANNEL,
         runId: `${runId}.report`,
@@ -468,7 +469,7 @@ export class DiscoveryFire {
         mode: "bypassPermissions",
         persistEvents: true,
       });
-      reportError = pickFirstError(events);
+      reportError = pickFirstError(reportEvents);
     } finally {
       this.deps.runContexts.unregister(reportSessionKey);
       this.deps.sessionOverrides.delete(reportSessionKey);
@@ -476,6 +477,25 @@ export class DiscoveryFire {
     }
 
     const finishedAt = this.deps.now();
+
+    if (!reportCtx.report && !reportError) {
+      const assistantText = extractAssistantText(reportEvents);
+      if (assistantText) {
+        const metadata: ReportMetadata = {
+          runId,
+          planId,
+          startedAt: startedAt.toISOString(),
+          finishedAt: finishedAt.toISOString(),
+          outcome: "executed",
+          workspaceStrategy: workspace.strategy === "git-worktree" ? "git-worktree" : "snapshot-copy",
+          workspaceHandle: workspace.cwd,
+        };
+        const parsed = parseReportMarkdown(assistantText, metadata);
+        const filePath = await this.deps.reportStore.writeReport(runId, parsed.rawContent);
+        reportCtx.report = { markdown: parsed.rawContent, filePath, finishedAt };
+      }
+    }
+
     const outcome: AlwaysOnDiscoveryOutcome = reportCtx.report && !reportError ? "executed" : "failed";
 
     if (reportCtx.report && !reportError) {
@@ -801,9 +821,10 @@ export class DiscoveryFire {
     };
     this.deps.runContexts.register(reportCtx);
 
+    let reportEvents: GatewayEvent[] = [];
     let reportError: { code?: string; message: string } | undefined;
     try {
-      const events = await this.drainTurn({
+      reportEvents = await this.drainTurn({
         sessionKey: reportSessionKey,
         channelKey: REPORT_CHANNEL,
         runId: `${runId}.report`,
@@ -817,7 +838,7 @@ export class DiscoveryFire {
         mode: "bypassPermissions",
         persistEvents: true,
       });
-      reportError = pickFirstError(events);
+      reportError = pickFirstError(reportEvents);
     } finally {
       this.deps.runContexts.unregister(reportSessionKey);
       this.deps.sessionOverrides.delete(reportSessionKey);
@@ -827,6 +848,25 @@ export class DiscoveryFire {
     }
 
     const finishedAt = this.deps.now();
+
+    if (!reportCtx.report && !reportError) {
+      const assistantText = extractAssistantText(reportEvents);
+      if (assistantText) {
+        const metadata: ReportMetadata = {
+          runId,
+          planId: planRecord.id,
+          startedAt: startedAt.toISOString(),
+          finishedAt: finishedAt.toISOString(),
+          outcome: "executed",
+          workspaceStrategy: workspace.strategy === "git-worktree" ? "git-worktree" : "snapshot-copy",
+          workspaceHandle: workspace.cwd,
+        };
+        const parsed = parseReportMarkdown(assistantText, metadata);
+        const filePath = await this.deps.reportStore.writeReport(runId, parsed.rawContent);
+        reportCtx.report = { markdown: parsed.rawContent, filePath, finishedAt };
+      }
+    }
+
     const outcome: AlwaysOnDiscoveryOutcome = reportCtx.report && !reportError ? "executed" : "failed";
 
     if (reportCtx.report && !reportError) {
@@ -1115,4 +1155,14 @@ function pickFirstError(events: GatewayEvent[]): { code?: string; message: strin
     }
   }
   return undefined;
+}
+
+function extractAssistantText(events: GatewayEvent[]): string {
+  let text = "";
+  for (const event of events) {
+    if (event.type === "assistant_text_delta") {
+      text += event.text;
+    }
+  }
+  return text.trim();
 }

@@ -22,13 +22,20 @@ const SUB_TABS: { id: AlwaysOnSubTab; labelKey: string; defaultLabel: string; ic
 
 type AlwaysOnV2Props = {
   selectedProject: Project | null;
+  subTab: AlwaysOnSubTab;
+  onSubTabChange: (tab: AlwaysOnSubTab) => void;
   onApplyWorkCycle?: (projectName: string, cycleId: string) => Promise<void>;
   onOpenExecutionSession?: (projectKey: string, runId: string, projectName?: string) => void;
 };
 
-export default function AlwaysOnV2({ selectedProject, onApplyWorkCycle, onOpenExecutionSession }: AlwaysOnV2Props) {
+export default function AlwaysOnV2({
+  selectedProject,
+  subTab,
+  onSubTabChange,
+  onApplyWorkCycle,
+  onOpenExecutionSession,
+}: AlwaysOnV2Props) {
   const { t } = useTranslation('alwaysOn');
-  const [subTab, setSubTab] = useState<AlwaysOnSubTab>('dashboard');
   const [planDetail, setPlanDetail] = useState<PlanDetailTarget | null>(null);
 
   const handleOpenPlanDetail = useCallback(
@@ -57,7 +64,7 @@ export default function AlwaysOnV2({ selectedProject, onApplyWorkCycle, onOpenEx
             <button
               key={tab.id}
               type="button"
-              onClick={() => setSubTab(tab.id)}
+              onClick={() => onSubTabChange(tab.id)}
               className={cn(
                 'inline-flex items-center gap-1.5 border-b-2 px-3 pb-2 text-[13px] font-medium transition-colors',
                 isActive

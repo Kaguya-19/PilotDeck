@@ -7,7 +7,7 @@ import type {
 type SessionPlanTodoState = {
   approvedPlan?: string;
   requiresInitialization: boolean;
-  requiresRefresh: boolean;
+  toolCallsSinceLastTodoWrite: number;
   lastMarkdown?: string;
   todos: PilotDeckTodoItem[];
 };
@@ -26,7 +26,7 @@ export function createPlanTodoStateManager(): PlanTodoStateManager {
     if (!state) {
       state = {
         requiresInitialization: false,
-        requiresRefresh: false,
+        toolCallsSinceLastTodoWrite: 0,
         todos: [],
       };
       states.set(sessionId, state);
@@ -38,7 +38,7 @@ export function createPlanTodoStateManager(): PlanTodoStateManager {
     return {
       approvedPlan: state.approvedPlan,
       requiresInitialization: state.requiresInitialization,
-      requiresRefresh: state.requiresRefresh,
+      toolCallsSinceLastTodoWrite: state.toolCallsSinceLastTodoWrite,
       lastMarkdown: state.lastMarkdown,
       todos: state.todos,
     };
@@ -53,11 +53,12 @@ export function createPlanTodoStateManager(): PlanTodoStateManager {
         "Represent completed items as `- [x]` and remaining items as `- [ ]`.",
       ].join("\n");
     }
-    if (state.requiresRefresh) {
+    if (state.toolCallsSinceLastTodoWrite >= 10) {
       return [
-        "Your todo checklist is stale.",
-        `Before the next non-read-only tool call, you MUST call \`${TODO_WRITE_TOOL_NAME}\` again and update the markdown checklist to reflect the latest completed steps.`,
-      ].join("\n");
+        `You haven't updated the todo list in a while (${state.toolCallsSinceLastTodoWrite} tool calls since last update).`,
+        `Consider calling \`${TODO_WRITE_TOOL_NAME}\` to reflect your current progress.`,
+        "This is a gentle reminder — ignore if not applicable.",
+      ].join(" ");
     }
     return undefined;
   }
@@ -76,12 +77,6 @@ export function createPlanTodoStateManager(): PlanTodoStateManager {
         `Call \`${TODO_WRITE_TOOL_NAME}\` first with a markdown checklist based on the approved plan, then retry this tool.`,
       ].join(" ");
     }
-    if (state.requiresRefresh) {
-      return [
-        "The todo list is stale after progress was made on the approved plan.",
-        `Call \`${TODO_WRITE_TOOL_NAME}\` first to update the markdown checklist and mark completed items, then retry this tool.`,
-      ].join(" ");
-    }
     return undefined;
   }
 
@@ -93,7 +88,7 @@ export function createPlanTodoStateManager(): PlanTodoStateManager {
         markPlanApproved(plan: string) {
           state.approvedPlan = plan.trim() || undefined;
           state.requiresInitialization = Boolean(state.approvedPlan);
-          state.requiresRefresh = false;
+          state.toolCallsSinceLastTodoWrite = 0;
           state.lastMarkdown = undefined;
           state.todos = [];
         },
@@ -101,7 +96,7 @@ export function createPlanTodoStateManager(): PlanTodoStateManager {
           state.lastMarkdown = markdown;
           state.todos = todos;
           state.requiresInitialization = false;
-          state.requiresRefresh = false;
+          state.toolCallsSinceLastTodoWrite = 0;
         },
         markToolProgressChanged(toolName: string) {
           if (!state.approvedPlan || toolName === TODO_WRITE_TOOL_NAME) {
@@ -110,7 +105,7 @@ export function createPlanTodoStateManager(): PlanTodoStateManager {
           if (state.requiresInitialization) {
             return;
           }
-          state.requiresRefresh = true;
+          state.toolCallsSinceLastTodoWrite += 1;
         },
         buildPromptAddendum: () => buildPromptAddendum(state),
         blockingMessageFor: (toolName, isReadOnly) =>

@@ -4,6 +4,7 @@ import { AlwaysOnError } from "../protocol/errors.js";
 import type { GateBlockReason } from "../protocol/types.js";
 import type { AlwaysOnPaths } from "../storage/AlwaysOnPaths.js";
 import { DiscoveryStateStore } from "../storage/DiscoveryStateStore.js";
+import { WorkCycleStore } from "../storage/WorkCycleStore.js";
 import type { ChannelLeaseRegistry } from "./ChannelLeaseRegistry.js";
 import {
   acquireDiscoveryLock,
@@ -23,6 +24,7 @@ export type DiscoverySchedulerDependencies = {
   projectKey: string;
   paths: AlwaysOnPaths;
   stateStore: DiscoveryStateStore;
+  cycleStore: WorkCycleStore;
   leases: ChannelLeaseRegistry;
   fire: DiscoveryFire;
   uuid: () => string;
@@ -111,6 +113,18 @@ export class DiscoveryScheduler {
         this.ensureDormancyWatcher();
       }
       return { outcome: "blocked", reason: evaluation.reason };
+    }
+
+    if (state.activeWorkCycleId) {
+      const activeCycle = await this.deps.cycleStore.getRecord(state.activeWorkCycleId);
+      if (
+        activeCycle &&
+        activeCycle.status === "active" &&
+        activeCycle.planIds.length >= this.deps.config.workspace.maxPlansPerCycle
+      ) {
+        this.deps.logger.info("always-on gate blocked", { reason: "cycle_full" });
+        return { outcome: "blocked", reason: "cycle_full" as GateBlockReason };
+      }
     }
 
     const runId = this.deps.uuid();

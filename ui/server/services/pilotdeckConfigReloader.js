@@ -9,7 +9,6 @@ export async function reloadPilotDeckConfig(config) {
   const result = {
     processEnv: { reloaded: false },
     memory: { reloaded: false },
-    proxy: { reloaded: false, skipped: false },
   };
 
   applyConfigToProcessEnv(config);
@@ -21,19 +20,6 @@ export async function reloadPilotDeckConfig(config) {
   }
   result.memory.reloaded = true;
   result.memory.scheduler = config.memory?.enabled ? 'started' : 'stopped';
-
-  result.proxy = await new Promise((resolve) => {
-    const handled = process.emit('pilotdeck:restart-proxy', (error) => {
-      if (error) {
-        resolve({ reloaded: false, error: error instanceof Error ? error.message : String(error) });
-      } else {
-        resolve({ reloaded: true });
-      }
-    });
-    if (!handled) {
-      resolve({ reloaded: false, skipped: true, reason: 'proxy restart hook is not registered in this process' });
-    }
-  });
 
   return result;
 }

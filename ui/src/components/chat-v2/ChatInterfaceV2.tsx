@@ -202,6 +202,7 @@ function ChatInterfaceV2({
     currentSessionId,
     model,
     permissionMode: effectivePermissionMode,
+    basePermissionMode: permissionMode,
     cycleRunMode,
     isLoading,
     canAbortSession,

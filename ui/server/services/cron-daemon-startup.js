@@ -15,8 +15,6 @@ function resolvePilotDeckMainRoot() {
 const DEFAULT_RETRY_ATTEMPTS = 20;
 const DEFAULT_RETRY_DELAY_MS = 250;
 const START_LOCK_STALE_MS = 30000;
-const CCR_SENTINEL = 'http://ccr.local';
-const CCR_DAEMON_FETCH_INTERCEPTOR = 'CCR_DAEMON_FETCH_INTERCEPTOR';
 
 function getPilotDeckConfigHomeDir() {
   return process.env.PILOTDECK_CONFIG_DIR || process.env.PILOT_HOME || path.join(os.homedir(), '.pilotdeck');
@@ -73,11 +71,7 @@ export function isCronDaemonUnavailableError(error) {
 }
 
 export function buildCronDaemonEnv(baseEnv = process.env) {
-  const env = { ...baseEnv };
-  if (env.ANTHROPIC_BASE_URL === CCR_SENTINEL) {
-    env[CCR_DAEMON_FETCH_INTERCEPTOR] = '1';
-  }
-  return env;
+  return { ...baseEnv };
 }
 
 export function buildCronDaemonSpawnCommand({

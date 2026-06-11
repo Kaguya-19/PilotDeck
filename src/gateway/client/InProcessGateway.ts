@@ -315,6 +315,7 @@ export class InProcessGateway implements Gateway {
             turnId: runId,
             maxTurns: input.maxTurns,
             permissionMode,
+            basePermissionMode: input.basePermissionMode,
             permissionRules: {
               ...persistedRules,
               allow: [...sessionAllowRules, ...persistedRules.allow],

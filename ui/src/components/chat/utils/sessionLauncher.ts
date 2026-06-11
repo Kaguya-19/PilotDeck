@@ -9,6 +9,7 @@ type StartSessionOptions = {
   sessionId?: string | null;
   temporarySessionId?: string;
   permissionMode?: PermissionMode | string;
+  basePermissionMode?: PermissionMode | string;
   model?: string;
   sessionSummary?: string | null;
   toolsSettings?: PilotDeckSettings;
@@ -82,6 +83,7 @@ export function startSessionCommand({
   sessionId,
   temporarySessionId,
   permissionMode = 'default',
+  basePermissionMode,
   model,
   sessionSummary,
   toolsSettings = getPilotDeckSettings(),
@@ -104,6 +106,7 @@ export function startSessionCommand({
       cwd: resolvedProjectPath,
       toolsSettings,
       permissionMode,
+      ...(basePermissionMode ? { basePermissionMode } : {}),
       ...(model ? { model } : {}),
       sessionSummary,
       ...(alwaysOnPlanId ? { alwaysOnPlanId } : {}),

@@ -142,7 +142,8 @@ export type GateBlockReason =
   | "recent_user_msg"
   | "cooldown"
   | "daily_budget"
-  | "lock_busy";
+  | "lock_busy"
+  | "cycle_full";
 
 export type GateResult =
   | { ok: true; lease?: AlwaysOnChannelLease }

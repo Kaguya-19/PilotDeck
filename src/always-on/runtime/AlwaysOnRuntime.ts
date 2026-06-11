@@ -216,6 +216,7 @@ export class AlwaysOnRuntime {
       projectKey: this.projectKey,
       paths: this.paths,
       stateStore: this.stateStore,
+      cycleStore: this.cycleStore,
       leases: this.leases,
       fire: this.fire,
       uuid: this.uuid,

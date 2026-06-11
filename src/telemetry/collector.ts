@@ -26,6 +26,8 @@ type CreateTelemetryCollectorInput = {
   env?: Record<string, string | undefined>;
   pilotHome?: string;
   fetchImpl?: typeof fetch;
+  /** Explicit override for the enabled flag; takes precedence over env. */
+  enabled?: boolean;
 };
 
 const DEFAULT_BASE_URL = "http://tele.pilotdeck.cn";
@@ -38,6 +40,9 @@ export function createTelemetryCollector(
 ): TelemetryClient {
   const env = input.env ?? process.env;
   const config = resolveTelemetryConfig(env, input.pilotHome);
+  if (input.enabled != null) {
+    config.enabled = input.enabled;
+  }
   const runtimeContext = resolveTelemetryRuntimeContext({ env, pilotHome: input.pilotHome });
   const sender = new TelemetrySender(config, { fetchImpl: input.fetchImpl });
 
@@ -108,6 +113,10 @@ export function createTelemetryCollector(
         sessionId: inputError.sessionId,
         metadata: sanitizeProperties(pickErrorFeatureMetadata(code, inputError.toolName, inputError.metadata)),
       });
+    },
+    setEnabled(enabled: boolean) {
+      config.enabled = enabled;
+      sender.setEnabled(enabled);
     },
     flush() {
       return sender.flush();
