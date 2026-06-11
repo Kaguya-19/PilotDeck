@@ -181,9 +181,13 @@ export function createWriteFileTool(): PilotDeckToolDefinition<WriteFileInput, W
 
       let resultText = `${type === "create" ? "Created" : "Overwrote"} ${resolved.relativePath}.`;
       if (isLintableFile(resolved.absolutePath)) {
-        const lint = await lintAfterWrite(resolved.absolutePath, input.content);
-        if (!lint.ok) {
-          resultText += formatLintDiagnostics(lint.diagnostics);
+        try {
+          const lint = await lintAfterWrite(resolved.absolutePath, input.content);
+          if (!lint.ok) {
+            resultText += formatLintDiagnostics(lint.diagnostics);
+          }
+        } catch {
+          // Lint failure must not block the write result
         }
       }
 

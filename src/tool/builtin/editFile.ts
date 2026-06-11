@@ -209,9 +209,13 @@ export function createEditFileTool(): PilotDeckToolDefinition<EditFileInput> {
       const replacements = input.old_string === "" ? 0 : input.replace_all ? occurrences : 1;
       let resultText = `${action === "created" ? "Created" : "Updated"} ${resolved.relativePath}${replacements > 0 ? ` (${replacements} replacement).` : "."}`;
       if (isLintableFile(resolved.absolutePath)) {
-        const lint = await lintAfterWrite(resolved.absolutePath, nextContent);
-        if (!lint.ok) {
-          resultText += formatLintDiagnostics(lint.diagnostics);
+        try {
+          const lint = await lintAfterWrite(resolved.absolutePath, nextContent);
+          if (!lint.ok) {
+            resultText += formatLintDiagnostics(lint.diagnostics);
+          }
+        } catch {
+          // Lint failure must not block the write result
         }
       }
 
