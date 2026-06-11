@@ -241,11 +241,23 @@ class RuntimeManager {
   }
 }
 
-async function createWindow(): Promise<void> {
+async function ensureRuntime(): Promise<RuntimeInfo> {
+  if (runtime?.getInfo()) {
+    return runtime.getInfo()!;
+  }
   const runtimeRoot = resolveRuntimeRoot();
   const nodeBinary = resolveNodeBinary();
   runtime = new RuntimeManager(runtimeRoot, nodeBinary);
-  const info = await runtime.start();
+  return runtime.start();
+}
+
+async function createOrShowWindow(info: RuntimeInfo): Promise<void> {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.show();
+    mainWindow.focus();
+    return;
+  }
+
   const icon = resolveAppIcon();
 
   if (process.platform === "win32") {
@@ -271,6 +283,10 @@ async function createWindow(): Promise<void> {
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     void shell.openExternal(url);
     return { action: "deny" };
+  });
+
+  mainWindow.on("closed", () => {
+    mainWindow = null;
   });
 
   await mainWindow.webContents.session.clearCache();
@@ -445,7 +461,8 @@ if (process.platform === "win32") {
 }
 
 app.whenReady()
-  .then(createWindow)
+  .then(ensureRuntime)
+  .then(createOrShowWindow)
   .catch(async (error) => {
     const detail = error instanceof Error ? error.stack ?? error.message : String(error);
     await runtime?.stop().catch(() => undefined);
@@ -455,6 +472,17 @@ app.whenReady()
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
+});
+
+app.on("activate", () => {
+  if (mainWindow === null || mainWindow.isDestroyed()) {
+    ensureRuntime()
+      .then(createOrShowWindow)
+      .catch((error) => {
+        const detail = error instanceof Error ? error.stack ?? error.message : String(error);
+        dialog.showErrorBox("PilotDeck failed to restore window", detail);
+      });
+  }
 });
 
 app.on("before-quit", (event) => {
