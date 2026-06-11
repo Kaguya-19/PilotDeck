@@ -60,7 +60,7 @@ export const IMAGE_TOO_LARGE_PATTERN =
   /image exceeds|image too large|image_too_large|image size exceeds/i;
 
 export const RATE_LIMIT_MESSAGE_PATTERN =
-  /rate limit|rate_limit|too many requests|throttled|requests per minute|tokens per minute|try again in|please retry after|resource_exhausted/i;
+  /rate limit|rate_limit|too many requests|throttled|requests per minute|tokens per minute|resource_exhausted/i;
 
 export const TRANSIENT_USAGE_SIGNAL_PATTERN =
   /try again|retry|resets at|reset in|wait|requests remaining|window/i;

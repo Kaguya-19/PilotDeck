@@ -85,11 +85,11 @@ function classifySemanticError(
     return "max_output_reached";
   }
 
-  if (RATE_LIMIT_MESSAGE_PATTERN.test(message)) {
-    return "rate_limit_error";
-  }
   if (BILLING_PATTERN.test(message)) {
     return "billing";
+  }
+  if (RATE_LIMIT_MESSAGE_PATTERN.test(message)) {
+    return "rate_limit_error";
   }
   if (IMAGE_TOO_LARGE_PATTERN.test(message)) {
     return "image_too_large";
