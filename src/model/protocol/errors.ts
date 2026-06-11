@@ -48,7 +48,7 @@ export const MAX_OUTPUT_REACHED_PATTERN = /max(?:imum)? (?:output|completion) to
 export const MULTIMODAL_PROCESSOR_PATTERN = /failed to apply.*processor/i;
 
 export const CONTEXT_OVERFLOW_PATTERN =
-  /context length|context size|maximum context|token limit|too many tokens|reduce the length|context window|prompt exceeds max length|max_tokens|maximum number of tokens|exceeds the max_model_len|max_model_len|input is too long|maximum model length|context length exceeded|slot context|n_ctx_slot|超过最大长度|上下文长度|input token|exceeds the maximum number of input tokens/i;
+  /context length|context size|maximum context|too many tokens|context window|prompt exceeds max length|maximum number of tokens|exceeds the max_model_len|max_model_len|input is too long|maximum model length|context length exceeded|slot context|n_ctx_slot|超过最大长度|上下文长度|input token|exceeds the maximum number of input tokens/i;
 
 export const BILLING_PATTERN =
   /insufficient credits|insufficient_quota|insufficient balance|credit balance|credits have been exhausted|top up your credits|payment required|billing hard limit|exceeded your current quota|account is deactivated|plan does not include/i;
