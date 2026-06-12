@@ -50,11 +50,17 @@ function lintJson(content: string): LintResult {
     return { ok: true, diagnostics: [] };
   } catch (error) {
     const message = error instanceof SyntaxError ? error.message : String(error);
-    const lineMatch = message.match(/position (\d+)/i);
     let line = 1;
     let column = 1;
-    if (lineMatch) {
-      const pos = Number.parseInt(lineMatch[1], 10);
+
+    // Node 21+ exposes structured cause with byte offset
+    const cause = (error as { cause?: { position?: number } }).cause;
+    const posFromCause = cause?.position;
+    // Fallback: extract from "at position N" / "position N" in message
+    const posFromMsg = message.match(/(?:at )?position (\d+)/i);
+    const pos = posFromCause ?? (posFromMsg ? Number.parseInt(posFromMsg[1], 10) : undefined);
+
+    if (pos !== undefined && pos <= content.length) {
       const before = content.slice(0, pos);
       line = (before.match(/\n/g) || []).length + 1;
       const lastNewline = before.lastIndexOf("\n");
@@ -99,6 +105,11 @@ async function lintTypeScript(
     scriptKind,
   );
 
+  // parseDiagnostics is an internal TS property; guard against removal in future major versions.
+  const major = Number.parseInt(ts.version.split(".")[0], 10);
+  if (major < 4 || major > 5) {
+    return { ok: true, diagnostics: [] };
+  }
   const parseDiagnostics = (sourceFile as unknown as { parseDiagnostics?: unknown[] }).parseDiagnostics;
   if (!parseDiagnostics || parseDiagnostics.length === 0) {
     return { ok: true, diagnostics: [] };
