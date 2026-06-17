@@ -41,6 +41,18 @@ export type AgentRuntimeConfig = {
   /** Enable automatic JSON self-correction retry on invalid_tool_arguments. Default false. */
   jsonSelfCorrect?: boolean;
   /**
+   * Tool call format hint — controls which self-correct prompt is used.
+   * "auto" (default) detects from text markers; explicit values select a
+   * specific format from the registry (e.g. "qwen_xml", "hermes", "dsml").
+   */
+  toolCallFormat?: string;
+  /**
+   * User-defined tool name aliases for fuzzy name repair.
+   * Maps common model-emitted names to canonical tool names.
+   * Example: { "search": "grep", "cat": "read" }
+   */
+  toolAliases?: Record<string, string>;
+  /**
    * The agent's default-model context window (tokens). Passed through so the
    * loop can compare it with the routed model's window and trigger a
    * post-routing compaction pass when the routed window is smaller.

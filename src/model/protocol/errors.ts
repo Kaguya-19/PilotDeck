@@ -13,7 +13,7 @@ export type CanonicalModelErrorCode =
 
 export type CanonicalModelError = {
   provider: string;
-  protocol: "anthropic" | "openai";
+  protocol: "anthropic" | "openai" | "text";
   code: CanonicalModelErrorCode | (string & {});
   status?: number;
   message: string;
@@ -23,6 +23,8 @@ export type CanonicalModelError = {
   recoverableViaCompact?: boolean;
   /** True for multimodal processor errors recoverable by stripping images from context. */
   recoverableViaImageStrip?: boolean;
+  /** Additional structured metadata for error classification (e.g. detectedFormat). */
+  metadata?: Record<string, unknown>;
 };
 
 export const PROMPT_TOO_LONG_ANTHROPIC_PATTERN = /prompt is too long/i;
