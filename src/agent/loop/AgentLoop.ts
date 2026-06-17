@@ -42,6 +42,7 @@ import { collectToolCalls } from "./collectToolCalls.js";
 import { createMissingToolResult, ensureToolResultPairing } from "./ensureToolResultPairing.js";
 import { LargeFileRepair, type LargeFileRepairDecision } from "./LargeFileRepair.js";
 import { projectToolResults } from "./projectToolResults.js";
+import { getSelfCorrectPrompt, looksLikeUnparsedToolCall, detectFormatByText } from "../../model/streaming/toolCallFormats.js";
 
 const TOOL_EVENT_PUMP_INTERVAL_MS = 500;
 const SUBAGENT_STATUS_HEARTBEAT_MS = 2_000;
@@ -153,6 +154,7 @@ export class AgentLoop {
     let consecutiveEmptyCount = 0;
     const MAX_JSON_SELF_CORRECT_RETRIES = 3;
     let jsonSelfCorrectCount = 0;
+    let hasAttemptedToolCallRetry = false;
     const largeFileRepair = new LargeFileRepair();
 
     /**
@@ -438,14 +440,15 @@ export class AgentLoop {
           jsonSelfCorrectCount < MAX_JSON_SELF_CORRECT_RETRIES
         ) {
           jsonSelfCorrectCount++;
+          const detectedFormat = assembled.error.metadata?.detectedFormat as string | undefined;
+          const failedText = textFromMessage(assembled.message);
+          const prompt = getSelfCorrectPrompt(
+            this.config.toolCallFormat ?? detectedFormat,
+            failedText,
+          );
           messages.push({
             role: "user",
-            content: [{
-              type: "text",
-              text: "Your previous tool call contained invalid JSON in the arguments and could not be parsed. "
-                + "Please retry with valid JSON. Common issues: missing quotes around keys/values, "
-                + "trailing commas, unescaped special characters in strings.",
-            }],
+            content: [{ type: "text", text: prompt }],
             metadata: { synthetic: true, purpose: "json_self_correct" },
           });
           yield {
@@ -692,6 +695,38 @@ export class AgentLoop {
           }
           yield continued.event;
           continue;
+        }
+
+        // Guard: text looks like an unparsed tool call (markers present but
+        // extraction failed). Give the model one chance to retry properly.
+        if (!hasAttemptedToolCallRetry && looksLikeUnparsedToolCall(assistantText)) {
+          hasAttemptedToolCallRetry = true;
+          const prompt = getSelfCorrectPrompt(this.config.toolCallFormat, assistantText);
+          messages.push({
+            role: "user",
+            content: [{ type: "text", text: prompt }],
+            metadata: { synthetic: true, purpose: "unparsed_tool_call_retry" },
+          });
+          yield {
+            type: "turn_continued",
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            reason: "model_error",
+          };
+          continue;
+        }
+
+        // Retry already attempted but text still looks like an unparsed tool call.
+        // Emit a warning so the UI can inform the user.
+        if (hasAttemptedToolCallRetry && looksLikeUnparsedToolCall(assistantText)) {
+          yield {
+            type: "warning",
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            code: "unparsed_tool_call",
+            message: "Model attempted to call a tool but the output could not be parsed. The response may be incomplete.",
+            metadata: { detectedFormat: detectFormatByText(assistantText)?.id },
+          };
         }
 
         const stopHooks = await this.dispatchLifecycle(input, "Stop", {
