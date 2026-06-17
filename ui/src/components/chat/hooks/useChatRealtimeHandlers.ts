@@ -373,7 +373,7 @@ export function useChatRealtimeHandlers({
 
     // Only route certain message kinds to the store append logic.
     const flushKinds = new Set([
-      'tool_use', 'tool_result', 'text', 'complete', 'error', 'permission_request',
+      'tool_use', 'tool_result', 'text', 'complete', 'error', 'warning', 'permission_request',
     ]);
     if (flushKinds.has(msg.kind as string)) {
       // Finalize thinking if still active (model moved past thinking)

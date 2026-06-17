@@ -543,6 +543,16 @@ export function gatewayEventToFrames(event, sessionId, provider) {
                     recoverable: event.recoverable,
                 }),
             ];
+        case 'warning':
+            return [
+                createNormalizedMessage({
+                    ...base,
+                    kind: 'warning',
+                    text: event.message || 'An issue occurred during tool call parsing.',
+                    code: event.code,
+                    metadata: event.metadata,
+                }),
+            ];
         case 'agent_status': {
             const subagentFrames = createSubagentStatusFrames(event, base);
             if (subagentFrames && subagentFrames.length > 0) return subagentFrames;

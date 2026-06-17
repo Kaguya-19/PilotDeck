@@ -153,6 +153,14 @@ function convertSingleMessage(
         timestamp: msg.timestamp,
       };
 
+    case 'warning':
+      return {
+        id: msg.id,
+        type: 'warning',
+        content: msg.content || msg.text || 'A non-critical issue occurred.',
+        timestamp: msg.timestamp,
+      };
+
     case 'interactive_prompt':
       return {
         id: msg.id,

@@ -94,7 +94,7 @@ const shouldDelegate = (message: ChatMessage): boolean => {
   if (message.isInteractivePrompt) return true;
   if (message.isTaskNotification) return true;
   const t = message.type;
-  if (t !== 'user' && t !== 'assistant' && t !== 'error') return true;
+  if (t !== 'user' && t !== 'assistant' && t !== 'error' && t !== 'warning') return true;
   return false;
 };
 
@@ -322,6 +322,20 @@ function MessageRowV2({
         </div>
         <div className="min-w-0 flex-1 pt-0.5 text-[14px] leading-relaxed text-red-500">
           <Markdown projectName={selectedProject?.name}>{formattedContent}</Markdown>
+        </div>
+      </div>,
+    );
+  }
+
+  // Warning: amber banner for non-fatal issues (e.g. unparsed tool calls).
+  if (message.type === 'warning') {
+    return withProcessRows(
+      <div className="flex gap-3">
+        <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400">
+          <AlertTriangle className="h-3.5 w-3.5" strokeWidth={2} />
+        </div>
+        <div className="min-w-0 flex-1 pt-0.5 text-[13px] leading-relaxed text-amber-700 dark:text-amber-300">
+          {formattedContent}
         </div>
       </div>,
     );

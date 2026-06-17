@@ -332,7 +332,7 @@ export function isProcessMessage(message: ChatMessage): boolean {
   if (message.isAgentActivity || message.isAgentActivitySummary) {
     return false;
   }
-  if (message.type === 'user' || message.type === 'error') {
+  if (message.type === 'user' || message.type === 'error' || message.type === 'warning') {
     return false;
   }
   if (message.isSubagentContainer) {

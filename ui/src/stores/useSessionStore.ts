@@ -21,6 +21,7 @@ export type MessageKind =
   | 'stream_delta'
   | 'stream_end'
   | 'error'
+  | 'warning'
   | 'complete'
   | 'status'
   | 'permission_request'
