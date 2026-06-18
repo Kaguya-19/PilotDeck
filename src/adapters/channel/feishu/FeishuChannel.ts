@@ -33,6 +33,7 @@ const PROCESSING_EMOJI = "OnIt";
 const TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1000;
 const SEEN_EVENTS_MAX = 2000;
 const MAX_TEXT_MESSAGE_LENGTH = 4000;
+const DEFAULT_LIVE_REPLY_CURSOR = " ▉";
 
 export type FeishuOutboundMessage = {
   chatId: string;
@@ -339,10 +340,13 @@ export class FeishuChannel implements ChannelAdapter {
   }
 
   private createLiveReplyTransport(chatId: string): ImLiveReplyTransport<FeishuLiveMessageHandle> {
+    const liveCursor = this.liveReplyOptions?.cursor ?? DEFAULT_LIVE_REPLY_CURSOR;
     return {
       maxMessageLength: MAX_TEXT_MESSAGE_LENGTH,
       send: async (text) => {
-        const messageId = await this.sendLiveMessage({ chatId, text });
+        const messageId = text.endsWith(liveCursor)
+          ? await this.sendLiveMessage({ chatId, text })
+          : await this.sendTextMessage({ chatId, text });
         if (messageId === false) return false;
         return messageId ? { messageId } : undefined;
       },
@@ -357,7 +361,7 @@ export class FeishuChannel implements ChannelAdapter {
   }
 
   private async sendLiveMessage(message: FeishuOutboundMessage): Promise<string | undefined | false> {
-    return this.sendTextMessage(message);
+    return this.sendCardMessage(message);
   }
 
   private async sendTextMessage(message: FeishuOutboundMessage): Promise<string | undefined | false> {
@@ -403,6 +407,49 @@ export class FeishuChannel implements ChannelAdapter {
     return false;
   }
 
+  private async sendCardMessage(message: FeishuOutboundMessage): Promise<string | undefined | false> {
+    if (this.explicitSend) {
+      await this.explicitSend(message);
+      return undefined;
+    }
+    if (!this.appId || !this.appSecret) {
+      this.logger?.warn?.("feishu: cannot send live card — appId/appSecret missing");
+      return false;
+    }
+
+    try {
+      const token = await this.getTenantAccessToken();
+      const res = await fetch(SEND_MESSAGE_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json; charset=utf-8",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          receive_id: message.chatId,
+          msg_type: "interactive",
+          content: JSON.stringify(buildLiveReplyCard(message.text)),
+        }),
+      });
+      const json = (await res.json().catch(() => ({}))) as {
+        code?: number;
+        msg?: string;
+        data?: { message_id?: string };
+      };
+      if (!res.ok || (json.code !== undefined && json.code !== 0)) {
+        if (json.code === 99991663 || json.code === 99991664) {
+          this.tokenCache = undefined;
+        }
+        this.logger?.error?.(`feishu: send live card failed code=${json.code} msg=${json.msg}`);
+        return false;
+      }
+      return json.data?.message_id;
+    } catch (e) {
+      this.logger?.error?.(`feishu: send live card threw: ${e}`);
+    }
+    return false;
+  }
+
   private async editLiveMessage(messageId: string, text: string): Promise<boolean> {
     if (!messageId || !this.appId || !this.appSecret) return false;
 
@@ -415,8 +462,8 @@ export class FeishuChannel implements ChannelAdapter {
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          msg_type: "text",
-          content: JSON.stringify({ text }),
+          msg_type: "interactive",
+          content: JSON.stringify(buildLiveReplyCard(text)),
         }),
       });
       const json = (await res.json().catch(() => ({}))) as { code?: number; msg?: string };
@@ -616,6 +663,24 @@ function decryptFeishuPayload(encrypted: string, key: string): string {
   decipher.setAutoPadding(true);
   const decoded = Buffer.concat([decipher.update(cipherText), decipher.final()]);
   return decoded.toString("utf8");
+}
+
+function buildLiveReplyCard(text: string): Record<string, unknown> {
+  return {
+    config: {
+      wide_screen_mode: true,
+      update_multi: true,
+    },
+    elements: [
+      {
+        tag: "div",
+        text: {
+          tag: "lark_md",
+          content: text || " ",
+        },
+      },
+    ],
+  };
 }
 
 function maskAppId(id: string): string {

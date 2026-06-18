@@ -62,7 +62,16 @@ async function waitFor(predicate: () => boolean, label: string): Promise<void> {
 function requestText(call: FetchCall | undefined): string {
   assert.ok(call, "expected fetch call");
   const body = JSON.parse(String(call.init?.body)) as { content?: string };
-  return JSON.parse(body.content ?? "{}").text as string;
+  const content = JSON.parse(body.content ?? "{}") as {
+    text?: string;
+    elements?: Array<{ text?: { content?: string } }>;
+  };
+  return content.text ?? content.elements?.[0]?.text?.content ?? "";
+}
+
+function requestMsgType(call: FetchCall | undefined): string {
+  assert.ok(call, "expected fetch call");
+  return (JSON.parse(String(call.init?.body)) as { msg_type?: string }).msg_type ?? "";
 }
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
@@ -150,12 +159,14 @@ test("feishu live reply sends a long preview before turn completion", async () =
     const sends = calls.filter((call) => call.init?.method === "POST" && call.url.includes("/im/v1/messages?"));
     assert.equal(sends.length, 1);
     assert.equal(requestText(sends[0]), "hello visible reply above threshold ▉");
+    assert.equal(requestMsgType(sends[0]), "interactive");
     assert.equal(calls.some((call) => call.init?.method === "PATCH"), false);
 
     releaseTurn.resolve();
     await waitFor(() => calls.some((call) => call.init?.method === "PATCH"), "expected final update call");
     const edit = calls.find((call) => call.init?.method === "PATCH");
     assert.equal(requestText(edit), "hello visible reply above threshold");
+    assert.equal(requestMsgType(edit), "interactive");
   } finally {
     releaseTurn.resolve();
     globalThis.fetch = originalFetch;
@@ -208,7 +219,9 @@ test("feishu long pre-text activity placeholder is reused for the answer", async
     const edits = calls.filter((call) => call.init?.method === "PATCH");
     assert.equal(sends.length, 1);
     assert.equal(requestText(sends[0]), "正在思考… ▉");
+    assert.equal(requestMsgType(sends[0]), "interactive");
     assert.equal(requestText(edits[0]), "answer ▉");
+    assert.equal(requestMsgType(edits[0]), "interactive");
     assert.equal(requestText(edits.at(-1)), "answer");
     assert.ok(edits.every((call) => call.url.endsWith("/om_1")));
   } finally {
@@ -257,7 +270,9 @@ test("feishu live reply falls back to final continuation when update fails", asy
     const sends = calls.filter((call) => call.init?.method === "POST" && call.url.includes("/im/v1/messages?"));
     assert.equal(sends.length, 2);
     assert.equal(requestText(sends[0]), "hello ▉");
+    assert.equal(requestMsgType(sends[0]), "interactive");
     assert.equal(requestText(sends[1]), "world");
+    assert.equal(requestMsgType(sends[1]), "text");
   } finally {
     globalThis.fetch = originalFetch;
   }
