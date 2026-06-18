@@ -4,7 +4,11 @@ import type { Gateway } from "../../../gateway/index.js";
 import type { ChannelAdapter, ChannelHandle, ChannelLogger, ChannelStartDeps } from "../protocol/ChannelAdapter.js";
 import { executeChannelCommand, resolveCommand } from "../protocol/ChannelCommandRegistry.js";
 import { ImElicitationHelper } from "../protocol/ImElicitationHelper.js";
-import { ImLiveReplyController, type ImLiveReplyTransport } from "../protocol/ImLiveReplyController.js";
+import {
+  ImLiveReplyController,
+  type ImLiveReplyControllerOptions,
+  type ImLiveReplyTransport,
+} from "../protocol/ImLiveReplyController.js";
 import { FeishuSessionMapper } from "./FeishuSessionMapper.js";
 
 let Lark: any = null;
@@ -61,6 +65,10 @@ export type FeishuChannelOptions = {
    * channel calls Lark Open API directly.
    */
   send?: (message: FeishuOutboundMessage) => Promise<void>;
+  liveReplyOptions?: Omit<
+    ImLiveReplyControllerOptions<FeishuLiveMessageHandle>,
+    "transport" | "onTransportError"
+  >;
 };
 
 type ParsedEvent =
@@ -73,6 +81,7 @@ export class FeishuChannel implements ChannelAdapter {
 
   private readonly mapper: FeishuSessionMapper;
   private readonly explicitSend?: (message: FeishuOutboundMessage) => Promise<void>;
+  private readonly liveReplyOptions?: FeishuChannelOptions["liveReplyOptions"];
 
   private appId: string;
   private appSecret: string;
@@ -95,6 +104,7 @@ export class FeishuChannel implements ChannelAdapter {
   constructor(options: FeishuChannelOptions = {}) {
     this.mapper = options.mapper ?? new FeishuSessionMapper();
     this.explicitSend = options.send;
+    this.liveReplyOptions = options.liveReplyOptions;
     this.appId = options.appId ?? "";
     this.appSecret = options.appSecret ?? "";
     this.encryptKey = options.encryptKey;
@@ -288,6 +298,7 @@ export class FeishuChannel implements ChannelAdapter {
     this.activeChats.add(chatId);
     try {
       const liveReply = new ImLiveReplyController<FeishuLiveMessageHandle>({
+        ...this.liveReplyOptions,
         transport: this.createLiveReplyTransport(chatId),
         onTransportError: (error, phase) => {
           this.logger?.warn?.(`feishu: live reply ${phase} failed: ${error}`);
@@ -302,6 +313,7 @@ export class FeishuChannel implements ChannelAdapter {
         })) {
           if (event.type === "elicitation_request") {
             const questionText = this.elicitation.capture(chatId, mapped.sessionKey, event);
+            await liveReply.pauseActivity();
             await this.send({ chatId, text: questionText });
             continue;
           }

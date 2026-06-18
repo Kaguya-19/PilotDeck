@@ -1,14 +1,23 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ImLiveReplyController, type ImLiveReplyTransport } from "../../../../src/adapters/channel/protocol/ImLiveReplyController.js";
+import {
+  ImLiveReplyController,
+  type ImLiveReplyActivity,
+  type ImLiveReplyTransport,
+} from "../../../../src/adapters/channel/protocol/ImLiveReplyController.js";
 
 type Call =
   | { kind: "send"; text: string }
-  | { kind: "edit"; handle: string; text: string };
+  | { kind: "edit"; handle: string; text: string }
+  | { kind: "pulseActivity"; activity: ImLiveReplyActivity }
+  | { kind: "stopActivity" };
+
+const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function makeTransport(options: {
   editable?: boolean;
   failEditAt?: number;
+  nativeActivity?: boolean;
 } = {}): { calls: Call[]; transport: ImLiveReplyTransport<string> } {
   const calls: Call[] = [];
   let nextHandle = 1;
@@ -31,15 +40,76 @@ function makeTransport(options: {
             calls.push({ kind: "edit", handle, text });
             return true;
           },
+      pulseActivity: options.nativeActivity
+        ? async (activity) => {
+            calls.push({ kind: "pulseActivity", activity });
+            return true;
+          }
+        : undefined,
+      stopActivity: options.nativeActivity
+        ? async () => {
+            calls.push({ kind: "stopActivity" });
+          }
+        : undefined,
     },
   };
 }
 
-test("first assistant delta sends an immediate live preview", async () => {
+test("short first assistant delta is buffered instead of sent immediately", async () => {
   const { calls, transport } = makeTransport();
-  const controller = new ImLiveReplyController({ transport, throttleMs: 10_000 });
+  const controller = new ImLiveReplyController({
+    transport,
+    initialThrottleMs: 10_000,
+    activityDelayMs: 10_000,
+  });
 
   await controller.handleEvent({ type: "assistant_text_delta", text: "hello" });
+
+  assert.deepEqual(calls, []);
+
+  await controller.flushFinal();
+  assert.deepEqual(calls, [{ kind: "send", text: "hello" }]);
+});
+
+test("activity does not start before a gateway event asks for it", async () => {
+  const { calls, transport } = makeTransport();
+  const controller = new ImLiveReplyController({
+    transport,
+    activityDelayMs: 5,
+    activityUpdateThrottleMs: 10_000,
+  });
+
+  await wait(20);
+  await controller.flushFinal();
+
+  assert.deepEqual(calls, []);
+});
+
+test("first reply preview sends when initial threshold is reached", async () => {
+  const { calls, transport } = makeTransport();
+  const controller = new ImLiveReplyController({
+    transport,
+    initialBufferThreshold: 5,
+    initialThrottleMs: 10_000,
+    activityDelayMs: 10_000,
+  });
+
+  await controller.handleEvent({ type: "assistant_text_delta", text: "hello" });
+
+  assert.deepEqual(calls, [{ kind: "send", text: "hello ▉" }]);
+});
+
+test("first reply preview sends when initial throttle elapses", async () => {
+  const { calls, transport } = makeTransport();
+  const controller = new ImLiveReplyController({
+    transport,
+    initialBufferThreshold: 100,
+    initialThrottleMs: 5,
+    activityDelayMs: 10_000,
+  });
+
+  await controller.handleEvent({ type: "assistant_text_delta", text: "hello" });
+  await wait(20);
 
   assert.deepEqual(calls, [{ kind: "send", text: "hello ▉" }]);
 });
@@ -48,8 +118,10 @@ test("multiple deltas are throttled into a limited edit", async () => {
   const { calls, transport } = makeTransport();
   const controller = new ImLiveReplyController({
     transport,
+    initialBufferThreshold: 5,
     throttleMs: 10_000,
     bufferThreshold: 1_000,
+    activityDelayMs: 10_000,
   });
 
   await controller.handleEvent({ type: "assistant_text_delta", text: "hello" });
@@ -66,9 +138,92 @@ test("multiple deltas are throttled into a limited edit", async () => {
   ]);
 });
 
+test("activity placeholder is sent after long pre-text wait", async () => {
+  const { calls, transport } = makeTransport();
+  const controller = new ImLiveReplyController({
+    transport,
+    activityDelayMs: 5,
+    activityUpdateThrottleMs: 10_000,
+  });
+
+  await controller.handleEvent({ type: "model_request_started", model: "m", provider: "p" });
+  await wait(20);
+
+  assert.deepEqual(calls, [{ kind: "send", text: "正在思考… ▉" }]);
+});
+
+test("assistant text reuses activity placeholder handle", async () => {
+  const { calls, transport } = makeTransport();
+  const controller = new ImLiveReplyController({
+    transport,
+    initialBufferThreshold: 5,
+    activityDelayMs: 5,
+    activityUpdateThrottleMs: 10_000,
+  });
+
+  await controller.handleEvent({ type: "model_request_started", model: "m", provider: "p" });
+  await wait(20);
+  await controller.handleEvent({ type: "assistant_text_delta", text: "hello" });
+  await controller.flushFinal();
+
+  assert.deepEqual(calls, [
+    { kind: "send", text: "正在思考… ▉" },
+    { kind: "edit", handle: "m1", text: "hello ▉" },
+    { kind: "edit", handle: "m1", text: "hello" },
+  ]);
+});
+
+test("thinking delta content is not sent to IM", async () => {
+  const { calls, transport } = makeTransport();
+  const controller = new ImLiveReplyController({
+    transport,
+    activityDelayMs: 5,
+    activityUpdateThrottleMs: 10_000,
+  });
+
+  await controller.handleEvent({ type: "assistant_thinking_delta", text: "secret chain of thought" });
+  await wait(20);
+
+  assert.deepEqual(calls, [{ kind: "send", text: "正在思考… ▉" }]);
+});
+
+test("subagent and tool status are throttled as activity updates", async () => {
+  const { calls, transport } = makeTransport();
+  const controller = new ImLiveReplyController({
+    transport,
+    activityDelayMs: 5,
+    activityUpdateThrottleMs: 10,
+    activityMaxUpdates: 2,
+    formatActivity: ({ kind, updateCount }) => (
+      kind === "subagent"
+        ? `正在处理子任务…#${updateCount}`
+        : `正在执行工具…#${updateCount}`
+    ),
+  });
+
+  await controller.handleEvent({
+    type: "agent_status",
+    event: "subagent_started",
+    detail: { subagentId: "s1", subagentType: "general" },
+  });
+  await wait(20);
+  await wait(20);
+  await wait(20);
+
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[0], { kind: "send", text: "正在处理子任务…#1 ▉" });
+  assert.equal(calls[1]?.kind, "edit");
+  assert.equal((calls[1] as Extract<Call, { kind: "edit" }>).handle, "m1");
+  assert.equal((calls[1] as Extract<Call, { kind: "edit" }>).text, "正在处理子任务…#2 ▉");
+});
+
 test("tool boundary finalizes the current segment and starts a new one", async () => {
   const { calls, transport } = makeTransport();
-  const controller = new ImLiveReplyController({ transport, throttleMs: 10_000 });
+  const controller = new ImLiveReplyController({
+    transport,
+    initialBufferThreshold: 10,
+    activityDelayMs: 10_000,
+  });
 
   await controller.handleEvent({ type: "assistant_text_delta", text: "before tool" });
   await controller.handleEvent({ type: "tool_call_started", toolCallId: "t1", name: "shell" });
@@ -85,7 +240,11 @@ test("tool boundary finalizes the current segment and starts a new one", async (
 
 test("final flush removes cursor from the visible message", async () => {
   const { calls, transport } = makeTransport();
-  const controller = new ImLiveReplyController({ transport, throttleMs: 10_000 });
+  const controller = new ImLiveReplyController({
+    transport,
+    initialBufferThreshold: 4,
+    activityDelayMs: 10_000,
+  });
 
   await controller.handleEvent({ type: "assistant_text_delta", text: "done" });
   await controller.flushFinal();
@@ -96,9 +255,31 @@ test("final flush removes cursor from the visible message", async () => {
   ]);
 });
 
+test("activity-only turn is finalized without cursor", async () => {
+  const { calls, transport } = makeTransport();
+  const controller = new ImLiveReplyController({
+    transport,
+    activityDelayMs: 5,
+    activityUpdateThrottleMs: 10_000,
+  });
+
+  await controller.handleEvent({ type: "model_request_started", model: "m", provider: "p" });
+  await wait(20);
+  await controller.flushFinal();
+
+  assert.deepEqual(calls, [
+    { kind: "send", text: "正在思考… ▉" },
+    { kind: "edit", handle: "m1", text: "处理完成，但没有可见回复。" },
+  ]);
+});
+
 test("edit failure sends only the unseen continuation", async () => {
   const { calls, transport } = makeTransport({ failEditAt: 1 });
-  const controller = new ImLiveReplyController({ transport, throttleMs: 10_000 });
+  const controller = new ImLiveReplyController({
+    transport,
+    initialBufferThreshold: 5,
+    activityDelayMs: 10_000,
+  });
 
   await controller.handleEvent({ type: "assistant_text_delta", text: "hello" });
   await controller.handleEvent({ type: "assistant_text_delta", text: " world" });
@@ -111,18 +292,20 @@ test("edit failure sends only the unseen continuation", async () => {
   ]);
 });
 
-test("non-editable transport sends preview and final continuation", async () => {
+test("non-editable transport skips live activity and sends final reply once", async () => {
   const { calls, transport } = makeTransport({ editable: false });
-  const controller = new ImLiveReplyController({ transport, throttleMs: 10_000 });
+  const controller = new ImLiveReplyController({
+    transport,
+    initialBufferThreshold: 5,
+    activityDelayMs: 5,
+  });
 
-  await controller.handleEvent({ type: "assistant_text_delta", text: "hello" });
-  await controller.handleEvent({ type: "assistant_text_delta", text: " world" });
+  await controller.handleEvent({ type: "model_request_started", model: "m", provider: "p" });
+  await wait(20);
+  await controller.handleEvent({ type: "assistant_text_delta", text: "hello world" });
   await controller.flushFinal();
 
-  assert.deepEqual(calls, [
-    { kind: "send", text: "hello ▉" },
-    { kind: "send", text: "world" },
-  ]);
+  assert.deepEqual(calls, [{ kind: "send", text: "hello world" }]);
 });
 
 test("long replies split into multiple live segments", async () => {
@@ -130,8 +313,10 @@ test("long replies split into multiple live segments", async () => {
   transport.maxMessageLength = 8;
   const controller = new ImLiveReplyController({
     transport,
+    initialBufferThreshold: 1,
     throttleMs: 10_000,
     cursor: " ▉",
+    activityDelayMs: 10_000,
   });
 
   await controller.handleEvent({ type: "assistant_text_delta", text: "abcdefghij" });
@@ -158,7 +343,8 @@ test("initial send failure does not mark text as visible", async () => {
         return true;
       },
     },
-    throttleMs: 10_000,
+    initialBufferThreshold: 5,
+    activityDelayMs: 10_000,
   });
 
   await controller.handleEvent({ type: "assistant_text_delta", text: "hello" });
@@ -169,4 +355,20 @@ test("initial send failure does not mark text as visible", async () => {
     { kind: "send", text: "hello ▉" },
     { kind: "send", text: "hello world" },
   ]);
+});
+
+test("native activity transports receive pulses but no placeholder message", async () => {
+  const { calls, transport } = makeTransport({ nativeActivity: true });
+  const controller = new ImLiveReplyController({
+    transport,
+    activityDelayMs: 5,
+    activityUpdateThrottleMs: 10_000,
+  });
+
+  await controller.handleEvent({ type: "model_request_started", model: "m", provider: "p" });
+  await wait(20);
+  await controller.flushFinal();
+
+  assert.equal(calls[0]?.kind, "pulseActivity");
+  assert.deepEqual(calls.at(-1), { kind: "stopActivity" });
 });
