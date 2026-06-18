@@ -396,6 +396,27 @@ test("non-editable transport skips live activity and sends final reply once", as
   assert.deepEqual(calls, [{ kind: "send", text: "hello world" }]);
 });
 
+test("non-editable transport does not flush cached text at tool boundaries", async () => {
+  const { calls, transport } = makeTransport({ editable: false });
+  const controller = new ImLiveReplyController({
+    transport,
+    initialBufferThreshold: 1,
+    activityDelayMs: 5,
+  });
+
+  await controller.handleEvent({ type: "assistant_text_delta", text: "before tool" });
+  await controller.handleEvent({ type: "tool_call_started", toolCallId: "t1", name: "shell" });
+  await wait(20);
+  await controller.handleEvent({ type: "tool_call_finished", toolCallId: "t1", ok: true });
+  await controller.handleEvent({ type: "assistant_text_delta", text: " after tool" });
+
+  assert.deepEqual(calls, []);
+
+  await controller.flushFinal();
+
+  assert.deepEqual(calls, [{ kind: "send", text: "before tool after tool" }]);
+});
+
 test("long replies split into multiple live segments", async () => {
   const { calls, transport } = makeTransport();
   transport.maxMessageLength = 8;
@@ -415,6 +436,27 @@ test("long replies split into multiple live segments", async () => {
     { kind: "edit", handle: "m1", text: "abcdef" },
     { kind: "send", text: "ghij ▉" },
     { kind: "edit", handle: "m2", text: "ghij" },
+  ]);
+});
+
+test("non-editable long replies split only at final flush", async () => {
+  const { calls, transport } = makeTransport({ editable: false });
+  transport.maxMessageLength = 6;
+  const controller = new ImLiveReplyController({
+    transport,
+    initialBufferThreshold: 1,
+    activityDelayMs: 10_000,
+  });
+
+  await controller.handleEvent({ type: "assistant_text_delta", text: "abcdefghi" });
+
+  assert.deepEqual(calls, []);
+
+  await controller.flushFinal();
+
+  assert.deepEqual(calls, [
+    { kind: "send", text: "abcdef" },
+    { kind: "send", text: "ghi" },
   ]);
 });
 
@@ -459,4 +501,29 @@ test("native activity transports receive pulses but no placeholder message", asy
 
   assert.equal(calls[0]?.kind, "pulseActivity");
   assert.deepEqual(calls.at(-1), { kind: "stopActivity" });
+});
+
+test("native activity transport keeps typing lease until final reply", async () => {
+  const { calls, transport } = makeTransport({ editable: false, nativeActivity: true });
+  const controller = new ImLiveReplyController({
+    transport,
+    initialBufferThreshold: 1,
+    activityDelayMs: 5,
+    activityUpdateThrottleMs: 10_000,
+  });
+
+  await controller.handleEvent({ type: "model_request_started", model: "m", provider: "p" });
+  await wait(20);
+  await controller.handleEvent({ type: "assistant_text_delta", text: "hello" });
+
+  assert.equal(calls[0]?.kind, "pulseActivity");
+  assert.equal(calls.some((call) => call.kind === "send"), false);
+  assert.equal(calls.some((call) => call.kind === "stopActivity"), false);
+
+  await controller.flushFinal();
+
+  assert.deepEqual(calls.slice(-2), [
+    { kind: "send", text: "hello" },
+    { kind: "stopActivity" },
+  ]);
 });

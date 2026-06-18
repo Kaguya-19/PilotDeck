@@ -151,7 +151,11 @@ export class ImLiveReplyController<Handle = ImLiveReplyHandle> {
         await this.append(event.text);
         return;
       case "tool_call_started":
-        await this.flushSegment({ finalizeActivityOnly: false });
+        if (this.shouldFlushBeforeToolBoundary()) {
+          await this.flushSegment({ finalizeActivityOnly: false });
+        } else {
+          this.clearTextTimer();
+        }
         this.markActivity("tool");
         return;
       case "tool_call_finished":
@@ -248,8 +252,10 @@ export class ImLiveReplyController<Handle = ImLiveReplyHandle> {
 
   private async append(text: string): Promise<void> {
     if (!text) return;
-    this.clearActivityTimers();
-    await this.stopNativeActivity();
+    if (this.transport.edit) {
+      this.clearActivityTimers();
+      await this.stopNativeActivity();
+    }
 
     const liveTextLimit = this.liveTextLimit();
     if (liveTextLimit) {
@@ -311,6 +317,7 @@ export class ImLiveReplyController<Handle = ImLiveReplyHandle> {
   }
 
   private liveTextLimit(): number | undefined {
+    if (!this.transport.edit) return undefined;
     const max = this.transport.maxMessageLength;
     if (!max) return undefined;
     return Math.max(1, max - this.cursor.length);
@@ -346,7 +353,7 @@ export class ImLiveReplyController<Handle = ImLiveReplyHandle> {
   private markActivity(kind: ImLiveReplyActivityKind): void {
     if (!this.canUseActivity()) return;
     const segment = this.currentSegment;
-    if (segment.activityDisabled || segment.text.trim() || this.hasVisibleReplyText(segment)) return;
+    if (segment.activityDisabled || this.shouldSuppressActivityForText(segment)) return;
 
     const kindChanged = segment.activityKind !== kind;
     if (kindChanged || !segment.activityArmed) {
@@ -371,7 +378,7 @@ export class ImLiveReplyController<Handle = ImLiveReplyHandle> {
   private scheduleActivityDelay(): void {
     if (this.closed || this.activityDelayTimer || !this.canUseActivity()) return;
     const segment = this.currentSegment;
-    if (segment.activityDisabled || segment.text.trim() || this.hasVisibleReplyText(segment)) return;
+    if (segment.activityDisabled || this.shouldSuppressActivityForText(segment)) return;
     if (this.activityDelayMs < 0) return;
 
     this.activityDelayTimer = setTimeout(() => {
@@ -387,8 +394,7 @@ export class ImLiveReplyController<Handle = ImLiveReplyHandle> {
     if (
       segment.activityDisabled
       || !segment.activityVisible
-      || segment.text.trim()
-      || this.hasVisibleReplyText(segment)
+      || this.shouldSuppressActivityForText(segment)
       || segment.activityUpdates >= this.activityMaxUpdates
     ) {
       return;
@@ -414,8 +420,7 @@ export class ImLiveReplyController<Handle = ImLiveReplyHandle> {
       this.closed
       || !this.canUseActivity()
       || segment.activityDisabled
-      || segment.text.trim()
-      || this.hasVisibleReplyText(segment)
+      || this.shouldSuppressActivityForText(segment)
       || segment.activityUpdates >= this.activityMaxUpdates
     ) {
       return;
@@ -551,6 +556,12 @@ export class ImLiveReplyController<Handle = ImLiveReplyHandle> {
     }
 
     if (!params.final && !this.canSendNonFinalText(segment)) {
+      return;
+    }
+
+    if (params.final && !this.transport.edit && !segment.handle) {
+      await this.sendFinalChunks(segment, finalText);
+      segment.final = true;
       return;
     }
 
@@ -748,6 +759,37 @@ export class ImLiveReplyController<Handle = ImLiveReplyHandle> {
       }
     }
     segment.fallbackPrefix = finalText;
+  }
+
+  private shouldFlushBeforeToolBoundary(): boolean {
+    const segment = this.currentSegment;
+    return Boolean(this.transport.edit || segment.handle || this.hasVisibleReplyText(segment));
+  }
+
+  private shouldSuppressActivityForText(segment: Segment<Handle>): boolean {
+    if (!this.transport.edit && this.transport.pulseActivity) {
+      return false;
+    }
+    return Boolean(segment.text.trim() || this.hasVisibleReplyText(segment));
+  }
+
+  private async sendFinalChunks(segment: Segment<Handle>, finalText: string): Promise<void> {
+    for (const chunk of this.splitForTransport(finalText)) {
+      try {
+        const handle = await this.transport.send(chunk);
+        if (handle === false) {
+          return;
+        }
+        segment.handle = handle === undefined ? segment.handle : handle;
+        segment.activityVisible = false;
+        segment.lastVisibleText = chunk;
+        segment.lastVisibleFinalText = finalText;
+        this.lastFlushAt = Date.now();
+      } catch (error) {
+        this.reportTransportError(error, "send");
+        return;
+      }
+    }
   }
 
   private formatForTransport(text: string): string {
