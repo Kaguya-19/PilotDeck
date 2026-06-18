@@ -12,5 +12,7 @@ export type AgentSubmitOptions = {
   permissionMode?: PermissionMode;
   /** The user's actual permission preference before plan-mode override. */
   basePermissionMode?: PermissionMode;
+  /** Allow model-visible plan mode tools for this turn. */
+  allowPlanModeTools?: boolean;
   permissionRules?: Partial<PermissionRuleSet>;
 };

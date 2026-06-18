@@ -63,6 +63,8 @@ export type AgentLoopInput = {
   permissionMode?: PermissionMode;
   /** The user's actual permission preference before plan-mode override. */
   basePermissionMode?: PermissionMode;
+  /** Allow model-visible plan mode tools for this turn. */
+  allowPlanModeTools?: boolean;
   permissionRules?: Partial<PermissionRuleSet>;
   abortSignal?: AbortSignal;
   onDurableMessage?: (message: CanonicalMessage) => void | Promise<void>;
@@ -1066,6 +1068,9 @@ export class AgentLoop {
     const contextRuntime = this.dependencies.context ?? new NullContextRuntime();
     const planTodo = this.dependencies.planTodoManager?.forSession(input.sessionId);
     let tools = this.dependencies.tools.registry.toCanonicalSchemas();
+    if (input.allowPlanModeTools !== true) {
+      tools = tools.filter((tool) => tool.name !== "enter_plan_mode" && tool.name !== "exit_plan_mode");
+    }
     if (this.config.permissionMode === "plan") {
       tools = filterPlanModeTools(tools);
     }

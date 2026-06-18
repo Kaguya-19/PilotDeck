@@ -78,6 +78,9 @@ import type {
 import type { TelemetryClient } from "../../telemetry/index.js";
 import type { TelemetryExecutionKind, TelemetryModule } from "../../telemetry/index.js";
 
+const PLAN_COMMAND_USAGE = "用法：/plan <任务>\n例如：/plan 设计一个新功能";
+const PLAN_MODE_TOOL_CHANNELS = new Set(["web"]);
+
 export type InProcessGatewayOptions = {
   now?: () => Date;
   uuid?: () => string;
@@ -258,6 +261,21 @@ export class InProcessGateway implements Gateway {
   }
 
   async *submitTurn(input: GatewaySubmitTurnInput): AsyncIterable<GatewayEvent> {
+    const plannedInput = normalizePlanCommandInput(input);
+    if (!plannedInput) {
+      yield {
+        type: "assistant_text_delta",
+        text: PLAN_COMMAND_USAGE,
+      };
+      yield {
+        type: "turn_completed",
+        usage: {},
+        finishReason: "completed",
+      };
+      return;
+    }
+    input = plannedInput;
+
     // Per-turn config refresh (defensive). The fs watcher path already
     // catches most edits, but this guarantees a fresh apiKey/url is in
     // effect for the very next turn even when watcher events are
@@ -313,6 +331,7 @@ export class InProcessGateway implements Gateway {
         });
         const permissionSettings = readPermissionSettings();
         const permissionMode = input.mode ?? (permissionSettings.skipPermissions ? "bypassPermissions" : undefined);
+        const allowPlanModeTools = input.allowPlanModeTools ?? PLAN_MODE_TOOL_CHANNELS.has(input.channelKey);
         const persistedRules = permissionSettingsToRuleSet(permissionSettings);
         const sessionAllowRules = this.sessionPermissionGrants.get(input.sessionKey) ?? [];
         this.options.telemetry?.trackFeatureLoopStage({
@@ -343,6 +362,7 @@ export class InProcessGateway implements Gateway {
             maxTurns: input.maxTurns,
             permissionMode,
             basePermissionMode: input.basePermissionMode,
+            allowPlanModeTools,
             permissionRules: {
               ...persistedRules,
               allow: [...sessionAllowRules, ...persistedRules.allow],
@@ -1356,6 +1376,35 @@ function mapSubagentModelEvent(
     default:
       return [];
   }
+}
+
+function normalizePlanCommandInput(input: GatewaySubmitTurnInput): GatewaySubmitTurnInput | undefined {
+  const parsed = parsePlanCommand(input.message);
+  if (!parsed.isPlanCommand) {
+    return input;
+  }
+  if (!parsed.message) {
+    return undefined;
+  }
+  return {
+    ...input,
+    message: parsed.message,
+    mode: "plan",
+    basePermissionMode: input.basePermissionMode ?? input.mode ?? "default",
+    allowPlanModeTools: true,
+  };
+}
+
+function parsePlanCommand(message: string): { isPlanCommand: boolean; message: string } {
+  const trimmed = message.trim();
+  const match = trimmed.match(/^\/plan(?:\s+([\s\S]*))?$/u);
+  if (!match) {
+    return { isPlanCommand: false, message };
+  }
+  return {
+    isPlanCommand: true,
+    message: (match[1] ?? "").trim(),
+  };
 }
 
 function mapTurnCompleted(result: AgentTurnResult): GatewayEvent[] {

@@ -19,6 +19,8 @@ export type TurnRunnerOptions = {
   permissionMode?: PermissionMode;
   /** The user's actual permission preference before plan-mode override. */
   basePermissionMode?: PermissionMode;
+  /** Allow model-visible plan mode tools for this turn. */
+  allowPlanModeTools?: boolean;
   permissionRules?: Partial<PermissionRuleSet>;
   abortSignal?: AbortSignal;
 };
@@ -108,6 +110,7 @@ export class TurnRunner {
         maxTurns: options.maxTurns,
         permissionMode: options.permissionMode,
         basePermissionMode: options.basePermissionMode,
+        allowPlanModeTools: options.allowPlanModeTools,
         permissionRules: options.permissionRules,
         abortSignal: options.abortSignal,
         onDurableMessage: (msg) => this.transcript.recordDurableMessage(options.sessionId, options.turnId, msg),

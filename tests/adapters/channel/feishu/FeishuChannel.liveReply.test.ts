@@ -433,3 +433,34 @@ test("feishu elicitation request is delivered by existing immediate path", async
   assert.equal(sent[0]?.chatId, "oc_5");
   assert.match(sent[0]?.text ?? "", /继续吗/);
 });
+
+test("feishu /plan command is forwarded to gateway instead of consumed as system command", async () => {
+  const submitted: Array<{ sessionKey: string; channelKey: string; message: string }> = [];
+  const sent: Array<{ chatId: string; text: string }> = [];
+  const channel = new FeishuChannel({
+    connectionMode: "webhook",
+    send: async (message) => {
+      sent.push(message);
+    },
+  });
+
+  await channel.start({
+    gateway: {
+      submitTurn: async function* (input: { sessionKey: string; channelKey: string; message: string }) {
+        submitted.push(input);
+        yield { type: "assistant_text_delta", text: "planning" } satisfies GatewayEvent;
+      },
+    } as unknown as Gateway,
+  });
+
+  await runWebhook(channel, { chatId: "oc_plan", text: "/plan 做一个官网", eventId: "evt_plan" });
+  await wait(20);
+
+  assert.equal(submitted.length, 1);
+  assert.deepEqual(submitted[0], {
+    sessionKey: "feishu:chat=oc_plan:general",
+    channelKey: "feishu",
+    message: "/plan 做一个官网",
+  });
+  assert.deepEqual(sent, [{ chatId: "oc_plan", text: "planning" }]);
+});

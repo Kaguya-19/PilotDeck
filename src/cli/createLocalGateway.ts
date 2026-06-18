@@ -74,9 +74,6 @@ import { SkillManager } from "../extension/skills/index.js";
 import { ExtensionWatchManager, type ExtensionWatchEvent } from "./ExtensionWatchManager.js";
 import { createTelemetryCollector, type TelemetryClient } from "../telemetry/index.js";
 
-const PLAN_MODE_TOOL_NAMES = ["enter_plan_mode", "exit_plan_mode"] as const;
-const PLAN_MODE_TOOL_CHANNELS = new Set(["web"]);
-
 export type CreateLocalGatewayOptions = {
   projectRoot?: string;
   pilotHome?: string;
@@ -839,8 +836,6 @@ class ProjectRuntimeRegistry {
         }
       }
     }
-    sessionTools = filterPlanModeToolsForChannel(sessionTools, context.channelKey);
-
     // Inject the gateway's interactive permission hook so the agent's
     // PermissionRequest lifecycle is round-tripped through whichever
     // client is streaming this session (Web UI, TUI, etc.) instead of
@@ -1114,20 +1109,6 @@ class ProjectRuntimeRegistry {
       }),
     };
   }
-}
-
-export function channelSupportsPlanModeTools(channelKey: string): boolean {
-  return PLAN_MODE_TOOL_CHANNELS.has(channelKey);
-}
-
-export function filterPlanModeToolsForChannel(tools: ToolRegistry, channelKey: string): ToolRegistry {
-  if (channelSupportsPlanModeTools(channelKey)) return tools;
-  if (!PLAN_MODE_TOOL_NAMES.some((name) => tools.has(name))) return tools;
-  const filtered = tools.clone();
-  for (const name of PLAN_MODE_TOOL_NAMES) {
-    filtered.unregister(name);
-  }
-  return filtered;
 }
 
 function mergeSessionDependencies(
