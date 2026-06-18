@@ -10,6 +10,7 @@ import { WeixinSessionMapper } from "./WeixinSessionMapper.js";
 import { renderWeixinEvent } from "./weixin-render.js";
 
 const CREDENTIALS_PATH = join(homedir(), ".pilotdeck", "weixin-credentials.json");
+const POLL_RETRY_DELAY_MS = 3000;
 
 export type WeixinChannelOptions = {
   credentialsPath?: string;
@@ -37,6 +38,7 @@ export class WeixinChannel implements ChannelAdapter {
   private activeChats = new Set<string>();
   private readonly elicitation = new ImElicitationHelper();
   private contextTokens = new Map<string, string>();
+  private consecutivePollErrors = 0;
 
   constructor(options: WeixinChannelOptions = {}) {
     this.credentialsPath = options.credentialsPath ?? CREDENTIALS_PATH;
@@ -52,14 +54,7 @@ export class WeixinChannel implements ChannelAdapter {
       return { stop: async () => undefined };
     }
 
-    this.client = new ILinkClient({
-      baseUrl: creds.baseUrl,
-      token: creds.botToken,
-    });
-
-    if (creds.cursor) {
-      this.client.cursor = creds.cursor;
-    }
+    this.client = this.createClient(creds);
 
     this.loopAbort = new AbortController();
     this.pollPromise = this.pollLoop();
@@ -126,6 +121,10 @@ export class WeixinChannel implements ChannelAdapter {
     while (!this.loopAbort.signal.aborted) {
       try {
         const resp = await this.client.poll();
+        if (this.consecutivePollErrors > 0) {
+          this.logger?.info?.(`weixin: poll recovered after ${this.consecutivePollErrors} error(s)`);
+          this.consecutivePollErrors = 0;
+        }
 
         if (resp.errcode === -14) {
           this.logger?.error?.("weixin: session expired (errcode -14), need re-login");
@@ -136,11 +135,16 @@ export class WeixinChannel implements ChannelAdapter {
 
         if (resp.ret !== 0 && resp.ret !== undefined) {
           this.logger?.warn?.(`weixin: poll ret=${resp.ret} errmsg=${resp.errmsg}`);
-          await this.sleep(3000);
+          await this.sleep(POLL_RETRY_DELAY_MS);
           continue;
         }
 
-        for (const msg of resp.msgs ?? []) {
+        const messages = resp.msgs ?? [];
+        if (messages.length > 0) {
+          this.logger?.info?.(`weixin: polled ${messages.length} message(s)`);
+        }
+
+        for (const msg of messages) {
           if (msg.message_type === 1) {
             void this.dispatchMessage(msg);
           }
@@ -149,8 +153,12 @@ export class WeixinChannel implements ChannelAdapter {
         this.saveCursor();
       } catch (e) {
         if (this.loopAbort.signal.aborted) break;
-        this.logger?.error?.(`weixin: poll error: ${e}`);
-        await this.sleep(3000);
+        this.consecutivePollErrors++;
+        this.logger?.error?.(
+          `weixin: poll error #${this.consecutivePollErrors}: ${formatWeixinError(e)}`,
+        );
+        this.rebuildClientAfterPollError(e);
+        await this.sleep(POLL_RETRY_DELAY_MS);
       }
     }
   }
@@ -167,6 +175,7 @@ export class WeixinChannel implements ChannelAdapter {
     const text = textItem?.text_item?.text ?? "";
 
     if (!text.trim()) return;
+    this.logger?.info?.(`weixin: received text message from ${fromUser}`);
 
     if (this.elicitation.hasPending(fromUser) && this.gateway) {
       try {
@@ -244,8 +253,9 @@ export class WeixinChannel implements ChannelAdapter {
     }
     try {
       await this.client.sendTextChunked(userId, text, contextToken, 2000);
+      this.logger?.info?.(`weixin: sent reply to ${userId}`);
     } catch (e) {
-      this.logger?.error?.(`weixin: sendText failed: ${e}`);
+      this.logger?.error?.(`weixin: sendText failed: ${formatWeixinError(e)}`);
     }
   }
 
@@ -255,7 +265,37 @@ export class WeixinChannel implements ChannelAdapter {
     if (!contextToken) return;
     try {
       await this.client.sendTyping(userId, contextToken);
-    } catch { /* best effort */ }
+    } catch (e) {
+      this.logger?.warn?.(`weixin: sendTyping failed: ${formatWeixinError(e)}`);
+    }
+  }
+
+  private createClient(creds: SavedCredentials, cursor = creds.cursor): ILinkClient {
+    const client = new ILinkClient({
+      baseUrl: creds.baseUrl,
+      token: creds.botToken,
+    });
+    if (cursor) {
+      client.cursor = cursor;
+    }
+    return client;
+  }
+
+  private rebuildClientAfterPollError(error: unknown): void {
+    if (!isRecoverablePollError(error)) return;
+    const creds = this.loadCredentials();
+    if (!creds) {
+      this.logger?.warn?.("weixin: cannot rebuild iLink client because credentials are missing");
+      return;
+    }
+
+    const cursor = this.client?.cursor || creds.cursor;
+    this.client = this.createClient(creds, cursor);
+    if (cursor && creds.cursor !== cursor) {
+      creds.cursor = cursor;
+      this.saveCredentials(creds);
+    }
+    this.logger?.warn?.("weixin: rebuilt iLink client after recoverable poll error");
   }
 
   private loadCredentials(): SavedCredentials | null {
@@ -298,4 +338,53 @@ export class WeixinChannel implements ChannelAdapter {
       }, { once: true });
     });
   }
+}
+
+function isRecoverablePollError(error: unknown): boolean {
+  const detail = formatWeixinError(error).toLowerCase();
+  return (
+    detail.includes("fetch failed") ||
+    detail.includes("econnreset") ||
+    detail.includes("enet") ||
+    detail.includes("etimedout") ||
+    detail.includes("und_err") ||
+    detail.includes("socket") ||
+    detail.includes("network") ||
+    detail.includes("timeout")
+  );
+}
+
+function formatWeixinError(error: unknown, depth = 0): string {
+  if (error instanceof Error) {
+    const pieces = [`${error.name}: ${error.message}`];
+    const code = readStringProperty(error, "code");
+    if (code) pieces.push(`code=${code}`);
+    const cause = (error as { cause?: unknown }).cause;
+    if (cause && depth < 2) {
+      pieces.push(`cause=(${formatWeixinError(cause, depth + 1)})`);
+    }
+    if (depth === 0) {
+      const stackLine = error.stack?.split("\n").slice(1, 2).map((line) => line.trim()).find(Boolean);
+      if (stackLine) pieces.push(`at=${stackLine}`);
+    }
+    return pieces.join("; ");
+  }
+
+  if (typeof error === "object" && error !== null) {
+    const name = readStringProperty(error, "name");
+    const message = readStringProperty(error, "message");
+    const code = readStringProperty(error, "code");
+    const pieces = [name, message].filter(Boolean);
+    if (code) pieces.push(`code=${code}`);
+    if (pieces.length > 0) return pieces.join("; ");
+  }
+
+  return String(error);
+}
+
+function readStringProperty(source: object, key: string): string | undefined {
+  const value = (source as Record<string, unknown>)[key];
+  if (typeof value === "string" && value.length > 0) return value;
+  if (typeof value === "number") return String(value);
+  return undefined;
 }
