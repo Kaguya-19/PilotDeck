@@ -4,6 +4,7 @@ import type { Gateway } from "../../../gateway/index.js";
 import type { ChannelAdapter, ChannelHandle, ChannelLogger, ChannelStartDeps } from "../protocol/ChannelAdapter.js";
 import { executeChannelCommand, resolveCommand } from "../protocol/ChannelCommandRegistry.js";
 import { ImElicitationHelper } from "../protocol/ImElicitationHelper.js";
+import { ImLiveReplyController, type ImLiveReplyTransport } from "../protocol/ImLiveReplyController.js";
 import { FeishuSessionMapper } from "./FeishuSessionMapper.js";
 
 let Lark: any = null;
@@ -23,13 +24,19 @@ async function loadLarkSdk(): Promise<any> {
 const TENANT_TOKEN_URL = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal";
 const SEND_MESSAGE_URL = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id";
 const REACTION_URL = "https://open.feishu.cn/open-apis/im/v1/messages";
+const UPDATE_MESSAGE_URL = "https://open.feishu.cn/open-apis/im/v1/messages";
 const PROCESSING_EMOJI = "OnIt";
 const TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1000;
 const SEEN_EVENTS_MAX = 2000;
+const MAX_TEXT_MESSAGE_LENGTH = 4000;
 
 export type FeishuOutboundMessage = {
   chatId: string;
   text: string;
+};
+
+export type FeishuLiveMessageHandle = {
+  messageId: string;
 };
 
 export type FeishuConnectionMode = "stream" | "webhook";
@@ -280,9 +287,12 @@ export class FeishuChannel implements ChannelAdapter {
 
     this.activeChats.add(chatId);
     try {
-      let lastTextSegment = "";
-      let errorMessages = "";
-      let inToolCall = false;
+      const liveReply = new ImLiveReplyController<FeishuLiveMessageHandle>({
+        transport: this.createLiveReplyTransport(chatId),
+        onTransportError: (error, phase) => {
+          this.logger?.warn?.(`feishu: live reply ${phase} failed: ${error}`);
+        },
+      });
       try {
         for await (const event of this.gateway.submitTurn({
           sessionKey: mapped.sessionKey,
@@ -290,41 +300,24 @@ export class FeishuChannel implements ChannelAdapter {
           message: mapped.message,
           ...(mapped.projectKey ? { projectKey: mapped.projectKey } : {}),
         })) {
-          switch (event.type) {
-            case "assistant_text_delta":
-              if (!inToolCall) lastTextSegment += event.text;
-              break;
-            case "tool_call_started":
-              inToolCall = true;
-              lastTextSegment = "";
-              break;
-            case "tool_call_finished":
-              inToolCall = false;
-              if (!event.ok) {
-                const name = event.toolName ?? event.toolCallId;
-                errorMessages += `⚠️ ${name} 执行失败\n`;
-              }
-              break;
-            case "elicitation_request": {
-              const questionText = this.elicitation.capture(chatId, mapped.sessionKey, event);
-              await this.send({ chatId, text: questionText });
-              break;
-            }
-            case "error":
-              errorMessages += `❌ ${event.message}\n`;
-              break;
+          if (event.type === "elicitation_request") {
+            const questionText = this.elicitation.capture(chatId, mapped.sessionKey, event);
+            await this.send({ chatId, text: questionText });
+            continue;
           }
+          await liveReply.handleEvent(event);
         }
       } catch (e) {
         this.logger?.error?.(`feishu: submitTurn error: ${e}`);
-        lastTextSegment = "处理消息时发生错误，请重试。";
+        await liveReply.handleEvent({
+          type: "error",
+          message: "处理消息时发生错误，请重试。",
+          recoverable: true,
+        });
       }
 
       this.elicitation.clear(chatId);
-      const reply = (lastTextSegment.trim() || errorMessages.trim());
-      if (reply) {
-        await this.send({ chatId, text: reply });
-      }
+      await liveReply.flushFinal();
     } finally {
       if (reactionId && messageId) {
         await this.removeReaction(messageId, reactionId);
@@ -333,14 +326,36 @@ export class FeishuChannel implements ChannelAdapter {
     }
   }
 
+  private createLiveReplyTransport(chatId: string): ImLiveReplyTransport<FeishuLiveMessageHandle> {
+    return {
+      maxMessageLength: MAX_TEXT_MESSAGE_LENGTH,
+      send: async (text) => {
+        const messageId = await this.sendLiveMessage({ chatId, text });
+        if (messageId === false) return false;
+        return messageId ? { messageId } : undefined;
+      },
+      edit: async (handle, text) => {
+        return this.editLiveMessage(handle.messageId, text);
+      },
+    };
+  }
+
   private async send(message: FeishuOutboundMessage): Promise<void> {
+    await this.sendTextMessage(message);
+  }
+
+  private async sendLiveMessage(message: FeishuOutboundMessage): Promise<string | undefined | false> {
+    return this.sendTextMessage(message);
+  }
+
+  private async sendTextMessage(message: FeishuOutboundMessage): Promise<string | undefined | false> {
     if (this.explicitSend) {
       await this.explicitSend(message);
-      return;
+      return undefined;
     }
     if (!this.appId || !this.appSecret) {
       this.logger?.warn?.("feishu: cannot send — appId/appSecret missing");
-      return;
+      return false;
     }
 
     try {
@@ -357,15 +372,53 @@ export class FeishuChannel implements ChannelAdapter {
           content: JSON.stringify({ text: message.text }),
         }),
       });
-      const json = (await res.json().catch(() => ({}))) as { code?: number; msg?: string };
+      const json = (await res.json().catch(() => ({}))) as {
+        code?: number;
+        msg?: string;
+        data?: { message_id?: string };
+      };
       if (!res.ok || (json.code !== undefined && json.code !== 0)) {
         if (json.code === 99991663 || json.code === 99991664) {
           this.tokenCache = undefined;
         }
         this.logger?.error?.(`feishu: send failed code=${json.code} msg=${json.msg}`);
+        return false;
       }
+      return json.data?.message_id;
     } catch (e) {
       this.logger?.error?.(`feishu: send threw: ${e}`);
+    }
+    return false;
+  }
+
+  private async editLiveMessage(messageId: string, text: string): Promise<boolean> {
+    if (!messageId || !this.appId || !this.appSecret) return false;
+
+    try {
+      const token = await this.getTenantAccessToken();
+      const res = await fetch(`${UPDATE_MESSAGE_URL}/${encodeURIComponent(messageId)}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json; charset=utf-8",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          msg_type: "text",
+          content: JSON.stringify({ text }),
+        }),
+      });
+      const json = (await res.json().catch(() => ({}))) as { code?: number; msg?: string };
+      if (!res.ok || (json.code !== undefined && json.code !== 0)) {
+        if (json.code === 99991663 || json.code === 99991664) {
+          this.tokenCache = undefined;
+        }
+        this.logger?.warn?.(`feishu: update message failed code=${json.code} msg=${json.msg}`);
+        return false;
+      }
+      return true;
+    } catch (e) {
+      this.logger?.warn?.(`feishu: update message threw: ${e}`);
+      return false;
     }
   }
 
