@@ -11,6 +11,7 @@ import { renderWeixinEvent } from "./weixin-render.js";
 
 const CREDENTIALS_PATH = join(homedir(), ".pilotdeck", "weixin-credentials.json");
 const POLL_RETRY_DELAY_MS = 3000;
+let ilinkFetchCompatibilityInstalled = false;
 
 export type WeixinChannelOptions = {
   credentialsPath?: string;
@@ -54,6 +55,7 @@ export class WeixinChannel implements ChannelAdapter {
       return { stop: async () => undefined };
     }
 
+    installIlinkFetchCompatibility();
     this.client = this.createClient(creds);
 
     this.loopAbort = new AbortController();
@@ -387,4 +389,43 @@ function readStringProperty(source: object, key: string): string | undefined {
   if (typeof value === "string" && value.length > 0) return value;
   if (typeof value === "number") return String(value);
   return undefined;
+}
+
+function installIlinkFetchCompatibility(): void {
+  if (ilinkFetchCompatibilityInstalled) return;
+  ilinkFetchCompatibilityInstalled = true;
+
+  const originalFetch = globalThis.fetch.bind(globalThis);
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const url = typeof input === "string" || input instanceof URL
+      ? String(input)
+      : input.url;
+    if (!url.includes("/ilink/bot/") || !init?.headers) {
+      return originalFetch(input, init);
+    }
+
+    const headers = stripContentLengthHeader(init.headers);
+    return originalFetch(input, { ...init, headers });
+  }) as typeof fetch;
+}
+
+function stripContentLengthHeader(headers: HeadersInit): HeadersInit {
+  if (headers instanceof Headers) {
+    const next = new Headers(headers);
+    next.delete("content-length");
+    next.delete("Content-Length");
+    return next;
+  }
+
+  if (Array.isArray(headers)) {
+    return headers.filter(([key]) => key.toLowerCase() !== "content-length");
+  }
+
+  const next: Record<string, string> = {};
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() !== "content-length") {
+      next[key] = value;
+    }
+  }
+  return next;
 }
