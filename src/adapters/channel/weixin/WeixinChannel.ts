@@ -2,12 +2,16 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { ILinkClient, loginWithQR, MessageItemType } from "weixin-ilink";
-import type { WeixinMessage, LoginResult } from "weixin-ilink";
+import type { ClientOptions, GetUpdatesResp, WeixinMessage, LoginResult } from "weixin-ilink";
 import type { Gateway, GatewayChannelKey } from "../../../gateway/index.js";
 import type { ChannelAdapter, ChannelHandle, ChannelLogger, ChannelStartDeps } from "../protocol/ChannelAdapter.js";
 import { ImElicitationHelper } from "../protocol/ImElicitationHelper.js";
+import {
+  ImLiveReplyController,
+  type ImLiveReplyControllerOptions,
+  type ImLiveReplyTransport,
+} from "../protocol/ImLiveReplyController.js";
 import { WeixinSessionMapper } from "./WeixinSessionMapper.js";
-import { renderWeixinEvent } from "./weixin-render.js";
 
 const CREDENTIALS_PATH = join(homedir(), ".pilotdeck", "weixin-credentials.json");
 const POLL_RETRY_DELAY_MS = 3000;
@@ -16,6 +20,9 @@ let ilinkFetchCompatibilityInstalled = false;
 export type WeixinChannelOptions = {
   credentialsPath?: string;
   mapper?: WeixinSessionMapper;
+  liveReplyOptions?: Omit<ImLiveReplyControllerOptions<void>, "transport" | "onTransportError">;
+  clientFactory?: (options: ClientOptions) => WeixinIlinkClient;
+  loginWithQR?: typeof loginWithQR;
 };
 
 type SavedCredentials = {
@@ -25,15 +32,25 @@ type SavedCredentials = {
   cursor?: string;
 };
 
+export type WeixinIlinkClient = {
+  cursor: string;
+  poll(): Promise<GetUpdatesResp>;
+  sendTextChunked(toUserId: string, text: string, contextToken: string, maxLength?: number): Promise<number>;
+  sendTyping(userId: string, contextToken?: string): Promise<void>;
+};
+
 export class WeixinChannel implements ChannelAdapter {
   readonly channelKey: GatewayChannelKey = "weixin";
 
   private readonly credentialsPath: string;
   private readonly mapper: WeixinSessionMapper;
+  private readonly liveReplyOptions?: WeixinChannelOptions["liveReplyOptions"];
+  private readonly clientFactory: (options: ClientOptions) => WeixinIlinkClient;
+  private readonly login: typeof loginWithQR;
 
   private gateway?: Gateway;
   private logger?: ChannelLogger;
-  private client?: ILinkClient;
+  private client?: WeixinIlinkClient;
   private loopAbort = new AbortController();
   private pollPromise: Promise<void> | null = null;
   private activeChats = new Set<string>();
@@ -44,6 +61,9 @@ export class WeixinChannel implements ChannelAdapter {
   constructor(options: WeixinChannelOptions = {}) {
     this.credentialsPath = options.credentialsPath ?? CREDENTIALS_PATH;
     this.mapper = options.mapper ?? new WeixinSessionMapper();
+    this.liveReplyOptions = options.liveReplyOptions;
+    this.clientFactory = options.clientFactory ?? ((clientOptions) => new ILinkClient(clientOptions));
+    this.login = options.loginWithQR ?? loginWithQR;
   }
 
   async start(deps: ChannelStartDeps): Promise<ChannelHandle> {
@@ -86,7 +106,7 @@ export class WeixinChannel implements ChannelAdapter {
     console.log("╚══════════════════════════════════════════════╝\n");
 
     try {
-      const result: LoginResult = await loginWithQR({
+      const result: LoginResult = await this.login({
         onQRCode: (url) => {
           console.log(`[weixin] 扫码登录链接:\n${url}\n`);
         },
@@ -217,33 +237,81 @@ export class WeixinChannel implements ChannelAdapter {
   ): Promise<void> {
     if (!this.gateway) return;
 
-    await this.sendTypingIfPossible(userId);
+    const liveReply = new ImLiveReplyController<void>({
+      ...this.liveReplyOptions,
+      transport: this.createLiveReplyTransport(userId),
+      onTransportError: (error, phase) => {
+        this.logger?.warn?.(`weixin: live reply ${phase} failed: ${formatWeixinError(error)}`);
+      },
+    });
+    const turnTimeoutMs = this.liveReplyOptions?.turnTimeoutMs ?? 600_000;
+    let activeRunId: string | undefined;
+    let watchdogSettled = false;
+    const watchdog = turnTimeoutMs > 0
+      ? setTimeout(() => {
+          if (watchdogSettled) return;
+          watchdogSettled = true;
+          this.logger?.warn?.(`weixin: live reply timed out for user ${userId}`);
+          void liveReply.markTimedOut().catch((error: unknown) => {
+            this.logger?.warn?.(`weixin: mark timeout failed: ${formatWeixinError(error)}`);
+          });
+          void this.gateway?.abortTurn({ sessionKey, ...(activeRunId ? { runId: activeRunId } : {}) })
+            .catch((error: unknown) => {
+              this.logger?.warn?.(`weixin: abort timeout turn failed: ${formatWeixinError(error)}`);
+            });
+        }, turnTimeoutMs)
+      : undefined;
+    watchdog?.unref?.();
 
-    let replyText = "";
     try {
       for await (const event of this.gateway.submitTurn({
         sessionKey,
         channelKey: "weixin",
         message,
       })) {
+        if (event.type === "turn_started") {
+          activeRunId = event.runId;
+        }
         if (event.type === "elicitation_request") {
           const questionText = this.elicitation.capture(userId, sessionKey, event);
+          await liveReply.pauseActivity();
           await this.sendReply(userId, questionText);
           continue;
         }
-        const fragment = renderWeixinEvent(event);
-        if (fragment != null) replyText += fragment;
+        if (event.type === "error" && event.code === "agent_aborted") {
+          await liveReply.markAborted();
+          continue;
+        }
+        await liveReply.handleEvent(event);
       }
     } catch (e) {
-      this.logger?.error?.(`weixin: submitTurn error: ${e}`);
-      replyText = "处理消息时发生错误，请重试。";
+      this.logger?.error?.(`weixin: submitTurn error: ${formatWeixinError(e)}`);
+      await liveReply.handleEvent({
+        type: "error",
+        message: "处理消息时发生错误，请重试。",
+        recoverable: true,
+      });
+    } finally {
+      watchdogSettled = true;
+      if (watchdog) clearTimeout(watchdog);
     }
 
     this.elicitation.clear(userId);
-    const finalText = replyText.trim();
-    if (finalText) {
-      await this.sendReply(userId, finalText);
-    }
+    await liveReply.flushFinal();
+  }
+
+  private createLiveReplyTransport(userId: string): ImLiveReplyTransport<void> {
+    return {
+      send: async (text) => {
+        await this.sendReply(userId, text);
+        return undefined;
+      },
+      pulseActivity: async () => {
+        await this.sendTypingIfPossible(userId);
+        return true;
+      },
+      stopActivity: async () => true,
+    };
   }
 
   private async sendReply(userId: string, text: string): Promise<void> {
@@ -272,8 +340,8 @@ export class WeixinChannel implements ChannelAdapter {
     }
   }
 
-  private createClient(creds: SavedCredentials, cursor = creds.cursor): ILinkClient {
-    const client = new ILinkClient({
+  private createClient(creds: SavedCredentials, cursor = creds.cursor): WeixinIlinkClient {
+    const client = this.clientFactory({
       baseUrl: creds.baseUrl,
       token: creds.botToken,
     });
