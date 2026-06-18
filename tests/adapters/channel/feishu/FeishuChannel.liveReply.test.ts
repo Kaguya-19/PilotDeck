@@ -97,7 +97,7 @@ test("feishu short replies send once at final without a cursor preview", async (
     if (init?.method === "POST" && String(url).includes("/im/v1/messages?")) {
       return jsonResponse({ code: 0, data: { message_id: "om_1" } });
     }
-    if (init?.method === "PATCH") {
+    if (init?.method === "PUT") {
       return jsonResponse({ code: 0 });
     }
     return jsonResponse({ code: 0 });
@@ -114,7 +114,7 @@ test("feishu short replies send once at final without a cursor preview", async (
     await wait(20);
 
     const sends = calls.filter((call) => call.init?.method === "POST" && call.url.includes("/im/v1/messages?"));
-    const edits = calls.filter((call) => call.init?.method === "PATCH");
+    const edits = calls.filter((call) => call.init?.method === "PUT");
 
     assert.equal(sends.length, 1);
     assert.equal(edits.length, 0);
@@ -140,7 +140,7 @@ test("feishu live reply sends a long preview before turn completion", async () =
     if (init?.method === "POST" && String(url).includes("/im/v1/messages?")) {
       return jsonResponse({ code: 0, data: { message_id: "om_1" } });
     }
-    if (init?.method === "PATCH") {
+    if (init?.method === "PUT") {
       return jsonResponse({ code: 0 });
     }
     return jsonResponse({ code: 0 });
@@ -163,14 +163,14 @@ test("feishu live reply sends a long preview before turn completion", async () =
     const sends = calls.filter((call) => call.init?.method === "POST" && call.url.includes("/im/v1/messages?"));
     assert.equal(sends.length, 1);
     assert.equal(requestText(sends[0]), "hello visible reply above threshold ▉");
-    assert.equal(requestMsgType(sends[0]), "interactive");
-    assert.equal(calls.some((call) => call.init?.method === "PATCH"), false);
+    assert.equal(requestMsgType(sends[0]), "text");
+    assert.equal(calls.some((call) => call.init?.method === "PUT"), false);
 
     releaseTurn.resolve();
-    await waitFor(() => calls.some((call) => call.init?.method === "PATCH"), "expected final update call");
-    const edit = calls.find((call) => call.init?.method === "PATCH");
+    await waitFor(() => calls.some((call) => call.init?.method === "PUT"), "expected final update call");
+    const edit = calls.find((call) => call.init?.method === "PUT");
     assert.equal(requestText(edit), "hello visible reply above threshold");
-    assert.equal(requestMsgType(edit), "interactive");
+    assert.equal(requestMsgType(edit), "text");
   } finally {
     releaseTurn.resolve();
     globalThis.fetch = originalFetch;
@@ -188,7 +188,7 @@ test("feishu long pre-text activity placeholder is reused for the answer", async
     if (init?.method === "POST" && String(url).includes("/im/v1/messages?")) {
       return jsonResponse({ code: 0, data: { message_id: "om_1" } });
     }
-    if (init?.method === "PATCH") {
+    if (init?.method === "PUT") {
       return jsonResponse({ code: 0 });
     }
     return jsonResponse({ code: 0 });
@@ -215,17 +215,17 @@ test("feishu long pre-text activity placeholder is reused for the answer", async
     await runWebhook(channel, { chatId: "oc_3", text: "hi", eventId: "evt_3" });
 
     await waitFor(
-      () => calls.some((call) => call.init?.method === "PATCH"),
+      () => calls.some((call) => call.init?.method === "PUT"),
       "expected answer to update activity placeholder",
     );
 
     const sends = calls.filter((call) => call.init?.method === "POST" && call.url.includes("/im/v1/messages?"));
-    const edits = calls.filter((call) => call.init?.method === "PATCH");
+    const edits = calls.filter((call) => call.init?.method === "PUT");
     assert.equal(sends.length, 1);
     assert.equal(requestText(sends[0]), "正在思考… ▉");
-    assert.equal(requestMsgType(sends[0]), "interactive");
+    assert.equal(requestMsgType(sends[0]), "text");
     assert.equal(requestText(edits[0]), "answer ▉");
-    assert.equal(requestMsgType(edits[0]), "interactive");
+    assert.equal(requestMsgType(edits[0]), "text");
     assert.equal(requestText(edits.at(-1)), "answer");
     assert.ok(edits.every((call) => call.url.endsWith("/om_1")));
   } finally {
@@ -241,7 +241,7 @@ test("feishu live reply falls back to final continuation when update fails", asy
     if (String(url).includes("tenant_access_token")) {
       return jsonResponse({ code: 0, tenant_access_token: "token", expire: 7200 });
     }
-    if (init?.method === "PATCH") {
+    if (init?.method === "PUT") {
       return jsonResponse({ code: 99991672, msg: "permission denied" });
     }
     if (init?.method === "POST" && String(url).includes("/im/v1/messages?")) {
@@ -274,7 +274,7 @@ test("feishu live reply falls back to final continuation when update fails", asy
     const sends = calls.filter((call) => call.init?.method === "POST" && call.url.includes("/im/v1/messages?"));
     assert.equal(sends.length, 2);
     assert.equal(requestText(sends[0]), "hello ▉");
-    assert.equal(requestMsgType(sends[0]), "interactive");
+    assert.equal(requestMsgType(sends[0]), "text");
     assert.equal(requestText(sends[1]), "world");
     assert.equal(requestMsgType(sends[1]), "text");
   } finally {
@@ -282,7 +282,7 @@ test("feishu live reply falls back to final continuation when update fails", asy
   }
 });
 
-test("feishu live reply watchdog aborts long turns and edits card to timeout guidance", async () => {
+test("feishu live reply watchdog aborts long turns and edits message to timeout guidance", async () => {
   const calls: FetchCall[] = [];
   const aborts: Array<{ sessionKey: string; runId?: string }> = [];
   const releaseTurn = deferred();
@@ -295,7 +295,7 @@ test("feishu live reply watchdog aborts long turns and edits card to timeout gui
     if (init?.method === "POST" && String(url).includes("/im/v1/messages?")) {
       return jsonResponse({ code: 0, data: { message_id: "om_timeout" } });
     }
-    if (init?.method === "PATCH") {
+    if (init?.method === "PUT") {
       return jsonResponse({ code: 0 });
     }
     return jsonResponse({ code: 0 });
@@ -327,24 +327,24 @@ test("feishu live reply watchdog aborts long turns and edits card to timeout gui
     await runWebhook(channel, { chatId: "oc_timeout", text: "hi", eventId: "evt_timeout" });
 
     await waitFor(
-      () => aborts.length === 1 && calls.some((call) => call.init?.method === "PATCH"),
-      "expected watchdog abort and timeout card update",
+      () => aborts.length === 1 && calls.some((call) => call.init?.method === "PUT"),
+      "expected watchdog abort and timeout message update",
     );
 
     assert.deepEqual(aborts, [{ sessionKey: "feishu:chat=oc_timeout:general", runId: "run_timeout" }]);
     const sends = calls.filter((call) => call.init?.method === "POST" && call.url.includes("/im/v1/messages?"));
-    const edits = calls.filter((call) => call.init?.method === "PATCH");
+    const edits = calls.filter((call) => call.init?.method === "PUT");
     assert.equal(requestText(sends[0]), "正在思考… ▉");
-    assert.equal(requestMsgType(sends[0]), "interactive");
+    assert.equal(requestMsgType(sends[0]), "text");
     assert.equal(requestText(edits.at(-1)), "处理超时，请重新发送或稍后重试。");
-    assert.equal(requestMsgType(edits.at(-1)), "interactive");
+    assert.equal(requestMsgType(edits.at(-1)), "text");
   } finally {
     releaseTurn.resolve();
     globalThis.fetch = originalFetch;
   }
 });
 
-test("feishu agent_aborted updates live card once without raw error text", async () => {
+test("feishu agent_aborted updates live message once without raw error text", async () => {
   const calls: FetchCall[] = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
@@ -355,7 +355,7 @@ test("feishu agent_aborted updates live card once without raw error text", async
     if (init?.method === "POST" && String(url).includes("/im/v1/messages?")) {
       return jsonResponse({ code: 0, data: { message_id: "om_abort" } });
     }
-    if (init?.method === "PATCH") {
+    if (init?.method === "PUT") {
       return jsonResponse({ code: 0 });
     }
     return jsonResponse({ code: 0 });
@@ -383,12 +383,12 @@ test("feishu agent_aborted updates live card once without raw error text", async
     await runWebhook(channel, { chatId: "oc_abort", text: "hi", eventId: "evt_abort" });
 
     await waitFor(
-      () => calls.some((call) => call.init?.method === "PATCH"),
+      () => calls.some((call) => call.init?.method === "PUT"),
       "expected aborted update",
     );
 
     const texts = calls
-      .filter((call) => call.init?.method === "POST" || call.init?.method === "PATCH")
+      .filter((call) => call.init?.method === "POST" || call.init?.method === "PUT")
       .map((call) => requestText(call));
     assert.ok(texts.includes("正在思考… ▉"));
     assert.ok(texts.includes("处理已中止，请重新发送或稍后重试。"));
