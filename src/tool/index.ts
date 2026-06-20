@@ -6,6 +6,12 @@ export type {
 export { ToolRuntime } from "./execution/ToolRuntime.js";
 export { validateToolInput } from "./execution/validateToolInput.js";
 export {
+  ToolErrorEnricherRegistry,
+  createDefaultToolErrorEnricherRegistry,
+  type ToolErrorEnricher,
+  type ToolErrorEnrichmentContext,
+} from "./execution/errorEnrichment.js";
+export {
   normalizeToolError,
   PilotDeckToolRuntimeError,
   toolError,

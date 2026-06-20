@@ -32,6 +32,7 @@ import type {
 import { ConcurrentToolScheduler } from "../../tool/scheduler/ConcurrentToolScheduler.js";
 import { ToolRuntime } from "../../tool/execution/ToolRuntime.js";
 import { PermissionRuntime } from "../../permission/index.js";
+import { createDefaultToolErrorEnricherRegistry } from "../../tool/execution/errorEnrichment.js";
 import {
   buildForkedMessages,
 } from "./buildForkedMessages.js";
@@ -251,6 +252,7 @@ export class SubAgentSession {
       permissionRuntime,
       this.options.parentDependencies.lifecycle,
       this.options.parentDependencies.eventEmitter,
+      createDefaultToolErrorEnricherRegistry(),
     );
     const scheduler = new ConcurrentToolScheduler(toolRuntime, registry);
     return {

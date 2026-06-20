@@ -1,5 +1,5 @@
 import { PermissionRuntime } from "../../permission/index.js";
-import type { LifecycleRuntime, PilotDeckHookEffect } from "../../lifecycle/index.js";
+import type { LifecycleDispatchResult, LifecycleRuntime, PilotDeckHookEffect } from "../../lifecycle/index.js";
 import { toolError } from "../protocol/errors.js";
 import type { PilotDeckToolErrorCode } from "../protocol/errors.js";
 import { PLAN_MODE_ALLOWED_TOOLS, buildPlanModeViolationMessage } from "../planModeConstraints.js";
@@ -15,6 +15,8 @@ import { validateToolInput } from "./validateToolInput.js";
 import { formatValidationError } from "./formatValidationError.js";
 import { normalizeToolError } from "../protocol/errors.js";
 import type { AgentEventEmitter } from "../../agent/protocol/events.js";
+import type { ToolErrorEnricherRegistry } from "./errorEnrichment.js";
+import { repairToolName } from "../../model/streaming/repairToolName.js";
 
 export class ToolRuntime {
   constructor(
@@ -22,12 +24,23 @@ export class ToolRuntime {
     private readonly permissionRuntime: PermissionRuntime,
     private readonly lifecycle?: LifecycleRuntime,
     private readonly eventEmitter?: AgentEventEmitter,
+    private readonly errorEnrichers?: ToolErrorEnricherRegistry,
   ) {}
 
   async execute(call: PilotDeckToolCall, context: PilotDeckToolRuntimeContext): Promise<PilotDeckToolResult> {
     const startedAtDate = now(context);
     const startedAt = startedAtDate.toISOString();
-    const tool = this.registry.get(call.name);
+    let tool = this.registry.get(call.name);
+    if (!tool) {
+      const repaired = repairToolName(
+        call.name,
+        new Set(this.registry.list().map((definition) => definition.name)),
+        context.toolAliases,
+      );
+      if (repaired) {
+        tool = this.registry.get(repaired.name);
+      }
+    }
     const toolName = tool?.name ?? call.name;
 
     if (context.abortSignal?.aborted) {
@@ -242,14 +255,25 @@ export class ToolRuntime {
       return result;
     } catch (error) {
       const normalized = normalizeToolError(error);
-      await this.dispatchLifecycle("PostToolUseFailure", tool.name, call.id, executeInput, context, {
+      const failureHookResult = await this.dispatchLifecycle("PostToolUseFailure", tool.name, call.id, executeInput, context, {
         error: normalized.message,
+        errorCode: normalized.code,
         isInterrupt: normalized.code === "tool_aborted",
       });
       this.eventEmitter?.({ type: "post_tool_execute", sessionId: context.sessionId, turnId: context.turnId, toolCallId: call.id, toolName: tool.name, success: false });
-      const result = this.createErrorResult(call.id, tool.name, normalized.code, normalized.message, startedAt, context, {
-        details: normalized.details,
-      });
+      const hookAdditionalContext = failureHookResult.effects
+        .filter(isAdditionalContextEffect)
+        .map((e) => e.content);
+      const result = this.createErrorResult(
+        call.id,
+        tool.name,
+        normalized.code,
+        normalized.message,
+        startedAt,
+        context,
+        normalized.details,
+        hookAdditionalContext,
+      );
       await this.recordToolAudit(result, context, startedAtDate);
       return result;
     }
@@ -278,14 +302,26 @@ export class ToolRuntime {
     startedAt: string,
     context: PilotDeckToolRuntimeContext,
     details?: Record<string, unknown>,
+    hookAdditionalContext?: string[],
   ): PilotDeckToolErrorResult {
     const completedAt = now(context).toISOString();
+    let modelMessage = message;
+    if (this.errorEnrichers && code !== "invalid_tool_input" && code !== "plan_mode_violation") {
+      modelMessage = this.errorEnrichers.enrich(code, toolName, message, {
+        cwd: context.cwd,
+        permissionMode: context.permissionMode,
+        toolName,
+      }, details);
+    }
+    if (hookAdditionalContext && hookAdditionalContext.length > 0) {
+      modelMessage += "\n\n" + hookAdditionalContext.map((c) => `[Hook hint]: ${c}`).join("\n");
+    }
     return {
       type: "error",
       toolCallId,
       toolName,
       error: toolError(code, message, details),
-      content: [{ type: "text", text: message }],
+      content: [{ type: "text", text: modelMessage }],
       startedAt,
       completedAt,
     };
@@ -317,7 +353,7 @@ export class ToolRuntime {
     toolInput: unknown,
     context: PilotDeckToolRuntimeContext,
     extraPayload: Record<string, unknown> = {},
-  ) {
+  ): Promise<LifecycleDispatchResult> {
     return this.lifecycle?.dispatch({
       event,
       baseInput: {
@@ -350,6 +386,12 @@ function findEffect<Type extends PilotDeckHookEffect["type"]>(
   type: Type,
 ): Extract<PilotDeckHookEffect, { type: Type }> | undefined {
   return effects.find((effect): effect is Extract<PilotDeckHookEffect, { type: Type }> => effect.type === type);
+}
+
+function isAdditionalContextEffect(
+  effect: PilotDeckHookEffect,
+): effect is Extract<PilotDeckHookEffect, { type: "additional_context" }> {
+  return effect.type === "additional_context";
 }
 
 function lifecycleMetadata(result: { effects: PilotDeckHookEffect[] }): Record<string, unknown> | undefined {

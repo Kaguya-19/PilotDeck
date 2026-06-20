@@ -1,5 +1,6 @@
 import { PermissionRuntime } from "../../permission/index.js";
 import { ConcurrentToolScheduler, SequentialToolScheduler, ToolRuntime } from "../../tool/index.js";
+import { createDefaultToolErrorEnricherRegistry } from "../../tool/execution/errorEnrichment.js";
 import { AgentLoop, type AgentLoopSeedState } from "../loop/AgentLoop.js";
 import type { AgentRuntimeConfig } from "../runtime/AgentRuntimeConfig.js";
 import type { AgentRuntimeDependencies } from "../runtime/AgentRuntimeDependencies.js";
@@ -39,7 +40,7 @@ export function createAgentSessionWithStorage(options: CreateAgentSessionOptions
 } {
   const eventBuf = options.dependencies.drainEvents ? undefined : createAgentEventBuffer();
   const emitter = options.dependencies.eventEmitter ?? eventBuf?.emitter;
-  const toolRuntime = new ToolRuntime(options.dependencies.tools.registry, new PermissionRuntime(), options.dependencies.lifecycle, emitter);
+  const toolRuntime = new ToolRuntime(options.dependencies.tools.registry, new PermissionRuntime(), options.dependencies.lifecycle, emitter, createDefaultToolErrorEnricherRegistry());
   const scheduler = options.dependencies.tools.scheduler
     ?? new ConcurrentToolScheduler(toolRuntime, options.dependencies.tools.registry);
   const dependencies: AgentRuntimeDependencies = {
