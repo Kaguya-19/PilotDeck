@@ -254,7 +254,11 @@ export class SubAgentSession {
       this.options.parentDependencies.eventEmitter,
       createDefaultToolErrorEnricherRegistry(),
     );
-    const scheduler = new ConcurrentToolScheduler(toolRuntime, registry);
+    const scheduler = new ConcurrentToolScheduler(toolRuntime, registry, {
+      maxToolCallsPerTurn: this.options.parentConfig.maxToolCallsPerTurn,
+      maxConcurrentToolCalls: this.options.parentConfig.maxConcurrentToolCalls,
+      dedupeSameTurnReadOnlyToolCalls: this.options.parentConfig.dedupeSameTurnReadOnlyToolCalls,
+    });
     return {
       router: this.options.parentDependencies.router,
       tools: { scheduler, registry },

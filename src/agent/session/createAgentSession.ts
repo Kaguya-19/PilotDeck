@@ -42,7 +42,11 @@ export function createAgentSessionWithStorage(options: CreateAgentSessionOptions
   const emitter = options.dependencies.eventEmitter ?? eventBuf?.emitter;
   const toolRuntime = new ToolRuntime(options.dependencies.tools.registry, new PermissionRuntime(), options.dependencies.lifecycle, emitter, createDefaultToolErrorEnricherRegistry());
   const scheduler = options.dependencies.tools.scheduler
-    ?? new ConcurrentToolScheduler(toolRuntime, options.dependencies.tools.registry);
+    ?? new ConcurrentToolScheduler(toolRuntime, options.dependencies.tools.registry, {
+      maxToolCallsPerTurn: options.config.maxToolCallsPerTurn,
+      maxConcurrentToolCalls: options.config.maxConcurrentToolCalls,
+      dedupeSameTurnReadOnlyToolCalls: options.config.dedupeSameTurnReadOnlyToolCalls,
+    });
   const dependencies: AgentRuntimeDependencies = {
     ...options.dependencies,
     tools: {

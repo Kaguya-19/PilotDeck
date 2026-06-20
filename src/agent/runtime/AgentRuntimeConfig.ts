@@ -41,6 +41,22 @@ export type AgentRuntimeConfig = {
   /** Enable automatic JSON self-correction retry on invalid_tool_arguments. Default false. */
   jsonSelfCorrect?: boolean;
   /**
+   * Maximum number of tool calls the agent will execute from a single model
+   * turn. Extra calls receive invalid_tool_input results asking the model to
+   * split work across turns. Default 32.
+   */
+  maxToolCallsPerTurn?: number;
+  /**
+   * Maximum number of concurrency-safe tool calls to execute at once within a
+   * single turn. Default 8.
+   */
+  maxConcurrentToolCalls?: number;
+  /**
+   * Coalesce identical read-only, concurrency-safe tool calls emitted in the
+   * same turn. Default true.
+   */
+  dedupeSameTurnReadOnlyToolCalls?: boolean;
+  /**
    * Tool call format hint — controls which self-correct prompt is used.
    * "auto" (default) detects from text markers; explicit values select a
    * specific format from the registry (e.g. "qwen_xml", "hermes", "dsml").

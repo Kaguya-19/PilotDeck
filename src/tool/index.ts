@@ -59,7 +59,12 @@ export type {
 } from "./protocol/types.js";
 export { ToolRegistry } from "./registry/ToolRegistry.js";
 export { createBuiltinRegistry, type CreateBuiltinRegistryOptions } from "./registry/createBuiltinRegistry.js";
-export { ConcurrentToolScheduler } from "./scheduler/ConcurrentToolScheduler.js";
+export {
+  ConcurrentToolScheduler,
+  DEFAULT_MAX_CONCURRENT_TOOL_CALLS,
+  DEFAULT_MAX_TOOL_CALLS_PER_TURN,
+  type ConcurrentToolSchedulerOptions,
+} from "./scheduler/ConcurrentToolScheduler.js";
 export { SequentialToolScheduler } from "./scheduler/SequentialToolScheduler.js";
 export type { PilotDeckToolScheduler } from "./scheduler/ToolScheduler.js";
 export {
