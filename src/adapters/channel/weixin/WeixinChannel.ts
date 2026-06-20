@@ -5,6 +5,7 @@ import { ILinkClient, loginWithQR, MessageItemType } from "weixin-ilink";
 import type { ClientOptions, GetUpdatesResp, WeixinMessage, LoginResult } from "weixin-ilink";
 import type { Gateway, GatewayChannelKey } from "../../../gateway/index.js";
 import type { ChannelAdapter, ChannelHandle, ChannelLogger, ChannelStartDeps } from "../protocol/ChannelAdapter.js";
+import { executeChannelCommand } from "../protocol/ChannelCommandRegistry.js";
 import { ImElicitationHelper } from "../protocol/ImElicitationHelper.js";
 import {
   ImLiveReplyController,
@@ -209,22 +210,35 @@ export class WeixinChannel implements ChannelAdapter {
       return;
     }
 
-    if (this.activeChats.has(fromUser)) {
-      this.logger?.info?.(`weixin: chat ${fromUser} already active, skipping`);
-      return;
-    }
-
     const mapped = this.mapper.resolve({ chatId: fromUser, text });
     if (mapped.command === "new" && !mapped.message) {
       await this.sendReply(fromUser, "已创建新会话。");
       return;
     }
 
+    if (this.gateway && text.trim().startsWith("/")) {
+      const handled = await executeChannelCommand(text, {
+        gateway: this.gateway,
+        chatId: fromUser,
+        channelKey: "weixin",
+        reply: (msg) => this.sendReply(fromUser, msg),
+        bindProject: (projectKey) => this.mapper.bindProject(fromUser, projectKey),
+        getProject: () => this.mapper.getProject(fromUser),
+        logger: this.logger as any,
+      });
+      if (handled) return;
+    }
+
     if (!mapped.message) return;
+
+    if (this.activeChats.has(fromUser)) {
+      this.logger?.info?.(`weixin: chat ${fromUser} already active, skipping`);
+      return;
+    }
 
     this.activeChats.add(fromUser);
     try {
-      await this.processMessage(fromUser, mapped.sessionKey, mapped.message);
+      await this.processMessage(fromUser, mapped.sessionKey, mapped.message, mapped.projectKey);
     } finally {
       this.activeChats.delete(fromUser);
     }
@@ -234,6 +248,7 @@ export class WeixinChannel implements ChannelAdapter {
     userId: string,
     sessionKey: string,
     message: string,
+    projectKey?: string,
   ): Promise<void> {
     if (!this.gateway) return;
 
@@ -268,6 +283,8 @@ export class WeixinChannel implements ChannelAdapter {
         sessionKey,
         channelKey: "weixin",
         message,
+        allowPlanModeTools: false,
+        ...(projectKey ? { projectKey } : {}),
       })) {
         if (event.type === "turn_started") {
           activeRunId = event.runId;

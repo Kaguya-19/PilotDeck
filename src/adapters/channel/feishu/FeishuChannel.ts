@@ -328,6 +328,7 @@ export class FeishuChannel implements ChannelAdapter {
           sessionKey: mapped.sessionKey,
           channelKey: "feishu",
           message: mapped.message,
+          allowPlanModeTools: false,
           ...(mapped.projectKey ? { projectKey: mapped.projectKey } : {}),
         })) {
           if (event.type === "turn_started") {
