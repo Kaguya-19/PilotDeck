@@ -17,6 +17,7 @@ import {
 import type {
   PilotDeckReadFileStateMap,
   PilotDeckSubagentForkApi,
+  PilotDeckToolErrorResult,
   PilotDeckToolResult,
   PilotDeckToolRuntimeContext,
   PilotDeckWriteSnapshotMap,
@@ -42,10 +43,18 @@ import { collectToolCalls } from "./collectToolCalls.js";
 import { createMissingToolResult, ensureToolResultPairing } from "./ensureToolResultPairing.js";
 import { LargeFileRepair, type LargeFileRepairDecision } from "./LargeFileRepair.js";
 import { projectToolResults } from "./projectToolResults.js";
+import { SnipEngine } from "../../context/compaction/SnipEngine.js";
 import { getSelfCorrectPrompt, looksLikeUnparsedToolCall, detectFormatByText } from "../../model/streaming/toolCallFormats.js";
 
 const TOOL_EVENT_PUMP_INTERVAL_MS = 500;
 const SUBAGENT_STATUS_HEARTBEAT_MS = 2_000;
+
+const CIRCUIT_BREAKER_GRACE_PROMPT =
+  "Your last several tool calls all failed input validation with the same error. " +
+  "This may indicate a tool-side issue rather than a problem with your approach. " +
+  "Options: (1) try a different tool or different parameters, " +
+  "(2) explain the situation in text without calling tools, " +
+  "(3) if you believe the tool should work, try once more with corrected input.";
 
 type ActiveSubagentStatus = {
   subagentId: string;
@@ -158,14 +167,17 @@ export class AgentLoop {
     const largeFileRepair = new LargeFileRepair();
 
     /**
-     * Circuit breaker: consecutive turns where ALL tool calls are
-     * `invalid_tool_input` errors. When the model is stuck in a loop
-     * (e.g. qwen repeatedly emitting empty-param bash calls), terminate
-     * early instead of burning tokens. Resets on any turn with at least
-     * one successful tool call.
+     * Circuit breaker: detects the model stuck in a loop by fingerprinting
+     * each turn's invalid_tool_input errors (toolName + errorMessage).
+     * Only triggers when the **same fingerprint** repeats consecutively,
+     * so different-tool failures or environment-side issues don't cause
+     * premature termination. Before stopping, a grace-period prompt gives
+     * the model one chance to escape (e.g. switch tools or reply in text).
      */
-    const MAX_CONSECUTIVE_ALL_INVALID_TURNS = 3;
-    let consecutiveAllInvalidTurns = 0;
+    const MAX_SAME_INVALID_FINGERPRINT = 3;
+    let lastInvalidFingerprint: string | undefined;
+    let sameInvalidFingerprintCount = 0;
+    let hasUsedInvalidGracePeriod = false;
 
     const stickyInfo = this.dependencies.router.invalidateSticky?.(input.sessionId);
     let previousTier: string | undefined = stickyInfo?.previousTier;
@@ -973,8 +985,10 @@ export class AgentLoop {
       }
 
       // Circuit breaker: detect turns where ALL tool calls returned
-      // invalid_tool_input. If the model is stuck (e.g. repeatedly emitting
-      // empty-param bash), terminate early after MAX_CONSECUTIVE_ALL_INVALID_TURNS.
+      // invalid_tool_input.  Uses fingerprint-based detection (toolName +
+      // errorMessage) so only identical repeated failures trigger termination.
+      // A grace-period prompt is injected before final termination to give
+      // the model one chance to escape the loop.
       // When LargeFileRepair is actively managing recovery, defer to its own
       // attempt limits instead of terminating here.
       const allInvalid = pairedResults.length > 0 && pairedResults.every(
@@ -995,8 +1009,27 @@ export class AgentLoop {
         }
       }
       if (allInvalid) {
-        consecutiveAllInvalidTurns++;
-        if (consecutiveAllInvalidTurns >= MAX_CONSECUTIVE_ALL_INVALID_TURNS) {
+        const fingerprint = buildInvalidFingerprint(pairedResults);
+        if (fingerprint === lastInvalidFingerprint) {
+          sameInvalidFingerprintCount++;
+        } else {
+          sameInvalidFingerprintCount = 1;
+          lastInvalidFingerprint = fingerprint;
+          hasUsedInvalidGracePeriod = false;
+        }
+
+        if (sameInvalidFingerprintCount >= MAX_SAME_INVALID_FINGERPRINT) {
+          if (!hasUsedInvalidGracePeriod) {
+            hasUsedInvalidGracePeriod = true;
+            messages.push({
+              role: "user",
+              content: [{ type: "text", text: CIRCUIT_BREAKER_GRACE_PROMPT }],
+              metadata: { synthetic: true, purpose: "circuit_breaker_grace" },
+            });
+            yield { type: "turn_continued", sessionId: input.sessionId, turnId: input.turnId, reason: "model_error" };
+            continue;
+          }
+
           const result = this.createTurnResult(input, {
             type: "error",
             stopReason: "tool_error",
@@ -1008,7 +1041,7 @@ export class AgentLoop {
             structuredOutput,
             errors: [agentError(
               "agent_tool_error_loop",
-              `Terminated: ${consecutiveAllInvalidTurns} consecutive turns with all tool calls failing input validation. The model appears stuck in a loop.`,
+              `Terminated: ${sameInvalidFingerprintCount} consecutive turns with identical tool input validation failures (same tool + same error). The model appears stuck in a loop.`,
             )],
           });
           yield { type: "turn_failed", sessionId: input.sessionId, turnId: input.turnId, error: result.errors![0]! };
@@ -1017,7 +1050,9 @@ export class AgentLoop {
           return { result, messages };
         }
       } else {
-        consecutiveAllInvalidTurns = 0;
+        sameInvalidFingerprintCount = 0;
+        lastInvalidFingerprint = undefined;
+        hasUsedInvalidGracePeriod = false;
         maxOutputRecoveryCount = 0;
         consecutiveEmptyCount = 0;
         hasAttemptedOutputRetry = false;
@@ -1639,11 +1674,29 @@ function subagentIdFromSessionId(sessionId: string): string | undefined {
 const OUTPUT_TOKEN_RETRY_DEFAULT = 4_096;
 const OUTPUT_TOKEN_RETRY_CEILING = 64_000;
 
-/** Keep only the trailing `keepRatio` portion of the message history. */
+/**
+ * Truncate message history while preserving tool_call / tool_result pair
+ * integrity.  Uses `SnipEngine` (Tier 2 compaction) so that:
+ *   - Head turns (initial user context) are preserved.
+ *   - Dangling tool_call / tool_result pairs are cleaned up.
+ *   - A snip boundary marker is injected.
+ *   - The result always ends with a user message.
+ *
+ * `keepRatio` controls how aggressively the middle is pruned: a lower ratio
+ * keeps fewer tail turns.  When the conversation is too short for SnipEngine
+ * to act (total turns <= head + tail), the messages are returned unchanged.
+ */
 function truncateHeadKeepRatio(messages: CanonicalMessage[], keepRatio: number): CanonicalMessage[] {
   const ratio = Math.max(0.05, Math.min(1, keepRatio));
-  const keep = Math.max(1, Math.floor(messages.length * ratio));
-  return messages.slice(-keep);
+  const tailTurns = Math.max(1, Math.round(ratio * 10));
+  const snip = new SnipEngine({
+    keepHeadTurns: 1,
+    keepTailTurns: tailTurns,
+  }).snip(messages);
+  if (snip.applied) {
+    return snip.messages;
+  }
+  return messages;
 }
 
 /**
@@ -1693,6 +1746,17 @@ function stripImagesFromMessages(messages: CanonicalMessage[]): CanonicalMessage
     });
     return { ...msg, content: newContent };
   });
+}
+
+function buildInvalidFingerprint(results: PilotDeckToolResult[]): string {
+  return results
+    .filter(
+      (r): r is PilotDeckToolErrorResult =>
+        r.type === "error" && r.error.code === "invalid_tool_input",
+    )
+    .map((r) => `${r.toolName}::${r.error.message}`)
+    .sort()
+    .join("\n");
 }
 
 function collectPermissionDenials(results: PilotDeckToolResult[]): AgentPermissionDenial[] {
