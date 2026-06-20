@@ -851,11 +851,15 @@ export class AgentLoop {
         if (assembled.finishReason === "length" || assembled.hasRepairedToolCalls) {
           toolContext.outputTruncated = true;
         }
-        results = yield* this.executeToolsWithEventPump(
-          toolCalls,
-          toolContext,
-          input,
-        );
+        const { executableCalls, deniedResults } = this.partitionExperimentalToolSearchCalls(toolCalls);
+        const executedResults = executableCalls.length > 0
+          ? yield* this.executeToolsWithEventPump(
+            executableCalls,
+            toolContext,
+            input,
+          )
+          : [];
+        results = [...executedResults, ...deniedResults];
       } catch (error) {
         results = toolCalls.map((call) =>
           createMissingToolResult(call, this.now, error instanceof Error ? error.message : String(error)),
@@ -1093,7 +1097,10 @@ export class AgentLoop {
   ): Promise<CanonicalModelRequest> {
     const contextRuntime = this.dependencies.context ?? new NullContextRuntime();
     const planTodo = this.dependencies.planTodoManager?.forSession(input.sessionId);
-    let tools = this.dependencies.tools.registry.toCanonicalSchemas();
+    let tools = resolveVisibleTools(
+      this.dependencies.tools.registry.toCanonicalSchemas(),
+      this.config.experimentalToolSearch,
+    );
     if (this.config.permissionMode === "plan") {
       tools = filterPlanModeTools(tools);
     }
@@ -1168,6 +1175,15 @@ export class AgentLoop {
       now: this.now,
       env: this.config.env,
       maxResultBytes: this.config.maxResultBytes,
+      toolExecutor: {
+        execute: async (call, toolContext) => {
+          const [result] = await this.dependencies.tools.scheduler.executeAll([call], {
+            ...toolContext,
+            currentToolCallId: call.id,
+          });
+          return result ?? createMissingToolResult(call, this.now);
+        },
+      },
       // Tools that need a secondary model call (e.g. `agent` subagents in
       // fallback mode, `web_fetch` extraction) get a thin adapter that
       // funnels into the router's stream so subagents inherit fallback /
@@ -1423,6 +1439,34 @@ export class AgentLoop {
     return results ?? [];
   }
 
+  private partitionExperimentalToolSearchCalls(
+    toolCalls: CanonicalToolCall[],
+  ): { executableCalls: CanonicalToolCall[]; deniedResults: PilotDeckToolResult[] } {
+    if (!this.config.experimentalToolSearch?.enabled) {
+      return { executableCalls: toolCalls, deniedResults: [] };
+    }
+
+    const visibleToolNames = resolveVisibleToolNames(
+      this.dependencies.tools.registry.toCanonicalSchemas(),
+      this.config.experimentalToolSearch,
+    );
+    const executableCalls: CanonicalToolCall[] = [];
+    const deniedResults: PilotDeckToolResult[] = [];
+
+    for (const call of toolCalls) {
+      const tool = this.dependencies.tools.registry.get(call.name);
+      const canonicalName = tool?.name ?? call.name;
+      if (!tool || visibleToolNames.has(canonicalName)) {
+        executableCalls.push(call);
+        continue;
+      }
+
+      deniedResults.push(createExperimentalToolSearchDirectCallDeniedResult(call, canonicalName, this.now));
+    }
+
+    return { executableCalls, deniedResults };
+  }
+
   private *drainToolEventBufferForSubagentStatus(
     input: AgentLoopInput,
     activeSubagents: Map<string, ActiveSubagentStatus>,
@@ -1568,6 +1612,75 @@ function filterPlanModeTools(tools: CanonicalToolSchema[]): CanonicalToolSchema[
       }
       return tool;
     });
+}
+
+const DEFAULT_EXPERIMENTAL_TOOL_SEARCH_CORE_TOOLS = new Set([
+  "read_file",
+  "grep",
+  "glob",
+  "bash",
+  "todo_write",
+  "ask_user_question",
+  "read_skill",
+  "list_tools",
+  "tool_call",
+]);
+
+function resolveVisibleTools(
+  tools: CanonicalToolSchema[],
+  experimental: AgentRuntimeConfig["experimentalToolSearch"] | undefined,
+): CanonicalToolSchema[] {
+  if (!experimental?.enabled) {
+    return tools;
+  }
+  const allowed = new Set(
+    experimental.coreTools && experimental.coreTools.length > 0
+      ? experimental.coreTools
+      : [...DEFAULT_EXPERIMENTAL_TOOL_SEARCH_CORE_TOOLS],
+  );
+  allowed.add("list_tools");
+  allowed.add("tool_call");
+  return tools.filter((tool) => allowed.has(tool.name));
+}
+
+function resolveVisibleToolNames(
+  tools: CanonicalToolSchema[],
+  experimental: AgentRuntimeConfig["experimentalToolSearch"] | undefined,
+): Set<string> {
+  return new Set(resolveVisibleTools(tools, experimental).map((tool) => tool.name));
+}
+
+function createExperimentalToolSearchDirectCallDeniedResult(
+  call: CanonicalToolCall,
+  canonicalName: string,
+  now: () => Date = () => new Date(),
+): PilotDeckToolResult {
+  const timestamp = now().toISOString();
+  const requested = canonicalName === call.name ? call.name : `${call.name} (${canonicalName})`;
+  const message = `Tool ${requested} is hidden by experimental tool search. Use list_tools to discover available hidden tools, then call tool_call with { "name": "${canonicalName}", "input": ... } instead of calling ${call.name} directly.`;
+  return {
+    type: "error",
+    toolCallId: call.id,
+    toolName: canonicalName,
+    error: {
+      code: "unsupported_tool",
+      message,
+      details: {
+        experimentalToolSearch: true,
+        requestedToolName: call.name,
+        canonicalToolName: canonicalName,
+      },
+    },
+    content: [{ type: "text", text: message }],
+    metadata: {
+      experimentalToolSearch: true,
+      directHiddenToolCallDenied: true,
+      requestedToolName: call.name,
+      canonicalToolName: canonicalName,
+    },
+    startedAt: timestamp,
+    completedAt: timestamp,
+  };
 }
 
 function mergeUserRules(target: PermissionRule[], userRules: PermissionRule[] | undefined): void {

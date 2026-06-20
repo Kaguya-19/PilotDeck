@@ -30,6 +30,7 @@ export type {
 } from "./protocol/schema.js";
 export type {
   PilotDeckToolCall,
+  PilotDeckToolExecutor,
   PilotDeckToolDefinition,
   PilotDeckToolExecutionOutput,
   PilotDeckToolSupplementalMessage,
@@ -51,6 +52,12 @@ export type {
   PilotDeckWriteSnapshotEntry,
   PilotDeckWriteSnapshotMap,
 } from "./protocol/types.js";
+export {
+  ToolCatalog,
+  type ToolCatalogCategory,
+  type ToolCatalogOptions,
+  type ToolCatalogSummary,
+} from "./catalog/ToolCatalog.js";
 export { ToolRegistry } from "./registry/ToolRegistry.js";
 export { createBuiltinRegistry, type CreateBuiltinRegistryOptions } from "./registry/createBuiltinRegistry.js";
 export { ConcurrentToolScheduler } from "./scheduler/ConcurrentToolScheduler.js";
@@ -188,6 +195,13 @@ export {
   type TaskStopInput,
   type TaskStopResult,
 } from "./builtin/taskTools.js";
+export {
+  createListToolsTool,
+  createToolCallProxyTool,
+  type CreateToolCatalogToolsOptions,
+  type ListToolsInput,
+  type ToolCallProxyInput,
+} from "./builtin/toolCatalog.js";
 export {
   createTodoWriteTool,
   parseTodoMarkdown,

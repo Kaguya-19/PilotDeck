@@ -12,6 +12,7 @@ import type {
 } from "../../permission/index.js";
 import type { PilotDeckToolAuditRecorder } from "../audit/ToolAuditRecorder.js";
 import type { PilotDeckElicitationChannel } from "../elicitation/PilotDeckElicitationChannel.js";
+import type { PilotDeckToolResult } from "./result.js";
 import type { PilotDeckToolInputSchema, PilotDeckToolValidationResult } from "./schema.js";
 
 /**
@@ -33,6 +34,10 @@ export type PilotDeckToolFileHistorySink = {
  */
 export type PilotDeckToolModelClient = {
   stream(request: CanonicalModelRequest, signal?: AbortSignal): AsyncIterable<CanonicalModelEvent>;
+};
+
+export type PilotDeckToolExecutor = {
+  execute(call: CanonicalToolCall, context: PilotDeckToolRuntimeContext): Promise<PilotDeckToolResult>;
 };
 
 /**
@@ -202,8 +207,14 @@ export type PilotDeckToolRuntimeContext = {
    * (e.g. `agent` subagent prompts, `web_fetch` content extraction). Absent
    * when the caller didn't provide one — affected tools must report
    * `unsupported_tool` with a clear hint instead of failing silently.
-   */
+  */
   model?: PilotDeckToolModelClient;
+  /**
+   * Optional bridge back into the host ToolRuntime. Proxy/catalog tools use
+   * this to execute hidden tools while preserving the normal permission,
+   * lifecycle, audit, and event pipeline.
+   */
+  toolExecutor?: PilotDeckToolExecutor;
   /**
    * Optional user-elicitation channel used by `ask_user_question` and any
    * tool that requests a synchronous user answer. The host (Gateway / TUI /

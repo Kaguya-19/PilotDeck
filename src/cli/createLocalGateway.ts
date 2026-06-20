@@ -581,6 +581,7 @@ class ProjectRuntimeRegistry {
             },
           }
         : {}),
+      experimentalToolSearch: snapshot.config.tools?.experimentalToolSearch?.enabled === true,
     });
     for (const tool of this._extraTools) {
       tools.register(tool);
@@ -1090,6 +1091,7 @@ class ProjectRuntimeRegistry {
       subagentTimeoutMs: agent.subagents?.timeoutMs,
       maxContextTokens,
       thinking: agent.thinking,
+      experimentalToolSearch: runtime.snapshot.config.tools?.experimentalToolSearch,
       permissionContext: createDefaultPermissionContext({
         cwd,
         mode: permissionMode,

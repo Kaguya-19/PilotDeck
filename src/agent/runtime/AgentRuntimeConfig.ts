@@ -53,6 +53,15 @@ export type AgentRuntimeConfig = {
    */
   toolAliases?: Record<string, string>;
   /**
+   * Experimental tool catalog bridge. When enabled, the model-visible native
+   * tool set is kept small and long-tail tools are invoked through
+   * list_tools/tool_call to preserve provider prompt/tool cache stability.
+   */
+  experimentalToolSearch?: {
+    enabled: boolean;
+    coreTools?: string[];
+  };
+  /**
    * The agent's default-model context window (tokens). Passed through so the
    * loop can compare it with the routed model's window and trigger a
    * post-routing compaction pass when the routed window is smaller.

@@ -26,6 +26,7 @@ export {
   type PilotRawConfig,
   type PilotAdaptersConfig,
   type PilotGatewayConfig,
+  type PilotExperimentalToolSearchConfig,
   type PilotRouterConfig,
   type PilotProxyConfig,
   type PilotToolsConfig,

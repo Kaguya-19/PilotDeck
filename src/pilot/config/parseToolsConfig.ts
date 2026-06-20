@@ -1,6 +1,7 @@
 import { isRecord } from "../../model/config/schema.js";
 import type {
   PilotConfigDiagnostic,
+  PilotExperimentalToolSearchConfig,
   PilotToolsConfig,
   PilotWebSearchConfig,
   PilotWebSearchCustomAuth,
@@ -40,9 +41,13 @@ export function parseToolsConfig(
   }
 
   const webSearch = parseWebSearch(rawTools.webSearch, diagnostics);
+  const experimentalToolSearch = parseExperimentalToolSearch(
+    rawTools.experimentalToolSearch,
+    diagnostics,
+  );
 
   for (const key of Object.keys(rawTools)) {
-    if (key !== "webSearch") {
+    if (key !== "webSearch" && key !== "experimentalToolSearch") {
       diagnostics.push({
         code: "TOOLS_UNKNOWN_FIELD",
         severity: "warning",
@@ -53,10 +58,13 @@ export function parseToolsConfig(
     }
   }
 
-  if (!webSearch) {
+  if (!webSearch && !experimentalToolSearch) {
     return undefined;
   }
-  return { webSearch };
+  return {
+    ...(webSearch ? { webSearch } : {}),
+    ...(experimentalToolSearch ? { experimentalToolSearch } : {}),
+  };
 }
 
 function parseWebSearch(
@@ -241,6 +249,75 @@ function parseCustomProvider(
   }
 
   return Object.keys(result).length > 0 ? result : undefined;
+}
+
+function parseExperimentalToolSearch(
+  raw: unknown,
+  diagnostics: PilotConfigDiagnostic[],
+): PilotExperimentalToolSearchConfig | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (!isRecord(raw)) {
+    diagnostics.push({
+      code: "TOOLS_EXPERIMENTAL_TOOL_SEARCH_INVALID",
+      severity: "fatal",
+      message: "tools.experimentalToolSearch must be an object.",
+      path: "tools.experimentalToolSearch",
+      recoverable: false,
+    });
+    return undefined;
+  }
+
+  const result: PilotExperimentalToolSearchConfig = { enabled: false };
+
+  if (raw.enabled === undefined) {
+    diagnostics.push({
+      code: "TOOLS_EXPERIMENTAL_TOOL_SEARCH_ENABLED_MISSING",
+      severity: "fatal",
+      message: "tools.experimentalToolSearch.enabled must be set to true or false.",
+      path: "tools.experimentalToolSearch.enabled",
+      recoverable: false,
+    });
+  } else if (typeof raw.enabled !== "boolean") {
+    diagnostics.push({
+      code: "TOOLS_EXPERIMENTAL_TOOL_SEARCH_ENABLED_INVALID",
+      severity: "fatal",
+      message: "tools.experimentalToolSearch.enabled must be a boolean.",
+      path: "tools.experimentalToolSearch.enabled",
+      recoverable: false,
+    });
+  } else {
+    result.enabled = raw.enabled;
+  }
+
+  if (raw.coreTools !== undefined) {
+    if (!Array.isArray(raw.coreTools) || raw.coreTools.some((item) => typeof item !== "string" || item.trim().length === 0)) {
+      diagnostics.push({
+        code: "TOOLS_EXPERIMENTAL_TOOL_SEARCH_CORE_TOOLS_INVALID",
+        severity: "fatal",
+        message: "tools.experimentalToolSearch.coreTools must be an array of non-empty strings.",
+        path: "tools.experimentalToolSearch.coreTools",
+        recoverable: false,
+      });
+    } else {
+      result.coreTools = raw.coreTools.map((item) => item.trim());
+    }
+  }
+
+  for (const key of Object.keys(raw)) {
+    if (key !== "enabled" && key !== "coreTools") {
+      diagnostics.push({
+        code: "TOOLS_EXPERIMENTAL_TOOL_SEARCH_UNKNOWN_FIELD",
+        severity: "warning",
+        message: `Unknown tools.experimentalToolSearch field ${key}.`,
+        path: `tools.experimentalToolSearch.${key}`,
+        recoverable: true,
+      });
+    }
+  }
+
+  return result;
 }
 
 function parseEnumField<T extends string>(

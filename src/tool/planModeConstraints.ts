@@ -18,6 +18,8 @@ export const PLAN_MODE_ALLOWED_TOOLS = new Set([
   "todo_write",
   "exit_plan_mode",
   "read_skill",
+  "list_tools",
+  "tool_call",
   "structured_output",
   "agent",
   "bash",

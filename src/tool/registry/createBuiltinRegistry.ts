@@ -19,6 +19,7 @@ import {
 import { createWebFetchTool, type CreateWebFetchToolOptions } from "../builtin/webFetch.js";
 import { createWebSearchTool, type CreateWebSearchToolOptions } from "../builtin/webSearch.js";
 import { createReadSkillTool, type ReadSkillDeps } from "../builtin/readSkill.js";
+import { createListToolsTool, createToolCallProxyTool } from "../builtin/toolCatalog.js";
 import { createWriteFileTool } from "../builtin/writeFile.js";
 import { ToolRegistry } from "./ToolRegistry.js";
 
@@ -77,6 +78,10 @@ export type CreateBuiltinRegistryOptions = {
    */
   readSkill?: ReadSkillDeps | false;
   /**
+   * Experimental compact tool catalog bridge.
+   */
+  experimentalToolSearch?: boolean;
+  /**
    * `enter_plan_mode` / `exit_plan_mode` builtins. Registered by default —
    * these lightweight skeleton tools let the model request a permission-mode
    * switch to plan (read-only) and back. Pass `false` to skip.
@@ -123,6 +128,16 @@ export function createBuiltinRegistry(options?: CreateBuiltinRegistryOptions): T
   registry.register(createTodoWriteTool());
   if (options?.readSkill) {
     registry.register(createReadSkillTool(options.readSkill));
+  }
+  if (options?.experimentalToolSearch) {
+    registry.register(createListToolsTool({
+      registry,
+      excludeNames: ["list_tools", "tool_call"],
+    }));
+    registry.register(createToolCallProxyTool({
+      registry,
+      excludeNames: ["list_tools", "tool_call"],
+    }));
   }
   return registry;
 }

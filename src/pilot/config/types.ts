@@ -149,8 +149,14 @@ export type PilotWebSearchConfig = {
   customProvider?: PilotWebSearchCustomProviderConfig;
 };
 
+export type PilotExperimentalToolSearchConfig = {
+  enabled: boolean;
+  coreTools?: string[];
+};
+
 export type PilotToolsConfig = {
   webSearch?: PilotWebSearchConfig;
+  experimentalToolSearch?: PilotExperimentalToolSearchConfig;
 };
 
 export type PilotProxyConfig = {
