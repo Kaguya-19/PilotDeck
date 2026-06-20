@@ -10,7 +10,6 @@ import type {
 } from "../protocol/canonical.js";
 import type { CanonicalModelError } from "../protocol/errors.js";
 import { extractTextToolCalls } from "./parseTextToolCalls.js";
-import { getAllMarkers } from "./toolCallFormats.js";
 
 export type ModelMessageAssemblerState = {
   content: CanonicalContentBlock[];
@@ -22,6 +21,7 @@ export type ModelMessageAssemblerState = {
   error?: CanonicalModelError;
   toolCalls: CanonicalToolCall[];
   hasRepairedToolCalls?: boolean;
+  hasTextFallbackToolCalls?: boolean;
 };
 
 export type AssembledAssistantMessage = {
@@ -31,6 +31,7 @@ export type AssembledAssistantMessage = {
   toolCalls: CanonicalToolCall[];
   error?: CanonicalModelError;
   hasRepairedToolCalls?: boolean;
+  hasTextFallbackToolCalls?: boolean;
 };
 
 export function createModelMessageAssemblerState(): ModelMessageAssemblerState {
@@ -92,12 +93,12 @@ export function assembleAssistantMessage(state: ModelMessageAssemblerState): Ass
   flushTextBuffers(state);
 
   if (state.toolCalls.length === 0) {
-    const markers = getAllMarkers();
-    const textIdx = state.content.findIndex(
-      (b): b is CanonicalTextBlock => b.type === "text" && markers.some((m) => b.text.includes(m)),
-    );
-    if (textIdx >= 0) {
-      const textBlock = state.content[textIdx] as CanonicalTextBlock;
+    let firstParseError: { detectedFormat: string } | undefined;
+    for (let textIdx = 0; textIdx < state.content.length; textIdx++) {
+      const textBlock = state.content[textIdx];
+      if (textBlock.type !== "text") {
+        continue;
+      }
       const parseResult = extractTextToolCalls(textBlock.text);
       if (parseResult.toolCalls.length > 0) {
         console.log(`[text-tool-call-fallback] Extracted ${parseResult.toolCalls.length} tool call(s) from assistant text (format: ${parseResult.detectedFormat ?? "unknown"})`);
@@ -110,17 +111,22 @@ export function assembleAssistantMessage(state: ModelMessageAssemblerState): Ass
           state.content.push({ type: "tool_call", ...tc });
           state.toolCalls.push(tc);
         }
-        state.hasRepairedToolCalls = true;
+        state.hasTextFallbackToolCalls = true;
+        break;
       } else if (parseResult.parseError && parseResult.detectedFormat) {
-        state.error = {
-          provider: "text_fallback",
-          protocol: "text",
-          code: "invalid_tool_arguments",
-          message: `Tool call markers detected (format: ${parseResult.detectedFormat}) but parsing failed.`,
-          retryable: true,
-          metadata: { detectedFormat: parseResult.detectedFormat },
-        };
+        firstParseError ??= { detectedFormat: parseResult.detectedFormat };
       }
+    }
+
+    if (state.toolCalls.length === 0 && firstParseError) {
+      state.error = {
+        provider: "text_fallback",
+        protocol: "text",
+        code: "invalid_tool_arguments",
+        message: `Tool call markers detected (format: ${firstParseError.detectedFormat}) but parsing failed.`,
+        retryable: true,
+        metadata: { detectedFormat: firstParseError.detectedFormat },
+      };
     }
   }
 
@@ -134,6 +140,7 @@ export function assembleAssistantMessage(state: ModelMessageAssemblerState): Ass
     toolCalls: [...state.toolCalls],
     error: state.error,
     hasRepairedToolCalls: state.hasRepairedToolCalls,
+    hasTextFallbackToolCalls: state.hasTextFallbackToolCalls,
   };
 }
 
