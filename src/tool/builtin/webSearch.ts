@@ -1,6 +1,7 @@
 import type { PermissionResult } from "../../permission/index.js";
 import { PilotDeckToolRuntimeError } from "../protocol/errors.js";
 import type {
+  PilotDeckToolAvailabilityContext,
   PilotDeckToolDefinition,
   PilotDeckToolExecutionOutput,
   PilotDeckToolRuntimeContext,
@@ -39,6 +40,8 @@ export type CreateWebSearchToolOptions = {
   fetchImpl?: typeof fetch;
   /** Override timeout (default 30s). */
   timeoutMs?: number;
+  /** Run a bounded smoke request during tool availability filtering. Default true. */
+  preflight?: boolean;
   /** Cap on organic results returned to the model (default 8). */
   organicLimit?: number;
   /** Cap on top-stories returned (default 5). */
@@ -113,6 +116,13 @@ Usage notes:
     isReadOnly: () => true,
     isConcurrencySafe: () => true,
     isOpenWorld: () => true,
+    checkAvailability: async (context) =>
+      checkWebSearchAvailability({
+        options,
+        context,
+        fetchImpl,
+        timeoutMs: Math.min(timeoutMs, 5_000),
+      }),
     checkPermissions: async (): Promise<PermissionResult> => ({
       type: "ask",
       reason: {
@@ -186,6 +196,120 @@ Usage notes:
         organicLimit,
       });
     },
+  };
+}
+
+async function checkWebSearchAvailability(args: {
+  options: CreateWebSearchToolOptions;
+  context: PilotDeckToolAvailabilityContext;
+  fetchImpl: typeof fetch;
+  timeoutMs: number;
+}) {
+  const { options, context, fetchImpl, timeoutMs } = args;
+  const runtimeContext = availabilityContextToRuntimeContext(context);
+  const provider = resolveProvider(options.provider, options.apiKey, runtimeContext);
+  const apiKey = resolveApiKey(options.apiKey, provider, runtimeContext);
+  const custom = normalizeCustomProviderConfig(options.customProvider);
+
+  if (!apiKey && !(provider === "custom" && custom.auth === "none")) {
+    return {
+      ok: false as const,
+      code: "missing_config" as const,
+      reason: "web_search requires an API key.",
+    };
+  }
+
+  if (provider === "custom" && !options.endpoint?.trim()) {
+    return {
+      ok: false as const,
+      code: "missing_config" as const,
+      reason: "web_search custom provider requires an endpoint URL.",
+    };
+  }
+
+  const endpoint = provider === "tavily"
+    ? options.endpoint ?? DEFAULT_TAVILY_ENDPOINT
+    : provider === "custom"
+      ? options.endpoint!.trim()
+      : options.endpoint ?? readEnv(runtimeContext, "GLM_WEB_SEARCH_ENDPOINT") ?? DEFAULT_GLM_ENDPOINT;
+
+  try {
+    new URL(endpoint);
+  } catch {
+    return {
+      ok: false as const,
+      code: "missing_config" as const,
+      reason: `web_search endpoint is not a valid URL: ${endpoint}`,
+    };
+  }
+
+  if (options.preflight === false) {
+    return { ok: true as const };
+  }
+
+  try {
+    const input: WebSearchInput = { query: "PilotDeck web_search preflight" };
+    if (provider === "tavily") {
+      await performTavilySearch({
+        input,
+        context: runtimeContext,
+        apiKey: apiKey ?? "",
+        endpoint,
+        fetchImpl,
+        timeoutMs,
+        organicLimit: 1,
+      });
+    } else if (provider === "custom") {
+      await performCustomSearch({
+        input,
+        context: runtimeContext,
+        apiKey,
+        endpoint,
+        fetchImpl,
+        timeoutMs,
+        organicLimit: 1,
+        custom,
+      });
+    } else {
+      await performGlmSearch({
+        input,
+        context: runtimeContext,
+        apiKey: apiKey ?? "",
+        endpoint,
+        fetchImpl,
+        timeoutMs,
+        organicLimit: 1,
+      });
+    }
+    return { ok: true as const };
+  } catch (error) {
+    return {
+      ok: false as const,
+      code: "unreachable" as const,
+      reason: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+function availabilityContextToRuntimeContext(
+  context: PilotDeckToolAvailabilityContext,
+): PilotDeckToolRuntimeContext {
+  return {
+    sessionId: "tool-availability",
+    turnId: "tool-availability",
+    cwd: context.cwd,
+    abortSignal: context.abortSignal,
+    permissionMode: "default",
+    permissionContext: {
+      cwd: context.cwd,
+      mode: "default",
+      canPrompt: false,
+      bypassAvailable: false,
+      additionalWorkingDirectories: [],
+      rules: { allow: [], deny: [], ask: [] },
+    },
+    now: context.now,
+    env: context.env,
   };
 }
 

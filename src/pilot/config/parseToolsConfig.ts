@@ -129,6 +129,20 @@ function parseWebSearch(
     }
   }
 
+  if (raw.preflight !== undefined) {
+    if (typeof raw.preflight !== "boolean") {
+      diagnostics.push({
+        code: "TOOLS_WEB_SEARCH_PREFLIGHT_INVALID",
+        severity: "fatal",
+        message: "tools.webSearch.preflight must be a boolean.",
+        path: "tools.webSearch.preflight",
+        recoverable: false,
+      });
+    } else {
+      result.preflight = raw.preflight;
+    }
+  }
+
   const customProvider = parseCustomProvider(raw.customProvider, diagnostics);
   if (customProvider) {
     result.customProvider = customProvider;
@@ -158,7 +172,7 @@ function parseWebSearch(
   }
 
   for (const key of Object.keys(raw)) {
-    if (key !== "provider" && key !== "apiKey" && key !== "endpoint" && key !== "customProvider" && key !== "region" && key !== "tavilyApiKey") {
+    if (key !== "provider" && key !== "apiKey" && key !== "endpoint" && key !== "preflight" && key !== "customProvider" && key !== "region" && key !== "tavilyApiKey") {
       diagnostics.push({
         code: "TOOLS_WEB_SEARCH_UNKNOWN_FIELD",
         severity: "warning",

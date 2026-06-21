@@ -146,6 +146,7 @@ export type PilotWebSearchConfig = {
   provider?: PilotWebSearchProvider;
   apiKey?: string;
   endpoint?: string;
+  preflight?: boolean;
   customProvider?: PilotWebSearchCustomProviderConfig;
 };
 

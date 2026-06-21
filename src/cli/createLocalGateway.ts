@@ -63,8 +63,18 @@ import { sanitizeSessionIdForPath } from "../session/storage/ProjectSessionStora
 import { readWebSessionMessages, readSubagentWebMessages } from "../web/server/readSessionMessages.js";
 import { describeWebProject, listWebProjects } from "../web/server/listProjects.js";
 import { BackgroundTaskRuntime } from "../task/runtime/BackgroundTaskRuntime.js";
-import { createBuiltinRegistry, createPlanFileManager } from "../tool/index.js";
-import type { PilotDeckToolDefinition, ToolRegistry, PilotDeckElicitationChannel } from "../tool/index.js";
+import {
+  createBuiltinRegistry,
+  createPlanFileManager,
+  filterAvailableTools,
+  registerToolCatalogBridge,
+} from "../tool/index.js";
+import type {
+  PilotDeckToolDefinition,
+  PilotDeckUnavailableToolDiagnostic,
+  ToolRegistry,
+  PilotDeckElicitationChannel,
+} from "../tool/index.js";
 import { createRouterRuntime, type RouterRuntime } from "../router/index.js";
 import { SessionRouterStore } from "../router/session/SessionRouterStore.js";
 import type { RouterEventBus, RouterEvent } from "../router/protocol/events.js";
@@ -343,6 +353,8 @@ type ProjectRuntime = {
   router: RouterRuntime;
   pluginRuntime: PluginRuntime;
   tools: ToolRegistry;
+  projectUnavailableTools?: PilotDeckUnavailableToolDiagnostic[];
+  unavailableTools?: PilotDeckUnavailableToolDiagnostic[];
   projectStorage: GatewayProjectStorageOptions;
   /** Per-project background task runtime (shared across sessions). C5. */
   backgroundTasks: BackgroundTaskRuntime;
@@ -577,6 +589,7 @@ class ProjectRuntimeRegistry {
               ...(webSearchConfig.provider ? { provider: webSearchConfig.provider } : {}),
               ...(webSearchConfig.apiKey ? { apiKey: webSearchConfig.apiKey } : {}),
               ...(webSearchConfig.endpoint ? { endpoint: webSearchConfig.endpoint } : {}),
+              ...(webSearchConfig.preflight !== undefined ? { preflight: webSearchConfig.preflight } : {}),
               ...(webSearchConfig.customProvider ? { customProvider: webSearchConfig.customProvider } : {}),
             },
           }
@@ -698,6 +711,11 @@ class ProjectRuntimeRegistry {
           }
         }
       } catch (err) {
+        runtime.projectUnavailableTools = [{
+          toolName: "mcp:*",
+          code: "unreachable",
+          reason: (err as Error).message,
+        }];
         // eslint-disable-next-line no-console
         console.warn(
           `[pilotdeck] MCP runtime startup partial-failed for project ${runtime.projectRoot}:`,
@@ -745,6 +763,30 @@ class ProjectRuntimeRegistry {
       seedState: previous.fileState,
     });
     return session;
+  }
+
+  private async filterSessionTools(
+    runtime: ProjectRuntime,
+    registry: ToolRegistry,
+    context: GatewaySessionContext,
+  ): Promise<ToolRegistry> {
+    const override = this._sessionOverrides?.get(context.sessionKey);
+    const { registry: filtered, unavailable } = await filterAvailableTools(registry, {
+      cwd: override?.cwd ?? runtime.projectRoot,
+      env: this.options.env,
+      now: this.options.now,
+    });
+    runtime.unavailableTools = [...(runtime.projectUnavailableTools ?? []), ...unavailable];
+    for (const diagnostic of runtime.unavailableTools) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[pilotdeck] Tool ${diagnostic.toolName} unavailable (${diagnostic.code}): ${diagnostic.reason}`,
+      );
+    }
+    if (runtime.snapshot.config.tools?.experimentalToolSearch?.enabled === true) {
+      registerToolCatalogBridge(filtered);
+    }
+    return filtered;
   }
 
   private async prepareSessionRuntime(context: GatewaySessionContext) {
@@ -831,6 +873,8 @@ class ProjectRuntimeRegistry {
         }
       }
     }
+
+    sessionTools = await this.filterSessionTools(runtime, sessionTools, context);
 
     // Inject the gateway's interactive permission hook so the agent's
     // PermissionRequest lifecycle is round-tripped through whichever
