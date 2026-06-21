@@ -23,6 +23,8 @@ import { createListToolsTool, createToolCallProxyTool } from "../builtin/toolCat
 import { createWriteFileTool } from "../builtin/writeFile.js";
 import { ToolRegistry } from "./ToolRegistry.js";
 
+export const TOOL_CATALOG_BRIDGE_TOOL_NAMES = ["list_tools", "tool_call"] as const;
+
 export type CreateBuiltinRegistryOptions = {
   bash?: CreateBashToolOptions;
   /**
@@ -130,14 +132,21 @@ export function createBuiltinRegistry(options?: CreateBuiltinRegistryOptions): T
     registry.register(createReadSkillTool(options.readSkill));
   }
   if (options?.experimentalToolSearch) {
-    registry.register(createListToolsTool({
-      registry,
-      excludeNames: ["list_tools", "tool_call"],
-    }));
-    registry.register(createToolCallProxyTool({
-      registry,
-      excludeNames: ["list_tools", "tool_call"],
-    }));
+    registerToolCatalogBridge(registry);
   }
   return registry;
+}
+
+export function registerToolCatalogBridge(registry: ToolRegistry): void {
+  for (const name of TOOL_CATALOG_BRIDGE_TOOL_NAMES) {
+    registry.unregister(name);
+  }
+  registry.register(createListToolsTool({
+    registry,
+    excludeNames: TOOL_CATALOG_BRIDGE_TOOL_NAMES,
+  }));
+  registry.register(createToolCallProxyTool({
+    registry,
+    excludeNames: TOOL_CATALOG_BRIDGE_TOOL_NAMES,
+  }));
 }

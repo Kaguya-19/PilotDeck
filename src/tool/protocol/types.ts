@@ -136,6 +136,21 @@ export type PilotDeckToolExecutionOutput<Output = unknown> = {
   metadata?: Record<string, unknown>;
 };
 
+export type PilotDeckToolAvailability =
+  | { ok: true }
+  | {
+      ok: false;
+      code: "missing_config" | "unreachable" | "missing_binary" | "disabled" | "failed_check";
+      reason: string;
+    };
+
+export type PilotDeckToolAvailabilityContext = {
+  cwd: string;
+  env?: NodeJS.ProcessEnv;
+  abortSignal?: AbortSignal;
+  now?: () => Date;
+};
+
 /**
  * Tool progress event emitted via `PilotDeckToolRuntimeContext.progress`.
  * The sink is fire-and-forget — progress events MUST NOT replace the final
@@ -326,6 +341,9 @@ export type PilotDeckToolDefinition<Input = unknown, Output = unknown> = {
   isDestructive?(input: Input): boolean;
   requiresUserInteraction?(input: Input): boolean;
   isOpenWorld?(input: Input): boolean;
+  checkAvailability?(
+    context: PilotDeckToolAvailabilityContext,
+  ): Promise<PilotDeckToolAvailability> | PilotDeckToolAvailability;
   validateInput?(input: Input, context: PilotDeckToolRuntimeContext): Promise<PilotDeckToolValidationResult>;
   checkPermissions?(input: Input, context: PilotDeckToolRuntimeContext): Promise<PermissionResult>;
   execute(input: Input, context: PilotDeckToolRuntimeContext): Promise<PilotDeckToolExecutionOutput<Output>>;
