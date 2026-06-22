@@ -55,7 +55,7 @@ function buildEnterPlanModeResult(planDirectoryPath: string | undefined): string
       : ["4. When your plan is ready, call exit_plan_mode to present it for user approval"]),
     "",
     "## Rules",
-    `- DO NOT call write_file, edit_file, or bash (non-readonly) on any file${planDirectoryPath ? " except markdown plan files under the designated plan directory" : ""}`,
+    `- DO NOT call bash with write commands for any reason${planDirectoryPath ? "; use write_file/edit_file only for markdown plan files under the designated plan directory" : ""}`,
     "- You MAY use ask_user_question to clarify requirements or choose between approaches",
     "- Focus on understanding before proposing — read first, plan second",
   ].join("\n");
