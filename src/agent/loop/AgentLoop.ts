@@ -13,6 +13,7 @@ import {
   type CanonicalModelError,
   type CanonicalModelRequest,
   type CanonicalUsage,
+  materializeMediaReferences,
 } from "../../model/index.js";
 import type {
   PilotDeckReadFileStateMap,
@@ -1099,10 +1100,18 @@ export class AgentLoop {
       hasSystemPrompt: !!prepared.systemPrompt,
     });
 
+    const materialized = await materializeMediaReferences(prepared.messages);
+    for (const diagnostic of materialized.diagnostics) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[pilotdeck] ${diagnostic.code}: ${diagnostic.message} (${diagnostic.mediaType}, ${diagnostic.path})`,
+      );
+    }
+
     return {
       provider: this.config.provider,
       model: this.config.model,
-      messages: prepared.messages,
+      messages: materialized.messages,
       systemPrompt: prepared.systemPrompt ?? this.config.systemPrompt,
       tools: prepared.tools,
       toolChoice: this.config.toolChoice,

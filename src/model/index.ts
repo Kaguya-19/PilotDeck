@@ -4,6 +4,11 @@ export { parseModelConfig, type ParseModelConfigOptions } from "./config/parseMo
 export { resolveApiKey, type CredentialEnv } from "./config/resolveCredentials.js";
 export { ModelProviderRegistry, type ModelProviderAdapter } from "./providers/registry.js";
 export { buildModelRequest, type ProviderRequestBody } from "./request/buildModelRequest.js";
+export {
+  materializeMediaReferences,
+  type MaterializeMediaReferencesResult,
+  type MediaReferenceMaterializationDiagnostic,
+} from "./request/materializeMediaReferences.js";
 export { validateModelRequest, type ResolvedModelRequest } from "./request/validateModelRequest.js";
 export { parseModelResponse } from "./response/parseModelResponse.js";
 export { complete, streamModel, type ModelRuntimeOptions, type ModelTransport } from "./streaming/streamModel.js";

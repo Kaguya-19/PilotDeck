@@ -45,6 +45,7 @@ export type CanonicalAudioBlock = {
   source: "base64" | "url";
   data: string;
   mimeType: string;
+  bytes?: number;
   durationSeconds?: number;
 };
 
