@@ -32,7 +32,7 @@ export class NodeShellCommandRunner implements PilotDeckCommandRunner {
         cwd: options.cwd,
         env: options.env,
         shell: true,
-        detached: !isWindows,
+        detached: true,
         windowsHide: isWindows,
         stdio: ["ignore", "pipe", "pipe"],
       });
