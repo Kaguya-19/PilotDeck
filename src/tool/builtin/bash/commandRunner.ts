@@ -27,11 +27,13 @@ export class NodeShellCommandRunner implements PilotDeckCommandRunner {
   run(command: string, options: PilotDeckCommandOptions): Promise<PilotDeckCommandResult> {
     const startedAt = Date.now();
     return new Promise((resolve, reject) => {
+      const isWindows = process.platform === "win32";
       const child = spawn(command, {
         cwd: options.cwd,
         env: options.env,
         shell: true,
-        detached: true,
+        detached: !isWindows,
+        windowsHide: isWindows,
         stdio: ["ignore", "pipe", "pipe"],
       });
 
@@ -45,7 +47,7 @@ export class NodeShellCommandRunner implements PilotDeckCommandRunner {
         if (!pid) return;
         if (process.platform === "win32") {
           try {
-            spawn("taskkill", ["/pid", String(pid), "/t", "/f"], { stdio: "ignore" });
+            spawn("taskkill", ["/pid", String(pid), "/t", "/f"], { stdio: "ignore", windowsHide: true });
           } catch { /* best-effort */ }
         } else {
           try { process.kill(-pid, "SIGTERM"); } catch { /* already dead */ }
