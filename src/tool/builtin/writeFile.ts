@@ -14,6 +14,7 @@ import {
   recordWriteSnapshot,
   validateWriteSnapshotFresh,
 } from "./filesystem/writeSnapshots.js";
+import { formatLintDiagnostics, isLintableFile, lintAfterWrite } from "./filesystem/lintAfterWrite.js";
 
 export type WriteFileInput = {
   file_path: string;
@@ -178,8 +179,16 @@ export function createWriteFileTool(): PilotDeckToolDefinition<WriteFileInput, W
       await context.fileUpdateNotifier?.didChange?.(update);
       await context.fileUpdateNotifier?.didSave?.(update);
 
+      let resultText = `${type === "create" ? "Created" : "Overwrote"} ${resolved.relativePath}.`;
+      if (isLintableFile(resolved.absolutePath)) {
+        const lint = await lintAfterWrite(resolved.absolutePath, input.content);
+        if (!lint.ok) {
+          resultText += formatLintDiagnostics(lint.diagnostics);
+        }
+      }
+
       return {
-        content: [{ type: "text", text: `${type === "create" ? "Created" : "Overwrote"} ${resolved.relativePath}.` }],
+        content: [{ type: "text", text: resultText }],
         data,
         metadata: {
           bytesWritten: Buffer.byteLength(input.content, "utf8"),

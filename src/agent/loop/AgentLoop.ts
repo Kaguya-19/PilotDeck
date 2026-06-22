@@ -261,6 +261,7 @@ export class AgentLoop {
           });
           if (compact.type === "compacted") {
             messages = compact.messages;
+            this.readFileState.clear();
             yield {
               type: "turn_continued",
               sessionId: input.sessionId,
@@ -331,6 +332,7 @@ export class AgentLoop {
             });
             if (recompact.type === "compacted") {
               messages = recompact.messages;
+              this.readFileState.clear();
               request = await this.createModelRequest(messages, input);
               yield {
                 type: "turn_continued",

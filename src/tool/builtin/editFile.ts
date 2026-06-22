@@ -12,6 +12,7 @@ import {
   validateWriteSnapshotFresh,
 } from "./filesystem/writeSnapshots.js";
 import { findActualString, normalizeEditInput } from "./filesystem/editNormalization.js";
+import { formatLintDiagnostics, isLintableFile, lintAfterWrite } from "./filesystem/lintAfterWrite.js";
 
 export type EditFileInput = {
   file_path: string;
@@ -206,10 +207,18 @@ export function createEditFileTool(): PilotDeckToolDefinition<EditFileInput> {
       await context.fileUpdateNotifier?.didSave?.(update);
 
       const replacements = input.old_string === "" ? 0 : input.replace_all ? occurrences : 1;
+      let resultText = `${action === "created" ? "Created" : "Updated"} ${resolved.relativePath}${replacements > 0 ? ` (${replacements} replacement).` : "."}`;
+      if (isLintableFile(resolved.absolutePath)) {
+        const lint = await lintAfterWrite(resolved.absolutePath, nextContent);
+        if (!lint.ok) {
+          resultText += formatLintDiagnostics(lint.diagnostics);
+        }
+      }
+
       return {
         content: [{
           type: "text",
-          text: `${action === "created" ? "Created" : "Updated"} ${resolved.relativePath}${replacements > 0 ? ` (${replacements} replacement).` : "."}`,
+          text: resultText,
         }],
         data: {
           filePath: resolved.relativePath,
