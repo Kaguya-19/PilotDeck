@@ -24,16 +24,20 @@ export type PilotDeckCommandRunner = {
   run(command: string, options: PilotDeckCommandOptions): Promise<PilotDeckCommandResult>;
 };
 
+type SpawnShell = typeof spawn;
+
 export class NodeShellCommandRunner implements PilotDeckCommandRunner {
+  constructor(private readonly spawnShell: SpawnShell = spawn) {}
+
   run(command: string, options: PilotDeckCommandOptions): Promise<PilotDeckCommandResult> {
     const startedAt = Date.now();
     return new Promise((resolve, reject) => {
       const isWindows = process.platform === "win32";
-      const child = spawn(command, {
+      const child = this.spawnShell(command, {
         cwd: options.cwd,
         env: options.env,
         shell: true,
-        detached: true,
+        detached: !isWindows,
         windowsHide: isWindows,
         stdio: ["ignore", "pipe", "pipe"],
       });
@@ -48,7 +52,12 @@ export class NodeShellCommandRunner implements PilotDeckCommandRunner {
         if (!pid) return;
         if (process.platform === "win32") {
           try {
-            spawn("taskkill", ["/pid", String(pid), "/t", "/f"], { stdio: "ignore", windowsHide: true });
+            const killer = spawn("taskkill", ["/pid", String(pid), "/t", "/f"], {
+              stdio: "ignore",
+              windowsHide: true,
+            });
+            killer.on("error", () => undefined);
+            killer.unref();
           } catch { /* best-effort */ }
         } else {
           try { process.kill(-pid, "SIGTERM"); } catch { /* already dead */ }
@@ -61,24 +70,29 @@ export class NodeShellCommandRunner implements PilotDeckCommandRunner {
       const timeout = setTimeout(() => {
         timedOut = true;
         killProcessGroup();
+        forceResolveAfterKill();
       }, options.timeoutMs);
 
       const ABORT_FORCE_RESOLVE_MS = 15_000;
 
-      const onAbort = () => {
-        if (settled) return;
-        killProcessGroup();
+      function forceResolveAfterKill() {
         setTimeout(() => {
           if (settled) return;
           cleanup();
           resolve({
             exitCode: null,
             stdout,
-            stderr: stderr + "\n[PilotDeck] Process did not exit within 15s after abort; force-resolved.",
+            stderr: stderr + "\n[PilotDeck] Process did not exit within 15s after termination; force-resolved.",
             timedOut: true,
             durationMs: Date.now() - startedAt,
           });
         }, ABORT_FORCE_RESOLVE_MS).unref();
+      }
+
+      const onAbort = () => {
+        if (settled) return;
+        killProcessGroup();
+        forceResolveAfterKill();
       };
       options.signal?.addEventListener("abort", onAbort, { once: true });
 
@@ -90,6 +104,24 @@ export class NodeShellCommandRunner implements PilotDeckCommandRunner {
 
       const stdoutDecoder = createShellOutputDecoder();
       const stderrDecoder = createShellOutputDecoder();
+      let closeFallback: ReturnType<typeof setTimeout> | undefined;
+
+      function finish(exitCode: number | null) {
+        if (closeFallback) {
+          clearTimeout(closeFallback);
+          closeFallback = undefined;
+        }
+        stdout += stdoutDecoder.flush();
+        stderr += stderrDecoder.flush();
+        cleanup();
+        resolve({
+          exitCode,
+          stdout,
+          stderr,
+          timedOut,
+          durationMs: Date.now() - startedAt,
+        });
+      }
 
       child.stdout?.on("data", (chunk: Buffer) => {
         const text = stdoutDecoder.decode(chunk);
@@ -129,17 +161,18 @@ export class NodeShellCommandRunner implements PilotDeckCommandRunner {
         }
         reject(error);
       });
+      child.on("exit", (exitCode) => {
+        if (process.platform !== "win32" || settled || closeFallback) {
+          return;
+        }
+        closeFallback = setTimeout(() => {
+          if (settled) return;
+          finish(exitCode);
+        }, 250);
+        closeFallback.unref();
+      });
       child.on("close", (exitCode) => {
-        stdout += stdoutDecoder.flush();
-        stderr += stderrDecoder.flush();
-        cleanup();
-        resolve({
-          exitCode,
-          stdout,
-          stderr,
-          timedOut,
-          durationMs: Date.now() - startedAt,
-        });
+        finish(exitCode);
       });
     });
   }
