@@ -36,7 +36,7 @@ import type { LifecycleDispatchResult } from "../../lifecycle/index.js";
 import type { PilotDeckHookEvent } from "../../extension/hooks/protocol/events.js";
 import { NullContextRuntime } from "../../context/NullContextRuntime.js";
 import type { AgentContextRuntime } from "../../context/ContextRuntime.js";
-import type { ContextRecoveryDecision } from "../../context/index.js";
+import type { ContextRecoveryDecision, ContextSupplementalToolResultMessage } from "../../context/index.js";
 import type { PermissionMode, PermissionRule, PermissionRuleSet } from "../../permission/index.js";
 import { collectToolCalls } from "./collectToolCalls.js";
 import { createMissingToolResult, ensureToolResultPairing } from "./ensureToolResultPairing.js";
@@ -881,6 +881,7 @@ export class AgentLoop {
       // the runtime doesn't implement `applyToolResults` (e.g. NullContext),
       // we simply append the raw projection (legacy behaviour).
       const [toolResultMsg, ...supplementalMsgs] = projected;
+      const supplementalInputs = bindSupplementalMessagesToToolCalls(pairedResults, supplementalMsgs);
       let appendedMessages: CanonicalMessage[] = projected;
       const ctxApply = this.dependencies.context?.applyToolResults;
       if (ctxApply) {
@@ -889,7 +890,7 @@ export class AgentLoop {
             sessionId: input.sessionId,
             turnId: input.turnId,
             toolResultMessage: toolResultMsg,
-            supplementalMessages: supplementalMsgs,
+            supplementalMessages: supplementalInputs,
             messages,
           });
           messages = applied.messages;
@@ -1714,6 +1715,22 @@ function readRequestedMode(value: unknown): AgentRuntimeConfig["permissionMode"]
   }
   const requestedMode = (value as Record<string, unknown>).requestedMode;
   return isPermissionMode(requestedMode) ? requestedMode : undefined;
+}
+
+function bindSupplementalMessagesToToolCalls(
+  results: PilotDeckToolResult[],
+  supplementalMessages: CanonicalMessage[],
+): ContextSupplementalToolResultMessage[] {
+  const bound: ContextSupplementalToolResultMessage[] = [];
+  let index = 0;
+  for (const result of results) {
+    const count = result.supplementalMessages?.length ?? 0;
+    for (let offset = 0; offset < count && index < supplementalMessages.length; offset += 1) {
+      bound.push({ toolCallId: result.toolCallId, message: supplementalMessages[index] });
+      index += 1;
+    }
+  }
+  return bound;
 }
 
 function isPermissionMode(value: unknown): value is AgentRuntimeConfig["permissionMode"] {

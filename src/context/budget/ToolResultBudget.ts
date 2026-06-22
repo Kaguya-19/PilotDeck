@@ -30,6 +30,7 @@ export type ToolResultReplacementRecord = {
 
 export type MediaReplacementRecord = {
   id: string;
+  toolCallId: string;
   path: string;
   originalBytes: number;
   preview: string;
@@ -97,7 +98,7 @@ export class ToolResultBudget {
     return { ...message, content: newContent };
   }
 
-  async applyToSupplementalMessage(message: CanonicalMessage): Promise<CanonicalMessage> {
+  async applyToSupplementalMessage(message: CanonicalMessage, toolCallId: string): Promise<CanonicalMessage> {
     if (message.role !== "user") {
       return message;
     }
@@ -105,7 +106,7 @@ export class ToolResultBudget {
     let modified = false;
     for (let index = 0; index < message.content.length; index += 1) {
       const block = message.content[index];
-      const replaced = await this.maybeReplaceMedia(block, index);
+      const replaced = await this.maybeReplaceMedia(block, index, toolCallId);
       if (replaced !== block) {
         modified = true;
       }
@@ -170,6 +171,7 @@ export class ToolResultBudget {
   private async maybeReplaceMedia(
     block: CanonicalContentBlock,
     index: number,
+    toolCallId: string,
   ): Promise<CanonicalContentBlock> {
     if (block.type !== "image" && block.type !== "pdf" && block.type !== "audio") {
       return block;
@@ -194,6 +196,7 @@ export class ToolResultBudget {
 
     const record: MediaReplacementRecord = {
       id,
+      toolCallId,
       path,
       originalBytes,
       preview: mediaPreview(mediaType, mimeType, originalBytes, block),
@@ -209,6 +212,7 @@ export class ToolResultBudget {
   private toMediaReferenceBlock(record: MediaReplacementRecord): CanonicalMediaReferenceBlock {
     return {
       type: "media_reference",
+      toolCallId: record.toolCallId,
       path: record.path,
       originalBytes: record.originalBytes,
       preview: record.preview,

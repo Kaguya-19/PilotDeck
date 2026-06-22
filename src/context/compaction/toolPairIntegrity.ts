@@ -1,4 +1,4 @@
-import type { CanonicalMessage } from "../../model/index.js";
+import type { CanonicalContentBlock, CanonicalMessage } from "../../model/index.js";
 
 /**
  * Shared tool_call / tool_result pair integrity helpers.
@@ -24,7 +24,7 @@ export function collectToolResultIds(messages: CanonicalMessage[]): Set<string> 
   for (const message of messages) {
     if (message.role !== "user") continue;
     for (const block of message.content) {
-      if (block.type === "tool_result" || block.type === "tool_result_reference") {
+      if (isDirectToolResultBlock(block)) {
         ids.add(block.toolCallId);
       }
     }
@@ -52,7 +52,7 @@ export function stripUnpairedToolCalls(
 }
 
 /**
- * Remove tool_result / tool_result_reference blocks from user messages whose
+ * Remove tool-result blocks from user messages whose
  * toolCallId is NOT in `pairedIds`.
  * Messages that become empty after filtering are dropped entirely.
  */
@@ -64,13 +64,26 @@ export function stripUnpairedToolResults(
     if (message.role !== "user") return message;
     const filtered = message.content.filter(
       (block) =>
-        (block.type !== "tool_result" && block.type !== "tool_result_reference") ||
+        (!isDirectToolResultBlock(block) && !isMediaReferenceWithId(block)) ||
         pairedIds.has(block.toolCallId),
     );
     return filtered.length === message.content.length
       ? message
       : { ...message, content: filtered };
   }).filter((m) => m.content.length > 0);
+}
+
+function isDirectToolResultBlock(block: CanonicalContentBlock): block is Extract<
+  CanonicalContentBlock,
+  { type: "tool_result" | "tool_result_reference" }
+> {
+  return block.type === "tool_result" || block.type === "tool_result_reference";
+}
+
+function isMediaReferenceWithId(
+  block: CanonicalContentBlock,
+): block is Extract<CanonicalContentBlock, { type: "media_reference" }> & { toolCallId: string } {
+  return block.type === "media_reference" && typeof block.toolCallId === "string" && block.toolCallId.length > 0;
 }
 
 const CONTINUATION_TEXT =

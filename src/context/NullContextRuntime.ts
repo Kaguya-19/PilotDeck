@@ -56,6 +56,11 @@ function isToolResultOnly(message: CanonicalMessage): boolean {
   return (
     message.role === "user" &&
     message.content.length > 0 &&
-    message.content.every((block) => block.type === "tool_result")
+    message.content.every(
+      (block) =>
+        block.type === "tool_result" ||
+        block.type === "tool_result_reference" ||
+        (block.type === "media_reference" && typeof block.toolCallId === "string" && block.toolCallId.length > 0),
+    )
   );
 }

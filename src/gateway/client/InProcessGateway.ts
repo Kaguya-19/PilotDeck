@@ -1273,6 +1273,12 @@ export function mapAgentEvent(event: AgentEvent, runId: string): GatewayEvent[] 
             toolCallId: block.toolCallId,
             resultPath: block.path,
           });
+        } else if (block.type === "media_reference" && block.toolCallId) {
+          events.push({
+            type: "tool_result_detail_available",
+            toolCallId: block.toolCallId,
+            resultPath: block.path,
+          });
         } else if (block.type === "tool_result") {
           const projFullText = flattenToolResultBlockText(block);
           events.push({

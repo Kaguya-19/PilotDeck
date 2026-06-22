@@ -14,6 +14,7 @@ export type {
   ContextRecoveryDecision,
   ContextRecoveryInput,
   ContextRuntime,
+  ContextSupplementalToolResultMessage,
   ContextToolResultInput,
   ContextToolResultResult,
   ModelContext,

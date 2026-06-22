@@ -106,7 +106,7 @@ export class SnipEngine {
     // From head: drop tool_calls whose tool_result is in the snipped middle.
     const headCleaned = stripUnpairedToolCalls(head, tailToolResultIds);
     // From tail: drop tool_results whose tool_call lives in the snipped middle.
-    const allToolCallIds = new Set<string>([...headToolCallIds, ...tailToolCallIds]);
+    const allToolCallIds = new Set<string>([...collectToolCallIds(headCleaned), ...tailToolCallIds]);
     const tailCleaned = stripUnpairedToolResults(tail, allToolCallIds);
 
     const dangling = Array.from(headToolCallIds).filter((id) => !tailToolResultIds.has(id));
@@ -156,6 +156,10 @@ function splitIntoTurns(messages: CanonicalMessage[]): CanonicalMessage[][] {
 
 function isToolResultOnly(message: CanonicalMessage): boolean {
   if (message.content.length === 0) return false;
-  return message.content.every((block) => block.type === "tool_result");
+  return message.content.every(
+    (block) =>
+      block.type === "tool_result" ||
+      block.type === "tool_result_reference" ||
+      (block.type === "media_reference" && typeof block.toolCallId === "string" && block.toolCallId.length > 0),
+  );
 }
-

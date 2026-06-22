@@ -97,6 +97,8 @@ export type CanonicalToolResultReferenceBlock = {
 
 export type CanonicalMediaReferenceBlock = {
   type: "media_reference";
+  /** Originating tool call when known. Older transcripts may omit this. */
+  toolCallId?: string;
   /** Absolute path to the persisted media body. */
   path: string;
   /** Original binary size when known, otherwise persisted payload bytes. */

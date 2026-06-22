@@ -454,6 +454,7 @@ function flushBlock(
         provider: "pilotdeck",
         role: "tool",
         kind: "tool_result",
+        toolCallId: block.toolCallId,
         ok: true,
         text: block.preview,
         payload: {

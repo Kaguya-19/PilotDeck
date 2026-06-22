@@ -259,7 +259,10 @@ export class DefaultContextRuntime implements ContextRuntime {
       try {
         appended = await this.toolResultBudget.applyToMessage(input.toolResultMessage);
         supplementalMessages = await Promise.all(
-          supplementalMessages.map((message) => this.toolResultBudget!.applyToSupplementalMessage(message)),
+          supplementalMessages.map(async ({ toolCallId, message }) => ({
+            toolCallId,
+            message: await this.toolResultBudget!.applyToSupplementalMessage(message, toolCallId),
+          })),
         );
       } catch (error) {
         diagnostics.push({
@@ -269,7 +272,7 @@ export class DefaultContextRuntime implements ContextRuntime {
         });
       }
     }
-    const appendedMessages = [appended, ...supplementalMessages];
+    const appendedMessages = [appended, ...supplementalMessages.map(({ message }) => message)];
     return { messages: [...input.messages, ...appendedMessages], appendedMessages, diagnostics };
   }
 

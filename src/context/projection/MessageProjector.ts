@@ -23,7 +23,7 @@ export type MessageProjectorResult = {
  *  2. Ensure every assistant `tool_call` has a matching `tool_result`
  *     immediately following — inject placeholder results for any that are
  *     missing so the OpenAI API never rejects the payload.
- *  3. Strip orphaned `tool_result` blocks whose `tool_call` was dropped.
+ *  3. Strip orphaned tool-result blocks whose `tool_call` was dropped.
  */
 export class MessageProjector {
   project(input: MessageProjectorInput): MessageProjectorResult {
@@ -90,7 +90,7 @@ function toolPairSafeTruncate(
  * Walk through the conversation and:
  *  - Inject a placeholder `tool_result` user message for any assistant
  *    `tool_call` that has no matching result (fixes the OpenAI API error).
- *  - Strip orphaned `tool_result` blocks whose `tool_call` was dropped.
+ *  - Strip orphaned tool-result blocks whose `tool_call` was dropped.
  */
 function repairToolResultPairing(
   messages: CanonicalMessage[],
@@ -98,6 +98,11 @@ function repairToolResultPairing(
 ): CanonicalMessage[] {
   const output: CanonicalMessage[] = [];
   let pendingToolCallIds: string[] = [];
+  const visibleToolCallIds = new Set<string>();
+  for (const message of messages) {
+    if (message.role !== "assistant") continue;
+    for (const id of collectToolCallIds(message)) visibleToolCallIds.add(id);
+  }
 
   for (let i = 0; i < messages.length; i++) {
     const message = messages[i];
@@ -117,22 +122,26 @@ function repairToolResultPairing(
     // User (or system) message.
     const pendingSet = new Set(pendingToolCallIds);
     const seen = new Set<string>();
+    const mediaRefs = new Set<string>();
     for (const block of message.content) {
-      if (block.type === "tool_result" || block.type === "tool_result_reference") {
+      if (isDirectToolResultBlock(block)) {
         seen.add(block.toolCallId);
+      } else if (isMediaReferenceWithId(block)) {
+        mediaRefs.add(block.toolCallId);
       }
     }
 
-    // Strip orphaned tool_results / tool_result_references (their tool_call was truncated away).
-    const hasOrphans = [...seen].some((id) => !pendingSet.has(id));
+    // Strip orphaned tool result blocks (their tool_call was truncated away).
+    const hasOrphans =
+      [...seen].some((id) => !pendingSet.has(id)) ||
+      [...mediaRefs].some((id) => !visibleToolCallIds.has(id));
     let cleanedMessage = message;
     if (hasOrphans) {
       const kept: CanonicalContentBlock[] = [];
       for (const block of message.content) {
-        if (
-          (block.type === "tool_result" || block.type === "tool_result_reference") &&
-          !pendingSet.has(block.toolCallId)
-        ) {
+        const isDirectOrphan = isDirectToolResultBlock(block) && !pendingSet.has(block.toolCallId);
+        const isMediaOrphan = isMediaReferenceWithId(block) && !visibleToolCallIds.has(block.toolCallId);
+        if (isDirectOrphan || isMediaOrphan) {
           warnings.push({
             code: "tool_result_orphaned",
             message: `tool_result ${block.toolCallId} has no matching tool_call — removed.`,
@@ -199,6 +208,19 @@ function hasToolCalls(message: CanonicalMessage): boolean {
 
 function isToolResultOnly(message: CanonicalMessage): boolean {
   return message.content.length > 0 && message.content.every(
-    (block) => block.type === "tool_result" || block.type === "tool_result_reference",
+    (block) => isDirectToolResultBlock(block) || isMediaReferenceWithId(block),
   );
+}
+
+function isDirectToolResultBlock(block: CanonicalContentBlock): block is Extract<
+  CanonicalContentBlock,
+  { type: "tool_result" | "tool_result_reference" }
+> {
+  return block.type === "tool_result" || block.type === "tool_result_reference";
+}
+
+function isMediaReferenceWithId(
+  block: CanonicalContentBlock,
+): block is Extract<CanonicalContentBlock, { type: "media_reference" }> & { toolCallId: string } {
+  return block.type === "media_reference" && typeof block.toolCallId === "string" && block.toolCallId.length > 0;
 }

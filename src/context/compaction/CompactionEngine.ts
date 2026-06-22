@@ -106,12 +106,11 @@ export class CompactionEngine {
     // summary message, so any tool_result in the keep portion whose
     // tool_call is in the summarize portion (and vice-versa) becomes
     // dangling and must be stripped.
-    const keepToolCallIds = collectToolCallIds(input.messages.slice(-keepCount));
-    const keepToolResultIds = collectToolResultIds(input.messages.slice(-keepCount));
-    const messagesToKeep = stripUnpairedToolResults(
-      stripUnpairedToolCalls(input.messages.slice(-keepCount), keepToolResultIds),
-      keepToolCallIds,
-    );
+    const keptTail = input.messages.slice(-keepCount);
+    const keepToolResultIds = collectToolResultIds(keptTail);
+    const messagesWithPairedToolCalls = stripUnpairedToolCalls(keptTail, keepToolResultIds);
+    const keepToolCallIds = collectToolCallIds(messagesWithPairedToolCalls);
+    const messagesToKeep = stripUnpairedToolResults(messagesWithPairedToolCalls, keepToolCallIds);
 
     await this.options.lifecycle?.dispatch({
       event: "PreCompact",
