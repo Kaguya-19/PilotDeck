@@ -62,6 +62,8 @@ export function canonicalMessagesToMemoryMessages(messages: CanonicalMessage[]):
         );
       } else if (block.type === "tool_result_reference") {
         pushEntry("tool", block.preview);
+      } else if (block.type === "media_reference") {
+        pushEntry("tool", block.preview);
       }
     }
 

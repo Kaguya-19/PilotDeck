@@ -292,6 +292,8 @@ function toOpenAIContent(blocks: CanonicalContentBlock[]): string | unknown[] {
         return undefined;
       case "tool_result_reference":
         return { type: "text", text: block.preview };
+      case "media_reference":
+        return { type: "text", text: block.preview };
     }
   }).filter(Boolean);
 }

@@ -104,6 +104,8 @@ export function contentBlockToInputModality(block: CanonicalContentBlock): Input
     case "thinking":
     case "tool_call":
     case "tool_result":
+    case "tool_result_reference":
+    case "media_reference":
       return undefined;
   }
 }

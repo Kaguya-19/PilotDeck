@@ -880,9 +880,8 @@ export class AgentLoop {
       // runtime so large payloads land on disk via `ToolResultBudget`. When
       // the runtime doesn't implement `applyToolResults` (e.g. NullContext),
       // we simply append the raw projection (legacy behaviour).
-      // Only the first message (containing tool_result blocks) goes through
-      // budget processing; supplemental messages (PDF/image data) are appended directly.
       const [toolResultMsg, ...supplementalMsgs] = projected;
+      let appendedMessages: CanonicalMessage[] = projected;
       const ctxApply = this.dependencies.context?.applyToolResults;
       if (ctxApply) {
         try {
@@ -890,22 +889,20 @@ export class AgentLoop {
             sessionId: input.sessionId,
             turnId: input.turnId,
             toolResultMessage: toolResultMsg,
+            supplementalMessages: supplementalMsgs,
             messages,
           });
           messages = applied.messages;
+          appendedMessages = applied.appendedMessages ?? projected;
         } catch {
-          messages.push(toolResultMsg);
+          messages.push(...projected);
         }
       } else {
-        messages.push(toolResultMsg);
+        messages.push(...projected);
       }
-      for (const supplemental of supplementalMsgs) {
-        messages.push(supplemental);
-      }
-      yield { type: "tool_results_projected", sessionId: input.sessionId, turnId: input.turnId, message: toolResultMsg };
-      await input.onDurableMessage?.(toolResultMsg);
-      for (const supplemental of supplementalMsgs) {
-        await input.onDurableMessage?.(supplemental);
+      for (const appended of appendedMessages) {
+        yield { type: "tool_results_projected", sessionId: input.sessionId, turnId: input.turnId, message: appended };
+        await input.onDurableMessage?.(appended);
       }
 
       if (toolResultRepair) {
