@@ -56,6 +56,33 @@ router.get('/:sessionId/messages', async (req, res) => {
   }
 });
 
+router.get('/:sessionId/subagent/:subagentId/messages', async (req, res) => {
+  try {
+    const { sessionId, subagentId } = req.params;
+    const projectPath = String(req.query.projectPath || req.query.projectName || REPO_ROOT);
+
+    const gateway = await getPilotDeckGateway();
+    const result = await gateway.readSubagentMessages({
+      sessionKey: sessionId,
+      subagentId,
+      projectKey: projectPath,
+    });
+
+    const messages = result.messages.map((message) =>
+      mapWebMessageToNormalized(message, `${sessionId}::sub::${subagentId}`)
+    );
+
+    return res.json({
+      messages,
+      total: result.total,
+      hasMore: false,
+    });
+  } catch (error) {
+    console.error('[messages] read_subagent_messages failed:', error);
+    return res.json({ messages: [], total: 0, hasMore: false });
+  }
+});
+
 function mapWebMessageToNormalized(message, sessionId) {
   const base = {
     id: message.id,
@@ -83,6 +110,7 @@ function mapWebMessageToNormalized(message, sessionId) {
         toolName: message.toolName,
         toolInput: message.payload,
         toolId: message.toolCallId,
+        ...(message.subagentId ? { subagentId: message.subagentId } : {}),
       });
     case 'tool_result': {
       const planPayload = message.payload && typeof message.payload === 'object'

@@ -1,10 +1,11 @@
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { spawn, exec } from 'child_process';
+import { spawn, exec, execFile } from 'child_process';
 import { promisify } from 'util';
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -19,19 +20,114 @@ function execInProject(cmd) {
   return execAsync(cmd, { cwd: PROJECT_ROOT, maxBuffer: 10 * 1024 * 1024 });
 }
 
+function execGit(args) {
+  return execFileAsync('git', args, { cwd: PROJECT_ROOT, maxBuffer: 10 * 1024 * 1024 });
+}
+
+function parseUpstreamRef(value) {
+  const upstream = String(value || '').trim();
+  const slashIndex = upstream.indexOf('/');
+  if (slashIndex <= 0 || slashIndex >= upstream.length - 1) return null;
+  return {
+    remote: upstream.slice(0, slashIndex),
+    remoteBranch: upstream.slice(slashIndex + 1),
+    ref: upstream,
+  };
+}
+
+function unavailableUpdateCheck(res, {
+  currentBranch = 'unknown',
+  localHead = '',
+  currentCommit = '',
+  message,
+}) {
+  return res.json({
+    hasUpdate: false,
+    currentBranch,
+    localHead: localHead ? localHead.slice(0, 8) : 'unknown',
+    remoteHead: '',
+    behindCount: 0,
+    newCommits: [],
+    currentCommit,
+    checkUnavailable: true,
+    message,
+  });
+}
+
 /**
  * POST /api/update/check
  * Check if there are updates available (git fetch + compare HEAD)
  */
 router.post('/check', async (req, res) => {
   try {
-    const { stdout: branch } = await execInProject('git branch --show-current');
-    const currentBranch = branch.trim() || 'main';
+    let currentBranch = 'unknown';
+    let localHead = '';
+    let currentCommit = '';
 
-    await execInProject(`git fetch origin ${currentBranch}`);
+    try {
+      const { stdout: branch } = await execGit(['branch', '--show-current']);
+      currentBranch = branch.trim() || 'HEAD';
 
-    const { stdout: localHead } = await execInProject('git rev-parse HEAD');
-    const { stdout: remoteHead } = await execInProject(`git rev-parse origin/${currentBranch}`);
+      const { stdout: head } = await execGit(['rev-parse', 'HEAD']);
+      localHead = head.trim();
+
+      const { stdout: commit } = await execGit(['log', '--oneline', '-1', 'HEAD']);
+      currentCommit = commit.trim();
+    } catch (error) {
+      return unavailableUpdateCheck(res, {
+        currentBranch,
+        localHead,
+        currentCommit,
+        message: `Git version check unavailable: ${error.message}`,
+      });
+    }
+
+    let upstream = null;
+    try {
+      const { stdout } = await execGit([
+        'rev-parse',
+        '--abbrev-ref',
+        '--symbolic-full-name',
+        '@{u}',
+      ]);
+      upstream = parseUpstreamRef(stdout);
+    } catch {
+      upstream = null;
+    }
+
+    if (!upstream && currentBranch !== 'HEAD' && currentBranch !== 'unknown') {
+      upstream = {
+        remote: 'origin',
+        remoteBranch: currentBranch,
+        ref: `origin/${currentBranch}`,
+      };
+    }
+
+    if (!upstream) {
+      return unavailableUpdateCheck(res, {
+        currentBranch,
+        localHead,
+        currentCommit,
+        message: 'No upstream branch is configured for update checks.',
+      });
+    }
+
+    try {
+      await execGit([
+        'fetch',
+        upstream.remote,
+        `${upstream.remoteBranch}:refs/remotes/${upstream.remote}/${upstream.remoteBranch}`,
+      ]);
+    } catch (error) {
+      return unavailableUpdateCheck(res, {
+        currentBranch,
+        localHead,
+        currentCommit,
+        message: `Unable to fetch ${upstream.ref}: ${error.message}`,
+      });
+    }
+
+    const { stdout: remoteHead } = await execGit(['rev-parse', upstream.ref]);
 
     const local = localHead.trim();
     const remote = remoteHead.trim();
@@ -40,18 +136,21 @@ router.post('/check', async (req, res) => {
     let behindCount = 0;
     let newCommits = [];
     if (hasUpdate) {
-      const { stdout: countOut } = await execInProject(
-        `git rev-list --count HEAD..origin/${currentBranch}`,
-      );
+      const { stdout: countOut } = await execGit([
+        'rev-list',
+        '--count',
+        `HEAD..${upstream.ref}`,
+      ]);
       behindCount = parseInt(countOut.trim(), 10) || 0;
 
-      const { stdout: logOut } = await execInProject(
-        `git log --oneline HEAD..origin/${currentBranch} -10`,
-      );
+      const { stdout: logOut } = await execGit([
+        'log',
+        '--oneline',
+        `HEAD..${upstream.ref}`,
+        '-10',
+      ]);
       newCommits = logOut.trim().split('\n').filter(Boolean);
     }
-
-    const { stdout: currentCommit } = await execInProject('git log --oneline -1 HEAD');
 
     res.json({
       hasUpdate,
@@ -60,12 +159,12 @@ router.post('/check', async (req, res) => {
       remoteHead: remote.slice(0, 8),
       behindCount,
       newCommits,
-      currentCommit: currentCommit.trim(),
+      currentCommit,
+      upstream: upstream.ref,
     });
   } catch (error) {
-    res.status(500).json({
-      error: 'Failed to check for updates',
-      message: error.message,
+    return unavailableUpdateCheck(res, {
+      message: `Failed to check for updates: ${error.message}`,
     });
   }
 });

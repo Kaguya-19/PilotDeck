@@ -1,6 +1,7 @@
 import type { Gateway, GatewayEvent } from "../../gateway/index.js";
 import type { CronRunRecord, CronRunOutcome, CronTask } from "../protocol/types.js";
 import type { CronTaskStore } from "../storage/CronTaskStore.js";
+import { resolveCronTimezone } from "../CronTimezone.js";
 import { computeNextRunAt } from "./CronSchedule.js";
 
 export type CronActiveRun = {
@@ -28,6 +29,9 @@ export type CronFireDependencies = {
   registerActiveRun: (run: CronActiveRun) => void;
   unregisterActiveRun: (runId: string) => CronActiveRun | undefined;
   getActiveRun: (runId: string) => CronActiveRun | undefined;
+  runTimeoutMs: number;
+  defaultTimezone: string;
+  releaseTaskSession: (task: CronTask) => Promise<void>;
   logger?: {
     warn: (message: string, data?: Record<string, unknown>) => void;
   };
@@ -47,44 +51,76 @@ export class CronFire {
       stopRequested: false,
     };
     this.deps.registerActiveRun(activeRun);
-    await this.deps.store.putTask({
-      ...task,
-      status: "running",
-      lastRunId: runId,
-      updatedAt: startedAt.toISOString(),
-    });
-    this.deps.onPhaseEvent?.({
-      phase: "cron_started",
-      runId,
-      taskId: task.taskId,
-      projectKey: task.projectKey,
-      timestamp: startedAt.toISOString(),
-      title: task.message.trimStart().split(/\r?\n/, 1)[0]?.trim().slice(0, 120),
-    });
 
     let outcome: CronRunOutcome = "completed";
     let error: CronRunRecord["error"];
+    let forcedFailure = false;
+    let abortRequested = false;
     try {
+      await this.deps.store.putTask({
+        ...task,
+        status: "running",
+        lastRunId: runId,
+        updatedAt: startedAt.toISOString(),
+      });
+      this.deps.onPhaseEvent?.({
+        phase: "cron_started",
+        runId,
+        taskId: task.taskId,
+        projectKey: task.projectKey,
+        timestamp: startedAt.toISOString(),
+        title: task.message.trimStart().split(/\r?\n/, 1)[0]?.trim().slice(0, 120),
+      });
       for await (const event of this.deps.gateway.submitTurn({
         sessionKey: task.sessionKey,
         channelKey: task.channelKey,
         projectKey: task.projectKey,
         message: task.message,
-        mode: task.mode,
+        mode: "bypassPermissions",
         runId,
+        timeoutMs: this.deps.runTimeoutMs,
       })) {
         await this.deps.store.appendRunEvent(runId, event);
+        if (event.type === "elicitation_request" || event.type === "permission_request") {
+          outcome = "failed";
+          forcedFailure = true;
+          error = {
+            code: "cron_interaction_required",
+            message: `Cron run requested unsupported user interaction through ${event.type}.`,
+          };
+          if (!abortRequested) {
+            abortRequested = true;
+            void this.deps.gateway
+              .abortTurn({ sessionKey: task.sessionKey, runId })
+              .catch(() => undefined);
+          }
+          continue;
+        }
         if (event.type === "error") {
+          if (event.code === "turn_timeout") {
+            outcome = "failed";
+            forcedFailure = true;
+            error = {
+              code: "cron_run_timeout",
+              message: event.message,
+            };
+            continue;
+          }
+          if (forcedFailure) {
+            continue;
+          }
           outcome = event.code === "agent_aborted" ? "aborted" : "failed";
           error = { code: event.code ?? "cron_run_failed", message: event.message };
         }
       }
     } catch (caught) {
-      outcome = "failed";
-      error = {
-        code: "cron_run_failed",
-        message: caught instanceof Error ? caught.message : String(caught),
-      };
+      if (!forcedFailure) {
+        outcome = "failed";
+        error = {
+          code: "cron_run_failed",
+          message: caught instanceof Error ? caught.message : String(caught),
+        };
+      }
     } finally {
       const currentActive = this.deps.getActiveRun(runId);
       if (currentActive?.stopRequested) {
@@ -92,17 +128,25 @@ export class CronFire {
       }
       this.deps.unregisterActiveRun(runId);
       const finishedAt = this.deps.now();
-      await this.deps.store.appendRun({
-        schemaVersion: 1,
-        runId,
-        taskId: task.taskId,
-        sessionKey: task.sessionKey,
-        projectKey: task.projectKey,
-        startedAt: startedAt.toISOString(),
-        finishedAt: finishedAt.toISOString(),
-        outcome,
-        error,
-      });
+      await this.deps.store
+        .appendRun({
+          schemaVersion: 1,
+          runId,
+          taskId: task.taskId,
+          sessionKey: task.sessionKey,
+          projectKey: task.projectKey,
+          startedAt: startedAt.toISOString(),
+          finishedAt: finishedAt.toISOString(),
+          outcome,
+          error,
+        })
+        .catch((persistError: unknown) => {
+          this.deps.logger?.warn("cron run terminal record write failed", {
+            taskId: task.taskId,
+            runId,
+            error: persistError instanceof Error ? persistError.message : String(persistError),
+          });
+        });
       this.deps.onPhaseEvent?.({
         phase: outcome === "completed" ? "cron_completed" : "cron_failed",
         runId,
@@ -124,14 +168,27 @@ export class CronFire {
 
   private async updateTaskAfterRun(task: CronTask, finishedAt: Date, outcome: CronRunOutcome): Promise<void> {
     if (task.schedule.type === "once") {
-      await this.deps.store.deleteTask(task.taskId);
+      try {
+        await this.deps.store.deleteTask(task.taskId);
+      } finally {
+        await this.deps.releaseTaskSession(task);
+      }
       return;
     }
-    const nextRunAt = computeNextRunAt(task.schedule, finishedAt)?.toISOString();
+    const timezone = resolveCronTimezone(
+      task.schedule.timezone,
+      task.timezone,
+      this.deps.defaultTimezone,
+    );
+    const schedule = { ...task.schedule, timezone };
+    const nextRunAt = computeNextRunAt(schedule, finishedAt, timezone)?.toISOString();
     await this.deps.store.updateTask(task.taskId, (current) => ({
       ...current,
+      schedule,
+      timezone,
       status: "scheduled",
       nextRunAt,
+      scheduleComputationVersion: 2,
       updatedAt: finishedAt.toISOString(),
     }));
     void outcome;

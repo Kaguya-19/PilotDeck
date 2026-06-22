@@ -2,6 +2,7 @@ import { PermissionRuntime } from "../../permission/index.js";
 import type { LifecycleRuntime, PilotDeckHookEffect } from "../../lifecycle/index.js";
 import { toolError } from "../protocol/errors.js";
 import type { PilotDeckToolErrorCode } from "../protocol/errors.js";
+import { PLAN_MODE_ALLOWED_TOOLS, buildPlanModeViolationMessage } from "../planModeConstraints.js";
 import {
   applyResultSizeLimit,
   type PilotDeckToolErrorResult,
@@ -39,6 +40,17 @@ export class ToolRuntime {
         call.name,
         "tool_not_found",
         `Tool ${call.name} does not exist.`,
+        startedAt,
+        context,
+      );
+    }
+
+    if (context.permissionMode === "plan" && !PLAN_MODE_ALLOWED_TOOLS.has(tool.name)) {
+      return this.errorResult(
+        call.id,
+        tool.name,
+        "plan_mode_violation",
+        buildPlanModeViolationMessage(tool.name),
         startedAt,
         context,
       );
@@ -183,17 +195,18 @@ export class ToolRuntime {
     }
 
     executeInput = decision.updatedInput ?? executeInput;
-    const executeContext: PilotDeckToolRuntimeContext = context.progress
+    const baseContext: PilotDeckToolRuntimeContext = { ...context, currentToolCallId: call.id };
+    const executeContext: PilotDeckToolRuntimeContext = baseContext.progress
       ? {
-          ...context,
+          ...baseContext,
           progress: (event) =>
-            context.progress!({
+            baseContext.progress!({
               ...event,
               toolCallId: event.toolCallId || call.id,
               toolName: event.toolName || tool.name,
             }),
         }
-      : context;
+      : baseContext;
     try {
       const output = await tool.execute(executeInput, executeContext);
       const maxResultBytes = tool.maxResultBytes ?? context.maxResultBytes;

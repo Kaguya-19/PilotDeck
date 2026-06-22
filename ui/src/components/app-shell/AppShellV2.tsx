@@ -25,6 +25,7 @@ import {
 import { api } from '../../utils/api';
 import SidebarV2 from './SidebarV2';
 import MainAreaV2 from './MainAreaV2';
+import { ConnectionBanner } from '../ui/ConnectionBanner';
 
 type TypedSettingsProps = {
   isOpen: boolean;
@@ -581,7 +582,9 @@ export default function AppShellV2() {
   );
 
   return (
-    <div className="ui-v2 fixed inset-0 flex bg-white font-sans text-neutral-900 dark:bg-neutral-950 dark:text-neutral-100">
+    <div className="ui-v2 fixed inset-0 flex flex-col bg-white font-sans text-neutral-900 dark:bg-neutral-950 dark:text-neutral-100">
+      <ConnectionBanner />
+      <div className="flex min-h-0 flex-1">
       {!isMobile ? (
         desktopSidebarOpen ? sidebar : null
       ) : (
@@ -697,6 +700,7 @@ export default function AppShellV2() {
 	            document.body,
 	          )
 	        : null}
+	    </div>
 	    </div>
 	  );
 	}

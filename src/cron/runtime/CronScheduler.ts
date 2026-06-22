@@ -1,6 +1,7 @@
 import type { CronConfig } from "../config/parseCronConfig.js";
 import type { CronTask } from "../protocol/types.js";
 import type { CronTaskStore } from "../storage/CronTaskStore.js";
+import { resolveCronTimezone } from "../CronTimezone.js";
 import { computeNextRunAt } from "./CronSchedule.js";
 import type { CronFire } from "./CronFire.js";
 
@@ -113,19 +114,38 @@ export class CronScheduler {
     const tasks = await this.deps.store.listTasks();
     await Promise.all(
       tasks.map(async (task) => {
-        if (task.status === "running") {
-          await this.deps.store.putTask({ ...task, status: "scheduled", updatedAt: now.toISOString() });
+        if (task.schedule.type === "once") {
+          if (task.nextRunAt) {
+            return;
+          }
+          const nextRunAt = computeNextRunAt(task.schedule, now)?.toISOString();
+          if (!nextRunAt) {
+            await this.deps.store.deleteTask(task.taskId);
+            return;
+          }
+          await this.deps.store.putTask({ ...task, nextRunAt, updatedAt: now.toISOString() });
           return;
         }
-        if (task.nextRunAt) {
+
+        if (task.scheduleComputationVersion === 2 && task.nextRunAt) {
           return;
         }
-        const nextRunAt = computeNextRunAt(task.schedule, now)?.toISOString();
-        if (!nextRunAt && task.schedule.type === "once") {
-          await this.deps.store.deleteTask(task.taskId);
-          return;
-        }
-        await this.deps.store.putTask({ ...task, nextRunAt, updatedAt: now.toISOString() });
+        const timezone = resolveCronTimezone(
+          task.schedule.timezone,
+          task.timezone,
+          this.deps.config.timezone,
+        );
+        const schedule = { ...task.schedule, timezone };
+        const nextRunAt = computeNextRunAt(schedule, now, timezone)?.toISOString();
+        await this.deps.store.putTask({
+          ...task,
+          schedule,
+          timezone,
+          status: "scheduled",
+          nextRunAt,
+          scheduleComputationVersion: 2,
+          updatedAt: now.toISOString(),
+        });
       }),
     );
   }

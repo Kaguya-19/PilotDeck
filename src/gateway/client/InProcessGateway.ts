@@ -38,6 +38,8 @@ import type {
   WebProjectSummary,
   WebReadSessionMessagesInput,
   WebReadSessionMessagesResult,
+  WebReadSubagentMessagesInput,
+  WebReadSubagentMessagesResult,
 } from "../protocol/types.js";
 import type {
   CronCreateInput,
@@ -76,6 +78,26 @@ import type {
 import type { TelemetryClient } from "../../telemetry/index.js";
 import type { TelemetryExecutionKind, TelemetryModule } from "../../telemetry/index.js";
 
+const PLAN_COMMAND_USAGE = "用法：/plan <任务>\n例如：/plan 设计一个新功能";
+const PLAN_TOOLS_DISABLED_BY_DEFAULT_CHANNELS = new Set<string>([
+  "bluebubbles",
+  "discord",
+  "dingtalk",
+  "email",
+  "feishu",
+  "matrix",
+  "mattermost",
+  "qq",
+  "signal",
+  "slack",
+  "sms",
+  "telegram",
+  "wecom",
+  "wecom_callback",
+  "weixin",
+  "whatsapp",
+]);
+
 export type InProcessGatewayOptions = {
   now?: () => Date;
   uuid?: () => string;
@@ -87,6 +109,7 @@ export type InProcessGatewayOptions = {
    * `read_session_messages` without leaking transcript paths.
    */
   readSessionMessages?: (input: WebReadSessionMessagesInput) => Promise<WebReadSessionMessagesResult>;
+  readSubagentMessages?: (input: WebReadSubagentMessagesInput) => Promise<WebReadSubagentMessagesResult>;
   /**
    * Web Phase 3 — pluggable project enumerator + describer.
    */
@@ -230,7 +253,46 @@ export class InProcessGateway implements Gateway {
     return true;
   }
 
+  broadcastRetryProgress(detail: {
+    sessionId: string;
+    attempt: number;
+    maxAttempts: number;
+    delayMs: number;
+    reason: string;
+    provider: string;
+    model: string;
+  }): void {
+    const event: GatewayEvent = {
+      type: "agent_status",
+      event: "retry_progress",
+      detail: {
+        attempt: detail.attempt,
+        maxAttempts: detail.maxAttempts,
+        delayMs: detail.delayMs,
+        reason: detail.reason,
+        provider: detail.provider,
+        model: detail.model,
+      },
+    };
+    this.emitForSession(detail.sessionId, event);
+  }
+
   async *submitTurn(input: GatewaySubmitTurnInput): AsyncIterable<GatewayEvent> {
+    const plannedInput = normalizePlanCommandInput(input);
+    if (!plannedInput) {
+      yield {
+        type: "assistant_text_delta",
+        text: PLAN_COMMAND_USAGE,
+      };
+      yield {
+        type: "turn_completed",
+        usage: {},
+        finishReason: "completed",
+      };
+      return;
+    }
+    input = plannedInput;
+
     // Per-turn config refresh (defensive). The fs watcher path already
     // catches most edits, but this guarantees a fresh apiKey/url is in
     // effect for the very next turn even when watcher events are
@@ -275,6 +337,8 @@ export class InProcessGateway implements Gateway {
     }
 
     const telemetryContext = resolveSubmitTurnTelemetry(input);
+    let timeoutHandle: NodeJS.Timeout | undefined;
+    let timedOut = false;
 
     // Background pump: agent events → queue.
     const pump = (async () => {
@@ -284,8 +348,33 @@ export class InProcessGateway implements Gateway {
           projectKey: input.projectKey,
           channelKey: input.channelKey,
         });
+        if (input.timeoutMs !== undefined && Number.isFinite(input.timeoutMs) && input.timeoutMs > 0) {
+          timeoutHandle = setTimeout(() => {
+            timedOut = true;
+            const gatewayEvent: GatewayEvent = {
+              type: "error",
+              code: "turn_timeout",
+              message: `Turn exceeded the ${input.timeoutMs}ms timeout.`,
+              recoverable: false,
+            };
+            this.recordActiveTurnEvent(input.sessionKey, gatewayEvent);
+            queue.enqueue(gatewayEvent);
+            this.elicitationBus.rejectSession(input.sessionKey, "turn_timeout");
+            this.permissionBus.rejectSession(input.sessionKey, "turn_timeout");
+            queue.close();
+            try {
+              session.abort(`timeout:${runId}`);
+            } catch {
+              // The queue is already closed, so a faulty abort implementation
+              // cannot defeat the hard turn timeout.
+            }
+          }, input.timeoutMs);
+        }
         const permissionSettings = readPermissionSettings();
-        const permissionMode = input.mode ?? (permissionSettings.skipPermissions ? "bypassPermissions" : undefined);
+        const inputMode = normalizeGatewayModeForLegacyInput((input as { mode?: unknown }).mode);
+        const permissionMode = inputMode ?? (permissionSettings.skipPermissions ? "bypassPermissions" : undefined);
+        const basePermissionMode = normalizeGatewayModeForLegacyInput((input as { basePermissionMode?: unknown }).basePermissionMode);
+        const allowPlanModeTools = input.allowPlanModeTools ?? defaultAllowPlanModeTools(input.channelKey);
         const persistedRules = permissionSettingsToRuleSet(permissionSettings);
         const sessionAllowRules = this.sessionPermissionGrants.get(input.sessionKey) ?? [];
         this.options.telemetry?.trackFeatureLoopStage({
@@ -315,13 +404,17 @@ export class InProcessGateway implements Gateway {
             turnId: runId,
             maxTurns: input.maxTurns,
             permissionMode,
-            basePermissionMode: input.basePermissionMode,
+            basePermissionMode,
+            allowPlanModeTools,
             permissionRules: {
               ...persistedRules,
               allow: [...sessionAllowRules, ...persistedRules.allow],
             },
           },
         )) {
+          if (this.turnCompletions.get(input.sessionKey) !== turnDone) {
+            break;
+          }
           emitSessionTelemetry(this.options.telemetry, event, {
             sessionId: input.sessionKey,
             runId,
@@ -350,15 +443,21 @@ export class InProcessGateway implements Gateway {
             channelKey: input.channelKey,
           },
         });
-        const gatewayEvent: GatewayEvent = {
-          type: "error",
-          code: "gateway_submit_failed",
-          message: error instanceof Error ? error.message : String(error),
-          recoverable: false,
-        };
-        this.recordActiveTurnEvent(input.sessionKey, gatewayEvent);
-        queue.enqueue(gatewayEvent);
+        if (this.turnCompletions.get(input.sessionKey) === turnDone) {
+          const gatewayEvent: GatewayEvent = {
+            type: "error",
+            code: "gateway_submit_failed",
+            message: error instanceof Error ? error.message : String(error),
+            recoverable: false,
+          };
+          this.recordActiveTurnEvent(input.sessionKey, gatewayEvent);
+          queue.enqueue(gatewayEvent);
+        }
       } finally {
+        if (timeoutHandle) {
+          clearTimeout(timeoutHandle);
+          timeoutHandle = undefined;
+        }
         queue.close();
       }
     })();
@@ -376,8 +475,15 @@ export class InProcessGateway implements Gateway {
       this.elicitationBus.rejectSession(input.sessionKey, "turn_ended");
       this.permissionBus.rejectSession(input.sessionKey, "turn_ended");
       this.router.endTurn(input.sessionKey, runId);
-      // Defensive — make sure the pump promise is settled before we resolve.
-      await pump.catch(() => undefined);
+      if (timedOut) {
+        // The timed-out AgentSession is never safe to reuse. Do not await a
+        // misbehaving tool here: the hard timeout must release the Cron run.
+        await this.router.close(input.sessionKey);
+        void pump.catch(() => undefined);
+      } else {
+        // Defensive — make sure the pump promise is settled before we resolve.
+        await pump.catch(() => undefined);
+      }
       // Signal any in-flight `abortTurn` awaiters that the session slot
       // has been released. Drop our deferred only if we still own it —
       // a later turn for the same session may have already installed
@@ -527,6 +633,15 @@ export class InProcessGateway implements Gateway {
       );
     }
     return this.options.readSessionMessages(input);
+  }
+
+  async readSubagentMessages(input: WebReadSubagentMessagesInput): Promise<WebReadSubagentMessagesResult> {
+    if (!this.options.readSubagentMessages) {
+      throw new Error(
+        "read_subagent_messages is not configured. Wire `readSubagentMessages` via createLocalGateway.",
+      );
+    }
+    return this.options.readSubagentMessages(input);
   }
 
   async listProjects(): Promise<WebListProjectsResult> {
@@ -700,6 +815,16 @@ function resolveSubmitTurnTelemetry(input: GatewaySubmitTurnInput): {
     executionKind: input.telemetry?.executionKind ?? "user_session",
     phase: input.telemetry?.phase,
   };
+}
+
+export function normalizeGatewayModeForLegacyInput(value: unknown): GatewaySubmitTurnInput["mode"] | undefined {
+  if (value === undefined || value === null || value === "") {
+    return undefined;
+  }
+  if (value === "default" || value === "plan" || value === "bypassPermissions") {
+    return value;
+  }
+  return "default";
 }
 
 function emitSessionTelemetry(
@@ -1052,6 +1177,8 @@ export function mapAgentEvent(event: AgentEvent, runId: string): GatewayEvent[] 
   switch (event.type) {
     case "turn_started":
       return [{ type: "turn_started", runId }];
+    case "model_request_started":
+      return [{ type: "model_request_started", model: event.model, provider: event.provider }];
     case "model_event":
       return mapModelEvent(event.event);
     case "tool_calls_detected":
@@ -1065,7 +1192,6 @@ export function mapAgentEvent(event: AgentEvent, runId: string): GatewayEvent[] 
       const fullText = event.result.content.map(contentToText).join("\n");
       const lines = fullText.split("\n");
       const lineCount = lines.length;
-      const preview = lines.slice(0, 5).join("\n");
       const totalBytes = Buffer.byteLength(fullText, "utf-8");
 
       const PERSIST_THRESHOLD = 4096;
@@ -1102,7 +1228,7 @@ export function mapAgentEvent(event: AgentEvent, runId: string): GatewayEvent[] 
           type: "tool_call_finished",
           toolCallId: event.result.toolCallId,
           ok: event.result.type === "success",
-          resultPreview: preview,
+          resultPreview: fullText,
           resultLineCount: lineCount,
           resultBytes: totalBytes,
           toolName: event.result.toolName,
@@ -1126,6 +1252,7 @@ export function mapAgentEvent(event: AgentEvent, runId: string): GatewayEvent[] 
           code: event.error.code,
           message: event.error.message,
           recoverable: false,
+          userHint: event.error.userHint,
         },
       ];
     case "session_aborted":
@@ -1187,7 +1314,7 @@ export function mapAgentEvent(event: AgentEvent, runId: string): GatewayEvent[] 
       return [{
         type: "agent_status",
         event: "subagent_started",
-        detail: { subagentId: event.subagentId, subagentType: event.subagentType },
+        detail: { subagentId: event.subagentId, subagentType: event.subagentType, toolCallId: event.toolCallId },
       }];
     case "subagent_completed":
       return [{
@@ -1221,6 +1348,7 @@ export function mapAgentEvent(event: AgentEvent, runId: string): GatewayEvent[] 
           toolCallId: event.result.toolCallId,
           toolName: event.result.toolName,
           ok: event.result.type === "success",
+          content: fullText,
           preview: lines.slice(0, 3).join("\n"),
           resultLineCount: lines.length,
           resultBytes: Buffer.byteLength(fullText, "utf-8"),
@@ -1240,6 +1368,19 @@ export function mapAgentEvent(event: AgentEvent, runId: string): GatewayEvent[] 
           toolName: event.toolName,
           success: event.success,
           durationMs: event.durationMs,
+        },
+      }];
+    case "retry_progress":
+      return [{
+        type: "agent_status",
+        event: "retry_progress",
+        detail: {
+          attempt: event.detail.attempt,
+          maxAttempts: event.detail.maxAttempts,
+          delayMs: event.detail.delayMs,
+          reason: event.detail.reason,
+          provider: event.detail.provider,
+          model: event.detail.model,
         },
       }];
     case "session_ended":
@@ -1314,6 +1455,39 @@ function mapSubagentModelEvent(
     default:
       return [];
   }
+}
+
+function normalizePlanCommandInput(input: GatewaySubmitTurnInput): GatewaySubmitTurnInput | undefined {
+  const parsed = parsePlanCommand(input.message);
+  if (!parsed.isPlanCommand) {
+    return input;
+  }
+  if (!parsed.message) {
+    return undefined;
+  }
+  return {
+    ...input,
+    message: parsed.message,
+    mode: "plan",
+    basePermissionMode: input.basePermissionMode ?? input.mode ?? "default",
+    allowPlanModeTools: true,
+  };
+}
+
+function defaultAllowPlanModeTools(channelKey: string): boolean {
+  return !PLAN_TOOLS_DISABLED_BY_DEFAULT_CHANNELS.has(channelKey);
+}
+
+function parsePlanCommand(message: string): { isPlanCommand: boolean; message: string } {
+  const trimmed = message.trim();
+  const match = trimmed.match(/^\/plan(?:\s+([\s\S]*))?$/u);
+  if (!match) {
+    return { isPlanCommand: false, message };
+  }
+  return {
+    isPlanCommand: true,
+    message: (match[1] ?? "").trim(),
+  };
 }
 
 function mapTurnCompleted(result: AgentTurnResult): GatewayEvent[] {

@@ -70,6 +70,7 @@ export type PilotAgentConfig = {
    * or when you want compaction to kick in earlier.
    */
   maxContextTokens?: number;
+  thinking?: { enabled: boolean; budgetTokens?: number };
   subagents?: {
     timeoutMs?: number;
   };

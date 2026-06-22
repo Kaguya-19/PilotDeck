@@ -11,6 +11,7 @@ import {
   Globe2,
   MessageSquare,
   Palette,
+  Radio,
   RefreshCw,
   Server,
   Shield,
@@ -39,14 +40,16 @@ import SettingsToggle from './SettingsToggle';
 import PilotDeckConfigTab from './tabs/PilotDeckConfigTab';
 import McpServersTab from './tabs/McpServersTab';
 import PermissionsSettingsTab from './tabs/PermissionsSettingsTab';
+import GatewaySettingsTab from './tabs/GatewaySettingsTab';
 
-type SettingsPage = 'main' | 'config' | 'mcp' | 'permissions' | 'chatInput' | 'codeEditor';
+type SettingsPage = 'main' | 'config' | 'mcp' | 'permissions' | 'chatInput' | 'codeEditor' | 'gateway';
 type ThemeMode = 'system' | 'light' | 'dark';
 
 const pageFromInitialTab = (tab: string): SettingsPage => {
   if (tab === 'config') return 'config';
   if (tab === 'mcp') return 'mcp';
   if (tab === 'permissions') return 'permissions';
+  if (tab === 'gateway') return 'gateway';
   return 'main';
 };
 
@@ -77,6 +80,7 @@ function Settings({ isOpen, onClose, projects = [], initialTab = 'appearance' }:
     permissions: t('mainTabs.permissions'),
     chatInput: t('settingsHome.chatInput.title'),
     codeEditor: t('appearanceSettings.codeEditor.title'),
+    gateway: t('gateway.title'),
   }[page];
 
   const maxWidth = page === 'config' ? 'max-w-[820px]' : 'max-w-[760px]';
@@ -125,6 +129,7 @@ function Settings({ isOpen, onClose, projects = [], initialTab = 'appearance' }:
             {page === 'config' && <PilotDeckConfigTab projects={projects} />}
             {page === 'mcp' && <McpServersTab projects={projects} />}
             {page === 'permissions' && <PermissionsSettingsTab />}
+            {page === 'gateway' && <GatewaySettingsTab />}
             {page === 'chatInput' && <ChatInputSettingsPage />}
             {page === 'codeEditor' && (
               <CodeEditorSettingsPage
@@ -196,6 +201,12 @@ function SettingsHome({ projectSortOrder, onProjectSortOrderChange, onOpenPage }
             title={t('mcpConfig.title')}
             detail={t('settingsHome.mcp.detail')}
             onClick={() => onOpenPage('mcp')}
+          />
+          <NavigationRow
+            icon={Radio}
+            title={t('gateway.title')}
+            detail={t('settingsHome.gateway.detail')}
+            onClick={() => onOpenPage('gateway')}
           />
         </GroupedCard>
       </SettingsGroup>
@@ -325,6 +336,15 @@ function ChatInputSettingsPage() {
               ariaLabel={t('quickSettings.showThinking')}
             />
           </SettingsRow>
+          {preferences.showThinking ? (
+            <SettingsRow label={t('quickSettings.inlineThinking')}>
+              <SettingsToggle
+                checked={preferences.inlineThinking}
+                onChange={(value) => setPreference('inlineThinking', value)}
+                ariaLabel={t('quickSettings.inlineThinking')}
+              />
+            </SettingsRow>
+          ) : null}
         </SettingsCard>
       </SettingsSection>
 

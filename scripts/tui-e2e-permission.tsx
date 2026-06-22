@@ -97,6 +97,7 @@ class MockGateway implements Gateway {
   respondElicitation = stub({ delivered: false }) as Gateway["respondElicitation"];
   grantSessionPermission = stub({ granted: false }) as Gateway["grantSessionPermission"];
   readSessionMessages = stub({ messages: [], hasMore: false, session: {} as any }) as unknown as Gateway["readSessionMessages"];
+  readSubagentMessages = stub({ messages: [], total: 0 }) as unknown as Gateway["readSubagentMessages"];
   listProjects = stub({ projects: [] }) as Gateway["listProjects"];
   describeProject = stub({ projectKey: "", name: "", root: "", fullPath: "", sessionCount: 0 }) as unknown as Gateway["describeProject"];
 }

@@ -243,7 +243,7 @@ export class AlwaysOnRuntime {
     this.scheduler = undefined;
     this.fire = undefined;
     this.runContexts.list().forEach((ctx) => this.runContexts.unregister(ctx.sessionKey));
-    this.sessionOverrides.clear();
+    this.sessionOverrides.deletePrefix("always-on/");
     this.logger.info("always-on runtime stopped", { projectKey: this.projectKey });
   }
 

@@ -26,10 +26,12 @@ function normalizeToolDisplayName(name: string): string {
 }
 
 function isPlanModeToolDenyText(text: unknown): boolean {
-  return typeof text === "string" && /plan mode denies side-effecting tool\b/i.test(text);
+  if (typeof text !== "string") return false;
+  return /\[PLAN_MODE_VIOLATION\]/i.test(text) || /plan mode denies side-effecting tool\b/i.test(text);
 }
 
 function normalizeToolErrorCode(errorCode: string | undefined, resultPreview: unknown): string | undefined {
+  if (errorCode === "plan_mode_violation") return "plan_mode_denied";
   if (isPlanModeToolDenyText(resultPreview)) return "plan_mode_denied";
   return errorCode;
 }
@@ -81,6 +83,8 @@ export type WebMessage = {
    * uses this.
    */
   errorCode?: string;
+  /** UUID of the subagent spawned by this tool_use (agent/Task) call. */
+  subagentId?: string;
   payload?: unknown;
   source: "live" | "history";
   finishReason?: string;

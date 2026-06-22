@@ -5,8 +5,14 @@ export {
   type CreateCronRuntimeOptions,
   type CronRuntimeLogger,
 } from "./runtime/CronRuntime.js";
+export {
+  CronManager,
+  createCronManager,
+  type CreateCronManagerOptions,
+} from "./runtime/CronManager.js";
 export type { CronPhaseEventCallback } from "./runtime/CronFire.js";
 export { computeNextCronRunAt, computeNextRunAt } from "./runtime/CronSchedule.js";
+export { isValidCronTimezone, resolveCronTimezone } from "./CronTimezone.js";
 export { resolveCronPaths, cronRunEventsPath, type CronPaths } from "./storage/CronPaths.js";
 export { CronTaskStore } from "./storage/CronTaskStore.js";
 export type {
@@ -18,6 +24,8 @@ export type {
   CronListResult,
   CronRunOutcome,
   CronRunRecord,
+  CronRunNowInput,
+  CronRunNowResult,
   CronSchedule,
   CronStopInput,
   CronStopResult,

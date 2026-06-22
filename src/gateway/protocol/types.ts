@@ -23,6 +23,8 @@ import type {
   WebProjectSummary as WebUiProjectSummary,
   WebReadSessionMessagesInput as WebUiReadSessionMessagesInput,
   WebReadSessionMessagesResult as WebUiReadSessionMessagesResult,
+  WebReadSubagentMessagesInput as WebUiReadSubagentMessagesInput,
+  WebReadSubagentMessagesResult as WebUiReadSubagentMessagesResult,
 } from "../../web/client/protocol.js";
 import type {
   SkillCreateInput,
@@ -52,7 +54,7 @@ export type GatewayChannelKey =
   | "api_server" | "webhook"
   | (string & {});
 
-export type GatewayMode = "default" | "plan" | "acceptEdits" | "bypassPermissions";
+export type GatewayMode = "default" | "plan" | "bypassPermissions";
 
 export type ChannelAttachment = {
   type: "file" | "image" | "text" | "unknown";
@@ -77,8 +79,12 @@ export type GatewaySubmitTurnInput = {
   mode?: GatewayMode;
   /** The user's actual permission preference before plan-mode override. */
   basePermissionMode?: GatewayMode;
+  /** Allow model-visible plan mode tools for this turn. Defaults to true for web, false elsewhere. */
+  allowPlanModeTools?: boolean;
   runId?: string;
   maxTurns?: number;
+  /** Hard wall-clock limit for this turn. The gateway aborts and closes the session when exceeded. */
+  timeoutMs?: number;
   telemetry?: {
     ownerModule?: TelemetryModule;
     executionKind?: TelemetryExecutionKind;
@@ -88,6 +94,7 @@ export type GatewaySubmitTurnInput = {
 
 export type GatewayEvent =
   | { type: "turn_started"; runId: string }
+  | { type: "model_request_started"; model?: string; provider?: string }
   | { type: "assistant_text_delta"; text: string }
   | { type: "assistant_thinking_delta"; text: string }
   | { type: "tool_call_started"; toolCallId: string; name: string; argsPreview?: string }
@@ -162,7 +169,7 @@ export type GatewayEvent =
     }
   | { type: "turn_completed"; usage: TurnUsage; finishReason: AgentTurnResult["stopReason"] | string }
   | { type: "agent_status"; event: string; detail?: Record<string, unknown> }
-  | { type: "error"; message: string; code?: string; recoverable: boolean };
+  | { type: "error"; message: string; code?: string; recoverable: boolean; userHint?: string };
 
 export type GatewayActiveTurnSnapshotInput = {
   sessionKey: string;
@@ -213,6 +220,8 @@ export type GatewaySessionPermissionGrantInput = {
 
 export type WebReadSessionMessagesInput = WebUiReadSessionMessagesInput;
 export type WebReadSessionMessagesResult = WebUiReadSessionMessagesResult;
+export type WebReadSubagentMessagesInput = WebUiReadSubagentMessagesInput;
+export type WebReadSubagentMessagesResult = WebUiReadSubagentMessagesResult;
 export type WebProjectSummary = WebUiProjectSummary;
 export type WebListProjectsResult = WebUiListProjectsResult;
 export type WebDescribeProjectInput = { projectKey: string };
@@ -334,6 +343,10 @@ export interface Gateway {
    * the Web `WebMessage` DTO.
    */
   readSessionMessages(input: WebReadSessionMessagesInput): Promise<WebReadSessionMessagesResult>;
+  /**
+   * Read a subagent's sidechain transcript and return its messages in WebMessage format.
+   */
+  readSubagentMessages(input: WebReadSubagentMessagesInput): Promise<WebReadSubagentMessagesResult>;
   /**
    * Web Phase 3 — enumerate projects from PilotDeck home + an optional
    * registry.

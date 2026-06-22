@@ -335,20 +335,25 @@ export function isProcessMessage(message: ChatMessage): boolean {
   if (message.type === 'user' || message.type === 'error') {
     return false;
   }
+  if (message.isSubagentContainer) {
+    return false;
+  }
   if (message.isInteractivePrompt || isUserVisibleTool(message) || isPermissionToolError(message)) {
     return false;
   }
   return Boolean(
     message.isToolUse ||
-      message.isSubagentContainer ||
       message.isTaskNotification ||
       message.isCompactBoundary ||
-      message.isThinking ||
+      (message.isThinking && !message.isStreaming) ||
       message.type === 'tool',
   );
 }
 
 function isExpandableProcessMessage(message: ChatMessage): boolean {
+  if (message.isThinking) {
+    return true;
+  }
   if (!message.isToolUse || message.isSubagentContainer || isPermissionToolError(message)) {
     return false;
   }
@@ -615,6 +620,12 @@ function collectCompletedProcessSegments(messages: ChatMessage[], turn: MessageT
       return;
     }
 
+    if (segmentMessages.every((m) => m.isThinking)) {
+      segmentStartIndex = -1;
+      segmentMessages = [];
+      return;
+    }
+
     const endIndex = beforeOriginalIndex - 1;
     const first = segmentMessages[0];
     const nextHostIndex = previousHostIndex == null
@@ -683,6 +694,38 @@ export function buildRenderableMessageItems(
   const turns = createMessageTurns(messages);
   const liveTurn = options.isAssistantWorking ? turns[turns.length - 1] : null;
 
+  const liveStandaloneThinkingIndices = new Set<number>();
+  if (liveTurn) {
+    let groupStart = -1;
+    let hasNonThinking = false;
+    const pendingThinkingIndices: number[] = [];
+
+    for (let i = liveTurn.start; i < liveTurn.end; i += 1) {
+      const msg = messages[i];
+      if (!msg || msg.isAgentActivity || msg.isAgentActivitySummary) continue;
+
+      if (isProcessMessage(msg)) {
+        if (groupStart < 0) groupStart = i;
+        if (!msg.isThinking) hasNonThinking = true;
+        else pendingThinkingIndices.push(i);
+      } else {
+        if (groupStart >= 0 && !hasNonThinking) {
+          for (const idx of pendingThinkingIndices) {
+            liveStandaloneThinkingIndices.add(idx);
+          }
+        }
+        groupStart = -1;
+        hasNonThinking = false;
+        pendingThinkingIndices.length = 0;
+      }
+    }
+    if (groupStart >= 0 && !hasNonThinking) {
+      for (const idx of pendingThinkingIndices) {
+        liveStandaloneThinkingIndices.add(idx);
+      }
+    }
+  }
+
   messages.forEach((message, originalIndex) => {
     if (message.isAgentActivitySummary) {
       return;
@@ -691,7 +734,8 @@ export function buildRenderableMessageItems(
       liveTurn &&
       originalIndex >= liveTurn.start &&
       originalIndex < liveTurn.end &&
-      isProcessMessage(message)
+      isProcessMessage(message) &&
+      !liveStandaloneThinkingIndices.has(originalIndex)
     ) {
       collapsedIndices.add(originalIndex);
       return;
@@ -834,15 +878,23 @@ export function getLiveProcessGroups(
       return;
     }
 
+    if (groupMessages.every((m) => m.isThinking)) {
+      groupStartIndex = -1;
+      groupMessages = [];
+      return;
+    }
+
     const first = groupMessages[0];
+    const detail = groupMessages.filter(isExpandableProcessMessage);
+    const gid = getStableProcessSegmentId(messages, liveTurn, first, groupStartIndex);
     groups.push({
-      id: getStableProcessSegmentId(messages, liveTurn, first, groupStartIndex),
+      id: gid,
       afterOriginalIndex: previousVisibleIndex,
       beforeOriginalIndex,
       startIndex: groupStartIndex,
       endIndex: beforeOriginalIndex ?? messages.length,
       messages: groupMessages,
-      detailMessages: groupMessages.filter(isExpandableProcessMessage),
+      detailMessages: detail,
     });
     groupStartIndex = -1;
     groupMessages = [];
@@ -868,7 +920,7 @@ export function getLiveProcessGroups(
 
   finishGroup(null);
 
-  return groups.map((group, index) => {
+  const result = groups.map((group, index) => {
     const isLatestGroup = index === groups.length - 1;
     const isOpenEnded = group.beforeOriginalIndex == null;
     return {
@@ -876,6 +928,7 @@ export function getLiveProcessGroups(
       isRunning: Boolean(options.isAssistantWorking && isLatestGroup && isOpenEnded),
     };
   });
+  return result;
 }
 
 export function shouldRenderLiveProcessGroup(group: LiveProcessGroup, runMode: ChatRunMode): boolean {
@@ -1004,7 +1057,7 @@ export function getRunningProcessTitle(
     return t('working.compacting', { defaultValue: 'Compacting context...' });
   }
   if (kind === 'thinking') {
-    return t('working.thinking', { defaultValue: 'Thinking' });
+    return t('working.thinking', { defaultValue: 'thinking' });
   }
   return latestMessage.title || latestMessage.content || latestMessage.toolName || t('working.processing', { defaultValue: 'Processing' });
 }

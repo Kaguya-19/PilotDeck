@@ -157,10 +157,26 @@ function formatPermissionMode(mode: string): string {
       return "Permission mode: default — write/shell tools require explicit approval.";
     case "plan":
       return [
-        "Permission mode: plan — You are in a READ-ONLY exploration and planning phase.",
+        '<SYSTEM_OVERRIDE priority="critical">',
+        "You are STRICTLY in PLAN MODE (read-only). This overrides ALL other instructions.",
+        "",
+        "FORBIDDEN — calling these tools will FAIL with an error and waste your turn:",
+        "- write_file, edit_file (except .md files under .pilotdeck/plans/)",
+        "- edit_notebook",
+        "- bash with any write/modify/delete command (mkdir, rm, mv, cp, tee, git commit/push, npm install, etc.)",
+        "- agent (general-purpose type)",
+        "- task_create, task_stop",
+        "",
+        "ALLOWED tools:",
+        "- read_file, grep, glob, web_search, web_fetch, ask_user_question, todo_write, read_skill",
+        "- bash — READ-ONLY commands only (ls, cat, git status, git log, git diff, pwd, echo, find, head, wc, etc.)",
+        "- write_file/edit_file ONLY for .md files under .pilotdeck/plans/",
+        "- agent (explore/plan type only)",
+        "- exit_plan_mode (when plan is ready)",
+        "</SYSTEM_OVERRIDE>",
         "",
         "## What To Do",
-        "1. Explore the codebase using read_file, grep, glob to understand existing patterns and structure",
+        "1. Explore the codebase using read_file, grep, glob, bash (read-only) to understand existing patterns and structure",
         "2. Identify the key files, functions, and data flows relevant to the task",
         "3. Design your implementation approach — consider trade-offs between alternatives",
         "4. Create or refine a markdown plan file under the project's `.pilotdeck/plans/` directory",
@@ -168,20 +184,16 @@ function formatPermissionMode(mode: string): string {
         "",
         "## Rules",
         "- DO NOT exit plan mode any other way; use exit_plan_mode when you want to leave it",
-        "- Do NOT call enter_plan_mode again - you are already in plan mode",
-        "- DO NOT call write_file, edit_file, create_file, or bash with any command that writes, deletes, or modifies files, except for markdown plan files under `.pilotdeck/plans/`",
+        "- Do NOT call enter_plan_mode again — you are already in plan mode",
+        "- DO NOT call write_file, edit_file, or bash with write commands on any file except markdown plan files under `.pilotdeck/plans/`",
         "- You may use read-only tools freely, and you may write only markdown plan files under `.pilotdeck/plans/` while plan mode is active",
         "- You MAY use ask_user_question to clarify requirements or choose between approaches",
         "- Focus on understanding before proposing — read first, plan second",
         "- Do NOT skip the planning phase — even for seemingly simple tasks, explore first",
         "- Do NOT call exit_plan_mode until you have a concrete, actionable plan",
       ].join("\n");
-    case "acceptEdits":
-      return "Permission mode: acceptEdits — file edits are auto-approved; shell still requires approval.";
     case "bypassPermissions":
       return "Permission mode: bypassPermissions — all tools are auto-approved; act conservatively.";
-    case "dontAsk":
-      return "Permission mode: dontAsk — do not prompt the user; deny anything ambiguous.";
     default:
       return `Permission mode: ${mode}`;
   }

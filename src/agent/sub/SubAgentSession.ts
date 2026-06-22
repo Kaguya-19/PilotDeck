@@ -44,7 +44,7 @@ import {
   cloneReadFileState,
   cloneWriteSnapshots,
 } from "./contextInheritance.js";
-import { filterIncompleteToolCalls } from "./filterIncompleteToolCalls.js";
+
 
 const SUMMARY_FIELDS = ["Scope", "Result", "Key files", "Files changed", "Issues"] as const;
 const SUBAGENT_DEFAULT_MAX_TURNS = 16;
@@ -54,12 +54,6 @@ export type SubAgentSessionOptions = {
   definition: SubagentDefinition;
   /** Free-text directive from the parent (becomes the subagent's user prompt). */
   directive: string;
-  /**
-   * Parent's accumulated message history. We slice off the *last* assistant
-   * message to seed the fork (S1). Caller should pass parent's full history
-   * up to and including the assistant turn that issued the `agent` tool call.
-   */
-  parentMessages: CanonicalMessage[];
   /** Parent agent's runtime config (provider, model, permission mode, ...). */
   parentConfig: AgentRuntimeConfig;
   /** Parent agent's runtime dependencies (model, scheduler factory, ...). */
@@ -185,25 +179,7 @@ export class SubAgentSession {
   }
 
   private buildInitialMessages(): CanonicalMessage[] {
-    const parentLast = this.options.parentMessages[this.options.parentMessages.length - 1];
-    if (!parentLast || parentLast.role !== "assistant") {
-      // Fall back to a synthetic assistant message that just references the
-      // directive (rare; happens for tool-driven invocations where the parent
-      // hasn't produced an assistant message yet).
-      const synthetic: CanonicalMessage = {
-        role: "assistant",
-        content: [
-          {
-            type: "text",
-            text: "(parent did not produce an assistant message before forking)",
-          },
-        ],
-      };
-      return filterIncompleteToolCalls(buildForkedMessages(this.options.directive, synthetic));
-    }
-    return filterIncompleteToolCalls(
-      buildForkedMessages(this.options.directive, parentLast),
-    );
+    return buildForkedMessages(this.options.directive);
   }
 
   private buildScopedRegistry(): ToolRegistry {

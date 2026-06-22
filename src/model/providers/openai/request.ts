@@ -89,6 +89,13 @@ export function buildOpenAIRequest(
     };
   }
 
+  if (request.thinking?.enabled) {
+    (body as Record<string, unknown>).enable_thinking = true;
+    if (request.thinking.budgetTokens) {
+      (body as Record<string, unknown>).thinking_budget = request.thinking.budgetTokens;
+    }
+  }
+
   return body;
 }
 

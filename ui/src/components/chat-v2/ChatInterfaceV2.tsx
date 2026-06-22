@@ -48,6 +48,7 @@ function ChatInterfaceV2({
   autoExpandTools,
   showRawParameters,
   showThinking,
+  inlineThinking,
   autoScrollToBottom,
   sendByCtrlEnter,
   externalMessageUpdate,
@@ -314,6 +315,7 @@ function ChatInterfaceV2({
     if (!isLoading || !canAbortSession) return;
     const handleGlobalEscape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || event.repeat || event.defaultPrevented) return;
+      if (document.querySelector('[data-modal-overlay]')) return;
       event.preventDefault();
       handleAbortWithPending();
     };
@@ -473,10 +475,12 @@ function ChatInterfaceV2({
         autoExpandTools={autoExpandTools}
         showRawParameters={showRawParameters}
         showThinking={showThinking}
+        inlineThinking={inlineThinking}
         setInput={setInput}
         isAssistantWorking={isLoading}
         workingStatus={claudeStatus || pilotDeckStatus}
         runMode={runMode}
+        sessionStore={sessionStore}
       />
       {composer}
     </div>

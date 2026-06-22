@@ -57,6 +57,11 @@ export const authenticatedFetch = (url, options = {}) => {
     if (refreshedToken) {
       localStorage.setItem('auth-token', refreshedToken);
     }
+    if (response.status >= 500) {
+      window.dispatchEvent(new CustomEvent('pilotdeck:toast', {
+        detail: { kind: 'error', message: `Server error (${response.status}): ${response.statusText || 'Internal Server Error'}` },
+      }));
+    }
     return response;
   });
 };

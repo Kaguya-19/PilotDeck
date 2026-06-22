@@ -27,7 +27,10 @@ import type { WorkspaceProviderRegistry } from "../workspace/WorkspaceProviderRe
 import type { AlwaysOnRunContextRegistry, ExecutionRunContext, DiscoveryRunContext, WorkspaceRunContext, ReportRunContext } from "./AlwaysOnRunContextRegistry.js";
 import { generateWorkspaceDiff } from "../workspace/WorkspaceApply.js";
 import { buildDiscoveryPrompt, buildExecutionPrompt, buildWorkspacePrompt, buildReportPrompt, buildApplyPrompt } from "./discoveryPrompts.js";
-import type { SessionConfigOverrides } from "./SessionConfigOverrides.js";
+import {
+  UNATTENDED_SESSION_EXCLUDED_TOOLS,
+  type SessionConfigOverrides,
+} from "./SessionConfigOverrides.js";
 import type { PermissionRule } from "../../permission/index.js";
 import type { TelemetryClient } from "../../telemetry/index.js";
 
@@ -62,16 +65,6 @@ const WORKSPACE_CHANNEL: GatewayChannelKey = "always-on/workspace";
 const EXECUTION_CHANNEL: GatewayChannelKey = "always-on/execute";
 const REPORT_CHANNEL: GatewayChannelKey = "always-on/report";
 const APPLY_CHANNEL: GatewayChannelKey = "always-on/apply";
-
-/**
- * Tools that require user interaction or could block an unattended session.
- * Excluded from all Always-On agent loops via SessionConfigOverride.excludeTools.
- */
-const ALWAYS_ON_EXCLUDED_TOOLS = [
-  "enter_plan_mode",
-  "exit_plan_mode",
-  "ask_user_question",
-];
 
 /**
  * Deny rules injected into the execution phase session. These override
@@ -269,7 +262,7 @@ export class DiscoveryFire {
       permissionMode: "bypassPermissions",
       bypassAvailable: true,
       canPrompt: false,
-      excludeTools: ALWAYS_ON_EXCLUDED_TOOLS,
+      excludeTools: [...UNATTENDED_SESSION_EXCLUDED_TOOLS],
     });
 
     try {
@@ -387,7 +380,7 @@ export class DiscoveryFire {
       permissionMode: "bypassPermissions",
       bypassAvailable: true,
       canPrompt: false,
-      excludeTools: ALWAYS_ON_EXCLUDED_TOOLS,
+      excludeTools: [...UNATTENDED_SESSION_EXCLUDED_TOOLS],
       permissionRules: { deny: ALWAYS_ON_EXECUTION_DENY_RULES },
     });
 
@@ -443,7 +436,7 @@ export class DiscoveryFire {
     // Phase 4: Report
     this.emitEvent(runId, "report_started", { planId, title: planRecord.title });
     const reportSessionKey = DiscoveryFire.deriveReportSessionKey(this.deps.projectKey, runId);
-    this.deps.sessionOverrides.set(reportSessionKey, { cwd: workspace.cwd, permissionMode: "bypassPermissions", bypassAvailable: true, canPrompt: false, excludeTools: ALWAYS_ON_EXCLUDED_TOOLS });
+    this.deps.sessionOverrides.set(reportSessionKey, { cwd: workspace.cwd, permissionMode: "bypassPermissions", bypassAvailable: true, canPrompt: false, excludeTools: [...UNATTENDED_SESSION_EXCLUDED_TOOLS] });
 
     const reportCtx: ReportRunContext = {
       kind: "report",
@@ -558,7 +551,7 @@ export class DiscoveryFire {
       permissionMode: "bypassPermissions",
       bypassAvailable: true,
       canPrompt: false,
-      excludeTools: ALWAYS_ON_EXCLUDED_TOOLS,
+      excludeTools: [...UNATTENDED_SESSION_EXCLUDED_TOOLS],
     });
 
     const chatDigest = await buildChatDigest({
@@ -703,7 +696,7 @@ export class DiscoveryFire {
       permissionMode: "bypassPermissions",
       bypassAvailable: true,
       canPrompt: false,
-      excludeTools: ALWAYS_ON_EXCLUDED_TOOLS,
+      excludeTools: [...UNATTENDED_SESSION_EXCLUDED_TOOLS],
       permissionRules: {
         deny: ALWAYS_ON_EXECUTION_DENY_RULES,
       },
@@ -805,7 +798,7 @@ export class DiscoveryFire {
       permissionMode: "bypassPermissions",
       bypassAvailable: true,
       canPrompt: false,
-      excludeTools: ALWAYS_ON_EXCLUDED_TOOLS,
+      excludeTools: [...UNATTENDED_SESSION_EXCLUDED_TOOLS],
     });
 
     const reportCtx: ReportRunContext = {
@@ -981,7 +974,7 @@ export class DiscoveryFire {
       permissionMode: "bypassPermissions",
       bypassAvailable: true,
       canPrompt: false,
-      excludeTools: ALWAYS_ON_EXCLUDED_TOOLS,
+      excludeTools: [...UNATTENDED_SESSION_EXCLUDED_TOOLS],
     });
 
     try {

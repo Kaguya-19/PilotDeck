@@ -4,7 +4,6 @@ import type { ClaudeWorkStatus, CompactProgress, PendingPermissionRequest, Pilot
 import type { Project, ProjectSession, SessionProvider } from '../../../types/app';
 import type { SessionStore, NormalizedMessage } from '../../../stores/useSessionStore';
 import { useWebSocket } from '../../../contexts/WebSocketContext';
-import { SmoothTextStream } from './streamSmoother';
 
 type PendingViewSession = {
   sessionId: string | null;
@@ -52,7 +51,6 @@ type LatestChatMessage = {
   [key: string]: any;
 };
 
-type StreamSmootherMap = Map<string, SmoothTextStream>;
 
 function getExplicitSessionId(msg: LatestChatMessage): string | null {
   const value = msg.sessionId ?? msg.session_id ?? msg.actualSessionId ?? msg.newSessionId;
@@ -84,19 +82,6 @@ function warnResolvedSessionId(msg: LatestChatMessage, fallbackSessionId: string
     type: msg.type,
     fallbackSessionId,
   });
-}
-
-function getOrCreateSmoother(
-  map: StreamSmootherMap,
-  sessionId: string,
-  create: () => SmoothTextStream,
-): SmoothTextStream {
-  let state = map.get(sessionId);
-  if (!state) {
-    state = create();
-    map.set(sessionId, state);
-  }
-  return state;
 }
 
 interface UseChatRealtimeHandlersArgs {
@@ -142,6 +127,7 @@ export function useChatRealtimeHandlers({
   onSessionInactive,
   onSessionProcessing,
   onSessionNotProcessing,
+  selectedProject,
   onReplaceTemporarySession,
   onNavigateToSession,
   onWebSocketReconnect,
@@ -149,8 +135,8 @@ export function useChatRealtimeHandlers({
 }: UseChatRealtimeHandlersArgs) {
   const { subscribe } = useWebSocket();
 
-  const streamBySessionRef = useRef<StreamSmootherMap>(new Map());
-  const thinkingBySessionRef = useRef<StreamSmootherMap>(new Map());
+  // Track which sessions have active thinking (just a boolean flag now)
+  const thinkingBySessionRef = useRef<Map<string, boolean>>(new Map());
 
   const handleMessage = useCallback((latestMessage: LatestChatMessage, fallbackSessionId?: string | null) => {
     if (!latestMessage) return;
@@ -167,30 +153,7 @@ export function useChatRealtimeHandlers({
 
     const msg = latestMessage as any;
     const clearAccumulators = () => {
-      for (const state of streamBySessionRef.current.values()) {
-        state.cancel();
-      }
-      for (const state of thinkingBySessionRef.current.values()) {
-        state.cancel();
-      }
-      streamBySessionRef.current.clear();
       thinkingBySessionRef.current.clear();
-    };
-    const flushStream = (sessionId: string, finalize = false) => {
-      const state = streamBySessionRef.current.get(sessionId);
-      if (!state) return;
-      state.flush(finalize);
-      if (finalize) {
-        streamBySessionRef.current.delete(sessionId);
-      }
-    };
-    const flushThinking = (sessionId: string, finalize = false) => {
-      const state = thinkingBySessionRef.current.get(sessionId);
-      if (!state) return;
-      state.flush(finalize);
-      if (finalize) {
-        thinkingBySessionRef.current.delete(sessionId);
-      }
     };
 
     if (!msg.kind) {
@@ -218,7 +181,15 @@ export function useChatRealtimeHandlers({
             statusSessionId === currentSessionId || (selectedSession && statusSessionId === selectedSession.id);
 
           if (isCurrentSession && Array.isArray(msg.activeTurnMessages) && msg.activeTurnMessages.length > 0) {
+            clearAccumulators();
+            // Only replay messages that have stable IDs and can be deduped
+            // against server data (tool_use by toolId, tool_result/status by id).
+            // Skip thinking, stream_delta, stream_end — these create messages
+            // with generated IDs that can't be matched to server copies,
+            // causing duplication. fetchFromServer provides authoritative copies.
+            const skipKinds = new Set(['thinking', 'stream_delta', 'stream_end']);
             for (const activeTurnMessage of msg.activeTurnMessages) {
+              if (skipKinds.has(activeTurnMessage.kind)) continue;
               handleMessage(activeTurnMessage, statusSessionId);
             }
           }
@@ -284,6 +255,7 @@ export function useChatRealtimeHandlers({
       warnDroppedFrame(msg);
       return;
     }
+
     if (!getExplicitSessionId(msg) && fallbackSessionId) {
       warnResolvedSessionId(msg, sid);
     }
@@ -293,55 +265,132 @@ export function useChatRealtimeHandlers({
       sid === selectedSession?.id ||
       sid === activeViewSessionId;
 
+    // Ensure the store's activeSession matches so notify() triggers re-renders.
+    // Without this, the RAF scheduler silently drops notifications for
+    // sessions it doesn't consider "active", causing content to not render
+    // until some other state change (like clicking stop) triggers a re-render.
+    if (isForActiveView) {
+      sessionStore.setActiveSession(sid);
+    }
+
     if (msg.kind === 'agent_activity') {
+      const activitySubagentId = typeof msg.subagentId === 'string'
+        ? msg.subagentId
+        : String(msg.activityId || '').startsWith('subagent:')
+          ? String(msg.activityId).slice('subagent:'.length)
+          : '';
+      if (
+        activitySubagentId &&
+        msg.phase === 'subagent' &&
+        ['completed', 'failed', 'cancelled'].includes(String(msg.state || ''))
+      ) {
+        sessionStore.finalizeSubagentDetailThinking?.(sid, activitySubagentId);
+        sessionStore.finalizeSubagentDetailStreaming?.(sid, activitySubagentId);
+      }
       sessionStore.upsertActivity?.(sid, msg as NormalizedMessage);
       return;
     }
 
-    // --- Streaming: buffer for performance ---
+    if (msg.kind === 'subagent_link') {
+      sessionStore.recordSubagentLink?.(sid, msg as NormalizedMessage);
+      return;
+    }
+
+    const subagentId = typeof msg.subagentId === 'string' ? msg.subagentId : '';
+    if (msg.isSubagentDetail && subagentId) {
+      if (msg.kind === 'thinking') {
+        sessionStore.updateSubagentDetailThinking?.(
+          sid,
+          subagentId,
+          msg.content || '',
+          provider,
+        );
+        return;
+      }
+      if (msg.kind === 'stream_delta') {
+        sessionStore.finalizeSubagentDetailThinking?.(sid, subagentId);
+        sessionStore.updateSubagentDetailStreaming?.(
+          sid,
+          subagentId,
+          msg.content || '',
+          provider,
+        );
+        return;
+      }
+      if (msg.kind === 'stream_end') {
+        sessionStore.finalizeSubagentDetailThinking?.(sid, subagentId);
+        sessionStore.finalizeSubagentDetailStreaming?.(sid, subagentId);
+        return;
+      }
+      sessionStore.finalizeSubagentDetailThinking?.(sid, subagentId);
+      sessionStore.finalizeSubagentDetailStreaming?.(sid, subagentId);
+      sessionStore.appendSubagentDetailMessage?.(sid, subagentId, msg as NormalizedMessage);
+      return;
+    }
+
+    // --- Streaming: direct accumulation (no smoother animation) ---
     if (msg.kind === 'stream_delta') {
       const text = msg.content || '';
       if (!text) return;
-      // Flush this session's thinking before its assistant text starts.
-      flushThinking(sid, true);
-      const state = getOrCreateSmoother(
-        streamBySessionRef.current,
-        sid,
-        () => new SmoothTextStream({
-          emit: (content) => sessionStore.updateStreaming(sid, content, provider),
-          finalize: () => sessionStore.finalizeStreaming(sid),
-          frameMs: 50,
-        }),
-      );
-      state.append(text);
+      // Content starting means thinking is done
+      if (thinkingBySessionRef.current.has(sid)) {
+        thinkingBySessionRef.current.delete(sid);
+        sessionStore.finalizeStreamingThinking(sid);
+      }
+      const slot = sessionStore.getSessionSlot?.(sid);
+      const streamId = `__streaming_${sid}`;
+      const existing = slot?.realtimeMessages.find((m: any) => m.id === streamId);
+      const currentText = existing?.content || '';
+      sessionStore.updateStreaming(sid, currentText + text, provider);
       return;
     }
 
-    // --- Thinking: accumulate into a single message like stream_delta ---
+    // --- Thinking: direct accumulation (same as content) ---
     if (msg.kind === 'thinking') {
       const text = msg.content || '';
       if (!text) return;
-      const state = getOrCreateSmoother(
-        thinkingBySessionRef.current,
-        sid,
-        () => new SmoothTextStream({
-          emit: (content) => sessionStore.updateStreamingThinking(sid, content, provider),
-          finalize: () => sessionStore.finalizeStreamingThinking(sid),
-          frameMs: 50,
-        }),
-      );
-      state.append(text);
+      // Mark that thinking is active
+      thinkingBySessionRef.current.set(sid, true as any);
+      // Read current thinking content and append delta
+      const slot = sessionStore.getSessionSlot?.(sid);
+      const streamId = `__streaming_thinking_${sid}`;
+      const existing = slot?.realtimeMessages.find((m: any) => m.id === streamId);
+      const currentText = existing?.content || '';
+      sessionStore.updateStreamingThinking(sid, currentText + text, provider);
       return;
     }
 
+    // --- Stream end: finalize content stream ---
     if (msg.kind === 'stream_end') {
-      flushStream(sid, true);
+      // Finalize thinking if still active
+      if (thinkingBySessionRef.current.has(sid)) {
+        thinkingBySessionRef.current.delete(sid);
+        sessionStore.finalizeStreamingThinking(sid);
+      }
+      sessionStore.finalizeStreaming(sid);
       return;
     }
 
-    // --- Turn boundary: finalize in-flight streaming before non-stream msgs ---
-    flushThinking(sid, true);
-    flushStream(sid, true);
+    // Only route certain message kinds to the store append logic.
+    const flushKinds = new Set([
+      'tool_use', 'tool_result', 'text', 'complete', 'error', 'permission_request',
+    ]);
+    if (flushKinds.has(msg.kind as string)) {
+      // Finalize thinking if still active (model moved past thinking)
+      if (thinkingBySessionRef.current.has(sid)) {
+        thinkingBySessionRef.current.delete(sid);
+        sessionStore.finalizeStreamingThinking(sid);
+      }
+      // Finalize content stream on tool_use / complete / error.
+      // The gateway may not send stream_end, so tool_use is the
+      // reliable signal that the text block has ended.
+      if (msg.kind === 'tool_use' || msg.kind === 'complete' || msg.kind === 'error') {
+        sessionStore.finalizeStreaming(sid);
+      }
+      if (msg.kind === 'complete' || msg.kind === 'error') {
+        sessionStore.finalizeStreamingThinking(sid);
+      }
+    }
 
     // --- All other messages: route to store ---
     // Skip assistant text messages that duplicate finalized streaming content.
@@ -386,8 +435,12 @@ export function useChatRealtimeHandlers({
 
       case 'complete': {
         if (sid) {
-          flushThinking(sid, true);
-          flushStream(sid, true);
+          // Finalize both thinking and content streams
+          if (thinkingBySessionRef.current.has(sid)) {
+            thinkingBySessionRef.current.delete(sid);
+          }
+          sessionStore.finalizeStreamingThinking(sid);
+          sessionStore.finalizeStreaming(sid);
         }
 
         if (isForActiveView) {
@@ -403,6 +456,20 @@ export function useChatRealtimeHandlers({
           );
           onSessionInactive?.(sid);
           onSessionNotProcessing?.(sid);
+
+          // Auto-refresh from server to align with canonical message order.
+          // During streaming, messages may arrive out of order (e.g. content
+          // stream created before tool_use). The server has the authoritative
+          // copy with correct ordering. Retry if server hasn't committed yet.
+          const doRefresh = (attempt: number) => {
+            sessionStore.refreshFromServer(sid, { provider, projectName: selectedProject?.name, projectPath: selectedProject?.fullPath || selectedProject?.path || '' }).then(() => {
+              const slot = sessionStore.getSessionSlot?.(sid);
+              if (slot && slot.serverMessages.length === 0 && attempt < 5) {
+                setTimeout(() => doRefresh(attempt + 1), 1500 * attempt);
+              }
+            });
+          };
+          doRefresh(1);
         }
 
         // Handle aborted case
@@ -442,6 +509,7 @@ export function useChatRealtimeHandlers({
         if (sid) {
           onSessionInactive?.(sid);
           onSessionNotProcessing?.(sid);
+          sessionStore.refreshFromServer(sid, { provider, projectName: selectedProject?.name, projectPath: selectedProject?.fullPath || selectedProject?.path || '' });
         }
         break;
       }
@@ -495,6 +563,7 @@ export function useChatRealtimeHandlers({
             tokens: msg.tokens || 0,
             can_interrupt: msg.canInterrupt !== undefined ? msg.canInterrupt : true,
             compactProgress: msg.compactProgress || msg.compact_progress || null,
+            retryProgress: msg.retryProgress || null,
           });
           setIsLoading(true);
           setCanAbortSession(msg.canInterrupt !== false);
@@ -536,6 +605,7 @@ export function useChatRealtimeHandlers({
     onReplaceTemporarySession,
     onNavigateToSession,
     onWebSocketReconnect,
+    selectedProject,
     sessionStore,
   ]);
 

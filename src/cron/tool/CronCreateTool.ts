@@ -18,7 +18,6 @@ export function createCronCreateTool(runtime: CronToolRuntime): PilotDeckToolDef
         schedule: CRON_SCHEDULE_SCHEMA,
         sessionKey: { type: "string" },
         channelKey: { type: "string" },
-        projectKey: { type: "string" },
         mode: { type: "string" },
         timezone: { type: "string" },
       },
@@ -28,7 +27,7 @@ export function createCronCreateTool(runtime: CronToolRuntime): PilotDeckToolDef
     execute: async (input, context) => {
       const result = await runtime.createTask({
         ...input,
-        projectKey: input.projectKey ?? context.cwd,
+        projectKey: context.cwd,
       });
       return {
         content: [{ type: "json", value: result.task }],

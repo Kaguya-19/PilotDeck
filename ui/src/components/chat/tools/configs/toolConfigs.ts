@@ -108,8 +108,19 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
       }
     },
     result: {
-      hideOnSuccess: true,
-      type: 'special'
+      type: 'collapsible',
+      title: (data) => {
+        const content = typeof data === 'string' ? data : data?.content;
+        if (!content) return 'Output (empty)';
+        const lines = content.split('\n').length;
+        return `Output (${lines} line${lines > 1 ? 's' : ''})`;
+      },
+      defaultOpen: false,
+      contentType: 'text',
+      getContentProps: (data) => {
+        const content = typeof data === 'string' ? data : data?.content || '';
+        return { content };
+      }
     }
   },
 

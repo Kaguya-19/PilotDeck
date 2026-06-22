@@ -18,8 +18,11 @@ export function createCronListTool(runtime: CronToolRuntime): PilotDeckToolDefin
     },
     isReadOnly: () => true,
     isConcurrencySafe: () => true,
-    execute: async (input) => {
-      const result = await runtime.listTasks(input ?? {});
+    execute: async (input, context) => {
+      const result = await runtime.listTasks({
+        ...(input ?? {}),
+        projectKey: context.cwd,
+      });
       return {
         content: [{ type: "json", value: result }],
         data: result,

@@ -1,10 +1,12 @@
 import { isRecord } from "../../model/config/schema.js";
 import type { PilotConfigDiagnostic } from "../../pilot/config/types.js";
+import { isValidCronTimezone } from "../CronTimezone.js";
 
 export type CronConfig = {
   enabled: boolean;
   timezone: string;
   maxConcurrentRuns: number;
+  runTimeoutMinutes: number;
 };
 
 export function defaultCronConfig(): CronConfig {
@@ -12,10 +14,11 @@ export function defaultCronConfig(): CronConfig {
     enabled: true,
     timezone: "UTC",
     maxConcurrentRuns: 1,
+    runTimeoutMinutes: 60,
   };
 }
 
-const ALLOWED_KEYS = new Set(["enabled", "timezone", "maxConcurrentRuns"]);
+const ALLOWED_KEYS = new Set(["enabled", "timezone", "maxConcurrentRuns", "runTimeoutMinutes"]);
 
 export function parseCronConfig(
   raw: unknown,
@@ -37,11 +40,28 @@ export function parseCronConfig(
 
   const result = defaultCronConfig();
   result.enabled = booleanField(raw, "enabled", result.enabled);
-  result.timezone = nonEmptyString(raw.timezone, result.timezone, "cron.timezone", diagnostics);
+  const timezone = nonEmptyString(raw.timezone, result.timezone, "cron.timezone", diagnostics);
+  if (isValidCronTimezone(timezone)) {
+    result.timezone = timezone;
+  } else {
+    diagnostics.push({
+      code: "CRON_TIMEZONE_INVALID",
+      severity: "warning",
+      message: `cron.timezone must be a valid IANA timezone; falling back to ${result.timezone}.`,
+      path: "cron.timezone",
+      recoverable: true,
+    });
+  }
   result.maxConcurrentRuns = positiveInteger(
     raw.maxConcurrentRuns,
     result.maxConcurrentRuns,
     "cron.maxConcurrentRuns",
+    diagnostics,
+  );
+  result.runTimeoutMinutes = positiveInteger(
+    raw.runTimeoutMinutes,
+    result.runTimeoutMinutes,
+    "cron.runTimeoutMinutes",
     diagnostics,
   );
 

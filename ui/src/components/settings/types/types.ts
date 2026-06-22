@@ -6,7 +6,7 @@ import type { Dispatch, SetStateAction } from 'react';
 // for those to land. The agents/git/api/tasks/notifications/plugins/router/
 // about tabs and their MCP form modals stay removed — see git history if
 // you ever need to recover the multi-provider surface.
-export type SettingsMainTab = 'appearance' | 'permissions' | 'config' | 'mcp';
+export type SettingsMainTab = 'appearance' | 'permissions' | 'config' | 'mcp' | 'gateway';
 
 export type ProjectSortOrder = 'name' | 'date';
 export type SaveStatus = 'success' | 'error' | null;

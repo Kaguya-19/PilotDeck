@@ -19,7 +19,7 @@ import {
   appendAlwaysOnRunLogEvent,
   formatAlwaysOnPlanLogLine,
 } from './services/always-on-run-logs.js';
-import { resolvePilotHome, createProjectId } from './utils/pilotPaths.js';
+import { resolvePilotHome, resolveProjectStorageId } from './utils/pilotPaths.js';
 
 import { DiscoveryPlanService } from '../../src/always-on/web/DiscoveryPlanService.js';
 import { buildDiscoveryContext } from '../../src/always-on/web/DiscoveryPlanContext.js';
@@ -35,9 +35,10 @@ import { DiscoveryStateStore } from '../../src/always-on/storage/DiscoveryStateS
 // ---------------------------------------------------------------------------
 
 function getService() {
+  const pilotHome = resolvePilotHome();
   return new DiscoveryPlanService({
-    pilotHome: resolvePilotHome(),
-    createProjectId,
+    pilotHome,
+    resolveProjectId: (projectRoot) => resolveProjectStorageId(projectRoot, pilotHome),
     paths: { extractProjectDirectory },
     sessions: { getSessions },
     activity: { isSessionActive: isClaudeSDKSessionActive },
@@ -54,7 +55,7 @@ function getService() {
     state: {
       clearActiveWorkCycleId: async (projectRoot) => {
         const paths = resolveAlwaysOnPaths({
-          pilotHome: resolvePilotHome(),
+          pilotHome,
           projectKey: projectRoot,
         });
         const store = new DiscoveryStateStore(paths);

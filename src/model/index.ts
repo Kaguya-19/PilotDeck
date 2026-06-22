@@ -50,6 +50,7 @@ export type {
   ModelDefinition,
   ModelProtocol,
   ProviderConfig,
+  ProviderRetryConfig,
 } from "./protocol/canonical.js";
 export {
   flattenToolResultBlockText,
@@ -77,6 +78,8 @@ export {
   PROMPT_TOO_LONG_OPENAI_PATTERN,
   REQUEST_TOO_LARGE_PATTERN,
   MAX_OUTPUT_REACHED_PATTERN,
+  parseRetryAfterFromMessage,
+  parseRetryAfterHeader,
   type CanonicalModelError,
   type CanonicalModelErrorCode,
 } from "./protocol/errors.js";

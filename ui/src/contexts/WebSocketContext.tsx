@@ -4,11 +4,18 @@ import { IS_PLATFORM } from '../constants/config';
 
 type WSSubscriber = (msg: any) => void;
 
+export type ReconnectInfo = {
+  attempt: number;
+  nextRetryMs: number;
+  status: 'connected' | 'disconnected' | 'reconnecting';
+};
+
 type WebSocketContextType = {
   ws: WebSocket | null;
   sendMessage: (message: any) => void;
   latestMessage: any | null;
   isConnected: boolean;
+  reconnectInfo: ReconnectInfo;
   /**
    * Subscribe to every incoming WebSocket message synchronously, bypassing
    * React state batching. Returns an unsubscribe function. Use this for
@@ -35,6 +42,10 @@ const buildWebSocketUrl = (token: string | null) => {
   return `${protocol}//${window.location.host}/ws?token=${encodeURIComponent(token)}`;
 };
 
+const INITIAL_RECONNECT_MS = 1000;
+const MAX_RECONNECT_MS = 30000;
+const BACKOFF_FACTOR = 2;
+
 const useWebSocketProviderState = (): WebSocketContextType => {
   const wsRef = useRef<WebSocket | null>(null);
   const unmountedRef = useRef(false);
@@ -42,7 +53,13 @@ const useWebSocketProviderState = (): WebSocketContextType => {
   const connectIdRef = useRef(0);
   const [latestMessage, setLatestMessage] = useState<any>(null);
   const [isConnected, setIsConnected] = useState(false);
+  const [reconnectInfo, setReconnectInfo] = useState<ReconnectInfo>({
+    attempt: 0,
+    nextRetryMs: 0,
+    status: 'disconnected',
+  });
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const reconnectAttemptRef = useRef(0);
   const subscribersRef = useRef<Set<WSSubscriber>>(new Set());
   const { token } = useAuth();
 
@@ -56,6 +73,7 @@ const useWebSocketProviderState = (): WebSocketContextType => {
 
     const connect = () => {
       if (unmountedRef.current || connectIdRef.current !== id) return;
+      setReconnectInfo((prev) => ({ ...prev, status: 'reconnecting' }));
       try {
         const wsUrl = buildWebSocketUrl(token);
         if (!wsUrl) return console.warn('No authentication token found for WebSocket connection');
@@ -65,6 +83,8 @@ const useWebSocketProviderState = (): WebSocketContextType => {
         websocket.onopen = () => {
           if (connectIdRef.current !== id) { websocket.close(); return; }
           setIsConnected(true);
+          reconnectAttemptRef.current = 0;
+          setReconnectInfo({ attempt: 0, nextRetryMs: 0, status: 'connected' });
           wsRef.current = websocket;
 
           const pingInterval = setInterval(() => {
@@ -111,10 +131,16 @@ const useWebSocketProviderState = (): WebSocketContextType => {
           if (connectIdRef.current !== id) return;
           setIsConnected(false);
           wsRef.current = null;
+          const attempt = ++reconnectAttemptRef.current;
+          const delay = Math.min(
+            INITIAL_RECONNECT_MS * Math.pow(BACKOFF_FACTOR, attempt - 1),
+            MAX_RECONNECT_MS,
+          );
+          setReconnectInfo({ attempt, nextRetryMs: delay, status: 'disconnected' });
           reconnectTimeoutRef.current = setTimeout(() => {
             if (unmountedRef.current || connectIdRef.current !== id) return;
             connect();
-          }, 3000);
+          }, delay);
         };
 
         websocket.onerror = (error) => {
@@ -168,8 +194,9 @@ const useWebSocketProviderState = (): WebSocketContextType => {
     sendMessage,
     latestMessage,
     isConnected,
+    reconnectInfo,
     subscribe,
-  }), [sendMessage, latestMessage, isConnected, subscribe]);
+  }), [sendMessage, latestMessage, isConnected, reconnectInfo, subscribe]);
 
   return value;
 };

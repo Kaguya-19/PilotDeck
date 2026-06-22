@@ -15,6 +15,7 @@
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { createHash } from 'node:crypto';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 
 export const DEFAULT_PILOT_HOME = '~/.pilotdeck';
 
@@ -60,6 +61,21 @@ export function createCollisionResistantProjectId(projectRoot) {
 }
 
 /**
+ * Resolve the on-disk project directory name for a workspace.
+ *
+ * `.cwd` markers disambiguate paths that collapse to the same legacy slug.
+ * If no valid marker exists, preserve the legacy ID for compatibility with
+ * unregistered workspaces.
+ *
+ * @param {string} projectRoot Absolute filesystem path.
+ * @param {string} [pilotHome] Active PilotDeck home directory.
+ * @returns {string} Project directory name under `<pilotHome>/projects`.
+ */
+export function resolveProjectStorageId(projectRoot, pilotHome = resolvePilotHome()) {
+    return findStoredProjectId(projectRoot, pilotHome) ?? createProjectId(projectRoot);
+}
+
+/**
  * Sanitize a sessionId for safe use as a filename component.
  *
  * TUI/CLI sessionKeys embed the absolute project path (e.g.
@@ -86,3 +102,30 @@ function createLegacyProjectId(projectRoot) {
     return normalized.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'project';
 }
 
+function findStoredProjectId(projectRoot, pilotHome) {
+    const projectsDir = resolve(pilotHome, 'projects');
+    if (!existsSync(projectsDir)) return null;
+
+    const target = resolve(projectRoot);
+    try {
+        for (const entry of readdirSync(projectsDir, { withFileTypes: true })) {
+            if (!entry.isDirectory()) continue;
+            const markerPath = resolve(projectsDir, entry.name, '.cwd');
+            let marker;
+            try {
+                marker = readFileSync(markerPath, 'utf8').trim();
+            } catch {
+                continue;
+            }
+            if (!marker || resolve(marker) !== target) continue;
+            try {
+                if (statSync(marker).isDirectory()) return entry.name;
+            } catch {
+                continue;
+            }
+        }
+    } catch {
+        return null;
+    }
+    return null;
+}

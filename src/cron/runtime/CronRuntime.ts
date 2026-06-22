@@ -1,5 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
+import {
+  SessionConfigOverrides,
+  UNATTENDED_SESSION_EXCLUDED_TOOLS,
+} from "../../always-on/runtime/SessionConfigOverrides.js";
 import type { Gateway } from "../../gateway/index.js";
 import type { PilotDeckToolDefinition } from "../../tool/index.js";
 import type { CronConfig } from "../config/parseCronConfig.js";
@@ -18,6 +22,7 @@ import type {
 } from "../protocol/types.js";
 import { resolveCronPaths, type CronPaths } from "../storage/CronPaths.js";
 import { CronTaskStore } from "../storage/CronTaskStore.js";
+import { isValidCronTimezone, resolveCronTimezone } from "../CronTimezone.js";
 import { createCronCreateTool } from "../tool/CronCreateTool.js";
 import { createCronDeleteTool } from "../tool/CronDeleteTool.js";
 import { createCronListTool } from "../tool/CronListTool.js";
@@ -41,6 +46,9 @@ export type CreateCronRuntimeOptions = {
   logger?: CronRuntimeLogger;
   store?: CronTaskStore;
   telemetry?: TelemetryClient;
+  sessionOverrides?: SessionConfigOverrides;
+  activeRunCount?: () => number;
+  skipToolCreation?: boolean;
 };
 
 const NOOP_LOGGER: CronRuntimeLogger = {
@@ -58,8 +66,10 @@ export class CronRuntime {
   private readonly uuid: () => string;
   private readonly logger: CronRuntimeLogger;
   private readonly telemetry?: TelemetryClient;
+  private readonly sessionOverrides: SessionConfigOverrides;
   private readonly tools: PilotDeckToolDefinition[];
   private readonly activeRuns = new Map<string, CronActiveRun>();
+  private readonly sharedActiveRunCount?: () => number;
   private gateway?: Gateway;
   private fire?: CronFire;
   private scheduler?: CronScheduler;
@@ -73,12 +83,16 @@ export class CronRuntime {
     this.uuid = options.uuid ?? randomUUID;
     this.logger = options.logger ?? NOOP_LOGGER;
     this.telemetry = options.telemetry;
-    this.tools = [
-      createCronCreateTool(this),
-      createCronListTool(this),
-      createCronDeleteTool(this),
-      createCronStopTool(this),
-    ];
+    this.sessionOverrides = options.sessionOverrides ?? new SessionConfigOverrides();
+    this.sharedActiveRunCount = options.activeRunCount;
+    this.tools = options.skipToolCreation
+      ? []
+      : [
+          createCronCreateTool(this),
+          createCronListTool(this),
+          createCronDeleteTool(this),
+          createCronStopTool(this),
+        ];
   }
 
   getTools(): PilotDeckToolDefinition[] {
@@ -99,6 +113,9 @@ export class CronRuntime {
       registerActiveRun: (run) => this.registerActiveRun(run),
       unregisterActiveRun: (runId) => this.unregisterActiveRun(runId),
       getActiveRun: (runId) => this.activeRuns.get(runId),
+      runTimeoutMs: this.config.runTimeoutMinutes * 60_000,
+      defaultTimezone: this.config.timezone,
+      releaseTaskSession: (task) => this.releaseTaskSession(task),
       onPhaseEvent: (event) => {
         this.telemetry?.trackFeatureLoopStage({
           module: "cron_job",
@@ -134,7 +151,7 @@ export class CronRuntime {
       uuid: this.uuid,
       now: this.now,
       logger: this.logger,
-      activeRunCount: () => this.activeRuns.size,
+      activeRunCount: () => this.sharedActiveRunCount?.() ?? this.activeRuns.size,
     });
   }
 
@@ -147,12 +164,33 @@ export class CronRuntime {
       throw new Error("CronRuntime.start called before bindGateway.");
     }
     await this.migrateLegacyTaskSessions();
+    await this.recoverInterruptedRuns();
+    await this.prepareTaskSessions();
     await this.scheduler.start();
     this.logger.info("cron runtime started", { projectKey: this.projectKey });
   }
 
   async stop(): Promise<void> {
     await this.scheduler?.stop();
+    if (this.gateway) {
+      const activeRuns = [...this.activeRuns.values()];
+      for (const active of activeRuns) {
+        active.stopRequested = true;
+      }
+      await Promise.all(
+        activeRuns.map((active) =>
+          this.gateway!
+            .abortTurn({ sessionKey: active.sessionKey, runId: active.runId })
+            .catch(() => undefined),
+        ),
+      );
+    }
+    const tasks = await this.store.listTasks();
+    await Promise.all(tasks.map((task) => this.releaseTaskSession(task)));
+  }
+
+  getActiveRunCount(): number {
+    return this.activeRuns.size;
   }
 
   async createTask(input: CronCreateInput): Promise<CronCreateResult> {
@@ -162,8 +200,11 @@ export class CronRuntime {
     const now = this.now();
     const taskId = this.uuid();
     const sessionKey = buildCronSessionKey(taskId);
-    const schedule = normalizeSchedule(input);
-    const nextRunAt = computeNextRunAt(schedule, now);
+    const schedule = normalizeSchedule(input, this.config.timezone);
+    const timezone = schedule.type === "cron"
+      ? schedule.timezone
+      : input.timezone ?? this.config.timezone;
+    const nextRunAt = computeNextRunAt(schedule, now, timezone);
     if (!nextRunAt) {
       throw new Error("Cron schedule does not produce a valid future run time.");
     }
@@ -182,12 +223,19 @@ export class CronRuntime {
       // Keep the runtime root only as a compatibility fallback for direct callers.
       projectKey: input.projectKey ?? this.projectKey,
       mode: input.mode,
-      timezone: input.timezone ?? (schedule.type === "cron" ? schedule.timezone : undefined) ?? this.config.timezone,
+      timezone,
       createdAt: now.toISOString(),
       updatedAt: now.toISOString(),
       nextRunAt: nextRunAt.toISOString(),
+      scheduleComputationVersion: schedule.type === "cron" ? 2 : undefined,
     };
-    await this.store.putTask(task);
+    this.registerTaskSession(task);
+    try {
+      await this.store.putTask(task);
+    } catch (error) {
+      await this.releaseTaskSession(task);
+      throw error;
+    }
     this.telemetry?.trackFeatureLoopStage({
       module: "cron_job",
       loopStage: "module_event",
@@ -219,6 +267,9 @@ export class CronRuntime {
       stoppedRunId = stopped.runId;
     }
     const deleted = await this.store.deleteTask(input.taskId);
+    if (deleted) {
+      await this.releaseTaskSessionById(input.taskId);
+    }
     this.scheduler?.poke();
     return { deleted, stoppedRunId };
   }
@@ -233,6 +284,7 @@ export class CronRuntime {
     let deletedOneTimeTask = false;
     if (active.scheduleType === "once") {
       deletedOneTimeTask = await this.store.deleteTask(active.taskId);
+      await this.releaseTaskSessionById(active.taskId);
     }
     this.scheduler?.poke();
     return {
@@ -300,6 +352,10 @@ export class CronRuntime {
         continue;
       }
       migratedCount += 1;
+      this.sessionOverrides.delete(task.sessionKey);
+      await this.gateway
+        ?.closeSession({ sessionKey: task.sessionKey, reason: "cron/legacy-session-migrated" })
+        .catch(() => undefined);
       await this.store.putTask({
         ...task,
         sessionKey: nextSessionKey,
@@ -311,20 +367,124 @@ export class CronRuntime {
       this.logger.info("cron runtime migrated legacy task sessions", { migratedCount });
     }
   }
+
+  private registerTaskSession(task: CronTask): void {
+    this.sessionOverrides.set(task.sessionKey, {
+      permissionMode: "bypassPermissions",
+      bypassAvailable: true,
+      canPrompt: false,
+      excludeTools: [...UNATTENDED_SESSION_EXCLUDED_TOOLS],
+    });
+  }
+
+  private async prepareTaskSessions(): Promise<void> {
+    const tasks = await this.store.listTasks();
+    for (const task of tasks) {
+      this.registerTaskSession(task);
+      await this.gateway
+        ?.closeSession({ sessionKey: task.sessionKey, reason: "cron/unattended-policy-refresh" })
+        .catch(() => undefined);
+    }
+  }
+
+  private async releaseTaskSession(task: CronTask): Promise<void> {
+    this.sessionOverrides.delete(task.sessionKey);
+    await this.gateway
+      ?.closeSession({ sessionKey: task.sessionKey, reason: "cron/task-finished" })
+      .catch(() => undefined);
+  }
+
+  private async releaseTaskSessionById(taskId: string): Promise<void> {
+    const sessionKey = buildCronSessionKey(taskId);
+    this.sessionOverrides.delete(sessionKey);
+    await this.gateway
+      ?.closeSession({ sessionKey, reason: "cron/task-removed" })
+      .catch(() => undefined);
+  }
+
+  private async recoverInterruptedRuns(): Promise<void> {
+    const now = this.now();
+    const tasks = await this.store.listTasks();
+    const terminalRunIds = new Set(
+      (await this.store.listRuns(Number.MAX_SAFE_INTEGER))
+        .filter((run) => run.finishedAt && run.outcome)
+        .map((run) => run.runId),
+    );
+    let recoveredCount = 0;
+
+    for (const task of tasks) {
+      if (task.status !== "running") continue;
+      recoveredCount += 1;
+      if (task.lastRunId && !terminalRunIds.has(task.lastRunId)) {
+        const startedAt = Number.isNaN(new Date(task.updatedAt).getTime())
+          ? now.toISOString()
+          : task.updatedAt;
+        await this.store.appendRun({
+          schemaVersion: 1,
+          runId: task.lastRunId,
+          taskId: task.taskId,
+          sessionKey: task.sessionKey,
+          projectKey: task.projectKey,
+          startedAt,
+          finishedAt: now.toISOString(),
+          outcome: "failed",
+          error: {
+            code: "cron_run_interrupted",
+            message: "Cron run was interrupted before the runtime restarted.",
+          },
+        });
+      }
+
+      if (task.schedule.type === "once") {
+        await this.store.deleteTask(task.taskId);
+        await this.releaseTaskSession(task);
+        continue;
+      }
+
+      const timezone = resolveCronTimezone(
+        task.schedule.timezone,
+        task.timezone,
+        this.config.timezone,
+      );
+      const schedule = { ...task.schedule, timezone };
+      await this.store.putTask({
+        ...task,
+        schedule,
+        timezone,
+        status: "scheduled",
+        nextRunAt: computeNextRunAt(schedule, now, timezone)?.toISOString(),
+        scheduleComputationVersion: 2,
+        updatedAt: now.toISOString(),
+      });
+    }
+
+    if (recoveredCount > 0) {
+      this.logger.warn("cron runtime recovered interrupted runs", { recoveredCount });
+    }
+  }
 }
 
 export function createCronRuntime(options: CreateCronRuntimeOptions): CronRuntime {
   return new CronRuntime(options);
 }
 
-function normalizeSchedule(input: CronCreateInput): CronTask["schedule"] {
+function normalizeSchedule(input: CronCreateInput, configTimezone: string): CronTask["schedule"] {
   if (input.schedule.type === "once") {
     return { type: "once", runAt: input.schedule.runAt };
   }
+  const requestedTimezone = input.schedule.timezone ?? input.timezone;
+  if (requestedTimezone && !isValidCronTimezone(requestedTimezone)) {
+    throw new Error(`Invalid Cron timezone: ${requestedTimezone}`);
+  }
+  const timezone = resolveCronTimezone(
+    requestedTimezone,
+    undefined,
+    configTimezone,
+  );
   return {
     type: "cron",
     expression: input.schedule.expression,
-    timezone: input.schedule.timezone ?? input.timezone,
+    timezone,
   };
 }
 

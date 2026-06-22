@@ -60,7 +60,7 @@ import type { PilotAgentModelSelection, PilotConfigSnapshot } from "../pilot/con
 import { DEFAULT_JUDGE_TIMEOUT_MS, DEFAULT_SUBAGENT_MAX_TOKENS, DEFAULT_ALLOWED_TOOLS, DEFAULT_TRIGGER_TIERS, type RouterConfig } from "../router/config/schema.js";
 import { createAgentProjectSessionStorage, listProjectSessions, resumeAgentSession } from "../session/index.js";
 import { sanitizeSessionIdForPath } from "../session/storage/ProjectSessionStorage.js";
-import { readWebSessionMessages } from "../web/server/readSessionMessages.js";
+import { readWebSessionMessages, readSubagentWebMessages } from "../web/server/readSessionMessages.js";
 import { describeWebProject, listWebProjects } from "../web/server/listProjects.js";
 import { BackgroundTaskRuntime } from "../task/runtime/BackgroundTaskRuntime.js";
 import { createBuiltinRegistry, createPlanFileManager } from "../tool/index.js";
@@ -135,7 +135,7 @@ export type CreateLocalGatewayResult = {
   /**
    * Replace subsystem-owned tools, session overrides, and cron controller.
    * Called by the server command after tearing down and rebuilding
-   * AlwaysOnManager / CronRuntime in response to a config change.
+   * AlwaysOnManager / CronManager in response to a config change.
    */
   updateSubsystems: (update: SubsystemUpdate) => void;
 };
@@ -229,6 +229,12 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
     setSessionCwd: (sessionKey, cwd) => registry.setSessionCwd(sessionKey, cwd),
     readSessionMessages: (input) =>
       readWebSessionMessages(input, {
+        projectRoot: input.projectKey ? input.projectKey : projectRoot,
+        pilotHome,
+        now,
+      }),
+    readSubagentMessages: (input) =>
+      readSubagentWebMessages(input, {
         projectRoot: input.projectKey ? input.projectKey : projectRoot,
         pilotHome,
         now,
@@ -431,11 +437,17 @@ class ProjectRuntimeRegistry {
         renameSync(oldPath, eventsPath);
       }
     } catch { /* best-effort migration */ }
+    const self = this;
     return {
       emit(event: RouterEvent) {
         try {
           appendFileSync(eventsPath, JSON.stringify(event) + "\n");
         } catch { /* best-effort, never crash the agent loop */ }
+        if (event.type === "pilotdeck_router_retry_progress") {
+          try {
+            self.gateway?.broadcastRetryProgress(event);
+          } catch { /* best-effort */ }
+        }
       },
     };
   }
@@ -795,7 +807,7 @@ class ProjectRuntimeRegistry {
       );
     }
 
-    // -- excludeTools filtering (Always-On headless sessions) -----------
+    // -- excludeTools filtering (unattended sessions) -------------------
     const override = this._sessionOverrides?.get(context.sessionKey);
     if (override?.excludeTools && override.excludeTools.length > 0) {
       if (sessionTools === runtime.tools) {
@@ -809,8 +821,7 @@ class ProjectRuntimeRegistry {
     // -- Strip always_on_* tools from non-Always-On sessions -------------
     // These tools require an AlwaysOnRunContext to execute; surfacing them
     // in regular user sessions just pollutes the model's tool list.
-    const isAlwaysOnSession = override?.permissionMode === "bypassPermissions"
-      && override?.canPrompt === false;
+    const isAlwaysOnSession = context.sessionKey.startsWith("always-on/");
     if (!isAlwaysOnSession) {
       const alwaysOnNames = this._extraTools
         .filter((t) => t.name.startsWith("always_on_"))
@@ -824,7 +835,6 @@ class ProjectRuntimeRegistry {
         }
       }
     }
-
     // Inject the gateway's interactive permission hook so the agent's
     // PermissionRequest lifecycle is round-tripped through whichever
     // client is streaming this session (Web UI, TUI, etc.) instead of
@@ -1083,6 +1093,7 @@ class ProjectRuntimeRegistry {
       jsonSelfCorrect: true,
       subagentTimeoutMs: agent.subagents?.timeoutMs,
       maxContextTokens,
+      thinking: agent.thinking,
       permissionContext: createDefaultPermissionContext({
         cwd,
         mode: permissionMode,

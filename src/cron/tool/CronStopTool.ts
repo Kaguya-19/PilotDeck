@@ -18,8 +18,11 @@ export function createCronStopTool(runtime: CronToolRuntime): PilotDeckToolDefin
     },
     isReadOnly: () => false,
     isConcurrencySafe: () => false,
-    execute: async (input) => {
-      const result = await runtime.stopTask(input);
+    execute: async (input, context) => {
+      const result = await runtime.stopTask({
+        ...input,
+        projectKey: context.cwd,
+      });
       return {
         content: [{ type: "json", value: result }],
         data: result,

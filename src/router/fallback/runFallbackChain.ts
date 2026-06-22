@@ -30,8 +30,22 @@ export function planFallback(
  */
 const SELF_CORRECTABLE_CODES = new Set(["invalid_tool_arguments"]);
 
+/**
+ * Non-retryable error codes that should still attempt provider fallback
+ * because a different provider may succeed (e.g. billing exhaustion on
+ * one provider, model not found on another).
+ */
+const FALLBACK_ELIGIBLE_NON_RETRYABLE = new Set([
+  "billing",
+  "model_not_found",
+  "auth_error",
+]);
+
 export function isFallbackEligible(error: CanonicalModelError): boolean {
   if (SELF_CORRECTABLE_CODES.has(error.code)) {
+    return true;
+  }
+  if (FALLBACK_ELIGIBLE_NON_RETRYABLE.has(error.code)) {
     return true;
   }
   if (!error.retryable) {
@@ -43,7 +57,7 @@ export function isFallbackEligible(error: CanonicalModelError): boolean {
   if (error.recoverableViaImageStrip) {
     return false;
   }
-  if (error.code === "prompt_too_long" || error.code === "request_too_large") {
+  if (error.code === "prompt_too_long" || error.code === "request_too_large" || error.code === "context_overflow") {
     return false;
   }
   return true;

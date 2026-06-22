@@ -61,6 +61,7 @@
     "autoExpandTools": "Auto-expand tools",
     "showRawParameters": "Show raw parameters",
     "showThinking": "Show thinking",
+    "inlineThinking": "Inline thinking (typewriter animation)",
     "autoScrollToBottom": "Auto-scroll to bottom",
     "sendByCtrlEnter": "Send by Ctrl+Enter",
     "sendByCtrlEnterDescription": "When enabled, pressing Ctrl+Enter will send the message instead of just Enter. This is useful for IME users to avoid accidental sends.",
@@ -135,6 +136,9 @@
     "telemetry": {
       "title": "Telemetry",
       "detail": "Send anonymous usage data to help improve the product"
+    },
+    "gateway": {
+      "detail": "Connect Feishu, WeChat, and other IM channels"
     }
   },
   "notifications": {
@@ -442,10 +446,6 @@
           "title": "Default",
           "description": "Only trusted commands (ls, cat, grep, git status, etc.) run automatically. Other commands are skipped. Can write to workspace."
         },
-        "acceptEdits": {
-          "title": "Accept Edits",
-          "description": "All commands run automatically within the workspace. Full auto mode with sandboxed execution."
-        },
         "bypassPermissions": {
           "title": "Bypass Permissions",
           "description": "Full system access with no restrictions. All commands run automatically with full disk and network access. Use with caution."
@@ -454,7 +454,6 @@
       "technicalDetails": "Technical details",
       "technicalInfo": {
         "default": "sandboxMode=workspace-write, approvalPolicy=untrusted. Trusted commands: cat, cd, grep, head, ls, pwd, tail, git status/log/diff/show, find (without -exec), etc.",
-        "acceptEdits": "sandboxMode=workspace-write, approvalPolicy=never. All commands auto-execute within project directory.",
         "bypassPermissions": "sandboxMode=danger-full-access, approvalPolicy=never. Full system access, use only in trusted environments.",
         "overrideNote": "You can override this per-session using the mode button in the chat interface."
       }
@@ -703,7 +702,15 @@
         "supportsImageInput": "supports image input",
         "clickEnable": "Click to enable",
         "clickDisable": "Click to disable",
-        "customModelPlaceholder": "Custom model ID"
+        "customModelPlaceholder": "Custom model ID",
+        "providerAdvancedToggle": "Advanced retry settings",
+        "providerRetry": {
+          "requestMaxRetries": { "label": "Request max retries", "description": "Maximum retries for non-streaming requests." },
+          "streamMaxRetries": { "label": "Stream max retries", "description": "Maximum retries for streaming requests." },
+          "streamIdleTimeoutMs": { "label": "Stream idle timeout (ms)", "description": "Abort a stream if no data is received for this duration." },
+          "baseDelayMs": { "label": "Base delay (ms)", "description": "Initial delay before the first retry." },
+          "maxDelayMs": { "label": "Max delay (ms)", "description": "Maximum delay between retries." }
+        }
       },
       "agents": {
         "title": "Agents",
@@ -911,6 +918,13 @@
           "description": "Automatically retry when the upstream returns a response with zero tokens used.",
           "maxAttempts": { "label": "Max attempts", "description": "Maximum retry attempts before giving up." }
         },
+        "transientRetry": {
+          "label": "Transient error retry",
+          "description": "Automatically retry on transient errors (rate limits, server errors, overloaded) with exponential backoff.",
+          "maxAttempts": { "label": "Max attempts", "description": "Maximum retry attempts before giving up." },
+          "baseDelayMs": { "label": "Base delay (ms)", "description": "Initial delay before the first retry, in milliseconds." },
+          "maxDelayMs": { "label": "Max delay (ms)", "description": "Maximum delay between retries, in milliseconds." }
+        },
         "tokenSaver": {
           "title": "Token Saver",
           "description": "A lightweight judge classifies each turn into a tier and routes it to a cost-appropriate model.",
@@ -1030,5 +1044,44 @@
     "updateFailed": "Update failed",
     "restartToApply": "Restart to Apply",
     "dismiss": "Dismiss"
+  },
+  "gateway": {
+    "title": "IM Channels",
+    "description": "Configure instant messaging channels (Feishu, WeChat) so the agent can be reached from IM apps.",
+    "connected": "Connected",
+    "notConfigured": "Not configured",
+    "enabled": "Enabled",
+    "edit": "Edit",
+    "setup": "Set Up",
+    "testConnection": "Test Connection",
+    "save": "Save",
+    "disable": "Disable",
+    "cancel": "Cancel",
+    "dismiss": "Dismiss",
+    "feishu": {
+      "title": "Feishu / Lark",
+      "label": "Feishu Bot",
+      "domain": "Domain",
+      "connectionMode": "Connection Mode",
+      "chooseMethod": "Choose how to configure the Feishu bot:",
+      "qrScan": "QR Code Scan",
+      "qrScanDesc": "Scan with Feishu app to auto-create a bot",
+      "manualInput": "Manual Input",
+      "manualInputDesc": "Enter App ID and Secret from Developer Console",
+      "startQr": "Generate QR Code",
+      "connecting": "Connecting to Feishu…",
+      "scanPrompt": "Open Feishu / Lark app and scan the QR code",
+      "qrSuccess": "App created successfully — config saved and enabled",
+      "retry": "Retry"
+    },
+    "weixin": {
+      "title": "WeChat (iLink)",
+      "label": "WeChat Bot",
+      "qrLogin": "QR Code Login",
+      "relogin": "Re-login",
+      "loadingQr": "Generating QR code…",
+      "scanPrompt": "Open WeChat and scan the QR code to log in",
+      "loginSuccess": "Login successful — credentials saved"
+    }
   }
 }

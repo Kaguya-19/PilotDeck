@@ -52,11 +52,15 @@
   "working": {
     "default": "处理中",
     "processing": "处理中",
-    "thinking": "思考中",
+    "thinking": "连接中...",
+    "callingModel": "调用模型中...",
+    "executingTool": "执行工具中...",
     "generating": "正在生成回复",
     "compacting": "正在压缩上下文...",
     "compactingLevel": "正在触发 {{level}} 级压缩：{{label}}",
-    "waitingForPermission": "等待授权"
+    "waitingForPermission": "等待授权",
+    "retrying": "重连中 {{attempt}}/{{max}}{{delay}}",
+    "waitingForSubagent": "等待子任务完成"
   },
   "process": {
     "summary": {
@@ -147,6 +151,7 @@
   },
   "thinking": {
     "title": "思考中...",
+    "completed": "思考过程",
     "emoji": "💭 思考中..."
   },
   "json": {
@@ -199,13 +204,11 @@
     "permissionMode": "权限模式",
     "modes": {
       "default": "默认模式",
-      "acceptEdits": "编辑模式",
       "bypassPermissions": "无限制模式",
       "plan": "计划模式"
     },
     "descriptions": {
       "default": "只有受信任的命令（ls、cat、grep、git status 等）自动运行。其他命令将被跳过。可以写入工作区。",
-      "acceptEdits": "工作区内的所有命令自动运行。完全自动模式，具有沙盒执行功能。",
       "bypassPermissions": "完全的系统访问，无限制。所有命令自动运行，具有完整的磁盘和网络访问权限。请谨慎使用。",
       "plan": "计划模式 - 不执行任何命令"
     },
@@ -359,29 +362,29 @@
   },
   "pilotdeckStatus": {
     "actions": {
-      "thinking": "Thinking",
-      "processing": "Processing",
-      "analyzing": "Analyzing",
-      "working": "Working",
-      "computing": "Computing",
-      "reasoning": "Reasoning"
+      "thinking": "思考中",
+      "processing": "处理中",
+      "analyzing": "分析中",
+      "working": "工作中",
+      "computing": "计算中",
+      "reasoning": "推理中"
     },
     "state": {
-      "live": "Live",
-      "paused": "Paused"
+      "live": "运行中",
+      "paused": "已暂停"
     },
     "elapsed": {
       "seconds": "{{count}}s",
       "minutesSeconds": "{{minutes}}m {{seconds}}s",
-      "label": "{{time}} elapsed",
-      "startingNow": "Starting now"
+      "label": "已用时 {{time}}",
+      "startingNow": "刚刚开始"
     },
     "controls": {
-      "stopGeneration": "Stop Generation",
-      "pressEscToStop": "Press Esc anytime to stop"
+      "stopGeneration": "停止生成",
+      "pressEscToStop": "随时按 Esc 键停止"
     },
     "providers": {
-      "assistant": "Assistant"
+      "assistant": "助手"
     }
   },
   "projectSelection": {
@@ -397,5 +400,18 @@
   "welcome": {
     "greetingWithProject": "今天想做点什么？",
     "noProject": "从左侧选择一个项目开始"
+  },
+  "subagent": {
+    "detailTitle": "子任务详情",
+    "loadError": "加载子任务消息失败：{{error}}",
+    "noMessages": "没有可显示的子任务消息。",
+    "defaultDescription": "执行任务",
+    "status": {
+      "failed": "执行失败",
+      "completed": "已完成",
+      "stopped": "已停止",
+      "thinking": "思考中",
+      "executingTool": "正在执行 {{toolName}}"
+    }
   }
 }

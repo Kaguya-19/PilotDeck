@@ -10,16 +10,19 @@ import type {
   PilotDeckPermissionSuggestion,
   PermissionGrantResult,
 } from '../chat/types/types';
+import type { SessionStore } from '../../stores/useSessionStore';
 import { isBackgroundTaskSession, type Project, type ProjectSession, type SessionProvider } from '../../types/app';
 import { getIntrinsicMessageKey } from '../chat/utils/messageKeys';
 import MessageRowV2 from './MessageRowV2';
-import { ProcessLiveStatus, ProcessRunHeader, type ProcessTraceStep } from './ProcessTrace';
+import SubagentDetailModal from './SubagentDetailModal';
+import { useSubagentMessages } from './useSubagentMessages';
+import { ProcessLiveStatus, ProcessRunHeader, StreamingThinkingPreview, type ProcessTraceStep } from './ProcessTrace';
 import { formatProcessDuration } from './processTraceUtils';
 import {
   buildRenderableMessageItems,
   getLiveProcessDetailMessages,
-  getLiveProcessGroups,
   getLiveProcessGroupStep,
+  getLiveProcessGroups,
   shouldRenderLiveProcessGroup,
   type LiveProcessGroup,
   type RenderableMessageItem,
@@ -57,10 +60,12 @@ type MessagesPaneV2Props = {
   autoExpandTools?: boolean;
   showRawParameters?: boolean;
   showThinking?: boolean;
+  inlineThinking?: boolean;
   setInput: Dispatch<SetStateAction<string>>;
   isAssistantWorking?: boolean;
   workingStatus?: ClaudeWorkStatus | PilotDeckWorkStatus | null;
   runMode?: ChatRunMode;
+  sessionStore?: SessionStore;
 };
 
 type KeyedRenderableMessageItem = RenderableMessageItem & {
@@ -77,9 +82,18 @@ export type VirtualMessageWindow = {
   totalHeight: number;
 };
 
-const MESSAGE_VIRTUALIZATION_THRESHOLD = 160;
+const MESSAGE_VIRTUALIZATION_THRESHOLD = 60;
 const MESSAGE_WINDOW_OVERSCAN = 12;
 const MESSAGE_GAP_PX = 16;
+
+function isStreamingThinkingMessage(message: ChatMessage): boolean {
+  return Boolean(message.isThinking && String(message.id || '').startsWith('__streaming_thinking_'));
+}
+
+function isSubagentThinkingPlaceholder(message: ChatMessage): boolean {
+  const id = String(message.id || '');
+  return Boolean(message.isThinking && (id.startsWith('subagent_thinking_') || id.startsWith('__subagent_thinking_')));
+}
 
 function clampNumber(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -189,10 +203,22 @@ function MeasuredMessageItem({
       return undefined;
     }
 
-    const observer = new ResizeObserver(reportHeight);
+    let rafId: number | null = null;
+    const throttledReport = () => {
+      if (rafId != null) return;
+      rafId = requestAnimationFrame(() => {
+        rafId = null;
+        reportHeight();
+      });
+    };
+
+    const observer = new ResizeObserver(throttledReport);
     observer.observe(node);
 
-    return () => observer.disconnect();
+    return () => {
+      observer.disconnect();
+      if (rafId != null) cancelAnimationFrame(rafId);
+    };
   }, [itemKey, onHeightChange]);
 
   return (
@@ -234,10 +260,12 @@ export default function MessagesPaneV2({
   autoExpandTools,
   showRawParameters,
   showThinking,
+  inlineThinking,
   setInput,
   isAssistantWorking = false,
   workingStatus,
   runMode = 'agent',
+  sessionStore,
 }: MessagesPaneV2Props) {
   const { t } = useTranslation('chat');
   const messageKeyMapRef = useRef<WeakMap<ChatMessage, string>>(new WeakMap());
@@ -247,6 +275,14 @@ export default function MessagesPaneV2({
   const [heightVersion, setHeightVersion] = useState(0);
   const [scrollViewport, setScrollViewport] = useState({ scrollTop: 0, height: 0 });
   const [expandedProcessRows, setExpandedProcessRows] = useState<Map<string, boolean>>(() => new Map());
+  const [openSubagentId, setOpenSubagentId] = useState<string | null>(null);
+
+  const handleOpenSubagentDetail = useCallback((subagentId: string) => {
+    setOpenSubagentId(subagentId);
+  }, []);
+
+  const sessionId = selectedSession?.id ?? null;
+  const projectPath = selectedProject?.fullPath ?? undefined;
 
   const getMessageKey = useCallback((message: ChatMessage, index: number) => {
     const existingKey = messageKeyMapRef.current.get(message);
@@ -300,9 +336,79 @@ export default function MessagesPaneV2({
     () => activityMessages.filter((message) => message.isAgentActivity),
     [activityMessages],
   );
+  const subagentActivities = useMemo(
+    () => liveActivities.filter(isSubagentActivity),
+    [liveActivities],
+  );
+  const nonSubagentLiveActivities = useMemo(
+    () => liveActivities.filter((activity) => !isSubagentActivity(activity)),
+    [liveActivities],
+  );
+  const subagentActivityById = useMemo(() => {
+    const byId = new Map<string, ChatMessage>();
+    for (const activity of subagentActivities) {
+      const rawId = activity.activityId || activity.runId || '';
+      const subagentId = rawId.startsWith('subagent:')
+        ? rawId.slice('subagent:'.length)
+        : '';
+      if (subagentId) {
+        byId.set(subagentId, activity);
+      }
+    }
+    return byId;
+  }, [subagentActivities]);
+  const subagentThinkingByIdRef = useRef(new Map<string, string>());
+  const subagentThinkingById = (() => {
+    if (!sessionId || !sessionStore) {
+      if (subagentThinkingByIdRef.current.size === 0) return subagentThinkingByIdRef.current;
+      subagentThinkingByIdRef.current = new Map();
+      return subagentThinkingByIdRef.current;
+    }
+    const prev = subagentThinkingByIdRef.current;
+    let changed = false;
+    const next = new Map<string, string>();
+    for (const [subagentId, activity] of subagentActivityById) {
+      const state = String(activity.state || '');
+      if (['completed', 'failed', 'cancelled'].includes(state)) continue;
+      const msgs = sessionStore.getSubagentDetailMessages?.(sessionId, subagentId) ?? [];
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        const m = msgs[i];
+        if (m.id.startsWith('__subagent_thinking_') && m.content?.trim()) {
+          next.set(subagentId, m.content);
+          if (prev.get(subagentId) !== m.content) changed = true;
+          break;
+        }
+      }
+    }
+    if (!changed && prev.size === next.size) return prev;
+    subagentThinkingByIdRef.current = next;
+    return next;
+  })();
+  const openSubagentActivity = openSubagentId
+    ? subagentActivityById.get(openSubagentId)
+    : undefined;
+  const isOpenSubagentRunning = Boolean(
+    openSubagentActivity &&
+      !['completed', 'failed', 'cancelled'].includes(String(openSubagentActivity.state || '')),
+  );
+  const subagentDetail = useSubagentMessages(
+    openSubagentId ? sessionId : null,
+    openSubagentId,
+    projectPath,
+    sessionStore,
+    openSubagentActivity?.state,
+  );
   const renderableMessages = useMemo(
-    () => visibleMessages.filter((message) => !message.isAgentActivity),
-    [visibleMessages],
+    () => {
+      const filtered = visibleMessages.filter((message) =>
+        !message.isAgentActivity &&
+        !isSubagentThinkingPlaceholder(message) &&
+        (!inlineThinking && isStreamingThinkingMessage(message) ? false : true) &&
+        !(message.isThinking && !showThinking)
+      );
+      return filtered;
+    },
+    [visibleMessages, showThinking, inlineThinking],
   );
   const liveProcessDetailMessages = useMemo(
     () => isAssistantWorking ? getLiveProcessDetailMessages(renderableMessages) : [],
@@ -393,10 +499,62 @@ export default function MessagesPaneV2({
       item.message.content.trim().length > 0
     ));
   }, [isAssistantWorking, keyedMessageItems, liveProcessHeaderIndex]);
-  const liveStatusStep = useMemo(
-    () => getLiveStatusStep(liveActivities, workingStatus, hasLiveAssistantContent, t),
-    [hasLiveAssistantContent, liveActivities, t, workingStatus],
+  const hasPendingToolUse = useMemo(() => {
+    if (!isAssistantWorking || liveProcessHeaderIndex < 0) return false;
+    const liveItems = keyedMessageItems.slice(liveProcessHeaderIndex);
+    const lastToolUseIdx = liveItems.findLastIndex((item) => item.message.isToolUse);
+    if (lastToolUseIdx < 0) return false;
+    const hasContentAfterTool = liveItems.slice(lastToolUseIdx + 1).some((item) =>
+      item.message.type === 'assistant' && !item.message.isThinking && !item.message.isToolUse &&
+      typeof item.message.content === 'string' && item.message.content.trim().length > 0
+    );
+    return !hasContentAfterTool;
+  }, [isAssistantWorking, keyedMessageItems, liveProcessHeaderIndex]);
+  const runningSubagentActivity = useMemo(
+    () => [...subagentActivities].reverse().find(isRunningActivity) || null,
+    [subagentActivities],
   );
+  const streamingThinkingContent = useMemo(() => {
+    if (!showThinking || !isAssistantWorking) {
+      return null;
+    }
+    for (let i = visibleMessages.length - 1; i >= 0; i--) {
+      const msg = visibleMessages[i];
+      if (isStreamingThinkingMessage(msg) && typeof msg.content === 'string' && msg.content.trim()) {
+        return msg.content;
+      }
+      if (msg.type === 'user') break;
+    }
+    return null;
+  }, [showThinking, isAssistantWorking, visibleMessages]);
+  const liveStatusStep = useMemo<ProcessTraceStep>(() => {
+    if (streamingThinkingContent) {
+      return {
+        id: 'live-thinking',
+        title: t('working.thinking', { defaultValue: 'thinking' }),
+        phase: 'thinking',
+        state: 'running',
+      };
+    }
+    if (runningSubagentActivity) {
+      return {
+        id: runningSubagentActivity.activityId || runningSubagentActivity.id || 'live-subagent-waiting',
+        title: t('working.waitingForSubagent', { defaultValue: 'Waiting for subagent' }),
+        phase: 'subagent',
+        state: 'running',
+        toolName: 'agent',
+      };
+    }
+    return getLiveStatusStep(nonSubagentLiveActivities, workingStatus, hasLiveAssistantContent, hasPendingToolUse, t);
+  }, [
+    hasLiveAssistantContent,
+    hasPendingToolUse,
+    nonSubagentLiveActivities,
+    runningSubagentActivity,
+    streamingThinkingContent,
+    t,
+    workingStatus,
+  ]);
   const hasOpenEndedLiveProcessGroup = liveProcessGroups.some((group) => group.isRunning);
   const shouldRenderBottomLiveStatus = isAssistantWorking && !hasOpenEndedLiveProcessGroup;
 
@@ -493,29 +651,38 @@ export default function MessagesPaneV2({
         autoExpandTools={autoExpandTools}
         showRawParameters={showRawParameters}
         showThinking={showThinking}
+        inlineThinking={inlineThinking}
         isProcessExpanded={isProcessExpanded}
         onProcessExpandedChange={handleProcessExpandedChange}
+        onOpenSubagentDetail={handleOpenSubagentDetail}
+        subagentActivityById={subagentActivityById}
+        subagentThinkingById={subagentThinkingById}
+        isSessionRunning={isAssistantWorking}
       />
     ))
   ), [
     autoExpandTools,
     createDiff,
     getMessageKey,
+    handleOpenSubagentDetail,
+    inlineThinking,
     onFileOpen,
     onGrantSessionToolPermission,
     onShowSettings,
     provider,
     selectedProject,
+    subagentActivityById,
+    subagentThinkingById,
     isProcessExpanded,
     handleProcessExpandedChange,
     showRawParameters,
     showThinking,
+    isAssistantWorking,
   ]);
 
   const renderLiveProcessGroup = useCallback((group: LiveProcessGroup, index: number) => {
     const isLatestGroup = liveProcessGroups[liveProcessGroups.length - 1]?.id === group.id;
     const step = getLiveProcessGroupStep(group, t, group.isRunning && isLatestGroup ? liveStatusStep : null);
-
     return (
       <ProcessLiveStatus
         key={group.id || `${group.afterOriginalIndex}-${index}`}
@@ -551,7 +718,7 @@ export default function MessagesPaneV2({
       <Fragment key={item.itemKey}>
         {liveProcessHeaderIndex === 0 && item.renderIndex === 0 ? (
           <LiveProcessHeader
-            activities={liveActivities}
+            activities={nonSubagentLiveActivities}
             startedAtMs={liveProcessStartedAtMs}
             t={t}
           />
@@ -584,12 +751,17 @@ export default function MessagesPaneV2({
             autoExpandTools={autoExpandTools}
             showRawParameters={showRawParameters}
             showThinking={showThinking}
+            inlineThinking={inlineThinking}
             isProcessExpanded={isProcessExpanded}
             onProcessExpandedChange={handleProcessExpandedChange}
+            onOpenSubagentDetail={handleOpenSubagentDetail}
+            subagentActivityById={subagentActivityById}
+            subagentThinkingById={subagentThinkingById}
+            isSessionRunning={isAssistantWorking}
           />
           {rendersLiveHeaderAfterItem ? (
             <LiveProcessHeader
-              activities={liveActivities}
+              activities={nonSubagentLiveActivities}
               startedAtMs={liveProcessStartedAtMs}
               t={t}
             />
@@ -612,14 +784,16 @@ export default function MessagesPaneV2({
     autoExpandTools,
     createDiff,
     handleMeasuredItemHeight,
+    handleOpenSubagentDetail,
     handleProcessExpandedChange,
+    inlineThinking,
     isProcessExpanded,
     isAssistantWorking,
     keyedMessageItems,
-    liveActivities,
+    nonSubagentLiveActivities,
+    liveProcessGroupsByAnchor,
     liveProcessHeaderIndex,
     liveProcessStartedAtMs,
-    liveProcessGroupsByAnchor,
     onFileOpen,
     onGrantSessionToolPermission,
     onShowSettings,
@@ -628,6 +802,7 @@ export default function MessagesPaneV2({
     selectedProject,
     showRawParameters,
     showThinking,
+    subagentActivityById,
     t,
   ]);
 
@@ -774,23 +949,53 @@ export default function MessagesPaneV2({
           liveProcessHeaderIndex === keyedMessageItems.length &&
           keyedMessageItems[liveProcessHeaderIndex - 1]?.message.type !== 'user' ? (
             <LiveProcessHeader
-              activities={liveActivities}
+              activities={nonSubagentLiveActivities}
               startedAtMs={liveProcessStartedAtMs}
               t={t}
             />
           ) : null}
 
           {shouldRenderBottomLiveStatus ? (
-            <ProcessLiveStatus step={liveStatusStep}>
-              {liveProcessDetailMessages.length > 0
-                ? renderLiveProcessDetailMessages(liveProcessDetailMessages, 'bottom-live-process')
-                : null}
-            </ProcessLiveStatus>
+            <>
+              <ProcessLiveStatus step={liveStatusStep}>
+                {liveProcessDetailMessages.length > 0 && liveProcessGroups.length === 0
+                  ? renderLiveProcessDetailMessages(liveProcessDetailMessages, 'bottom-live-process')
+                  : null}
+              </ProcessLiveStatus>
+              {!inlineThinking && streamingThinkingContent ? (
+                <StreamingThinkingPreview content={streamingThinkingContent} />
+              ) : null}
+            </>
           ) : null}
         </div>
       )}
+
+      {openSubagentId ? (
+        <SubagentDetailModal
+          subagentId={openSubagentId}
+          messages={subagentDetail.messages}
+          isLoading={subagentDetail.isLoading}
+          error={subagentDetail.error}
+          provider={provider}
+          selectedProject={selectedProject}
+          createDiff={createDiff}
+          onFileOpen={onFileOpen}
+          showThinking={showThinking}
+          isRunning={isOpenSubagentRunning}
+          onClose={() => setOpenSubagentId(null)}
+        />
+      ) : null}
     </div>
   );
+}
+
+function isSubagentActivity(activity: ChatMessage): boolean {
+  const activityId = String(activity.activityId || activity.runId || '');
+  return activity.phase === 'subagent' || activityId.startsWith('subagent:');
+}
+
+function isRunningActivity(activity: ChatMessage): boolean {
+  return !['completed', 'failed', 'cancelled'].includes(String(activity.state || 'running'));
 }
 
 function getLatestActivity(activities: ChatMessage[]): ChatMessage | null {
@@ -819,11 +1024,34 @@ function getLiveStatusStep(
   activities: ChatMessage[],
   workingStatus: ClaudeWorkStatus | PilotDeckWorkStatus | null | undefined,
   hasAssistantContent: boolean,
+  hasPendingToolUse: boolean,
   t: (key: string, options?: Record<string, unknown>) => string,
 ): ProcessTraceStep {
   const latestActivity = getLatestActivity(activities);
   if (latestActivity) {
     return activityToLiveStep(latestActivity);
+  }
+
+  const retryProgress = (workingStatus as any)?.retryProgress;
+  if (retryProgress) {
+    const parts: string[] = [];
+    if (retryProgress.reason) parts.push(retryProgress.reason);
+    if (retryProgress.provider) parts.push(retryProgress.provider);
+    if (retryProgress.model) parts.push(retryProgress.model);
+    const delayStr = retryProgress.delayMs ? ` (${Math.round(retryProgress.delayMs / 1000)}s)` : '';
+    return {
+      id: 'live-retry',
+      title: t('working.retrying', {
+        defaultValue: 'Reconnecting {{attempt}}/{{max}}{{delay}}',
+        attempt: retryProgress.attempt,
+        max: retryProgress.maxAttempts,
+        delay: delayStr,
+      }),
+      detail: parts.join(' · '),
+      phase: 'retry',
+      state: 'running',
+      severity: 'warning',
+    };
   }
 
   if (workingStatus?.compactProgress) {
@@ -838,6 +1066,22 @@ function getLiveStatusStep(
   }
 
   const rawStatus = String(workingStatus?.text || '').toLowerCase();
+  if (rawStatus.includes('model_request_started')) {
+    if (hasPendingToolUse) {
+      return {
+        id: 'live-tool-exec',
+        title: t('working.executingTool', { defaultValue: 'Running tool...' }),
+        phase: 'tool',
+        state: 'running',
+      };
+    }
+    return {
+      id: 'live-model-call',
+      title: t('working.callingModel', { defaultValue: 'Calling model...' }),
+      phase: 'generation',
+      state: 'running',
+    };
+  }
   if (rawStatus.includes('permission')) {
     return {
       id: 'live-permission',
@@ -865,7 +1109,7 @@ function getLiveStatusStep(
       }
     : {
         id: 'live-thinking',
-        title: t('working.thinking', { defaultValue: 'Thinking' }),
+        title: t('working.thinking', { defaultValue: 'Connecting...' }),
         phase: 'thinking',
         state: 'running',
       };

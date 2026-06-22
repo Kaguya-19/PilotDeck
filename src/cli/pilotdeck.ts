@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { resolve } from "node:path";
 import { createAlwaysOnManager, createApplyHandler, SessionConfigOverrides, type AlwaysOnManager, type AlwaysOnConfig } from "../always-on/index.js";
-import { createCronRuntime, type CronRuntime, type CronConfig } from "../cron/index.js";
+import { createCronManager, type CronManager, type CronConfig } from "../cron/index.js";
 import { connectRemoteGatewayIfAvailable, type Gateway, type GatewayEvent, type GatewaySubmitTurnInput } from "../gateway/index.js";
 import { CliChannel, TuiChannel, FeishuChannel, WeixinChannel, QQChannel, loadEnabledChannels } from "../adapters/index.js";
 import {
@@ -38,8 +38,9 @@ async function main(argv = process.argv.slice(2)): Promise<void> {
     }
 
     let alwaysOn: AlwaysOnManager | undefined;
-    let cron: CronRuntime | undefined;
+    let cron: CronManager | undefined;
     let deferredBroadcast: ((name: string, payload?: unknown) => void) | undefined;
+    const sessionOverrides = new SessionConfigOverrides();
 
     const alwaysOnLogger = {
       info: (message: string, data?: Record<string, unknown>) =>
@@ -59,6 +60,7 @@ async function main(argv = process.argv.slice(2)): Promise<void> {
       return createAlwaysOnManager({
         config,
         pilotHome,
+        sessionOverrides,
         logger: alwaysOnLogger,
         telemetry,
         onWorktreeCreated: (runId, cwd) => {
@@ -73,12 +75,12 @@ async function main(argv = process.argv.slice(2)): Promise<void> {
       });
     }
 
-    function buildCron(config: CronConfig | undefined): CronRuntime | undefined {
+    function buildCron(config: CronConfig | undefined): CronManager | undefined {
       if (!config) return undefined;
-      return createCronRuntime({
+      return createCronManager({
         config,
         pilotHome,
-        projectKey: projectRoot,
+        sessionOverrides,
         logger: cronLogger,
         telemetry,
       });
@@ -96,7 +98,7 @@ async function main(argv = process.argv.slice(2)): Promise<void> {
       env,
       skipDefaultProject: !!env.PILOTDECK_SKIP_DEFAULT_PROJECT,
       extraTools: [...(alwaysOn?.getTools() ?? []), ...(cron?.getTools() ?? [])],
-      sessionOverrides: alwaysOn?.getSessionOverrides(),
+      sessionOverrides,
       cron,
       telemetry,
     });
@@ -104,7 +106,7 @@ async function main(argv = process.argv.slice(2)): Promise<void> {
     const standaloneApply = createApplyHandler({
       gateway,
       pilotHome,
-      sessionOverrides: alwaysOn?.getSessionOverrides() ?? new SessionConfigOverrides(),
+      sessionOverrides,
       alwaysOnConfig: snapshot.config.alwaysOn,
       telemetry,
       onTurnEvent: (sessionKey, channelKey, event) => {
@@ -118,7 +120,7 @@ async function main(argv = process.argv.slice(2)): Promise<void> {
     }
     updateSubsystems({
       extraTools: [...(alwaysOn?.getTools() ?? []), ...(cron?.getTools() ?? [])],
-      sessionOverrides: alwaysOn?.getSessionOverrides(),
+      sessionOverrides,
       cron,
       alwaysOnApply: alwaysOn
         ? (input) => alwaysOn!.applyCycle(input)
@@ -144,10 +146,21 @@ async function main(argv = process.argv.slice(2)): Promise<void> {
       const aoChanged = event.changedPaths.some((p) => p.startsWith("alwaysOn.") || p === "alwaysOn");
       const cronChanged = event.changedPaths.some((p) => p.startsWith("cron.") || p === "cron");
       const proxyChanged = event.changedPaths.some((p) => p.startsWith("proxy.") || p === "proxy");
+      const adapterChanged = event.changedPaths.some((p) => p.startsWith("adapters."));
 
       if (proxyChanged) {
         const proxyConfig = event.nextSnapshot.config.proxy;
         void reinstallGlobalProxy(proxyConfig?.url, proxyConfig?.noProxy);
+      }
+
+      if (adapterChanged) {
+        reloadChain = reloadChain
+          .then(() => handleAdapterHotReload(event.nextSnapshot.config))
+          .catch((err) =>
+            console.warn(
+              `[pilotdeck] adapter hot-reload failed: ${err instanceof Error ? err.message : String(err)}`,
+            ),
+          );
       }
 
       if (!aoChanged && !cronChanged) return;
@@ -186,7 +199,7 @@ async function main(argv = process.argv.slice(2)): Promise<void> {
       const fallbackApply = createApplyHandler({
         gateway,
         pilotHome,
-        sessionOverrides: alwaysOn?.getSessionOverrides() ?? new SessionConfigOverrides(),
+        sessionOverrides,
         alwaysOnConfig: config.alwaysOn,
         telemetry,
         onTurnEvent: (sessionKey, channelKey, event) => {
@@ -196,7 +209,7 @@ async function main(argv = process.argv.slice(2)): Promise<void> {
 
       updateSubsystems({
         extraTools: [...(alwaysOn?.getTools() ?? []), ...(cron?.getTools() ?? [])],
-        sessionOverrides: alwaysOn?.getSessionOverrides(),
+        sessionOverrides,
         cron,
         alwaysOnApply: alwaysOn ? (input) => alwaysOn!.applyCycle(input) : fallbackApply,
         alwaysOnRerunPlan: alwaysOn ? (input) => alwaysOn!.rerunPlan(input) : undefined,
@@ -210,6 +223,39 @@ async function main(argv = process.argv.slice(2)): Promise<void> {
       if (aoChanged) parts.push(`always-on=${alwaysOn ? "started" : "stopped"}`);
       if (cronChanged) parts.push(`cron=${cron ? "started" : "stopped"}`);
       console.log(`[pilotdeck] Subsystem hot-reload complete: ${parts.join(", ")}`);
+    }
+
+    // --- Adapter hot-reload ---
+
+    let serverRef: Awaited<ReturnType<typeof startPilotDeckServer>> | undefined;
+
+    async function handleAdapterHotReload(config: (typeof snapshot)["config"]): Promise<void> {
+      if (!serverRef) return;
+      const parts: string[] = [];
+
+      const fCfg = config.adapters?.feishu;
+      if (fCfg?.enabled === true) {
+        const ch = new FeishuChannel({
+          appId: fCfg.appId,
+          appSecret: fCfg.appSecret,
+          encryptKey: fCfg.encryptKey,
+          verifyToken: fCfg.verifyToken,
+          connectionMode: fCfg.connectionMode,
+          domainName: fCfg.domainName,
+        });
+        await serverRef.hotStartChannel(ch);
+        parts.push("feishu=started");
+      }
+
+      const wCfg = config.adapters?.weixin;
+      if (wCfg?.enabled === true) {
+        await serverRef.hotStartChannel(new WeixinChannel());
+        parts.push("weixin=started");
+      }
+
+      if (parts.length) {
+        console.log(`[pilotdeck] Adapter hot-reload complete: ${parts.join(", ")}`);
+      }
     }
 
     // --- Server startup ---
@@ -239,6 +285,7 @@ async function main(argv = process.argv.slice(2)): Promise<void> {
       channels: extraChannels,
       config: snapshot.config,
     });
+    serverRef = server;
     bindServer(server);
     deferredBroadcast = (name, payload) => server.broadcastNotification(name, payload);
     console.log(`PilotDeck server listening: ${server.url}`);
@@ -273,6 +320,18 @@ async function main(argv = process.argv.slice(2)): Promise<void> {
       void shutdownAndExit(0);
     });
     await new Promise(() => undefined);
+    return;
+  }
+
+  if (command === "gateway") {
+    const sub = argv[1];
+    if (sub === "setup") {
+      const { runGatewaySetup } = await import("./commands/gatewaySetup.js");
+      await runGatewaySetup(argv.slice(2));
+      return;
+    }
+    console.error("Usage: pilotdeck gateway setup [feishu|weixin]");
+    process.exitCode = 1;
     return;
   }
 
@@ -617,6 +676,9 @@ function createFallbackGateway(): Gateway {
     grantSessionPermission: async () => ({ granted: false }),
     readSessionMessages: async () => {
       throw new Error("read_session_messages is not configured.");
+    },
+    readSubagentMessages: async () => {
+      throw new Error("read_subagent_messages is not configured.");
     },
     listProjects: async () => ({ projects: [] }),
     describeProject: async (input) => ({

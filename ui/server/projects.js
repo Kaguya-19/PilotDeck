@@ -486,10 +486,17 @@ async function resolveProjectIdForPathOrName(projectName, fullPath) {
     return createProjectId(fullPath);
 }
 
-async function getProjectCronJobsOverview(_projectName) {
+async function getProjectCronJobsOverview(projectName) {
     try {
         const gateway = await getPilotDeckGateway();
-        const result = await gateway.cronList({ includeHistory: true, limit: 50 });
+        const projectKey = projectName
+            ? await extractProjectDirectory(projectName)
+            : undefined;
+        const result = await gateway.cronList({
+            projectKey,
+            includeHistory: true,
+            limit: 50,
+        });
         const runsByTaskId = new Map();
         if (Array.isArray(result.recentRuns)) {
             for (const run of result.recentRuns) {

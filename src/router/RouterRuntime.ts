@@ -28,6 +28,7 @@ import { decideScenario } from "./scenario/decideScenario.js";
 import { stripSubagentTagFromMessages } from "./scenario/subagentDetector.js";
 import { SessionRouterStore } from "./session/SessionRouterStore.js";
 import { SessionUsageCache } from "./session/sessionUsageCache.js";
+import { ProviderHealthTracker } from "./health/ProviderHealthTracker.js";
 import {
   createZeroUsageState,
   observeEventForZeroUsage,
@@ -102,6 +103,15 @@ export function createRouterRuntime(
   const judgeRuntime = deps.judgeRuntime ?? deps.modelRuntime;
   const events = deps.events ?? { emit: () => undefined };
   const telemetry = deps.telemetry;
+  const healthTrackers = new Map<string, ProviderHealthTracker>();
+  function getHealthTracker(sessionId: string): ProviderHealthTracker {
+    let tracker = healthTrackers.get(sessionId);
+    if (!tracker) {
+      tracker = new ProviderHealthTracker();
+      healthTrackers.set(sessionId, tracker);
+    }
+    return tracker;
+  }
 
   async function resolveCustom(
     input: RouterDecisionInput,
@@ -388,13 +398,20 @@ export function createRouterRuntime(
         return;
       }
       const attempt = attempts[attemptIndex];
+      if (
+        attemptIndex > 0 &&
+        getHealthTracker(ctx.sessionId).shouldSkip(attempt.provider) &&
+        attemptIndex < attempts.length - 1
+      ) {
+        continue;
+      }
       const attemptDecision: RouterDecision = {
         ...decision,
         provider: attempt.provider,
         model: attempt.model,
         resolvedFrom: attemptIndex === 0 ? decision.resolvedFrom : "fallback",
       };
-      const attemptRequest = applyDecisionToRequest(attemptDecision, request);
+      let attemptRequest = applyDecisionToRequest(attemptDecision, request);
       lastAttempt = attempt;
       lastDecision = attemptDecision;
 
@@ -458,8 +475,7 @@ export function createRouterRuntime(
 
         if (outcome.error) {
           lastError = outcome.error;
-          // Only retry/fallback if we haven't surfaced content yet — otherwise
-          // we'd produce duplicate text on the consumer side.
+          getHealthTracker(ctx.sessionId).recordFailure(attempt.provider);
           if (!hasYieldedContent && isFallbackEligible(outcome.error)) {
             if (attemptIndex < attempts.length - 1) {
               const next = attempts[attemptIndex + 1];
@@ -502,10 +518,12 @@ export function createRouterRuntime(
             transientRetryEnabled &&
             transientRetryCount < transientRetryMax
           ) {
-            const delay = Math.min(
-              transientBaseDelayMs * Math.pow(2, transientRetryCount) + Math.random() * 500,
-              transientMaxDelayMs,
-            );
+            const delay = outcome.error.retryAfterMs != null
+              ? Math.min(outcome.error.retryAfterMs, transientMaxDelayMs)
+              : Math.min(
+                  transientBaseDelayMs * Math.pow(2, transientRetryCount) + Math.random() * 500,
+                  transientMaxDelayMs,
+                );
             console.warn(
               `[PilotDeck] transientRetry: ${outcome.error.code} (attempt ${transientRetryCount + 1}/${transientRetryMax}, delay=${Math.round(delay)}ms)`,
             );
@@ -518,6 +536,17 @@ export function createRouterRuntime(
               provider: attempt.provider,
               model: attempt.model,
               errorCode: outcome.error.code,
+            });
+            events.emit({
+              type: "pilotdeck_router_retry_progress",
+              sessionId: ctx.sessionId,
+              turnId: ctx.turnId,
+              attempt: transientRetryCount + 1,
+              maxAttempts: transientRetryMax,
+              delayMs: Math.round(delay),
+              reason: classifyRetryReason(outcome.error.code),
+              provider: attempt.provider,
+              model: attempt.model,
             });
             telemetry?.trackFeatureLoopStage({
               module: "router",
@@ -539,9 +568,40 @@ export function createRouterRuntime(
             transientRetryCount++;
             continue;
           }
-          // Either we've already surfaced content, the error isn't eligible
-          // for fallback/retry, or we've exhausted all retry attempts. Replay
-          // any queued framing events then surface the error.
+          if (
+            hasYieldedContent &&
+            isMidStreamRateLimitError(outcome.error) &&
+            transientRetryCount < transientRetryMax
+          ) {
+            const partialText = extractPartialText(outcome.buffered);
+            if (partialText.length > 100) {
+              const midDelay = outcome.error.retryAfterMs != null
+                ? Math.min(outcome.error.retryAfterMs, transientMaxDelayMs)
+                : Math.min(
+                    transientBaseDelayMs * Math.pow(2, transientRetryCount) + Math.random() * 500,
+                    transientMaxDelayMs,
+                  );
+              console.warn(
+                `[PilotDeck] midStreamRetry: ${outcome.error.code} after partial content ` +
+                `(attempt ${transientRetryCount + 1}/${transientRetryMax}, delay=${Math.round(midDelay)}ms)`,
+              );
+              events.emit({
+                type: "pilotdeck_router_retry_progress",
+                sessionId: ctx.sessionId,
+                turnId: ctx.turnId,
+                attempt: transientRetryCount + 1,
+                maxAttempts: transientRetryMax,
+                delayMs: Math.round(midDelay),
+                reason: classifyRetryReason(outcome.error.code),
+                provider: attempt.provider,
+                model: attempt.model,
+              });
+              await abortableDelay(midDelay, ctx.abortSignal);
+              attemptRequest = buildMidStreamContinuationRequest(attemptRequest, partialText);
+              transientRetryCount++;
+              continue;
+            }
+          }
           for (const queued of pending) {
             yield queued;
           }
@@ -567,6 +627,17 @@ export function createRouterRuntime(
             provider: attempt.provider,
             model: attempt.model,
           });
+          events.emit({
+            type: "pilotdeck_router_retry_progress",
+            sessionId: ctx.sessionId,
+            turnId: ctx.turnId,
+            attempt: zeroUsageAttempt,
+            maxAttempts: zeroUsageMax,
+            delayMs: 500 * zeroUsageAttempt,
+            reason: "zero_usage",
+            provider: attempt.provider,
+            model: attempt.model,
+          });
           telemetry?.trackFeatureLoopStage({
             module: "router",
             ownerModule: "router",
@@ -585,8 +656,8 @@ export function createRouterRuntime(
           continue;
         }
 
-        // Success path: flush any pending framing events that didn't reach
-        // a content event (e.g. zero-content responses, tool-only turns).
+        getHealthTracker(ctx.sessionId).recordSuccess(attempt.provider);
+
         if (!hasYieldedContent) {
           for (const queued of pending) {
             yield queued;
@@ -716,6 +787,7 @@ export function createRouterRuntime(
       disposeTokenizer();
       if (!externalStore) sessionStore.clear();
       usageCache.clear();
+      healthTrackers.clear();
     },
   };
 }
@@ -858,4 +930,65 @@ function classifyNetworkErrorCode(error: unknown): string {
   if (msg.includes("timeout") || error.name === "TimeoutError") return "timeout";
   if (msg.includes("abort") || error.name === "AbortError") return "aborted";
   return "network_error";
+}
+
+function isMidStreamRateLimitError(error: import("../model/index.js").CanonicalModelError): boolean {
+  return error.code === "rate_limit_error" || error.code === "overloaded_error";
+}
+
+function classifyRetryReason(errorCode: string): "rate_limit" | "server_error" | "network_error" | "zero_usage" | "overloaded" {
+  if (errorCode === "rate_limit_error") return "rate_limit";
+  if (errorCode === "overloaded_error") return "overloaded";
+  if (errorCode === "server_error") return "server_error";
+  if (errorCode === "network_error" || errorCode === "timeout") return "network_error";
+  return "server_error";
+}
+
+function extractPartialText(buffered: CanonicalModelEvent[]): string {
+  let text = "";
+  for (const ev of buffered) {
+    if (ev.type === "text_delta") {
+      text += ev.text;
+    }
+  }
+  return text;
+}
+
+const MID_STREAM_CONTINUATION_MARKER = "Continue from where you left off.";
+
+function buildMidStreamContinuationRequest(
+  original: CanonicalModelRequest,
+  partialText: string,
+): CanonicalModelRequest {
+  const baseMessages = stripPriorContinuation(original.messages);
+  return {
+    ...original,
+    messages: [
+      ...baseMessages,
+      {
+        role: "assistant" as const,
+        content: [{ type: "text" as const, text: partialText }],
+      },
+      {
+        role: "user" as const,
+        content: [{ type: "text" as const, text: MID_STREAM_CONTINUATION_MARKER }],
+      },
+    ],
+  };
+}
+
+function stripPriorContinuation(messages: CanonicalModelRequest["messages"]): CanonicalModelRequest["messages"] {
+  if (messages.length < 2) return messages;
+  const last = messages[messages.length - 1];
+  const secondLast = messages[messages.length - 2];
+  if (
+    last.role === "user" &&
+    secondLast.role === "assistant" &&
+    last.content.length === 1 &&
+    last.content[0].type === "text" &&
+    (last.content[0] as { type: "text"; text: string }).text === MID_STREAM_CONTINUATION_MARKER
+  ) {
+    return messages.slice(0, -2);
+  }
+  return messages;
 }

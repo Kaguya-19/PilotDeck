@@ -28,6 +28,7 @@ export type CronTask = {
   updatedAt: string;
   nextRunAt?: string;
   lastRunId?: string;
+  scheduleComputationVersion?: 2;
 };
 
 export type CronRunOutcome = "completed" | "failed" | "aborted" | "stopped";
@@ -62,6 +63,7 @@ export type CronCreateResult = {
 };
 
 export type CronListInput = {
+  projectKey?: string;
   includeHistory?: boolean;
   limit?: number;
 };
@@ -73,6 +75,7 @@ export type CronListResult = {
 
 export type CronDeleteInput = {
   taskId: string;
+  projectKey?: string;
   stopRunning?: boolean;
 };
 
@@ -84,6 +87,7 @@ export type CronDeleteResult = {
 export type CronStopInput = {
   taskId?: string;
   runId?: string;
+  projectKey?: string;
 };
 
 export type CronStopResult = {
@@ -95,6 +99,7 @@ export type CronStopResult = {
 
 export type CronRunNowInput = {
   taskId: string;
+  projectKey?: string;
 };
 
 export type CronRunNowResult = {

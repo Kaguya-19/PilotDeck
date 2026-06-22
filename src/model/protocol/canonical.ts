@@ -241,6 +241,19 @@ export type ModelDefinition = {
   aliases?: string[];
 };
 
+export type ProviderRetryConfig = {
+  /** Max retries for non-streaming HTTP requests. Default 2. */
+  requestMaxRetries?: number;
+  /** Max retries for dropped SSE streams. Default 2. */
+  streamMaxRetries?: number;
+  /** Idle timeout (ms) for streaming responses before treating as lost. Default 300000 (5 min). */
+  streamIdleTimeoutMs?: number;
+  /** Base delay (ms) for exponential backoff. Default 1000. */
+  baseDelayMs?: number;
+  /** Max delay cap (ms) for backoff. Default 30000. */
+  maxDelayMs?: number;
+};
+
 export type ProviderConfig = {
   id: string;
   protocol: ModelProtocol;
@@ -250,7 +263,7 @@ export type ProviderConfig = {
   headers: Record<string, string>;
   /** Arbitrary fields merged into every request body (e.g. OpenRouter provider preferences). */
   extraBody?: Record<string, unknown>;
-  retry?: Record<string, unknown>;
+  retry?: ProviderRetryConfig;
   models: Record<string, ModelDefinition>;
 };
 

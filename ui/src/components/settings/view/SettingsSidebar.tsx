@@ -1,4 +1,4 @@
-import { FileCog, Palette, Server, Shield, type LucideIcon } from 'lucide-react';
+import { FileCog, Palette, Radio, Server, Shield, type LucideIcon } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { cn } from '../../../lib/utils';
 import { PillBar, Pill } from '../../../shared/view/ui';
@@ -22,6 +22,7 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'permissions', labelKey: 'mainTabs.permissions', icon: Shield },
   { id: 'config', labelKey: 'mainTabs.config', icon: FileCog },
   { id: 'mcp', labelKey: 'mcpConfig.title', icon: Server },
+  { id: 'gateway', labelKey: 'gateway.title', icon: Radio },
 ];
 
 export default function SettingsSidebar({ activeTab, onChange }: SettingsSidebarProps) {

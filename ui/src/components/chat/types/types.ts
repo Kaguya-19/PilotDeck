@@ -6,7 +6,7 @@ import type {
 
 export type Provider = SessionProvider;
 
-export type PermissionMode = 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan';
+export type PermissionMode = 'default' | 'bypassPermissions' | 'plan';
 export type ChatRunMode = 'agent' | 'plan';
 
 export interface ChatImage {
@@ -74,6 +74,7 @@ export interface ChatMessage {
   outputFile?: string;
   taskResult?: string;
   isSubagentContainer?: boolean;
+  subagentId?: string;
   isTaskNotification?: boolean;
   isInterruptedNotice?: boolean;
   isAgentActivity?: boolean;
@@ -130,11 +131,21 @@ export interface ClaudeWorkStatus {
   compactProgress?: CompactProgress | null;
 }
 
+export interface RetryProgress {
+  attempt: number;
+  maxAttempts: number;
+  delayMs?: number;
+  reason?: string;
+  provider?: string;
+  model?: string;
+}
+
 export interface PilotDeckWorkStatus {
   text: string;
   tokens: number;
   can_interrupt: boolean;
   compactProgress?: CompactProgress | null;
+  retryProgress?: RetryProgress | null;
 }
 
 export interface PilotDeckSettings {
@@ -212,6 +223,7 @@ export interface ChatInterfaceProps {
   autoExpandTools?: boolean;
   showRawParameters?: boolean;
   showThinking?: boolean;
+  inlineThinking?: boolean;
   autoScrollToBottom?: boolean;
   sendByCtrlEnter?: boolean;
   externalMessageUpdate?: number;

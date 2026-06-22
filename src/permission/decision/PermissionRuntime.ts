@@ -1,5 +1,6 @@
 import { isAbsolute, relative, resolve } from "node:path";
 import type { PilotDeckToolDefinition, PilotDeckToolRuntimeContext } from "../../tool/index.js";
+import { buildPlanModeViolationMessage, buildPlanModeBashViolationMessage } from "../../tool/planModeConstraints.js";
 import { matchPermissionRule } from "../policy/matchPermissionRule.js";
 import type {
   PermissionContext,
@@ -101,7 +102,7 @@ export class PermissionRuntime {
           return deny({
             type: "mode",
             mode: "plan",
-            message: `Plan mode denies side-effecting tool ${tool.name}.`,
+            message: buildPlanModeDenyMessage(tool.name, input),
           });
         }
         return finalizeAsk(toolDecision, permissionContext);
@@ -200,15 +201,7 @@ function decideByMode(
     return deny({
       type: "mode",
       mode: "plan",
-      message: `Plan mode denies side-effecting tool ${tool.name}.`,
-    });
-  }
-
-  if (context.mode === "acceptEdits" && tool.kind === "filesystem" && !tool.isReadOnly(input)) {
-    return allow({
-      type: "mode",
-      mode: "acceptEdits",
-      message: `acceptEdits allows filesystem edit tool ${tool.name}.`,
+      message: buildPlanModeDenyMessage(tool.name, input),
     });
   }
 
@@ -310,18 +303,6 @@ function finalizeAsk(decision: PermissionDecision, context: PermissionContext): 
     };
   }
 
-  if (context.mode === "dontAsk") {
-    return {
-      type: "deny",
-      reason: {
-        type: "mode",
-        mode: "dontAsk",
-        message: "dontAsk mode denies permission prompts.",
-      },
-      message: "Permission prompt denied because dontAsk mode is active.",
-    };
-  }
-
   return decision;
 }
 
@@ -363,4 +344,17 @@ function isPlanDirectoryWrite(
     && !relativeToPlanDir.startsWith("..")
     && !relativeToPlanDir.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`)
   );
+}
+
+/**
+ * Build a structured plan-mode deny message with corrective guidance.
+ * For `bash`, extracts the command string to give a more precise hint.
+ */
+function buildPlanModeDenyMessage(toolName: string, input: unknown): string {
+  if (toolName === "bash") {
+    const record = input as Record<string, unknown> | null;
+    const command = typeof record?.command === "string" ? record.command : "";
+    return buildPlanModeBashViolationMessage(command);
+  }
+  return buildPlanModeViolationMessage(toolName);
 }

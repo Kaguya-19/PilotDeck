@@ -93,6 +93,8 @@ export interface NormalizedMessage {
   exitCode?: number;
   actualSessionId?: string;
   parentToolUseId?: string;
+  subagentId?: string;
+  isSubagentDetail?: boolean;
   subagentTools?: unknown[];
   taskId?: string;
   outputFile?: string;
@@ -142,6 +144,9 @@ export interface SessionSlot {
   serverMessages: NormalizedMessage[];
   realtimeMessages: NormalizedMessage[];
   activityMessages: NormalizedMessage[];
+  subagentDetailMessages: Map<string, NormalizedMessage[]>;
+  /** toolCallId → { subagentId, subagentType } links from bridge subagent_link frames */
+  subagentLinks: Map<string, { subagentId: string; subagentType: string }>;
   merged: NormalizedMessage[];
   /** @internal Cache-invalidation refs for computeMerged */
   _lastServerRef: NormalizedMessage[];
@@ -162,6 +167,8 @@ function createEmptySlot(): SessionSlot {
     serverMessages: EMPTY,
     realtimeMessages: EMPTY,
     activityMessages: EMPTY,
+    subagentDetailMessages: new Map(),
+    subagentLinks: new Map(),
     merged: EMPTY,
     _lastServerRef: EMPTY,
     _lastRealtimeRef: EMPTY,
@@ -255,19 +262,33 @@ function isLocalInterruptDuplicate(
   });
 }
 
+// NOTE: isLocalFinalizedDuplicate was removed because it prematurely filtered
+// finalized thinking/text messages when ANY server data existed (even from
+// prior turns). The refreshFromServer cleanup already removes non-streaming
+// realtime messages once the server commits the current turn's data.
+
 /**
  * Compute merged messages: server + realtime, deduped by id.
  * Server messages take priority (they're the persisted source of truth).
  * Realtime messages that aren't yet in server stay (in-flight streaming).
  */
 function computeMerged(server: NormalizedMessage[], realtime: NormalizedMessage[]): NormalizedMessage[] {
-  if (realtime.length === 0) return server;
+  if (realtime.length === 0) {
+    return server;
+  }
   if (server.length === 0) return realtime;
   const serverIds = new Set(server.map(m => m.id));
+  const serverToolIds = new Set(
+    server.filter(m => m.kind === 'tool_use' && m.toolId).map(m => m.toolId!)
+  );
   const extra = realtime.filter((message) => {
     if (serverIds.has(message.id)) return false;
     if (isConfirmedUserMessageDuplicate(message, server)) return false;
     if (isLocalInterruptDuplicate(message, server)) return false;
+    // Dedup tool_use by toolId (invocation ID) — the message envelope ID
+    // may differ between WebSocket replay and server-persisted copy, but
+    // the underlying tool invocation is the same.
+    if (message.kind === 'tool_use' && message.toolId && serverToolIds.has(message.toolId)) return false;
     return true;
   });
   if (extra.length === 0) return server;
@@ -298,7 +319,15 @@ function computeMerged(server: NormalizedMessage[], realtime: NormalizedMessage[
     }
   }
 
-  return [...server, ...extra];
+  const result = [...server, ...extra];
+  return result;
+}
+
+function getUpsertKey(message: NormalizedMessage): string {
+  if ((message.kind === 'tool_use' || message.kind === 'tool_result') && message.toolId) {
+    return `${message.id}::${message.kind}::${message.toolId}`;
+  }
+  return message.id;
 }
 
 function upsertRealtimeMessages(
@@ -307,11 +336,12 @@ function upsertRealtimeMessages(
 ): NormalizedMessage[] {
   if (incoming.length === 0) return existing;
   const updated = [...existing];
-  const indexById = new Map(updated.map((message, index) => [message.id, index]));
+  const indexByKey = new Map(updated.map((message, index) => [getUpsertKey(message), index]));
   for (const message of incoming) {
-    const existingIndex = indexById.get(message.id);
+    const key = getUpsertKey(message);
+    const existingIndex = indexByKey.get(key);
     if (existingIndex === undefined) {
-      indexById.set(message.id, updated.length);
+      indexByKey.set(key, updated.length);
       updated.push(message);
     } else {
       updated[existingIndex] = message;
@@ -365,6 +395,7 @@ export function patchMergedStreamingMessage(
     content,
     ...(msgProvider != null ? { provider: msgProvider } : {}),
   };
+  slot.merged = slot.merged.slice();
   return true;
 }
 
@@ -518,8 +549,14 @@ export function useSessionStore() {
           (max, m) => Math.max(max, Date.parse(m.timestamp) || 0), 0,
         );
         const watermark = Math.max(fetchStartedAt, latestServerTs);
+        const serverIds = new Set(messages.map(m => m.id));
+        const serverToolIds = new Set(
+          messages.filter(m => m.kind === 'tool_use' && m.toolId).map(m => m.toolId!)
+        );
         slot.realtimeMessages = slot.realtimeMessages.filter(m => {
           if (m.id.startsWith('__streaming_')) return true;
+          if (serverIds.has(m.id)) return false;
+          if (m.kind === 'tool_use' && m.toolId && serverToolIds.has(m.toolId)) return false;
           return (Date.parse(m.timestamp) || 0) > watermark;
         });
       }
@@ -604,8 +641,14 @@ export function useSessionStore() {
       updated = updated.slice(-MAX_REALTIME_MESSAGES);
     }
     slot.realtimeMessages = updated;
-    recomputeMergedIfNeeded(slot);
-    notify(sessionId);
+    // Skip expensive merged recomputation and React re-render for message
+    // kinds that are invisible in the UI (they return null from conversion).
+    // The next visible message will trigger the recompute anyway.
+    const INVISIBLE_KINDS = new Set(['status', 'session_created', 'permission_cancelled', 'compact_boundary']);
+    if (!INVISIBLE_KINDS.has(msg.kind)) {
+      recomputeMergedIfNeeded(slot);
+      notify(sessionId);
+    }
   }, [getSlot, notify]);
 
   const upsertActivity = useCallback((sessionId: string, msg: NormalizedMessage) => {
@@ -625,6 +668,175 @@ export function useSessionStore() {
 
     notify(sessionId);
   }, [getSlot, notify]);
+
+  const recordSubagentLink = useCallback((sessionId: string, msg: NormalizedMessage) => {
+    const slot = getSlot(sessionId);
+    const toolCallId = (msg as Record<string, unknown>).toolCallId as string | undefined;
+    const subagentId = (msg as Record<string, unknown>).subagentId as string | undefined;
+    const subagentType = (msg as Record<string, unknown>).subagentType as string | undefined;
+    if (toolCallId && subagentId) {
+      const nextLinks = new Map(slot.subagentLinks);
+      nextLinks.set(toolCallId, { subagentId, subagentType: subagentType || 'agent' });
+      slot.subagentLinks = nextLinks;
+      notify(sessionId);
+    }
+  }, [getSlot, notify]);
+
+  const appendSubagentDetailMessage = useCallback((
+    sessionId: string,
+    subagentId: string,
+    msg: NormalizedMessage,
+  ) => {
+    const slot = getSlot(sessionId);
+    const current = slot.subagentDetailMessages.get(subagentId) ?? [];
+    let msgToStore = msg;
+    if ((msg.kind === 'tool_use' || msg.kind === 'tool_result') && msg.toolId) {
+      const existing = current.find(
+        (m) => m.kind === msg.kind && m.toolId === msg.toolId && m.id === msg.id,
+      );
+      if (!existing || existing.toolName !== msg.toolName) {
+        msgToStore = { ...msg, id: `${msg.id}::${msg.kind}::${msg.toolId}::${current.length}` };
+      } else {
+        msgToStore = { ...msg, id: existing.id };
+      }
+    }
+    const updated = upsertRealtimeMessages(current, [msgToStore]);
+    const nextMap = new Map(slot.subagentDetailMessages);
+    nextMap.set(subagentId, updated);
+    slot.subagentDetailMessages = nextMap;
+    notify(sessionId);
+  }, [getSlot, notify]);
+
+  const updateSubagentDetailStreaming = useCallback((
+    sessionId: string,
+    subagentId: string,
+    delta: string,
+    msgProvider: SessionProvider,
+  ) => {
+    if (!delta) return;
+    const slot = getSlot(sessionId);
+    const streamId = `__subagent_streaming_${sessionId}_${subagentId}`;
+    const current = slot.subagentDetailMessages.get(subagentId) ?? [];
+    const existingIndex = current.findIndex((message) => message.id === streamId);
+    let updated: NormalizedMessage[];
+    if (existingIndex >= 0) {
+      updated = [...current];
+      const existing = updated[existingIndex];
+      updated[existingIndex] = {
+        ...existing,
+        content: `${existing.content || ''}${delta}`,
+        provider: msgProvider,
+      };
+    } else {
+      updated = [
+        ...current,
+        {
+          id: streamId,
+          sessionId,
+          timestamp: new Date().toISOString(),
+          provider: msgProvider,
+          kind: 'stream_delta',
+          role: 'assistant',
+          content: delta,
+          subagentId,
+          isSubagentDetail: true,
+        },
+      ];
+    }
+    const nextMap = new Map(slot.subagentDetailMessages);
+    nextMap.set(subagentId, updated);
+    slot.subagentDetailMessages = nextMap;
+    notify(sessionId);
+  }, [getSlot, notify]);
+
+  const finalizeSubagentDetailStreaming = useCallback((sessionId: string, subagentId: string) => {
+    const slot = storeRef.current.get(sessionId);
+    if (!slot) return;
+    const streamId = `__subagent_streaming_${sessionId}_${subagentId}`;
+    const current = slot.subagentDetailMessages.get(subagentId) ?? [];
+    const existingIndex = current.findIndex((message) => message.id === streamId);
+    if (existingIndex < 0) return;
+    const stream = current[existingIndex];
+    const updated = [...current];
+    updated[existingIndex] = {
+      ...stream,
+      id: `subagent_text_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      kind: 'text',
+      role: 'assistant',
+    };
+    const nextMap = new Map(slot.subagentDetailMessages);
+    nextMap.set(subagentId, updated);
+    slot.subagentDetailMessages = nextMap;
+    notify(sessionId);
+  }, [notify]);
+
+  const updateSubagentDetailThinking = useCallback((
+    sessionId: string,
+    subagentId: string,
+    delta: string,
+    msgProvider: SessionProvider,
+  ) => {
+    if (!delta) return;
+    const slot = getSlot(sessionId);
+    const streamId = `__subagent_thinking_${sessionId}_${subagentId}`;
+    const current = slot.subagentDetailMessages.get(subagentId) ?? [];
+    const existingIndex = current.findIndex((message) => message.id === streamId);
+    let updated: NormalizedMessage[];
+    if (existingIndex >= 0) {
+      updated = [...current];
+      const existing = updated[existingIndex];
+      updated[existingIndex] = {
+        ...existing,
+        content: `${existing.content || ''}${delta}`,
+        provider: msgProvider,
+      };
+    } else {
+      updated = [
+        ...current,
+        {
+          id: streamId,
+          sessionId,
+          timestamp: new Date().toISOString(),
+          provider: msgProvider,
+          kind: 'thinking',
+          role: 'assistant',
+          content: delta,
+          subagentId,
+          isSubagentDetail: true,
+        },
+      ];
+    }
+    const nextMap = new Map(slot.subagentDetailMessages);
+    nextMap.set(subagentId, updated);
+    slot.subagentDetailMessages = nextMap;
+    notify(sessionId);
+  }, [getSlot, notify]);
+
+  const finalizeSubagentDetailThinking = useCallback((sessionId: string, subagentId: string) => {
+    const slot = storeRef.current.get(sessionId);
+    if (!slot) return;
+    const streamId = `__subagent_thinking_${sessionId}_${subagentId}`;
+    const current = slot.subagentDetailMessages.get(subagentId) ?? [];
+    const existingIndex = current.findIndex((message) => message.id === streamId);
+    if (existingIndex < 0) return;
+    const stream = current[existingIndex];
+    const updated = [...current];
+    updated[existingIndex] = {
+      ...stream,
+      id: `subagent_thinking_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    };
+    const nextMap = new Map(slot.subagentDetailMessages);
+    nextMap.set(subagentId, updated);
+    slot.subagentDetailMessages = nextMap;
+    notify(sessionId);
+  }, [notify]);
+
+  const getSubagentDetailMessages = useCallback((
+    sessionId: string,
+    subagentId: string,
+  ): NormalizedMessage[] => {
+    return storeRef.current.get(sessionId)?.subagentDetailMessages.get(subagentId) ?? [];
+  }, []);
 
   const setActivities = useCallback((sessionId: string, msgs: NormalizedMessage[]) => {
     const slot = getSlot(sessionId);
@@ -687,12 +899,25 @@ export function useSessionStore() {
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json();
 
-      slot.serverMessages = data.messages || [];
+      const incomingMessages = data.messages || [];
+      // Don't overwrite existing server messages with empty response
+      // (race condition: server hasn't committed yet after stop/complete).
+      if (incomingMessages.length > 0 || slot.serverMessages.length === 0) {
+        slot.serverMessages = incomingMessages;
+      }
       slot.total = data.total ?? slot.serverMessages.length;
       slot.hasMore = Boolean(data.hasMore);
       slot.fetchedAt = Date.now();
-      // drop realtime messages that the server has caught up with to prevent unbounded growth.
-      slot.realtimeMessages = [];
+      // Server is authoritative — keep only active streaming messages in
+      // realtime (they have live content the server hasn't persisted yet).
+      // All other realtime messages are now redundant.
+      // BUT: only clean realtime if server actually returned data THIS time.
+      // If server returned empty (messages not committed yet), keep realtime intact.
+      if (slot.realtimeMessages.length > 0 && incomingMessages.length > 0) {
+        slot.realtimeMessages = slot.realtimeMessages.filter(m =>
+          m.id.startsWith('__streaming_')
+        );
+      }
       recomputeMergedIfNeeded(slot);
       notify(sessionId);
     } catch (error) {
@@ -733,10 +958,13 @@ export function useSessionStore() {
       if (existing.content === accumulatedText && existing.provider === msgProvider) {
         return;
       }
-      existing.content = accumulatedText;
-      existing.provider = msgProvider;
       if (!patchMergedStreamingMessage(slot, streamId, accumulatedText, msgProvider)) {
+        existing.content = accumulatedText;
+        existing.provider = msgProvider;
         forceRecomputeMerged(slot);
+      } else {
+        existing.content = accumulatedText;
+        existing.provider = msgProvider;
       }
       notify(sessionId);
       return;
@@ -802,10 +1030,14 @@ export function useSessionStore() {
       if (existing.content === accumulatedText && existing.provider === msgProvider) {
         return;
       }
-      existing.content = accumulatedText;
-      existing.provider = msgProvider;
+      // FIX: patch merged BEFORE mutating existing (same fix as updateStreaming)
       if (!patchMergedStreamingMessage(slot, streamId, accumulatedText, msgProvider)) {
+        existing.content = accumulatedText;
+        existing.provider = msgProvider;
         forceRecomputeMerged(slot);
+      } else {
+        existing.content = accumulatedText;
+        existing.provider = msgProvider;
       }
       notify(sessionId);
       return;
@@ -896,13 +1128,22 @@ export function useSessionStore() {
     clearRealtime,
     getMessages,
     getActivityMessages,
+    getSubagentDetailMessages,
     getSessionSlot,
+    recordSubagentLink,
+    appendSubagentDetailMessage,
+    updateSubagentDetailStreaming,
+    finalizeSubagentDetailStreaming,
+    updateSubagentDetailThinking,
+    finalizeSubagentDetailThinking,
   }), [
     getSlot, has, fetchFromServer, fetchMore,
     appendRealtime, upsertActivity, setActivities, appendRealtimeBatch, refreshFromServer,
     setActiveSession, setStatus, isStale, updateStreaming, finalizeStreaming,
     updateStreamingThinking, finalizeStreamingThinking,
-    clearRealtime, getMessages, getActivityMessages, getSessionSlot,
+    clearRealtime, getMessages, getActivityMessages, getSubagentDetailMessages, getSessionSlot,
+    recordSubagentLink, appendSubagentDetailMessage, updateSubagentDetailStreaming,
+    finalizeSubagentDetailStreaming, updateSubagentDetailThinking, finalizeSubagentDetailThinking,
   ]);
 }
 

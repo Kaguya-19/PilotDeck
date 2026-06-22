@@ -63,6 +63,13 @@ type V2Provider = {
   timeoutMs?: number;
   headers?: Record<string, string>;
   models?: Record<string, Record<string, unknown> | null>;
+  retry?: {
+    requestMaxRetries?: number;
+    streamMaxRetries?: number;
+    streamIdleTimeoutMs?: number;
+    baseDelayMs?: number;
+    maxDelayMs?: number;
+  };
 };
 
 type PilotDeckConfig = {
@@ -145,6 +152,12 @@ type PilotDeckConfig = {
     zeroUsageRetry?: {
       enabled?: boolean;
       maxAttempts?: number;
+    };
+    transientRetry?: {
+      enabled?: boolean;
+      maxAttempts?: number;
+      baseDelayMs?: number;
+      maxDelayMs?: number;
     };
     tokenSaver?: {
       enabled?: boolean;
@@ -704,6 +717,7 @@ function ProviderCard({
   const effectiveUrl = provider.url || catalogEntry?.defaultUrl || '';
   const enabledModels = Object.keys(provider.models ?? {});
   const [newModelId, setNewModelId] = useState('');
+  const [showProviderAdvanced, setShowProviderAdvanced] = useState(false);
   const [providerIdDraft, setProviderIdDraft] = useState(providerId);
   const [providerIdError, setProviderIdError] = useState('');
   const displayName = providerDisplayName(
@@ -924,6 +938,58 @@ function ProviderCard({
             {t('pilotDeckConfig.actions.add')}
           </Button>
         </div>
+      </div>
+
+      {/* ── Advanced (per-provider retry) ─────────────────────── */}
+      <div className="px-4 pb-4">
+        <button
+          type="button"
+          onClick={() => setShowProviderAdvanced((v) => !v)}
+          aria-expanded={showProviderAdvanced}
+          className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-[12px] font-medium leading-5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+        >
+          <ChevronDown className={cn('h-3.5 w-3.5 transition-transform', showProviderAdvanced && 'rotate-180')} />
+          {t('pilotDeckConfig.panels.models.providerAdvancedToggle')}
+        </button>
+        {showProviderAdvanced && (
+          <div className="mt-3 space-y-3 divide-y divide-border rounded-md border border-border p-3">
+            <FormRow label={t('pilotDeckConfig.panels.models.providerRetry.requestMaxRetries.label')} description={t('pilotDeckConfig.panels.models.providerRetry.requestMaxRetries.description')}>
+              <NumberInput
+                value={provider.retry?.requestMaxRetries}
+                placeholder="2"
+                onChange={(v) => onChange({ ...provider, retry: { ...provider.retry, requestMaxRetries: v } })}
+              />
+            </FormRow>
+            <FormRow label={t('pilotDeckConfig.panels.models.providerRetry.streamMaxRetries.label')} description={t('pilotDeckConfig.panels.models.providerRetry.streamMaxRetries.description')}>
+              <NumberInput
+                value={provider.retry?.streamMaxRetries}
+                placeholder="3"
+                onChange={(v) => onChange({ ...provider, retry: { ...provider.retry, streamMaxRetries: v } })}
+              />
+            </FormRow>
+            <FormRow label={t('pilotDeckConfig.panels.models.providerRetry.streamIdleTimeoutMs.label')} description={t('pilotDeckConfig.panels.models.providerRetry.streamIdleTimeoutMs.description')}>
+              <NumberInput
+                value={provider.retry?.streamIdleTimeoutMs}
+                placeholder="30000"
+                onChange={(v) => onChange({ ...provider, retry: { ...provider.retry, streamIdleTimeoutMs: v } })}
+              />
+            </FormRow>
+            <FormRow label={t('pilotDeckConfig.panels.models.providerRetry.baseDelayMs.label')} description={t('pilotDeckConfig.panels.models.providerRetry.baseDelayMs.description')}>
+              <NumberInput
+                value={provider.retry?.baseDelayMs}
+                placeholder="1000"
+                onChange={(v) => onChange({ ...provider, retry: { ...provider.retry, baseDelayMs: v } })}
+              />
+            </FormRow>
+            <FormRow label={t('pilotDeckConfig.panels.models.providerRetry.maxDelayMs.label')} description={t('pilotDeckConfig.panels.models.providerRetry.maxDelayMs.description')}>
+              <NumberInput
+                value={provider.retry?.maxDelayMs}
+                placeholder="60000"
+                onChange={(v) => onChange({ ...provider, retry: { ...provider.retry, maxDelayMs: v } })}
+              />
+            </FormRow>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -2641,8 +2707,10 @@ function RouterSection({ config, onChange }: { config: PilotDeckConfig; onChange
   const ts = r.tokenSaver ?? {};
   const ao = r.autoOrchestrate ?? {};
   const zr = r.zeroUsageRetry ?? {};
+  const tr = r.transientRetry ?? {};
   const statsEnabled = r.stats?.enabled !== false;
   const zeroUsageEnabled = zr.enabled !== false;
+  const transientRetryEnabled = tr.enabled !== false;
   const tokenSaverEnabled = ts.enabled !== false;
   const autoOrchestrateEnabled = ao.enabled !== false;
 
@@ -2670,6 +2738,12 @@ function RouterSection({ config, onChange }: { config: PilotDeckConfig; onChange
     }
     if (next.router?.zeroUsageRetry?.maxAttempts == null) {
       next = patch(next, ['router', 'zeroUsageRetry', 'maxAttempts'], 2);
+    }
+    if (next.router?.transientRetry?.enabled !== true) {
+      next = patch(next, ['router', 'transientRetry', 'enabled'], true);
+    }
+    if (next.router?.transientRetry?.maxAttempts == null) {
+      next = patch(next, ['router', 'transientRetry', 'maxAttempts'], 5);
     }
     if (next.router?.tokenSaver?.enabled !== true) {
       next = patch(next, ['router', 'tokenSaver', 'enabled'], true);
@@ -2777,6 +2851,44 @@ function RouterSection({ config, onChange }: { config: PilotDeckConfig; onChange
                         onChange={(v) => onChange(patch(config, ['router', 'zeroUsageRetry', 'maxAttempts'], v))}
                       />
                     </FormRow>
+                  )}
+                </SettingsCard>
+
+                {/* ── TransientRetry ───────────────────────────────────── */}
+                <SettingsCard className="space-y-4 p-4">
+                  <SettingsRow
+                    label={t('pilotDeckConfig.panels.router.transientRetry.label')}
+                    description={t('pilotDeckConfig.panels.router.transientRetry.description')}
+                  >
+                    <SettingsToggle
+                      checked={transientRetryEnabled}
+                      onChange={(v) => onChange(patch(config, ['router', 'transientRetry', 'enabled'], v))}
+                    />
+                  </SettingsRow>
+                  {transientRetryEnabled && (
+                    <>
+                      <FormRow label={t('pilotDeckConfig.panels.router.transientRetry.maxAttempts.label')} description={t('pilotDeckConfig.panels.router.transientRetry.maxAttempts.description')}>
+                        <NumberInput
+                          value={tr.maxAttempts}
+                          placeholder="5"
+                          onChange={(v) => onChange(patch(config, ['router', 'transientRetry', 'maxAttempts'], v))}
+                        />
+                      </FormRow>
+                      <FormRow label={t('pilotDeckConfig.panels.router.transientRetry.baseDelayMs.label')} description={t('pilotDeckConfig.panels.router.transientRetry.baseDelayMs.description')}>
+                        <NumberInput
+                          value={tr.baseDelayMs}
+                          placeholder="1000"
+                          onChange={(v) => onChange(patch(config, ['router', 'transientRetry', 'baseDelayMs'], v))}
+                        />
+                      </FormRow>
+                      <FormRow label={t('pilotDeckConfig.panels.router.transientRetry.maxDelayMs.label')} description={t('pilotDeckConfig.panels.router.transientRetry.maxDelayMs.description')}>
+                        <NumberInput
+                          value={tr.maxDelayMs}
+                          placeholder="30000"
+                          onChange={(v) => onChange(patch(config, ['router', 'transientRetry', 'maxDelayMs'], v))}
+                        />
+                      </FormRow>
+                    </>
                   )}
                 </SettingsCard>
 

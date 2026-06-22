@@ -69,6 +69,12 @@ const commands: ChannelCommand[] = [
   },
 
   {
+    name: "plan",
+    description: "先生成计划并请求确认",
+    systemLevel: false,
+  },
+
+  {
     name: "projects",
     aliases: ["项目列表"],
     description: "List available projects",

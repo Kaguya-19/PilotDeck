@@ -1,8 +1,9 @@
 import { memo, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
-import { AlertTriangle, Check, ChevronRight, Copy, FileText } from 'lucide-react';
+import { AlertTriangle, Check, ChevronRight, Copy, FileText, Loader2 } from 'lucide-react';
 import { copyTextToClipboard } from '../../utils/clipboard';
+import { useTypewriter } from './useTypewriter';
 import type { Project, SessionProvider } from '../../types/app';
 import type {
   ChatMessage,
@@ -15,6 +16,7 @@ import { Markdown } from '../chat/view/subcomponents/Markdown';
 import { formatUsageLimitText } from '../chat/utils/chatFormatting';
 import { ProcessTrace } from './ProcessTrace';
 import { processSummaryToTrace, type ProcessAttachment } from './processGrouping';
+import SubagentCard from './SubagentCard';
 
 type DiffLine = { type: string; content: string; lineNum: number };
 
@@ -73,8 +75,13 @@ type MessageRowV2Props = {
   autoExpandTools?: boolean;
   showRawParameters?: boolean;
   showThinking?: boolean;
+  inlineThinking?: boolean;
   isProcessExpanded?: (processKey: string, defaultExpanded?: boolean) => boolean;
   onProcessExpandedChange?: (processKey: string, expanded: boolean) => void;
+  onOpenSubagentDetail?: (subagentId: string) => void;
+  subagentActivityById?: Map<string, ChatMessage>;
+  subagentThinkingById?: Map<string, string>;
+  isSessionRunning?: boolean;
 };
 
 // Fall back to the heavy legacy renderer for anything that isn't a vanilla
@@ -82,9 +89,9 @@ type MessageRowV2Props = {
 // prompts, task notifications, subagent containers, etc. live there and we
 // don't want to re-implement them all.
 const shouldDelegate = (message: ChatMessage): boolean => {
+  if (message.isSubagentContainer) return false;
   if (message.isToolUse) return true;
   if (message.isInteractivePrompt) return true;
-  if (message.isSubagentContainer) return true;
   if (message.isTaskNotification) return true;
   const t = message.type;
   if (t !== 'user' && t !== 'assistant' && t !== 'error') return true;
@@ -106,8 +113,13 @@ function MessageRowV2({
   autoExpandTools,
   showRawParameters,
   showThinking,
+  inlineThinking,
   isProcessExpanded,
   onProcessExpandedChange,
+  onOpenSubagentDetail,
+  subagentActivityById,
+  subagentThinkingById,
+  isSessionRunning,
 }: MessageRowV2Props) {
   const { t } = useTranslation('chat');
   const delegate = useMemo(() => shouldDelegate(message), [message]);
@@ -116,6 +128,8 @@ function MessageRowV2({
     () => formatUsageLimitText(String(message.content ?? '')),
     [message.content],
   );
+  const thinkingDisplayText = useTypewriter(formattedContent, !!message.isStreaming && !!message.isThinking, 4);
+  const contentDisplayText = useTypewriter(formattedContent, !!message.isStreaming && !message.isThinking, 6);
   const messageImages = useMemo(
     () =>
       Array.isArray(message.images)
@@ -163,6 +177,8 @@ function MessageRowV2({
           showThinking={showThinking}
           isProcessExpanded={isProcessExpanded}
           onProcessExpandedChange={onProcessExpandedChange}
+          onOpenSubagentDetail={onOpenSubagentDetail}
+          subagentActivityById={subagentActivityById}
         />
       )}
       isProcessExpanded={isProcessExpanded}
@@ -184,6 +200,15 @@ function MessageRowV2({
       </div>
     );
   };
+
+  if (message.isSubagentContainer) {
+    const subagentId = typeof message.subagentId === 'string' ? message.subagentId : '';
+    const liveActivity = subagentId ? subagentActivityById?.get(subagentId) : undefined;
+    const thinkingContent = subagentId ? subagentThinkingById?.get(subagentId) : undefined;
+    return withProcessRows(
+      <SubagentCard message={message} liveActivity={liveActivity} onOpenDetail={onOpenSubagentDetail} thinkingContent={thinkingContent} isSessionRunning={isSessionRunning} />,
+    );
+  }
 
   if (delegate) {
     return withProcessRows(
@@ -302,16 +327,48 @@ function MessageRowV2({
     );
   }
 
-  // Thinking: collapsible accordion
   if (message.isThinking) {
+    if (!showThinking) return null;
+    const isThinkingStreaming = !!message.isStreaming;
+
+    if (inlineThinking) {
+      // Inline mode: unified <details> with typewriter animation + blue theme
+      return withProcessRows(
+        <div className="min-w-0 text-[14px] leading-relaxed">
+          <details className="group" open={(isThinkingStreaming ? thinkingDisplayText.length > 12 : false) || undefined}>
+            <summary className="flex cursor-pointer select-none items-center gap-1.5 text-[13px] font-medium text-blue-600/70 hover:text-blue-700 dark:text-blue-400/70 dark:hover:text-blue-300">
+              {isThinkingStreaming
+                ? <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2} />
+                : <ChevronRight className="h-3.5 w-3.5 transition-transform group-open:rotate-90" strokeWidth={2} />}
+              <span>
+                {isThinkingStreaming
+                  ? t('thinking.title', { defaultValue: 'Thinking...' })
+                  : t('thinking.completed', { defaultValue: 'Thought process' })}
+              </span>
+            </summary>
+            <div className={`mt-1.5 max-h-64 overflow-y-auto border-l-2 pl-3 text-[13px] ${
+              isThinkingStreaming
+                ? 'border-blue-400/50 text-neutral-600 dark:border-blue-500/40 dark:text-neutral-300'
+                : 'border-blue-400/30 text-neutral-600 dark:border-blue-500/30 dark:text-neutral-400'
+            }`}>
+              <Markdown projectName={selectedProject?.name} isStreaming={isThinkingStreaming}>
+                {isThinkingStreaming ? thinkingDisplayText : formattedContent}
+              </Markdown>
+            </div>
+          </details>
+        </div>,
+      );
+    }
+
+    // Default (status-bar preview mode): simple collapsible accordion
     return withProcessRows(
       <div className="min-w-0 text-[14px] leading-relaxed">
         <details className="group">
           <summary className="flex cursor-pointer select-none items-center gap-1.5 text-[13px] font-medium text-neutral-500 hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200">
             <ChevronRight className="h-3.5 w-3.5 transition-transform group-open:rotate-90" strokeWidth={2} />
-            <span>{t('thinking.title', { defaultValue: 'Thinking...' })}</span>
+            <span>{t('thinking.completed', { defaultValue: 'Thought process' })}</span>
           </summary>
-          <div className="mt-1.5 border-l-2 border-neutral-300 pl-3 text-[13px] text-neutral-500 dark:border-neutral-700 dark:text-neutral-400">
+          <div className="mt-1.5 max-h-64 overflow-y-auto border-l-2 border-neutral-300 pl-3 text-[13px] text-neutral-500 dark:border-neutral-700 dark:text-neutral-400">
             <Markdown projectName={selectedProject?.name}>{formattedContent}</Markdown>
           </div>
         </details>
@@ -322,11 +379,11 @@ function MessageRowV2({
   // Assistant: plain prose, no avatar and no bubble.
   return withProcessRows(
     <div className="min-w-0 text-[14px] leading-relaxed text-neutral-900 dark:text-neutral-100">
-      {message.isStreaming && !formattedContent ? (
+      {message.isStreaming && !contentDisplayText ? (
         <span className="inline-block h-4 w-2 animate-pulse bg-neutral-400 dark:bg-neutral-500" />
       ) : (
         <>
-          <Markdown className="prose prose-sm prose-neutral max-w-none dark:prose-invert prose-headings:mb-2 prose-headings:mt-4 prose-h2:text-lg prose-h3:text-base prose-p:my-2 prose-pre:my-3 prose-ol:my-2 prose-ul:my-2 prose-table:my-0 prose-hr:my-4" projectName={selectedProject?.name}>{formattedContent}</Markdown>
+          <Markdown className="prose prose-sm prose-neutral max-w-none dark:prose-invert prose-headings:mb-2 prose-headings:mt-4 prose-h2:text-lg prose-h3:text-base prose-p:my-2 prose-pre:my-3 prose-ol:my-2 prose-ul:my-2 prose-table:my-0 prose-hr:my-4" projectName={selectedProject?.name} isStreaming={message.isStreaming}>{contentDisplayText}</Markdown>
           {formattedContent.trim() &&
            (!nextMessage || nextMessage.type === 'user' || nextMessage.type === 'error') ? (
             <div className="mt-1.5 flex justify-end">

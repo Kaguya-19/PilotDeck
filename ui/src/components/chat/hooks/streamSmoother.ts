@@ -22,13 +22,13 @@ export type SmoothTextStreamSnapshot = {
   isScheduled: boolean;
 };
 
-const DEFAULT_FRAME_MS = 33;
-const DEFAULT_TARGET_LAG_MS = 360;
-const DEFAULT_MAX_LAG_MS = 650;
+const DEFAULT_FRAME_MS = 16;
+const DEFAULT_TARGET_LAG_MS = 30;
+const DEFAULT_MAX_LAG_MS = 80;
 const DEFAULT_MIN_CHARS_PER_FRAME = 1;
-const DEFAULT_MAX_CHARS_PER_FRAME = 36;
-const DEFAULT_AVERAGE_CHARS_PER_SECOND = 90;
-const DEFAULT_FALLBACK_FRAME_MS = 80;
+const DEFAULT_MAX_CHARS_PER_FRAME = 4;
+const DEFAULT_AVERAGE_CHARS_PER_SECOND = 120;
+const DEFAULT_FALLBACK_FRAME_MS = 32;
 const RATE_ALPHA = 0.22;
 
 function clamp(value: number, min: number, max: number): number {
@@ -71,37 +71,80 @@ export class SmoothTextStream {
   private lastChunkAtMs: number | null = null;
   private lastFrameAtMs: number | null = null;
   private averageCharsPerSecond = DEFAULT_AVERAGE_CHARS_PER_SECOND;
+  private paused = false;
+
+  /** Called when draining completes (after flush(true) finishes pumping). */
+  onDrainComplete: (() => void) | null = null;
 
   constructor(private readonly options: SmoothTextStreamOptions) {}
 
   append(text: string): void {
     if (!text) return;
-
-    const now = this.now();
-    if (this.lastChunkAtMs != null) {
-      const intervalSeconds = clamp((now - this.lastChunkAtMs) / 1000, 0.016, 1.5);
-      const currentRate = text.length / intervalSeconds;
-      this.averageCharsPerSecond = smooth(this.averageCharsPerSecond, currentRate);
-    }
-    this.lastChunkAtMs = now;
     this.targetContent += text;
-    this.emitInitialContent();
-    this.schedulePump();
+    if (!this.paused) {
+      this.schedulePump();
+    }
+  }
+
+  pause(): void {
+    this.paused = true;
+  }
+
+  resume(): void {
+    this.paused = false;
+    if (this.renderedContent.length < this.targetContent.length) {
+      this.schedulePump();
+    } else if (this.draining) {
+      this.finalizeDone();
+    }
+  }
+
+  /**
+   * Signal that no more content will arrive but keep pumping at normal rate.
+   * When all buffered content is rendered, calls finalizeDone() which triggers
+   * onDrainComplete. Use this for thinking→content transitions where we want
+   * a smooth finish rather than an abrupt dump.
+   */
+  drain(): void {
+    this.draining = true;
+    if (this.renderedContent.length < this.targetContent.length) {
+      this.schedulePump();
+    } else {
+      this.finalizeDone();
+    }
   }
 
   flush(finalize = false): void {
     this.cancelScheduledFrame();
-    if (this.renderedContent !== this.targetContent) {
-      this.renderedContent = this.targetContent;
-      this.options.emit(this.renderedContent);
-    }
     if (finalize) {
-      this.options.finalize?.();
-      this.targetContent = '';
-      this.renderedContent = '';
-      this.lastChunkAtMs = null;
-      this.lastFrameAtMs = null;
+      // Immediately dump all remaining content and finalize.
+      // Gradual draining caused multiple smoothers to accumulate, each
+      // triggering expensive React re-renders that blocked the main thread
+      // and throttled rAF to 1fps.
+      if (this.renderedContent !== this.targetContent) {
+        this.renderedContent = this.targetContent;
+        this.options.emit(this.renderedContent);
+      }
+      this.finalizeDone();
+      return;
     }
+    // Non-finalize flush: just ensure pump is scheduled to continue gradual rendering.
+    if (this.renderedContent !== this.targetContent) {
+      this.schedulePump();
+    }
+  }
+
+  private draining = false;
+
+  private finalizeDone(): void {
+    this.draining = false;
+    this.options.finalize?.();
+    this.onDrainComplete?.();
+    this.onDrainComplete = null;
+    this.targetContent = '';
+    this.renderedContent = '';
+    this.lastChunkAtMs = null;
+    this.lastFrameAtMs = null;
   }
 
   cancel(): void {
@@ -127,7 +170,9 @@ export class SmoothTextStream {
     if (this.options.scheduleFrame) {
       return this.options.scheduleFrame(callback);
     }
-    return window.requestAnimationFrame(callback);
+    // Use setTimeout(16ms) for frame-rate independent pumping at ~60fps.
+    // rAF fires at display Hz (120 on modern Macs) making text too fast.
+    return window.setTimeout(callback, 16) as unknown as FrameHandle;
   }
 
   private cancelFrame(handle: FrameHandle): void {
@@ -135,7 +180,7 @@ export class SmoothTextStream {
       this.options.cancelFrame(handle);
       return;
     }
-    window.cancelAnimationFrame(handle);
+    window.clearTimeout(handle as unknown as number);
   }
 
   private cancelScheduledFrame(): void {
@@ -175,54 +220,44 @@ export class SmoothTextStream {
   }
 
   private emitInitialContent(): void {
-    if (this.renderedContent.length > 0 || this.targetContent.length === 0) {
-      return;
-    }
-
-    const charsToRender = this.getCharsForFrame(this.targetContent.length);
-    const minNextLength = Math.min(this.targetContent.length, this.minCharsPerFrame);
-    const maxNextLength = Math.min(this.targetContent.length, this.maxCharsPerFrame);
-    const nextLength = findBoundary(
-      this.targetContent,
-      minNextLength,
-      charsToRender,
-      maxNextLength,
-    );
-    this.renderedContent = this.targetContent.slice(0, nextLength);
-    this.options.emit(this.renderedContent);
+    // Let pump() handle all rendering uniformly to avoid burst-then-pause
   }
 
   private pump(): void {
     this.frame = null;
     this.cancelFallbackTimer();
 
-    const now = this.now();
-    if (this.lastFrameAtMs != null && now - this.lastFrameAtMs < this.frameMs * 0.8) {
-      this.schedulePump();
+    // If paused, don't emit — just reschedule if draining so we can finish
+    // when resume() is called. This prevents phantom re-renders that block
+    // the main thread while the smoother is supposed to be waiting.
+    if (this.paused) {
       return;
     }
-    this.lastFrameAtMs = now;
 
     const remaining = this.targetContent.length - this.renderedContent.length;
-    if (remaining <= 0) return;
+    if (remaining <= 0) {
+      if (this.draining) {
+        this.finalizeDone();
+      }
+      return;
+    }
 
-    const charsToRender = this.getCharsForFrame(remaining);
-    const minNextLength = this.renderedContent.length + charsToRender;
-    const maxNextLength = Math.min(
+    // 2 chars/pump at 60 pumps/sec = 120 cps (frame-rate independent).
+    // Draining mode: 15 chars/pump for a smooth-but-quick finish.
+    // 15 chars × 60fps = ~900 chars/sec, so 150 chars finishes in ~170ms.
+    const chars = this.draining ? Math.min(15, remaining) : Math.min(2, remaining);
+    const nextLength = Math.min(
       this.targetContent.length,
-      this.renderedContent.length + this.maxCharsPerFrame,
+      this.renderedContent.length + chars,
     );
-    const nextLength = findBoundary(
-      this.targetContent,
-      this.renderedContent.length + this.minCharsPerFrame,
-      minNextLength,
-      maxNextLength,
-    );
+
     this.renderedContent = this.targetContent.slice(0, nextLength);
     this.options.emit(this.renderedContent);
 
     if (this.renderedContent.length < this.targetContent.length) {
       this.schedulePump();
+    } else if (this.draining) {
+      this.finalizeDone();
     }
   }
 
@@ -257,8 +292,8 @@ export class SmoothTextStream {
     );
     const baseChars = Math.ceil(this.averageCharsPerSecond * (this.frameMs / 1000));
     const excessChars = Math.max(0, remaining - targetPendingChars);
-    const catchUpChars = remaining > maxPendingChars ? Math.ceil((remaining - maxPendingChars) / 4) : 0;
-    const desired = Math.max(this.minCharsPerFrame, baseChars, Math.ceil(excessChars / 10), catchUpChars);
+    const catchUpChars = remaining > maxPendingChars ? Math.ceil((remaining - maxPendingChars) / 12) : 0;
+    const desired = Math.max(this.minCharsPerFrame, baseChars, Math.ceil(excessChars / 20), catchUpChars);
     return clamp(desired, this.minCharsPerFrame, Math.min(this.maxCharsPerFrame, remaining));
   }
 }

@@ -4,6 +4,7 @@ import type { AgentError } from "./errors.js";
 import type { AgentTurnResult } from "./result.js";
 import type { AgentLoopTransition } from "./state.js";
 import type { TokenBudgetSnapshot } from "../../context/budget/TokenBudgetManager.js";
+import type { RouterRetryProgressEvent } from "../../router/protocol/events.js";
 
 export type AgentEvent =
   | { type: "session_started"; sessionId: string }
@@ -29,7 +30,7 @@ export type AgentEvent =
   | { type: "compact_started"; sessionId: string; turnId: string; trigger: string; preTokens: number }
   | { type: "compact_completed"; sessionId: string; turnId: string; status: string; preTokens: number; postTokens?: number }
   | { type: "context_budget"; sessionId: string; turnId: string; snapshot: TokenBudgetSnapshot }
-  | { type: "subagent_started"; sessionId: string; turnId: string; subagentId: string; subagentType: string }
+  | { type: "subagent_started"; sessionId: string; turnId: string; subagentId: string; subagentType: string; toolCallId?: string }
   | { type: "subagent_completed"; sessionId: string; turnId: string; subagentId: string; subagentType: string; success: boolean; durationMs: number }
   | {
       type: "subagent_status";
@@ -51,6 +52,7 @@ export type AgentEvent =
   | { type: "turn_continued"; sessionId: string; turnId: string; reason: AgentLoopTransition["reason"] }
   | { type: "turn_completed"; sessionId: string; turnId: string; result: AgentTurnResult }
   | { type: "turn_failed"; sessionId: string; turnId: string; error: AgentError }
+  | { type: "retry_progress"; sessionId: string; turnId: string; detail: RouterRetryProgressEvent }
   | { type: "session_aborted"; sessionId: string; reason?: string };
 
 export type AgentEventEmitter = (event: AgentEvent) => void;

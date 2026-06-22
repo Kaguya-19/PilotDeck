@@ -5,6 +5,7 @@ export {
   createProjectId,
   createProjectIdAsync,
   createCollisionResistantProjectId,
+  resolveProjectStorageId,
   getPilotConfigFilePath,
   getPilotExtensionPaths,
   getPilotProjectConfigFilePath,

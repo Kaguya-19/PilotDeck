@@ -174,6 +174,7 @@ function normalizeTask(value: unknown): CronTask | undefined {
     updatedAt: candidate.updatedAt,
     nextRunAt: typeof candidate.nextRunAt === "string" ? candidate.nextRunAt : undefined,
     lastRunId: typeof candidate.lastRunId === "string" ? candidate.lastRunId : undefined,
+    scheduleComputationVersion: candidate.scheduleComputationVersion === 2 ? 2 : undefined,
   };
 }
 

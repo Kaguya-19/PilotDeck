@@ -34,7 +34,7 @@ export function getPilotMemoryRootDir(pilotHome: string): string {
 }
 
 export function getPilotProjectChatDir(projectRoot: string, pilotHome: string): string {
-  const projectId = resolveStoredProjectId(projectRoot, pilotHome) ?? createProjectId(projectRoot);
+  const projectId = resolveProjectStorageId(projectRoot, pilotHome);
   return resolve(pilotHome, "projects", projectId, "chats");
 }
 
@@ -49,7 +49,7 @@ export async function getPilotProjectChatDirAsync(
   pilotHome: string,
 ): Promise<string> {
   const canonical = await findCanonicalProjectRoot(projectRoot);
-  const projectId = resolveStoredProjectId(canonical, pilotHome) ?? createProjectId(canonical);
+  const projectId = resolveProjectStorageId(canonical, pilotHome);
   return resolve(pilotHome, "projects", projectId, "chats");
 }
 
@@ -72,6 +72,18 @@ export function createCollisionResistantProjectId(projectRoot: string): string {
   const legacyId = createLegacyProjectId(normalizedRoot);
   const digest = createHash("sha1").update(normalizedRoot).digest("hex").slice(0, 10);
   return `${legacyId}--${digest}`;
+}
+
+/**
+ * Resolve the on-disk project directory name for a workspace.
+ *
+ * `.cwd` markers are authoritative because the legacy project ID is lossy:
+ * distinct paths (especially paths containing non-ASCII segments) can encode
+ * to the same slug. When no valid marker exists, retain the legacy ID for
+ * backwards compatibility with unregistered projects.
+ */
+export function resolveProjectStorageId(projectRoot: string, pilotHome: string): string {
+  return findStoredProjectId(projectRoot, pilotHome) ?? createProjectId(projectRoot);
 }
 
 /**
@@ -103,7 +115,7 @@ function createLegacyProjectId(projectRoot: string): string {
   return normalized.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "project";
 }
 
-function resolveStoredProjectId(projectRoot: string, pilotHome: string): string | null {
+function findStoredProjectId(projectRoot: string, pilotHome: string): string | null {
   const projectsDir = resolve(pilotHome, "projects");
   if (!existsSync(projectsDir)) {
     return null;

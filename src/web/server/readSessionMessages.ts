@@ -24,7 +24,7 @@ import {
 } from "../../model/index.js";
 import { listProjectSessions, readTranscript, findLastCompactBoundaryIndex, type SessionInfo } from "../../session/index.js";
 import type { AgentTranscriptEntry } from "../../session/transcript/TranscriptEntry.js";
-import { resolve } from "node:path";
+import { resolve, dirname } from "node:path";
 import { getPilotProjectChatDir } from "../../pilot/index.js";
 import { sanitizeSessionIdForPath } from "../../session/storage/ProjectSessionStorage.js";
 import type {
@@ -100,6 +100,7 @@ export async function readWebSessionMessages(
     allMessages.splice(insertPos, 0, compactMsg);
   }
 
+  attachSubagentIds(entries, allMessages);
   injectErrorTurnMessages(entries, allMessages, input.sessionKey, input.projectKey);
   if (incompleteTurnIds.length > 0) {
     allMessages.push(createIncompleteTurnStatusMessage(input, incompleteTurnIds, options));
@@ -131,6 +132,83 @@ export async function readWebSessionMessages(
       createdAt: sessionInfo?.createdAt,
     },
   };
+}
+
+/**
+ * Read a subagent's sidechain transcript and project it onto WebMessage[].
+ * Locates the sidechain JSONL by deriving the default path from the parent
+ * session transcript path + subagentId.
+ */
+export async function readSubagentWebMessages(
+  input: { sessionKey: string; subagentId: string; projectKey?: string },
+  options: ReadWebSessionMessagesOptions,
+): Promise<{ messages: WebMessage[]; total: number }> {
+  const effectiveProjectRoot = input.projectKey ?? options.projectRoot;
+  const chatDir = getPilotProjectChatDir(effectiveProjectRoot, options.pilotHome);
+  const parentTranscriptPath = resolve(
+    chatDir,
+    `${sanitizeSessionIdForPath(input.sessionKey)}.jsonl`,
+  );
+
+  const { entries: parentEntries } = await readTranscript(parentTranscriptPath);
+  let sidechainRelative: string | undefined;
+  for (const entry of parentEntries) {
+    if (entry.type === "subagent_started" && entry.subagentId === input.subagentId) {
+      sidechainRelative = entry.transcriptRelativePath;
+      break;
+    }
+  }
+
+  if (!sidechainRelative) {
+    return { messages: [], total: 0 };
+  }
+
+  const sidechainPath = resolve(dirname(parentTranscriptPath), sidechainRelative);
+  const { entries } = await readTranscript(sidechainPath);
+  const webReplay = extractSubagentExecutionMessages(entries);
+
+  const flattenedPerMessage: WebMessage[][] = webReplay.messages
+    .filter((message) => !message.metadata?.synthetic)
+    .map((message, index) =>
+      flattenCanonicalMessage(message, {
+        index,
+        sessionKey: `${input.sessionKey}::sub::${input.subagentId}`,
+        projectKey: input.projectKey,
+        now: options.now,
+        entryTimestamp: webReplay.timestamps[index],
+      }),
+    );
+  const cumulativeWebCounts: number[] = [];
+  let cumulative = 0;
+  for (const group of flattenedPerMessage) {
+    cumulative += group.length;
+    cumulativeWebCounts.push(cumulative);
+  }
+
+  const allMessages: WebMessage[] = flattenedPerMessage.flat();
+
+  for (const boundary of [...webReplay.compactBoundaries].reverse()) {
+    const insertPos =
+      boundary.insertAfterMessageIndex >= 0
+        ? (cumulativeWebCounts[boundary.insertAfterMessageIndex] ?? 0)
+        : 0;
+    const meta = boundary.metadata ?? {};
+    const compactMsg: WebMessage = {
+      id: `${input.sessionKey}::sub::${input.subagentId}-compact-${boundary.timestamp}`,
+      sessionKey: `${input.sessionKey}::sub::${input.subagentId}`,
+      projectKey: input.projectKey,
+      createdAt: boundary.timestamp,
+      provider: "pilotdeck",
+      role: "system",
+      kind: "compact_boundary",
+      text: "Context compacted",
+      payload: meta,
+      source: "history",
+    };
+    allMessages.splice(insertPos, 0, compactMsg);
+  }
+
+  return { messages: allMessages, total: allMessages.length };
 }
 
 function createIncompleteTurnStatusMessage(
@@ -301,7 +379,7 @@ function flushBlock(
     case "tool_call":
       flushText();
       out.push({
-        id: `${context.sessionKey}-tool-${block.id}`,
+        id: `${context.sessionKey}-tool-${context.index}-${block.id}`,
         sessionKey: context.sessionKey,
         projectKey: context.projectKey,
         createdAt: stamp,
@@ -326,7 +404,7 @@ function flushBlock(
         }
       }
       out.push({
-        id: `${context.sessionKey}-tool-${block.toolCallId}-result`,
+        id: `${context.sessionKey}-tool-${context.index}-${block.toolCallId}-result`,
         sessionKey: context.sessionKey,
         projectKey: context.projectKey,
         createdAt: stamp,
@@ -346,7 +424,7 @@ function flushBlock(
     case "tool_result_reference":
       flushText();
       out.push({
-        id: `${context.sessionKey}-tool-${block.toolCallId}-result-ref`,
+        id: `${context.sessionKey}-tool-${context.index}-${block.toolCallId}-result-ref`,
         sessionKey: context.sessionKey,
         projectKey: context.projectKey,
         createdAt: stamp,
@@ -481,8 +559,95 @@ function extractWebVisibleMessages(entries: AgentTranscriptEntry[]): {
   return { messages, timestamps, compactBoundaries };
 }
 
+function extractSubagentExecutionMessages(entries: AgentTranscriptEntry[]): {
+  messages: CanonicalMessage[];
+  timestamps: string[];
+  compactBoundaries: CompactBoundaryInfo[];
+} {
+  const lastBoundaryIndex = findLastCompactBoundaryIndex(entries);
+  const messages: CanonicalMessage[] = [];
+  const timestamps: string[] = [];
+  const compactBoundaries: CompactBoundaryInfo[] = [];
+  let sawExecutionMessage = false;
+
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+    const beforeBoundary = lastBoundaryIndex !== -1 && index < lastBoundaryIndex;
+
+    switch (entry.type) {
+      case "accepted_input":
+        // Sidechain accepted_input is the fork prelude: parent assistant
+        // context + fork directive. It is model input, not subagent output.
+        break;
+      case "assistant_message":
+      case "tool_result_message":
+      case "durable_message":
+        sawExecutionMessage = true;
+        if (!beforeBoundary) {
+          messages.push(cloneMessage(entry.message));
+          timestamps.push(entry.createdAt);
+        }
+        break;
+      case "control_boundary": {
+        if (
+          !beforeBoundary &&
+          sawExecutionMessage &&
+          entry.boundary &&
+          entry.boundary.kind === "compact"
+        ) {
+          const meta: Record<string, unknown> = {};
+          if (entry.boundary.subtype === "compact_boundary" && "compactMetadata" in entry.boundary) {
+            const cm = entry.boundary.compactMetadata as Record<string, unknown>;
+            meta.trigger = cm.trigger;
+            meta.preTokens = cm.preTokens;
+            meta.level = cm.level;
+            meta.stage = cm.stage;
+            meta.stageLabel = cm.stageLabel;
+          }
+          compactBoundaries.push({
+            insertAfterMessageIndex: messages.length - 1,
+            timestamp: entry.createdAt,
+            metadata: meta,
+          });
+        }
+        break;
+      }
+    }
+  }
+
+  return { messages, timestamps, compactBoundaries };
+}
+
 function cloneMessage(message: CanonicalMessage): CanonicalMessage {
   return JSON.parse(JSON.stringify(message)) as CanonicalMessage;
+}
+
+/**
+ * Correlate `subagent_started` transcript entries with their parent `tool_use`
+ * (agent/Task) WebMessages by matching order within entries, then stamp
+ * `subagentId` onto the WebMessage so the frontend can link to the sidechain.
+ */
+function attachSubagentIds(
+  entries: AgentTranscriptEntry[],
+  allMessages: WebMessage[],
+): void {
+  const subagentQueue: string[] = [];
+  for (const entry of entries) {
+    if (entry.type === "subagent_started") {
+      subagentQueue.push(entry.subagentId);
+    }
+  }
+  if (subagentQueue.length === 0) return;
+
+  let qi = 0;
+  for (const msg of allMessages) {
+    if (qi >= subagentQueue.length) break;
+    if (msg.kind !== "tool_use") continue;
+    const name = String(msg.toolName ?? "").toLowerCase();
+    if (name !== "agent" && name !== "task") continue;
+    msg.subagentId = subagentQueue[qi];
+    qi += 1;
+  }
 }
 
 /**

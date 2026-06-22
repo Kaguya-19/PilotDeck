@@ -1,22 +1,32 @@
 import type { CronSchedule } from "../protocol/types.js";
+import { isValidCronTimezone } from "../CronTimezone.js";
 
 const MINUTE_MS = 60_000;
 const MAX_SEARCH_MINUTES = 366 * 24 * 60;
 
-export function computeNextRunAt(schedule: CronSchedule, after: Date): Date | undefined {
+export function computeNextRunAt(
+  schedule: CronSchedule,
+  after: Date,
+  fallbackTimezone = "UTC",
+): Date | undefined {
   if (schedule.type === "once") {
     const runAt = new Date(schedule.runAt);
     return Number.isNaN(runAt.getTime()) ? undefined : runAt;
   }
-  return computeNextCronRunAt(schedule.expression, after);
+  return computeNextCronRunAt(schedule.expression, after, schedule.timezone ?? fallbackTimezone);
 }
 
-export function computeNextCronRunAt(expression: string, after: Date): Date | undefined {
+export function computeNextCronRunAt(
+  expression: string,
+  after: Date,
+  timezone = "UTC",
+): Date | undefined {
   const parsed = parseCronExpression(expression);
-  if (!parsed) return undefined;
+  if (!parsed || !isValidCronTimezone(timezone)) return undefined;
+  const formatter = createCronDateFormatter(timezone);
   let candidate = new Date(Math.floor(after.getTime() / MINUTE_MS) * MINUTE_MS + MINUTE_MS);
   for (let index = 0; index < MAX_SEARCH_MINUTES; index += 1) {
-    if (matchesCron(candidate, parsed)) {
+    if (matchesCron(candidate, parsed, formatter)) {
       return candidate;
     }
     candidate = new Date(candidate.getTime() + MINUTE_MS);
@@ -95,12 +105,68 @@ function parseField(field: string, min: number, max: number): Set<number> | unde
   return output;
 }
 
-function matchesCron(date: Date, cron: ParsedCron): boolean {
+type CronDateParts = {
+  minute: number;
+  hour: number;
+  dayOfMonth: number;
+  month: number;
+  dayOfWeek: number;
+};
+
+const WEEKDAY_INDEX: Record<string, number> = {
+  Sun: 0,
+  Mon: 1,
+  Tue: 2,
+  Wed: 3,
+  Thu: 4,
+  Fri: 5,
+  Sat: 6,
+};
+
+function createCronDateFormatter(timezone: string): Intl.DateTimeFormat {
+  return new Intl.DateTimeFormat("en-US-u-ca-gregory-nu-latn", {
+    timeZone: timezone,
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    weekday: "short",
+    hourCycle: "h23",
+  });
+}
+
+function readCronDateParts(date: Date, formatter: Intl.DateTimeFormat): CronDateParts | undefined {
+  const values: Record<string, string> = {};
+  for (const part of formatter.formatToParts(date)) {
+    if (part.type !== "literal") {
+      values[part.type] = part.value;
+    }
+  }
+  const minute = Number.parseInt(values.minute, 10);
+  const hour = Number.parseInt(values.hour, 10);
+  const dayOfMonth = Number.parseInt(values.day, 10);
+  const month = Number.parseInt(values.month, 10);
+  const dayOfWeek = WEEKDAY_INDEX[values.weekday];
+  if (
+    !Number.isInteger(minute) ||
+    !Number.isInteger(hour) ||
+    !Number.isInteger(dayOfMonth) ||
+    !Number.isInteger(month) ||
+    dayOfWeek === undefined
+  ) {
+    return undefined;
+  }
+  return { minute, hour, dayOfMonth, month, dayOfWeek };
+}
+
+function matchesCron(date: Date, cron: ParsedCron, formatter: Intl.DateTimeFormat): boolean {
+  const parts = readCronDateParts(date, formatter);
+  if (!parts) return false;
   return (
-    cron.minutes.has(date.getUTCMinutes()) &&
-    cron.hours.has(date.getUTCHours()) &&
-    cron.daysOfMonth.has(date.getUTCDate()) &&
-    cron.months.has(date.getUTCMonth() + 1) &&
-    cron.daysOfWeek.has(date.getUTCDay())
+    cron.minutes.has(parts.minute) &&
+    cron.hours.has(parts.hour) &&
+    cron.daysOfMonth.has(parts.dayOfMonth) &&
+    cron.months.has(parts.month) &&
+    cron.daysOfWeek.has(parts.dayOfWeek)
   );
 }

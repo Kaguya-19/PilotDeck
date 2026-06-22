@@ -1,5 +1,15 @@
 import type { PermissionMode, PermissionRule } from "../../permission/index.js";
 
+/**
+ * Tools that require a live user response and therefore cannot be exposed
+ * to unattended agent sessions such as Always-On and Cron.
+ */
+export const UNATTENDED_SESSION_EXCLUDED_TOOLS = [
+  "enter_plan_mode",
+  "exit_plan_mode",
+  "ask_user_question",
+] as const;
+
 export type SessionConfigOverride = {
   cwd?: string;
   permissionMode?: PermissionMode;
@@ -19,18 +29,17 @@ export type SessionConfigOverride = {
   };
   /**
    * Tool names to exclude from the session's tool registry. Used by
-   * Always-On phases to remove interactive/blocking tools (plan mode,
-   * ask_user_question) that cannot function without a human respondent.
+   * unattended runtimes to remove interactive/blocking tools that cannot
+   * function without a human respondent.
    */
   excludeTools?: string[];
 };
 
 /**
- * Keyed by `sessionKey`, this registry lets the AlwaysOnRuntime override the
- * `cwd` / `permissionMode` of the AgentSession created by
- * `ProjectRuntimeRegistry`. The runtime sets an entry before submitting the
- * execution turn (so its cwd points at the workspace handle and its mode is
- * `bypassPermissions`) and removes it after the turn completes.
+ * Keyed by `sessionKey`, this registry lets unattended runtimes override the
+ * `cwd`, permission mode, and tool set of AgentSessions created by
+ * `ProjectRuntimeRegistry`. Entries must be installed before the first turn
+ * creates the session.
  *
  * The registry is intentionally minimal — it does not own AgentSessions, only
  * the per-session inputs that the factory needs at creation time.
@@ -49,6 +58,14 @@ export class SessionConfigOverrides {
 
   delete(sessionKey: string): void {
     this.map.delete(sessionKey);
+  }
+
+  deletePrefix(prefix: string): void {
+    for (const sessionKey of this.map.keys()) {
+      if (sessionKey.startsWith(prefix)) {
+        this.map.delete(sessionKey);
+      }
+    }
   }
 
   clear(): void {

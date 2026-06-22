@@ -309,4 +309,26 @@ describe('processGrouping', () => {
     expect(attachments[0].processDetailMessages.map((message) => message.id)).toEqual(['plan-deny-1']);
     expect(attachments[0].processSummary.toolErrorCount).toBe(1);
   });
+
+  it('folds structured plan-mode violations into the process row', () => {
+    const planModeDeny = {
+      content: '[PLAN_MODE_VIOLATION] Tool "edit_notebook" is BLOCKED in plan mode.',
+      isError: true,
+      errorCode: 'plan_mode_violation',
+    };
+    const messages = [
+      user('u1'),
+      tool('plan-deny-1', 'edit_notebook', { file_path: 'notebook.ipynb' }, 100, planModeDeny),
+      assistant('a1', 'I will continue with a plan.', 200),
+    ];
+
+    const items = buildRenderableMessageItems(messages);
+    const assistantItem = items.find((item) => item.message.id === 'a1');
+    const attachments = processAttachments(assistantItem);
+
+    expect(items.map((item) => item.message.id)).toEqual(['u1', 'a1']);
+    expect(attachments).toHaveLength(1);
+    expect(attachments[0].processDetailMessages.map((message) => message.id)).toEqual(['plan-deny-1']);
+    expect(attachments[0].processSummary.toolErrorCount).toBe(1);
+  });
 });

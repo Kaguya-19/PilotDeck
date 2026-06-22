@@ -383,7 +383,10 @@ export async function executeAlwaysOnSlashCommand(args = [], context = {}) {
 
     if (parsed.action === 'run' && parsed.target === 'cron') {
       const gateway = await getPilotDeckGateway();
-      const result = await gateway.cronRunNow({ taskId: parsed.id });
+      const result = await gateway.cronRunNow({
+        taskId: parsed.id,
+        projectKey: project.projectPath,
+      });
 
       if (result.reason === 'not_found') {
         return buildResponse(buildNotFoundMarkdown('cron job', parsed.id));

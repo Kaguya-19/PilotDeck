@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import { createProjectId } from "../../pilot/paths.js";
+import { resolveProjectStorageId } from "../../pilot/paths.js";
 
 const ROOT_DIR_NAME = "always-on";
 
@@ -32,7 +32,7 @@ export function resolveAlwaysOnPaths(input: {
 }): AlwaysOnPaths {
   const pilotHome = resolve(input.pilotHome);
   const projectKey = resolve(input.projectKey);
-  const projectId = createProjectId(projectKey);
+  const projectId = resolveProjectStorageId(projectKey, pilotHome);
   const rootDir = resolve(pilotHome, ROOT_DIR_NAME);
   const projectDir = resolve(rootDir, "projects", projectId);
   const worktreesDir = resolve(input.worktreesBaseDir ?? resolve(rootDir, "worktrees"), projectId);

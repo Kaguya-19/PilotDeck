@@ -27,6 +27,7 @@ import {
 import type { ChatRunMode, PendingPermissionRequest, PermissionMode } from '../chat/types/types';
 import PermissionRequestsBanner from '../chat/view/subcomponents/PermissionRequestsBanner';
 import ImageAttachment from '../chat/view/subcomponents/ImageAttachment';
+import CommandMenu from '../chat/view/subcomponents/CommandMenu';
 import { cn } from '../../lib/utils.js';
 
 interface MentionableFile {
@@ -264,12 +265,12 @@ export default function ComposerV2({
   filteredFiles,
   selectedFileIndex,
   onSelectFile,
-  filteredCommands: _filteredCommands,
-  selectedCommandIndex: _selectedCommandIndex,
-  onCommandSelect: _onCommandSelect,
-  onCloseCommandMenu: _onCloseCommandMenu,
-  isCommandMenuOpen: _isCommandMenuOpen,
-  frequentCommands: _frequentCommands,
+  filteredCommands,
+  selectedCommandIndex,
+  onCommandSelect,
+  onCloseCommandMenu,
+  isCommandMenuOpen,
+  frequentCommands,
   onToggleCommandMenu: _onToggleCommandMenu,
   onInsertMention,
   getRootProps,
@@ -417,6 +418,21 @@ export default function ComposerV2({
               )}
             >
               <input {...getInputProps()} />
+
+              <CommandMenu
+                commands={filteredCommands}
+                selectedIndex={selectedCommandIndex}
+                onSelect={onCommandSelect}
+                onClose={onCloseCommandMenu}
+                isOpen={isCommandMenuOpen}
+                frequentCommands={frequentCommands}
+                position={(() => {
+                  const ta = textareaRef?.current;
+                  if (!ta) return { top: 0, left: 0, bottom: 90 };
+                  const rect = ta.getBoundingClientRect();
+                  return { top: rect.top - 8, left: rect.left, bottom: window.innerHeight - rect.top + 8 };
+                })()}
+              />
 
               <div className="relative">
                 <div

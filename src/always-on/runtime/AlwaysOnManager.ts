@@ -18,6 +18,7 @@ import type { TelemetryClient } from "../../telemetry/index.js";
 export type CreateAlwaysOnManagerOptions = {
   config: AlwaysOnConfig;
   pilotHome: string;
+  sessionOverrides?: SessionConfigOverrides;
   now?: () => Date;
   uuid?: () => string;
   logger?: AlwaysOnRuntimeLogger;
@@ -39,13 +40,14 @@ export type CreateAlwaysOnManagerOptions = {
 export class AlwaysOnManager {
   private readonly runtimes: AlwaysOnRuntime[] = [];
   private readonly runContexts = new AlwaysOnRunContextRegistry();
-  private readonly sessionOverrides = new SessionConfigOverrides();
+  private readonly sessionOverrides: SessionConfigOverrides;
   private readonly tools: PilotDeckToolDefinition[];
   private readonly logger: AlwaysOnRuntimeLogger;
 
   constructor(private readonly options: CreateAlwaysOnManagerOptions) {
     const now = options.now ?? (() => new Date());
     const uuid = options.uuid;
+    this.sessionOverrides = options.sessionOverrides ?? new SessionConfigOverrides();
     this.logger = options.logger ?? { info: () => undefined, warn: () => undefined };
 
     this.tools = [

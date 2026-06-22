@@ -763,7 +763,12 @@ async function handleCommand(
       return true;
     }
     case "/mode": {
-      const mode = (args[0] ?? "default") as GatewayMode;
+      const requestedMode = args[0];
+      const mode = (
+        requestedMode === "plan" || requestedMode === "bypassPermissions"
+          ? requestedMode
+          : "default"
+      ) as GatewayMode;
       if (mode === "bypassPermissions") {
         writePermissionSettings({ skipPermissions: true });
       } else {

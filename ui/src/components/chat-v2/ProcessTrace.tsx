@@ -12,6 +12,7 @@ import {
   Wrench,
   type LucideIcon,
 } from 'lucide-react';
+import { AgentTimeline } from './AgentTimeline';
 
 export type ProcessTraceMetric = {
   key: string;
@@ -302,12 +303,48 @@ export function ProcessTrace({
       {expanded ? (
         <div className="mt-1.5 space-y-1.5 pl-5">
           {statusStep ? <ProcessTraceLine step={statusStep} /> : null}
-          {steps.map((step, index) => (
-            <ProcessTraceLine key={step.id || `${step.title || 'process-step'}-${index}`} step={step} />
-          ))}
+          {steps.length > 3 ? (
+            <AgentTimeline steps={steps} />
+          ) : (
+            steps.map((step, index) => (
+              <ProcessTraceLine key={step.id || `${step.title || 'process-step'}-${index}`} step={step} />
+            ))
+          )}
           {children ? <div className="space-y-1.5 pt-0.5">{children}</div> : null}
         </div>
       ) : null}
+    </div>
+  );
+}
+
+export function StreamingThinkingPreview({
+  content,
+  maxLines = 10,
+}: {
+  content: string;
+  maxLines?: number;
+}) {
+  const lines = content.split('\n');
+  const visibleLines = lines.slice(-maxLines);
+  const hasOverflow = lines.length > maxLines;
+
+  return (
+    <div
+      className="relative mt-1 overflow-hidden px-3 py-2 font-mono text-xs leading-relaxed text-neutral-500 dark:text-neutral-400"
+      style={
+        hasOverflow
+          ? {
+              maskImage: 'linear-gradient(to bottom, transparent 0%, black 25%)',
+              WebkitMaskImage: 'linear-gradient(to bottom, transparent 0%, black 25%)',
+            }
+          : undefined
+      }
+    >
+      {visibleLines.map((line, i) => (
+        <div key={i} className="whitespace-pre-wrap break-words">
+          {line || '\u00A0'}
+        </div>
+      ))}
     </div>
   );
 }

@@ -14,7 +14,6 @@ export const PILOTDECK_GATEWAY_PROTOCOL_VERSION_WEB = "1.0";
 export type WebGatewayMode =
   | "default"
   | "plan"
-  | "acceptEdits"
   | "bypassPermissions";
 
 export type WebGatewayChannelKey =
@@ -132,6 +131,8 @@ export type WebSubmitTurnInput = {
   projectKey?: string;
   attachments?: WebChannelAttachment[];
   mode?: WebGatewayMode;
+  basePermissionMode?: WebGatewayMode;
+  allowPlanModeTools?: boolean;
   runId?: string;
 };
 
@@ -236,6 +237,17 @@ export type WebReadSessionMessagesResult = {
   nextCursor?: string;
   total?: number;
   session: WebSessionInfo;
+};
+
+export type WebReadSubagentMessagesInput = {
+  sessionKey: string;
+  subagentId: string;
+  projectKey?: string;
+};
+
+export type WebReadSubagentMessagesResult = {
+  messages: import("./webMessage.js").WebMessage[];
+  total: number;
 };
 
 export type WebActiveTurnSnapshotInput = {

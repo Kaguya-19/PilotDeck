@@ -106,6 +106,7 @@ cron:
   enabled: true
   timezone: Asia/Shanghai
   maxConcurrentRuns: 2
+  runTimeoutMinutes: 60
 `;
 
 function resolvePilotHome() {
@@ -201,6 +202,7 @@ cron:
   enabled: true
   timezone: Asia/Shanghai
   maxConcurrentRuns: 2
+  runTimeoutMinutes: 60
 `;
 
 const PATCH_SECTIONS = [

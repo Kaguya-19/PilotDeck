@@ -78,7 +78,11 @@ export {
   type ExecutionRunContext,
   type ReportRunContext,
 } from "./runtime/AlwaysOnRunContextRegistry.js";
-export { SessionConfigOverrides, type SessionConfigOverride } from "./runtime/SessionConfigOverrides.js";
+export {
+  SessionConfigOverrides,
+  UNATTENDED_SESSION_EXCLUDED_TOOLS,
+  type SessionConfigOverride,
+} from "./runtime/SessionConfigOverrides.js";
 export {
   DiscoveryFire,
   acquireDiscoveryLock,

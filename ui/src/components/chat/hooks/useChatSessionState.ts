@@ -363,6 +363,9 @@ export function useChatSessionState({
   const activityStoreMessages = activeSessionId
     ? sessionStore.getActivityMessages?.(activeSessionId) ?? []
     : [];
+  const subagentLinks = activeSessionId
+    ? sessionStore.getSessionSlot?.(activeSessionId)?.subagentLinks
+    : undefined;
 
   // Reset viewHiddenCount when store messages change
   const prevStoreLenRef = useRef(0);
@@ -378,7 +381,7 @@ export function useChatSessionState({
   const pendingTargetSessionId = pendingViewSessionRef.current?.sessionId ?? null;
 
   const chatMessages = useMemo(() => {
-    const all = normalizedToChatMessages(storeMessages);
+    const all = normalizedToChatMessages(storeMessages, subagentLinks);
     // The optimistic user bubble must ONLY render in the session it was
     // submitted into. Two valid surfaces:
     //   1. The welcome surface itself (activeSessionId=null), while we are
@@ -404,7 +407,7 @@ export function useChatSessionState({
     }
     if (viewHiddenCount > 0 && viewHiddenCount < all.length) return all.slice(0, -viewHiddenCount);
     return all;
-  }, [storeMessages, viewHiddenCount, pendingUserMessage, activeSessionId, pendingTargetSessionId]);
+  }, [storeMessages, viewHiddenCount, pendingUserMessage, activeSessionId, pendingTargetSessionId, subagentLinks]);
 
   const activityMessages = normalizedToChatMessages(activityStoreMessages);
 

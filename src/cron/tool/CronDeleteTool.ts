@@ -20,8 +20,11 @@ export function createCronDeleteTool(runtime: CronToolRuntime): PilotDeckToolDef
     isReadOnly: () => false,
     isConcurrencySafe: () => false,
     isDestructive: () => true,
-    execute: async (input) => {
-      const result = await runtime.deleteTask(input);
+    execute: async (input, context) => {
+      const result = await runtime.deleteTask({
+        ...input,
+        projectKey: context.cwd,
+      });
       return {
         content: [{ type: "json", value: result }],
         data: result,

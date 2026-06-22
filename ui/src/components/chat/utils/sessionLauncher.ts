@@ -22,7 +22,6 @@ type StartSessionOptions = {
 
 const VALID_PERMISSION_MODES = new Set<PermissionMode>([
   'default',
-  'acceptEdits',
   'bypassPermissions',
   'plan',
 ]);

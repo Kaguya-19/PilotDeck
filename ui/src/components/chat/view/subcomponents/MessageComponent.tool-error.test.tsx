@@ -4,6 +4,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { ChatMessage } from '../../types/types';
 import MessageComponent from './MessageComponent';
 
+const PLAN_MODE_VIOLATION_MESSAGE = '[PLAN_MODE_VIOLATION] Tool "edit_notebook" is BLOCKED in plan mode.\n\nYou are in READ-ONLY plan mode. This tool cannot be executed.';
+
 afterEach(() => {
   cleanup();
 });
@@ -112,5 +114,35 @@ describe('MessageComponent tool errors', () => {
 
     fireEvent.click(summary as HTMLElement);
     expect(screen.getByText(/Plan mode denies side-effecting tool bash/)).toBeTruthy();
+  });
+
+  it('renders structured plan-mode violations as collapsed tool details without permission actions', () => {
+    const { container } = renderToolMessage({
+      id: 'tool-4',
+      type: 'assistant',
+      content: '',
+      timestamp: '2026-05-18T08:00:00.000Z',
+      isToolUse: true,
+      toolName: 'edit_notebook',
+      toolId: 'tool-4',
+      toolInput: '{"file_path":"notebook.ipynb"}',
+      toolResult: {
+        isError: true,
+        content: PLAN_MODE_VIOLATION_MESSAGE,
+        errorCode: 'plan_mode_violation',
+      },
+    });
+
+    expect(container.querySelector('.border-l-red-500')).toBeNull();
+    expect(screen.queryByRole('button', { name: /permissions\.grant|Grant edit_notebook for this chat/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /permissions\.openSettings|Open settings/ })).toBeNull();
+
+    const summary = screen.getByText('Tool error').closest('summary');
+    expect(summary).not.toBeNull();
+    const details = summary?.closest('details') as HTMLDetailsElement | null;
+    expect(details?.open).toBe(false);
+
+    fireEvent.click(summary as HTMLElement);
+    expect(screen.getByText(/\[PLAN_MODE_VIOLATION\]/)).toBeTruthy();
   });
 });

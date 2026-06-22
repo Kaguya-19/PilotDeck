@@ -4,6 +4,11 @@ import type { Gateway } from "../../../gateway/index.js";
 import type { ChannelAdapter, ChannelHandle, ChannelLogger, ChannelStartDeps } from "../protocol/ChannelAdapter.js";
 import { executeChannelCommand, resolveCommand } from "../protocol/ChannelCommandRegistry.js";
 import { ImElicitationHelper } from "../protocol/ImElicitationHelper.js";
+import {
+  ImLiveReplyController,
+  type ImLiveReplyControllerOptions,
+  type ImLiveReplyTransport,
+} from "../protocol/ImLiveReplyController.js";
 import { FeishuSessionMapper } from "./FeishuSessionMapper.js";
 
 let Lark: any = null;
@@ -23,13 +28,20 @@ async function loadLarkSdk(): Promise<any> {
 const TENANT_TOKEN_URL = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal";
 const SEND_MESSAGE_URL = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id";
 const REACTION_URL = "https://open.feishu.cn/open-apis/im/v1/messages";
+const UPDATE_MESSAGE_URL = "https://open.feishu.cn/open-apis/im/v1/messages";
 const PROCESSING_EMOJI = "OnIt";
 const TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1000;
 const SEEN_EVENTS_MAX = 2000;
+const MAX_TEXT_MESSAGE_LENGTH = 4000;
+const DEFAULT_LIVE_REPLY_CURSOR = " ▉";
 
 export type FeishuOutboundMessage = {
   chatId: string;
   text: string;
+};
+
+export type FeishuLiveMessageHandle = {
+  messageId: string;
 };
 
 export type FeishuConnectionMode = "stream" | "webhook";
@@ -54,6 +66,10 @@ export type FeishuChannelOptions = {
    * channel calls Lark Open API directly.
    */
   send?: (message: FeishuOutboundMessage) => Promise<void>;
+  liveReplyOptions?: Omit<
+    ImLiveReplyControllerOptions<FeishuLiveMessageHandle>,
+    "transport" | "onTransportError"
+  >;
 };
 
 type ParsedEvent =
@@ -66,6 +82,7 @@ export class FeishuChannel implements ChannelAdapter {
 
   private readonly mapper: FeishuSessionMapper;
   private readonly explicitSend?: (message: FeishuOutboundMessage) => Promise<void>;
+  private readonly liveReplyOptions?: FeishuChannelOptions["liveReplyOptions"];
 
   private appId: string;
   private appSecret: string;
@@ -88,6 +105,7 @@ export class FeishuChannel implements ChannelAdapter {
   constructor(options: FeishuChannelOptions = {}) {
     this.mapper = options.mapper ?? new FeishuSessionMapper();
     this.explicitSend = options.send;
+    this.liveReplyOptions = options.liveReplyOptions;
     this.appId = options.appId ?? "";
     this.appSecret = options.appSecret ?? "";
     this.encryptKey = options.encryptKey;
@@ -280,51 +298,73 @@ export class FeishuChannel implements ChannelAdapter {
 
     this.activeChats.add(chatId);
     try {
-      let lastTextSegment = "";
-      let errorMessages = "";
-      let inToolCall = false;
+      let activeRunId: string | undefined;
+      let watchdogSettled = false;
+      const liveReply = new ImLiveReplyController<FeishuLiveMessageHandle>({
+        ...this.liveReplyOptions,
+        transport: this.createLiveReplyTransport(chatId),
+        onTransportError: (error, phase) => {
+          this.logger?.warn?.(`feishu: live reply ${phase} failed: ${error}`);
+        },
+      });
+      const turnTimeoutMs = this.liveReplyOptions?.turnTimeoutMs ?? 600_000;
+      const watchdog = turnTimeoutMs > 0
+        ? setTimeout(() => {
+            if (watchdogSettled) return;
+            watchdogSettled = true;
+            this.logger?.warn?.(`feishu: live reply timed out for chat ${chatId}`);
+            void liveReply.markTimedOut().catch((error: unknown) => {
+              this.logger?.warn?.(`feishu: mark timeout failed: ${error}`);
+            });
+            void this.gateway?.abortTurn({ sessionKey: mapped.sessionKey, ...(activeRunId ? { runId: activeRunId } : {}) })
+              .catch((error: unknown) => {
+                this.logger?.warn?.(`feishu: abort timeout turn failed: ${error}`);
+              });
+          }, turnTimeoutMs)
+        : undefined;
+      watchdog?.unref?.();
       try {
         for await (const event of this.gateway.submitTurn({
           sessionKey: mapped.sessionKey,
           channelKey: "feishu",
           message: mapped.message,
+          allowPlanModeTools: false,
+          timeoutMs: turnTimeoutMs,
           ...(mapped.projectKey ? { projectKey: mapped.projectKey } : {}),
         })) {
-          switch (event.type) {
-            case "assistant_text_delta":
-              if (!inToolCall) lastTextSegment += event.text;
-              break;
-            case "tool_call_started":
-              inToolCall = true;
-              lastTextSegment = "";
-              break;
-            case "tool_call_finished":
-              inToolCall = false;
-              if (!event.ok) {
-                const name = event.toolName ?? event.toolCallId;
-                errorMessages += `⚠️ ${name} 执行失败\n`;
-              }
-              break;
-            case "elicitation_request": {
-              const questionText = this.elicitation.capture(chatId, mapped.sessionKey, event);
-              await this.send({ chatId, text: questionText });
-              break;
-            }
-            case "error":
-              errorMessages += `❌ ${event.message}\n`;
-              break;
+          if (event.type === "turn_started") {
+            activeRunId = event.runId;
           }
+          if (event.type === "elicitation_request") {
+            const questionText = this.elicitation.capture(chatId, mapped.sessionKey, event);
+            await liveReply.pauseActivity();
+            await this.send({ chatId, text: questionText });
+            continue;
+          }
+          if (event.type === "error" && event.code === "agent_aborted") {
+            await liveReply.markAborted();
+            continue;
+          }
+          if (event.type === "error" && event.code === "turn_timeout") {
+            await liveReply.markTimedOut();
+            continue;
+          }
+          await liveReply.handleEvent(event);
         }
       } catch (e) {
         this.logger?.error?.(`feishu: submitTurn error: ${e}`);
-        lastTextSegment = "处理消息时发生错误，请重试。";
+        await liveReply.handleEvent({
+          type: "error",
+          message: "处理消息时发生错误，请重试。",
+          recoverable: true,
+        });
+      } finally {
+        watchdogSettled = true;
+        if (watchdog) clearTimeout(watchdog);
       }
 
       this.elicitation.clear(chatId);
-      const reply = (lastTextSegment.trim() || errorMessages.trim());
-      if (reply) {
-        await this.send({ chatId, text: reply });
-      }
+      await liveReply.flushFinal();
     } finally {
       if (reactionId && messageId) {
         await this.removeReaction(messageId, reactionId);
@@ -333,14 +373,39 @@ export class FeishuChannel implements ChannelAdapter {
     }
   }
 
+  private createLiveReplyTransport(chatId: string): ImLiveReplyTransport<FeishuLiveMessageHandle> {
+    const liveCursor = this.liveReplyOptions?.cursor ?? DEFAULT_LIVE_REPLY_CURSOR;
+    return {
+      maxMessageLength: MAX_TEXT_MESSAGE_LENGTH,
+      send: async (text) => {
+        const messageId = text.endsWith(liveCursor)
+          ? await this.sendLiveMessage({ chatId, text })
+          : await this.sendTextMessage({ chatId, text });
+        if (messageId === false) return false;
+        return messageId ? { messageId } : undefined;
+      },
+      edit: async (handle, text) => {
+        return this.editLiveMessage(handle.messageId, text);
+      },
+    };
+  }
+
   private async send(message: FeishuOutboundMessage): Promise<void> {
+    await this.sendTextMessage(message);
+  }
+
+  private async sendLiveMessage(message: FeishuOutboundMessage): Promise<string | undefined | false> {
+    return this.sendTextMessage(message);
+  }
+
+  private async sendTextMessage(message: FeishuOutboundMessage): Promise<string | undefined | false> {
     if (this.explicitSend) {
       await this.explicitSend(message);
-      return;
+      return undefined;
     }
     if (!this.appId || !this.appSecret) {
       this.logger?.warn?.("feishu: cannot send — appId/appSecret missing");
-      return;
+      return false;
     }
 
     try {
@@ -357,15 +422,53 @@ export class FeishuChannel implements ChannelAdapter {
           content: JSON.stringify({ text: message.text }),
         }),
       });
-      const json = (await res.json().catch(() => ({}))) as { code?: number; msg?: string };
+      const json = (await res.json().catch(() => ({}))) as {
+        code?: number;
+        msg?: string;
+        data?: { message_id?: string };
+      };
       if (!res.ok || (json.code !== undefined && json.code !== 0)) {
         if (json.code === 99991663 || json.code === 99991664) {
           this.tokenCache = undefined;
         }
         this.logger?.error?.(`feishu: send failed code=${json.code} msg=${json.msg}`);
+        return false;
       }
+      return json.data?.message_id;
     } catch (e) {
       this.logger?.error?.(`feishu: send threw: ${e}`);
+    }
+    return false;
+  }
+
+  private async editLiveMessage(messageId: string, text: string): Promise<boolean> {
+    if (!messageId || !this.appId || !this.appSecret) return false;
+
+    try {
+      const token = await this.getTenantAccessToken();
+      const res = await fetch(`${UPDATE_MESSAGE_URL}/${encodeURIComponent(messageId)}`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json; charset=utf-8",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          msg_type: "text",
+          content: JSON.stringify({ text }),
+        }),
+      });
+      const json = (await res.json().catch(() => ({}))) as { code?: number; msg?: string };
+      if (!res.ok || (json.code !== undefined && json.code !== 0)) {
+        if (json.code === 99991663 || json.code === 99991664) {
+          this.tokenCache = undefined;
+        }
+        this.logger?.warn?.(`feishu: update message failed code=${json.code} msg=${json.msg}`);
+        return false;
+      }
+      return true;
+    } catch (e) {
+      this.logger?.warn?.(`feishu: update message threw: ${e}`);
+      return false;
     }
   }
 

@@ -27,7 +27,14 @@ export class ContextOverflowRecovery {
     if (input.error.recoverableViaImageStrip) {
       return { type: "strip_images_and_retry", reason: "multimodal-processor-error" };
     }
-    if (input.error.code !== "prompt_too_long") {
+    if (input.error.code === "image_too_large") {
+      return { type: "strip_images_and_retry", reason: "image-too-large" };
+    }
+    const isContextError =
+      input.error.code === "prompt_too_long" ||
+      input.error.code === "context_overflow" ||
+      input.error.recoverableViaCompact === true;
+    if (!isContextError) {
       return { type: "give_up", reason: `non_recoverable_model_error:${input.error.code}` };
     }
     if (input.hasAttemptedCompact) {

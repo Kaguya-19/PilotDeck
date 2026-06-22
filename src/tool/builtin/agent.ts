@@ -150,7 +150,7 @@ export function createAgentTool(
     },
     maxResultBytes: 200_000,
     isReadOnly: () => false,
-    isConcurrencySafe: () => false,
+    isConcurrencySafe: () => true,
     isOpenWorld: () => true,
     checkPermissions: async (): Promise<PermissionResult> => ({
       type: "allow",
@@ -337,6 +337,7 @@ async function runFullFork(args: {
       definitionId: requestedType,
       directive,
       subagentId,
+      toolCallId: context.currentToolCallId,
       abortSignal: context.abortSignal,
       timeoutMs,
     });

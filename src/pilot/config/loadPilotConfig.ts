@@ -348,6 +348,7 @@ function parseAgent(
   const model = parseAgentModelSelection(rawAgent.model, "agent.model", modelConfig, diagnostics);
   const subagents = parseAgentSubagents(rawAgent.subagents, diagnostics);
   const maxContextTokens = readOptionalPositiveInteger(rawAgent.maxContextTokens, "agent.maxContextTokens");
+  const thinking = parseAgentThinking(rawAgent.thinking);
   if (rawAgent.fallbackModel !== undefined) {
     diagnostics.push({
       code: "CONFIG_AGENT_FALLBACK_MODEL_DEPRECATED",
@@ -363,7 +364,18 @@ function parseAgent(
   return {
     model,
     ...(maxContextTokens !== undefined ? { maxContextTokens } : {}),
+    ...(thinking ? { thinking } : {}),
     ...(subagents ? { subagents } : {}),
+  };
+}
+
+function parseAgentThinking(value: unknown): PilotAgentConfig["thinking"] | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!isRecord(value)) return undefined;
+  if (value.enabled !== true) return undefined;
+  return {
+    enabled: true,
+    ...(typeof value.budgetTokens === "number" ? { budgetTokens: value.budgetTokens } : {}),
   };
 }
 

@@ -85,6 +85,12 @@ export type TaskStopResult = {
   status: PilotDeckBackgroundTaskStatus;
 };
 
+const TERMINAL_TASK_STATUSES = new Set<PilotDeckBackgroundTaskStatus>([
+  "completed",
+  "failed",
+  "cancelled",
+]);
+
 function ensureRuntime(runtime: BackgroundTaskRuntime | undefined): BackgroundTaskRuntime {
   if (!runtime) {
     throw new PilotDeckToolRuntimeError(
@@ -93,6 +99,30 @@ function ensureRuntime(runtime: BackgroundTaskRuntime | undefined): BackgroundTa
     );
   }
   return runtime;
+}
+
+function isTerminalTaskStatus(status: PilotDeckBackgroundTaskStatus): boolean {
+  return TERMINAL_TASK_STATUSES.has(status);
+}
+
+function formatTaskOutputText(data: TaskOutputResult, requestedOffset: number): string {
+  const exitCode = data.exitCode ?? "null";
+  const header = `task_output taskId=${data.taskId} status=${data.status} offset=${requestedOffset} nextOffset=${data.nextOffset} totalBytes=${data.totalBytes} truncated=${data.truncated} exitCode=${exitCode}`;
+  const hasNewOutput = data.content.length > 0;
+  const isFinished = isTerminalTaskStatus(data.status) && data.nextOffset >= data.totalBytes;
+
+  if (!hasNewOutput) {
+    const message = isFinished
+      ? `No new output. Task is ${data.status} and polling is finished.`
+      : `No new output yet. Use nextOffset=${data.nextOffset} for the next poll.`;
+    return `${header}\n${message}`;
+  }
+
+  if (isFinished) {
+    return `${header}\n${data.content}\nTask is ${data.status} and all output has been read; polling is finished.`;
+  }
+
+  return `${header}\n${data.content}`;
 }
 
 export function createTaskCreateTool(
@@ -209,7 +239,8 @@ export function createTaskOutputTool(
   return {
     name: "task_output",
     aliases: ["TaskOutput"],
-    description: "Read newly-produced output for a background task (incremental polling).",
+    description:
+      "Read newly-produced output for a background task (incremental polling). Use nextOffset for the next read. Stop polling when status is completed, failed, or cancelled and nextOffset >= totalBytes.",
     kind: "shell",
     inputSchema: {
       type: "object",
@@ -242,7 +273,8 @@ export function createTaskOutputTool(
           `Unknown taskId: ${input.taskId}`,
         );
       }
-      const slice = rt.getOutput(input.taskId, input.offset ?? 0, input.maxBytes);
+      const requestedOffset = input.offset ?? 0;
+      const slice = rt.getOutput(input.taskId, requestedOffset, input.maxBytes);
       const data: TaskOutputResult = {
         taskId: input.taskId,
         content: slice.content,
@@ -252,7 +284,10 @@ export function createTaskOutputTool(
         status: task.status,
         exitCode: task.exitCode,
       };
-      return { content: [{ type: "text", text: slice.content }], data };
+      return {
+        content: [{ type: "text", text: formatTaskOutputText(data, requestedOffset) }],
+        data,
+      };
     },
   };
 }
