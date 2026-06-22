@@ -14,6 +14,7 @@ import {
   ChevronsDownUp,
   ChevronsUpDown,
   Folder,
+  GitFork,
   MessageSquarePlus,
   PanelLeftClose,
   Pencil,
@@ -208,6 +209,7 @@ export type SidebarV2Props = {
   onCreateProject: () => void;
   onRequestDeleteProject: (project: Project) => void;
   onRequestDeleteSession: (project: Project, session: ProjectSession) => void;
+  onRequestForkSession?: (project: Project, session: ProjectSession) => void;
   onShowSettings: () => void;
   onDeselectProject?: () => void;
   onResetProjectSessionPreview?: (projectName: string) => void;
@@ -258,6 +260,7 @@ export default function SidebarV2({
   onCreateProject,
   onRequestDeleteProject,
   onRequestDeleteSession,
+  onRequestForkSession,
   onShowSettings,
   onDeselectProject,
   onResetProjectSessionPreview,
@@ -588,6 +591,14 @@ export default function SidebarV2({
     [onRequestDeleteSession],
   );
 
+  const requestForkSession = useCallback(
+    (project: Project, session: ProjectSession) => {
+      setContextMenu(null);
+      onRequestForkSession?.(project, session);
+    },
+    [onRequestForkSession],
+  );
+
   const handleContextRename = useCallback(() => {
     if (!contextMenu) return;
     if (contextMenu.kind === 'project') {
@@ -605,6 +616,11 @@ export default function SidebarV2({
       requestDeleteSession(contextMenu.project, contextMenu.session);
     }
   }, [contextMenu, requestDeleteProject, requestDeleteSession]);
+
+  const handleContextFork = useCallback(() => {
+    if (!contextMenu || contextMenu.kind !== 'session') return;
+    requestForkSession(contextMenu.project, contextMenu.session);
+  }, [contextMenu, requestForkSession]);
 
   const commitProjectRename = useCallback(() => {
     if (!renamingProject) return;
@@ -1167,6 +1183,20 @@ export default function SidebarV2({
             <Pencil className="h-3.5 w-3.5 shrink-0 text-neutral-500 dark:text-neutral-400" strokeWidth={1.75} />
             <span>{t('sidebar:actions.rename', { defaultValue: 'Rename' })}</span>
           </button>
+          {contextMenu.kind === 'session' && onRequestForkSession ? (
+            <button
+              type="button"
+              role="menuitem"
+              onClick={handleContextFork}
+              className={cn(
+                'flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-[13px]',
+                'text-neutral-800 hover:bg-neutral-100 dark:text-neutral-100 dark:hover:bg-neutral-800',
+              )}
+            >
+              <GitFork className="h-3.5 w-3.5 shrink-0 text-neutral-500 dark:text-neutral-400" strokeWidth={1.75} />
+              <span>{t('sidebar:actions.fork', { defaultValue: 'Fork' })}</span>
+            </button>
+          ) : null}
           <button
             type="button"
             role="menuitem"

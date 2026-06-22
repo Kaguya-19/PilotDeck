@@ -654,6 +654,9 @@ function createFallbackGateway(): Gateway {
     listSessions: async () => ({ sessions: [] }),
     resumeSession: async (input) => input,
     newSession: async (input) => ({ sessionKey: `${input.channelKey}:project=${input.projectKey ?? process.cwd()}:s_local` }),
+    forkSession: async () => {
+      throw new Error("fork_session is not configured.");
+    },
     closeSession: async () => undefined,
     describeServer: async () => ({ mode: "in_process" }),
     cronCreate: async () => {

@@ -58,7 +58,7 @@ import { loadPilotConfig, resolvePilotHome } from "../pilot/index.js";
 import { createPilotConfigStoreSync, type PilotConfigStore } from "../pilot/config/PilotConfigStore.js";
 import type { PilotAgentModelSelection, PilotConfigSnapshot } from "../pilot/config/types.js";
 import { DEFAULT_JUDGE_TIMEOUT_MS, DEFAULT_SUBAGENT_MAX_TOKENS, DEFAULT_ALLOWED_TOOLS, DEFAULT_TRIGGER_TIERS, type RouterConfig } from "../router/config/schema.js";
-import { createAgentProjectSessionStorage, listProjectSessions, resumeAgentSession } from "../session/index.js";
+import { createAgentProjectSessionStorage, forkAgentSession, listProjectSessions, resumeAgentSession } from "../session/index.js";
 import { sanitizeSessionIdForPath } from "../session/storage/ProjectSessionStorage.js";
 import { readWebSessionMessages, readSubagentWebMessages } from "../web/server/readSessionMessages.js";
 import { describeWebProject, listWebProjects } from "../web/server/listProjects.js";
@@ -237,6 +237,15 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
       readSubagentWebMessages(input, {
         projectRoot: input.projectKey ? input.projectKey : projectRoot,
         pilotHome,
+        now,
+      }),
+    forkSession: async (input) =>
+      forkAgentSession({
+        projectRoot: input.projectKey ? input.projectKey : projectRoot,
+        pilotHome,
+        sourceSessionKey: input.sourceSessionKey,
+        targetSessionKey: input.targetSessionKey,
+        title: input.title,
         now,
       }),
     listProjects: () =>

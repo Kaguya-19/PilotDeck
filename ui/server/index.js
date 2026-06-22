@@ -730,6 +730,26 @@ app.delete('/api/projects/:projectName/sessions/:sessionId', authenticateToken, 
     }
 });
 
+// Fork session endpoint
+app.post('/api/projects/:projectName/sessions/:sessionId/fork', authenticateToken, async (req, res) => {
+    try {
+        const { projectName, sessionId } = req.params;
+        const projectPath = await extractProjectDirectory(projectName);
+        const gateway = await getPilotDeckGateway();
+        const result = await gateway.forkSession({
+            sourceSessionKey: sessionId,
+            projectKey: projectPath,
+            title: typeof req.body?.title === 'string' ? req.body.title : undefined,
+        });
+        res.json(result);
+    } catch (error) {
+        const code = error?.code || 'fork_session_failed';
+        const status = code === 'source_session_not_forkable' ? 409 : 500;
+        console.error(`[API] Error forking session ${req.params.sessionId}:`, error);
+        res.status(status).json({ error: error?.message || String(error), code });
+    }
+});
+
 // Rename session endpoint
 app.put('/api/sessions/:sessionId/rename', authenticateToken, async (req, res) => {
     try {

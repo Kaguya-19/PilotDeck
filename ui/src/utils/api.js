@@ -149,6 +149,11 @@ export const api = {
       method: 'DELETE',
     });
   },
+  forkSession: (projectName, sessionId, body = {}) =>
+    authenticatedFetch(`/api/projects/${encodeURIComponent(projectName)}/sessions/${encodeURIComponent(sessionId)}/fork`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
   renameSession: (sessionId, summary, provider) =>
     authenticatedFetch(`/api/sessions/${sessionId}/rename`, {
       method: 'PUT',

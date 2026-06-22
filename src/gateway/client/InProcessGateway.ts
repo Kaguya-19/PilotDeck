@@ -21,6 +21,8 @@ import type {
   GatewayActiveTurnSnapshotInput,
   GatewayElicitationResponseInput,
   GatewayEvent,
+  ForkSessionInput,
+  ForkSessionResult,
   GatewayPermissionDecisionInput,
   GatewaySessionPermissionGrantInput,
   GatewayServerInfo,
@@ -154,6 +156,8 @@ export type InProcessGatewayOptions = {
   toolResultsDir?: string;
   /** Override a session's cwd via SessionConfigOverrides. */
   setSessionCwd?: (sessionKey: string, cwd: string) => void;
+  /** Create a new transcript by forking an existing session. */
+  forkSession?: (input: ForkSessionInput & { targetSessionKey: string }) => Promise<ForkSessionResult>;
   /** Delegate for Always-On apply — wired to AlwaysOnManager.applyPlan. */
   alwaysOnApply?: (input: AlwaysOnApplyInput) => Promise<AlwaysOnApplyResult>;
   alwaysOnRerunPlan?: (input: AlwaysOnRerunPlanInput) => Promise<AlwaysOnRerunPlanResult>;
@@ -526,6 +530,17 @@ export class InProcessGateway implements Gateway {
     return { sessionKey: `${input.channelKey}:${projectKey}s_${suffix}` };
   }
 
+  async forkSession(input: ForkSessionInput): Promise<ForkSessionResult> {
+    if (!this.options.forkSession) {
+      throw new Error("fork_session is not configured.");
+    }
+    const targetSessionKey = this.createForkSessionKey(input.sourceSessionKey);
+    return this.options.forkSession({
+      ...input,
+      targetSessionKey,
+    });
+  }
+
   async closeSession(input: { sessionKey: string; reason?: string }): Promise<void> {
     await this.router.close(input.sessionKey);
     this.sessionPermissionGrants.delete(input.sessionKey);
@@ -774,6 +789,20 @@ export class InProcessGateway implements Gateway {
       replay.bytes -= Buffer.byteLength(JSON.stringify(dropped), "utf8");
       replay.truncated = true;
     }
+  }
+
+  private createForkSessionKey(sourceSessionKey: string): string {
+    const suffix = this.uuid();
+    const markerIndex = Math.max(
+      sourceSessionKey.lastIndexOf(":s_"),
+      sourceSessionKey.lastIndexOf("-s_"),
+      sourceSessionKey.lastIndexOf("_s_"),
+    );
+    if (markerIndex >= 0) {
+      return `${sourceSessionKey.slice(0, markerIndex + 1)}s_${suffix}`;
+    }
+    const separator = process.platform === "win32" ? "-" : ":";
+    return `web${separator}s_${suffix}`;
   }
 }
 

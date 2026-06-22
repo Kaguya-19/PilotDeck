@@ -23,6 +23,7 @@ export type WsGatewayMethod =
   | "list_sessions"
   | "resume_session"
   | "new_session"
+  | "fork_session"
   | "close_session"
   | "describe_server"
   | "active_turn_snapshot"

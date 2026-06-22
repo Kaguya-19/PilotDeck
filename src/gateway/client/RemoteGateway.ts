@@ -6,6 +6,8 @@ import type {
   Gateway,
   GatewayElicitationResponseInput,
   GatewayEvent,
+  ForkSessionInput,
+  ForkSessionResult,
   GatewayPermissionDecisionInput,
   GatewayServerInfo,
   GatewaySubmitTurnInput,
@@ -80,6 +82,10 @@ export class RemoteGateway implements Gateway {
 
   async newSession(input: NewSessionInput): Promise<{ sessionKey: string }> {
     return (await this.client.request("new_session", input)) as { sessionKey: string };
+  }
+
+  async forkSession(input: ForkSessionInput): Promise<ForkSessionResult> {
+    return (await this.client.request("fork_session", input)) as ForkSessionResult;
   }
 
   async closeSession(input: { sessionKey: string; reason?: string }): Promise<void> {

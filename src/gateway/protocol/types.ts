@@ -253,6 +253,17 @@ export type NewSessionInput = {
   hint?: string;
 };
 
+export type ForkSessionInput = {
+  sourceSessionKey: string;
+  projectKey?: string;
+  title?: string;
+};
+
+export type ForkSessionResult = {
+  sessionKey: string;
+  sourceSessionKey: string;
+};
+
 export type GatewayServerInfo = {
   mode: "in_process" | "remote";
   protocolVersion?: string;
@@ -311,6 +322,7 @@ export interface Gateway {
   listSessions(input: ListSessionsInput): Promise<ListSessionsResult>;
   resumeSession(input: { sessionKey: string }): Promise<{ sessionKey: string }>;
   newSession(input: NewSessionInput): Promise<{ sessionKey: string }>;
+  forkSession(input: ForkSessionInput): Promise<ForkSessionResult>;
   closeSession(input: { sessionKey: string; reason?: string }): Promise<void>;
   describeServer(): Promise<GatewayServerInfo>;
   getActiveTurnSnapshot?(input: GatewayActiveTurnSnapshotInput): Promise<GatewayActiveTurnSnapshot>;

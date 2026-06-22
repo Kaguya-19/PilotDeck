@@ -153,6 +153,20 @@ export class GatewayWsConnection {
         );
         return;
       }
+      if (hasStructuredErrorCode(error)) {
+        this.ws.sendText(
+          JSON.stringify({
+            type: "response",
+            id: frame.id,
+            ok: false,
+            error: {
+              code: error.code,
+              message: error.message,
+            },
+          }),
+        );
+        return;
+      }
       this.ws.sendText(
         JSON.stringify({
           type: "response",
@@ -177,6 +191,8 @@ export class GatewayWsConnection {
         return this.options.gateway.resumeSession(frame.params as never);
       case "new_session":
         return this.options.gateway.newSession(frame.params as never);
+      case "fork_session":
+        return this.options.gateway.forkSession(frame.params as never);
       case "close_session":
         return this.options.gateway.closeSession(frame.params as never).then(() => ({ ok: true }));
       case "describe_server":
@@ -299,4 +315,8 @@ function isRequestFrame(value: unknown): value is WsRequestFrame {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function hasStructuredErrorCode(error: unknown): error is { code: string; message: string } {
+  return isRecord(error) && typeof error.code === "string" && typeof error.message === "string";
 }

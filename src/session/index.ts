@@ -22,6 +22,12 @@ export {
 export { readSessionLite, type SessionLiteFile } from "./storage/SessionLiteReader.js";
 export { SessionMetadataStore, mergeMetadata, type SessionMetadataStoreOptions } from "./metadata/SessionMetadataStore.js";
 export { resumeAgentSession, type ResumeAgentSessionOptions, type ResumeAgentSessionResult } from "./resume/resumeAgentSession.js";
+export {
+  forkAgentSession,
+  ForkAgentSessionError,
+  type ForkAgentSessionOptions,
+  type ForkAgentSessionResult,
+} from "./fork/forkAgentSession.js";
 export { InMemoryTranscriptWriter, type InMemoryTranscriptEntry } from "./transcript/InMemoryTranscriptWriter.js";
 export {
   JsonlTranscriptWriter,

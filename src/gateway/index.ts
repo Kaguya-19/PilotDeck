@@ -30,6 +30,8 @@ export type {
   GatewayServerInfo,
   GatewaySessionInfo,
   GatewaySubmitTurnInput,
+  ForkSessionInput,
+  ForkSessionResult,
   ListSessionsInput,
   ListSessionsResult,
   NewSessionInput,

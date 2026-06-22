@@ -465,6 +465,51 @@ export default function AppShellV2() {
 	    }
 	  }, [deleteSessionTarget, refreshProjectsSilently, sidebarSharedProps]);
 
+  const handleRequestForkSession = useCallback(
+    async (project: Project, session: ProjectSession) => {
+      try {
+        const response = await api.forkSession(project.name, session.id);
+        const body = (await response.json().catch(() => ({}))) as {
+          sessionKey?: string;
+          error?: string;
+        };
+        if (!response.ok || !body.sessionKey) {
+          throw new Error(body.error || `Failed (HTTP ${response.status})`);
+        }
+
+        const now = new Date().toISOString();
+        const forkTitle = `Fork: ${sessionDisplayTitle(session)}`;
+        const forkSession: ProjectSession = {
+          ...session,
+          id: body.sessionKey,
+          title: forkTitle,
+          summary: forkTitle,
+          created_at: now,
+          updated_at: now,
+          lastActivity: now,
+          __projectName: project.name,
+        };
+
+        if (project.name !== selectedProject?.name) {
+          handleProjectSelect(project);
+        }
+        bumpSessionActivity(project.name, body.sessionKey, forkTitle);
+        setSelectedSession(forkSession);
+        setActiveTab('chat');
+        navigate(`/session/${body.sessionKey}`);
+        void refreshProjectsSilently();
+      } catch (err) {
+        window.dispatchEvent(new CustomEvent('pilotdeck:toast', {
+          detail: {
+            kind: 'error',
+            message: err instanceof Error ? err.message : 'Failed to fork session',
+          },
+        }));
+      }
+    },
+    [bumpSessionActivity, handleProjectSelect, navigate, refreshProjectsSilently, selectedProject?.name, setActiveTab, setSelectedSession],
+  );
+
 	  const handleSelectProject = useCallback(
     (project: Project) => {
       handleProjectSelect(project);
@@ -572,6 +617,7 @@ export default function AppShellV2() {
 	      onCreateProject={handleOpenNewProject}
 	      onRequestDeleteProject={handleRequestDeleteProject}
 	      onRequestDeleteSession={handleRequestDeleteSession}
+	      onRequestForkSession={handleRequestForkSession}
 	      onShowSettings={onShowSettings}
 	      onDeselectProject={handleDeselectProject}
 	      onResetProjectSessionPreview={handleResetProjectSessionPreview}

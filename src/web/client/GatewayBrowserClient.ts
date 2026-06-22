@@ -157,6 +157,10 @@ export class GatewayBrowserClient {
     return this.request<{ sessionKey: string }>("new_session", input);
   }
 
+  forkSession(input: { sourceSessionKey: string; projectKey?: string; title?: string }) {
+    return this.request<{ sessionKey: string; sourceSessionKey: string }>("fork_session", input);
+  }
+
   resumeSession(input: { sessionKey: string }) {
     return this.request<{ sessionKey: string }>("resume_session", input);
   }
