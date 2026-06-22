@@ -92,4 +92,29 @@ describe('UI project storage ID resolution', () => {
             rmSync(root, { recursive: true, force: true });
         }
     });
+
+    it('matches core marker lookup for Windows path casing', () => {
+        const root = mkdtempSync(join(tmpdir(), 'pilotdeck-ui-win-project-id-'));
+        const originalPlatform = process.platform;
+        try {
+            Object.defineProperty(process, 'platform', { value: 'win32' });
+
+            const pilotHome = join(root, 'pilot-home');
+            const projectRoot = join(root, 'Workspace', 'Repo');
+            const markerPath = join(root, 'workspace', 'repo');
+            const projectId = createCollisionResistantProjectId(projectRoot);
+            mkdirSync(projectRoot, { recursive: true });
+            mkdirSync(markerPath, { recursive: true });
+            mkdirSync(join(pilotHome, 'projects', projectId), { recursive: true });
+            writeFileSync(join(pilotHome, 'projects', projectId, '.cwd'), markerPath, 'utf8');
+
+            expect(resolveProjectStorageId(projectRoot, pilotHome)).toBe(projectId);
+            expect(resolveProjectStorageId(projectRoot, pilotHome)).toBe(
+                resolveCoreProjectStorageId(projectRoot, pilotHome),
+            );
+        } finally {
+            Object.defineProperty(process, 'platform', { value: originalPlatform });
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
 });

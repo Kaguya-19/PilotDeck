@@ -34,7 +34,8 @@ async function checkTaskMasterInstallation() {
         // Check if task-master command is available
         const child = spawn('which', ['task-master'], { 
             stdio: ['ignore', 'pipe', 'pipe'],
-            shell: true 
+            shell: true,
+            windowsHide: process.platform === 'win32'
         });
         
         let output = '';
@@ -53,7 +54,8 @@ async function checkTaskMasterInstallation() {
                 // TaskMaster is installed, get version
                 const versionChild = spawn('task-master', ['--version'], { 
                     stdio: ['ignore', 'pipe', 'pipe'],
-                    shell: true 
+                    shell: true,
+                    windowsHide: process.platform === 'win32'
                 });
                 
                 let versionOutput = '';
@@ -479,7 +481,8 @@ router.get('/next/:projectName', async (req, res) => {
             const nextTaskCommand = spawn('task-master', ['next'], {
                 cwd: projectPath,
                 stdio: ['pipe', 'pipe', 'pipe'],
-                shell: true
+                shell: true,
+                windowsHide: process.platform === 'win32'
             });
 
             let stdout = '';
@@ -1000,7 +1003,8 @@ router.post('/init/:projectName', async (req, res) => {
         const initProcess = spawn('npx', ['task-master', 'init'], {
             cwd: projectPath,
             stdio: ['pipe', 'pipe', 'pipe'],
-            shell: true
+            shell: true,
+            windowsHide: process.platform === 'win32'
         });
 
         let stdout = '';
@@ -1104,7 +1108,8 @@ router.post('/add-task/:projectName', async (req, res) => {
         const addTaskProcess = spawn('npx', args, {
             cwd: projectPath,
             stdio: ['pipe', 'pipe', 'pipe'],
-            shell: true
+            shell: true,
+            windowsHide: process.platform === 'win32'
         });
 
         let stdout = '';
@@ -1185,7 +1190,8 @@ router.put('/update-task/:projectName/:taskId', async (req, res) => {
             const setStatusProcess = spawn('npx', ['task-master-ai', 'set-status', `--id=${taskId}`, `--status=${status}`], {
                 cwd: projectPath,
                 stdio: ['pipe', 'pipe', 'pipe'],
-                shell: true
+                shell: true,
+                windowsHide: process.platform === 'win32'
             });
 
             let stdout = '';
@@ -1238,7 +1244,8 @@ router.put('/update-task/:projectName/:taskId', async (req, res) => {
             const updateProcess = spawn('npx', ['task-master-ai', 'update-task', `--id=${taskId}`, `--prompt=${prompt}`], {
                 cwd: projectPath,
                 stdio: ['pipe', 'pipe', 'pipe'],
-                shell: true
+                shell: true,
+                windowsHide: process.platform === 'win32'
             });
 
             let stdout = '';
@@ -1338,7 +1345,8 @@ router.post('/parse-prd/:projectName', async (req, res) => {
         const parsePRDProcess = spawn('npx', args, {
             cwd: projectPath,
             stdio: ['pipe', 'pipe', 'pipe'],
-            shell: true
+            shell: true,
+            windowsHide: process.platform === 'win32'
         });
 
         let stdout = '';

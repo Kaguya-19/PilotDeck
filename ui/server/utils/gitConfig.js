@@ -2,7 +2,10 @@ import { spawn } from 'child_process';
 
 function spawnAsync(command, args) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { shell: false });
+    const child = spawn(command, args, {
+      shell: false,
+      windowsHide: process.platform === 'win32',
+    });
     let stdout = '';
     child.stdout.on('data', (data) => { stdout += data.toString(); });
     child.on('error', (error) => { reject(error); });

@@ -38,7 +38,11 @@ function hasUsablePilotDeckConfig() {
 
 function spawnAsync(command, args, options = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { ...options, shell: false });
+    const child = spawn(command, args, {
+      ...options,
+      shell: false,
+      windowsHide: process.platform === 'win32',
+    });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (data) => { stdout += data.toString(); });

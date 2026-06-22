@@ -207,6 +207,7 @@ class RuntimeManager {
       env,
       stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32",
+      windowsHide: process.platform === "win32",
     });
     this.processes.push({ name, child });
     this.log(`[${name}] spawn ${bin} ${args.join(" ")}`);
@@ -439,7 +440,10 @@ function killProcessTree(child: ChildProcess): Promise<void> {
   return new Promise((resolve) => {
     child.once("exit", () => resolve());
     if (process.platform === "win32") {
-      spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore" })
+      spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
+        stdio: "ignore",
+        windowsHide: true,
+      })
         .once("exit", () => resolve());
       return;
     }

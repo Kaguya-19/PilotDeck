@@ -89,7 +89,8 @@ router.get('/cli/list', async (req, res) => {
     const exec = promisify(spawn);
     
     const process = spawn('claude', ['mcp', 'list'], {
-      stdio: ['pipe', 'pipe', 'pipe']
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: globalThis.process.platform === 'win32'
     });
     
     let stdout = '';
@@ -165,7 +166,8 @@ router.post('/cli/add', async (req, res) => {
     
     // For local scope, we need to run the command in the project directory
     const spawnOptions = {
-      stdio: ['pipe', 'pipe', 'pipe']
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: globalThis.process.platform === 'win32'
     };
     
     if (scope === 'local' && projectPath) {
@@ -259,7 +261,8 @@ router.post('/cli/add-json', async (req, res) => {
     
     // For local scope, we need to run the command in the project directory
     const spawnOptions = {
-      stdio: ['pipe', 'pipe', 'pipe']
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: globalThis.process.platform === 'win32'
     };
     
     if (scope === 'local' && projectPath) {
@@ -337,7 +340,8 @@ router.delete('/cli/remove/:name', async (req, res) => {
     console.log('🔧 Running Claude CLI command:', 'claude', cliArgs.join(' '));
     
     const process = spawn('claude', cliArgs, {
-      stdio: ['pipe', 'pipe', 'pipe']
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: globalThis.process.platform === 'win32'
     });
     
     let stdout = '';
@@ -381,7 +385,8 @@ router.get('/cli/get/:name', async (req, res) => {
     const { spawn } = await import('child_process');
     
     const process = spawn('claude', ['mcp', 'get', name], {
-      stdio: ['pipe', 'pipe', 'pipe']
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: globalThis.process.platform === 'win32'
     });
     
     let stdout = '';

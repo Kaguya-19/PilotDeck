@@ -135,6 +135,7 @@ function launchChrome(executablePath, userDataDir) {
   ], {
     stdio: 'ignore',
     detached: true,
+    windowsHide: process.platform === 'win32',
   });
   proc.unref();
   proc.on('exit', () => {
@@ -162,7 +163,7 @@ async function killCDPPort() {
     if (process.platform === 'win32') {
       const raw = execSync(
         `netstat -ano | findstr "LISTENING" | findstr ":${CDP_PORT} "`,
-        { encoding: 'utf8' }
+        { encoding: 'utf8', windowsHide: true }
       ).trim();
       for (const line of raw.split('\n')) {
         const parts = line.trim().split(/\s+/);
@@ -184,7 +185,7 @@ async function killCDPPort() {
 
   if (process.platform === 'win32') {
     for (const pid of pidList) {
-      try { execSync(`taskkill /F /PID ${pid}`, { stdio: 'ignore' }); } catch { /* ignore */ }
+      try { execSync(`taskkill /F /T /PID ${pid}`, { stdio: 'ignore', windowsHide: true }); } catch { /* ignore */ }
     }
   } else {
     for (const pid of pidList) {

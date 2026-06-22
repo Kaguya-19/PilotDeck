@@ -46,13 +46,16 @@ const SIMPLE_READ_COMMANDS = new Set([
 
 const WINDOWS_READ_COMMANDS = new Set([
   "dir",
+  "findstr",
   "get-childitem",
+  "get-command",
   "get-content",
   "get-date",
   "get-item",
   "get-itemproperty",
   "get-location",
   "get-process",
+  "resolve-path",
   "select-string",
   "test-path",
   "type",
@@ -98,13 +101,13 @@ export function isReadOnlyShellCommand(command: string): boolean {
   }
 
   const [commandName, ...args] = tokens;
-  const normalizedCommandName = commandName.toLowerCase();
+  const normalizedCommandName = normalizeExecutableName(commandName);
   if (SIMPLE_READ_COMMANDS.has(normalizedCommandName) || WINDOWS_READ_COMMANDS.has(normalizedCommandName)) {
     return true;
   }
 
   if (normalizedCommandName === "git") {
-    const subcommand = args.find((arg) => !arg.startsWith("-"));
+    const subcommand = getGitSubcommand(args);
     return (
       subcommand !== undefined
       && READ_ONLY_GIT_SUBCOMMANDS.has(subcommand)
@@ -112,11 +115,98 @@ export function isReadOnlyShellCommand(command: string): boolean {
     );
   }
 
+  if (isPowerShellCommand(normalizedCommandName)) {
+    return isReadOnlyPowerShellInvocation(args);
+  }
+
   if (normalizedCommandName === "find") {
     return isReadOnlyFindTokens(args);
   }
 
   return normalizedCommandName === "sh" && args.length === 2 && args[0] === "-c" && /^exit\s+\d+$/.test(args[1]);
+}
+
+const GIT_GLOBAL_OPTIONS_WITH_VALUE = new Set([
+  "-C",
+  "-c",
+  "--config-env",
+  "--exec-path",
+  "--git-dir",
+  "--namespace",
+  "--super-prefix",
+  "--work-tree",
+]);
+
+const GIT_GLOBAL_OPTIONS_WITH_VALUE_PREFIXES = [
+  "--config-env=",
+  "--exec-path=",
+  "--git-dir=",
+  "--namespace=",
+  "--super-prefix=",
+  "--work-tree=",
+];
+
+function getGitSubcommand(args: string[]): string | undefined {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (arg === "--") {
+      return undefined;
+    }
+    if (GIT_GLOBAL_OPTIONS_WITH_VALUE.has(arg)) {
+      index += 1;
+      continue;
+    }
+    if (GIT_GLOBAL_OPTIONS_WITH_VALUE_PREFIXES.some((prefix) => arg.startsWith(prefix))) {
+      continue;
+    }
+    if (arg.startsWith("-")) {
+      continue;
+    }
+    return arg.toLowerCase();
+  }
+  return undefined;
+}
+
+function isPowerShellCommand(commandName: string): boolean {
+  return commandName === "powershell" || commandName === "pwsh";
+}
+
+function isReadOnlyPowerShellInvocation(args: string[]): boolean {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    const normalized = arg.toLowerCase();
+    if (normalized === "-noprofile" || normalized === "-noninteractive" || normalized === "-nologo") {
+      continue;
+    }
+    if (normalized === "-command" || normalized === "-c") {
+      return isReadOnlyPowerShellCommand(args.slice(index + 1));
+    }
+    if (normalized.startsWith("-command:")) {
+      return isReadOnlyPowerShellCommand([arg.slice("-command:".length)]);
+    }
+    return false;
+  }
+  return false;
+}
+
+function isReadOnlyPowerShellCommand(commandTokens: string[]): boolean {
+  if (commandTokens.length === 0) {
+    return false;
+  }
+  const commandText = commandTokens.join(" ");
+  if (/[{}|;&<>`]/.test(commandText) || /\$\s*\(/.test(commandText)) {
+    return false;
+  }
+  const tokens = tokenizeSimpleShell(commandText);
+  if (!tokens || tokens.length === 0) {
+    return false;
+  }
+  const commandName = normalizeExecutableName(tokens[0]!);
+  return SIMPLE_READ_COMMANDS.has(commandName) || WINDOWS_READ_COMMANDS.has(commandName);
+}
+
+function normalizeExecutableName(commandName: string): string {
+  return commandName.toLowerCase().replace(/\.(exe|cmd|bat)$/i, "");
 }
 
 const FIND_MUTATING_OR_EXEC_ACTIONS = new Set([

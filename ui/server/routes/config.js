@@ -467,7 +467,11 @@ router.post('/open', async (_req, res) => {
       : process.platform === 'win32'
         ? ['/c', 'start', '', configPath]
         : [path.dirname(configPath)];
-    const child = spawn(command, args, { stdio: 'ignore', detached: true });
+    const child = spawn(command, args, {
+      stdio: 'ignore',
+      detached: true,
+      windowsHide: process.platform === 'win32',
+    });
     child.unref();
     res.json({ success: true, path: configPath });
   } catch (error) {

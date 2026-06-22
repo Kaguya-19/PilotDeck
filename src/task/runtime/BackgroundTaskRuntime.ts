@@ -147,6 +147,7 @@ export class BackgroundTaskRuntime {
         shell: true,
         stdio: ["ignore", "pipe", "pipe"],
         detached: true,
+        windowsHide: process.platform === "win32",
       });
       child.unref();
     } catch (err) {

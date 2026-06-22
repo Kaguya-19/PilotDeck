@@ -62,6 +62,7 @@ export class ProjectGitService {
         cwd: this.options.projectRoot,
         stdio: ["ignore", "pipe", "pipe"],
         env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+        windowsHide: process.platform === "win32",
       });
       let stdout = "";
       let stderr = "";

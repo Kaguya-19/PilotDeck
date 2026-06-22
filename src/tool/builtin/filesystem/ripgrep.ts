@@ -28,6 +28,7 @@ export async function runRipgrep(input: RipgrepRunInput): Promise<string> {
       cwd: input.cwd,
       env,
       stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: process.platform === "win32",
     });
 
     let stdout = "";

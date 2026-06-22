@@ -120,7 +120,7 @@ function findStoredProjectId(projectRoot: string, pilotHome: string): string | n
   if (!existsSync(projectsDir)) {
     return null;
   }
-  const target = resolve(projectRoot);
+  const target = normalizeProjectPathForMarkerComparison(projectRoot);
   try {
     for (const entry of readdirSync(projectsDir, { withFileTypes: true })) {
       if (!entry.isDirectory()) {
@@ -133,7 +133,7 @@ function findStoredProjectId(projectRoot: string, pilotHome: string): string | n
       } catch {
         continue;
       }
-      if (!marker || resolve(marker) !== target) {
+      if (!marker || normalizeProjectPathForMarkerComparison(marker) !== target) {
         continue;
       }
       try {
@@ -148,4 +148,9 @@ function findStoredProjectId(projectRoot: string, pilotHome: string): string | n
     return null;
   }
   return null;
+}
+
+function normalizeProjectPathForMarkerComparison(projectRoot: string): string {
+  const resolved = resolve(projectRoot);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }

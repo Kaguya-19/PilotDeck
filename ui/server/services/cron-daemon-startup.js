@@ -153,7 +153,8 @@ export function startCronDaemonDetached({
       cwd: process.cwd(),
       env: buildCronDaemonEnv(),
       detached: true,
-      stdio
+      stdio,
+      windowsHide: process.platform === 'win32'
     });
   } catch (err) {
     console.warn(`[WARN] Cron daemon spawn failed: ${err.message}`);

@@ -110,6 +110,7 @@ function runBuildIfNeeded(dir, packageJsonPath, onSuccess, onError) {
     cwd: dir,
     stdio: ['ignore', 'pipe', 'pipe'],
     shell: true,
+    windowsHide: process.platform === 'win32',
   });
 
   let stderr = '';
@@ -296,6 +297,7 @@ export function installPluginFromGit(url) {
 
     const gitProcess = spawn('git', ['clone', '--depth', '1', '--', url, tempDir], {
       stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: process.platform === 'win32',
     });
 
     let stderr = '';
@@ -343,6 +345,7 @@ export function installPluginFromGit(url) {
           cwd: tempDir,
           stdio: ['ignore', 'pipe', 'pipe'],
           shell: true,
+          windowsHide: process.platform === 'win32',
         });
 
         npmProcess.on('close', (npmCode) => {
@@ -380,6 +383,7 @@ export function updatePluginFromGit(name) {
     const gitProcess = spawn('git', ['pull', '--ff-only', '--'], {
       cwd: pluginDir,
       stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: process.platform === 'win32',
     });
 
     let stderr = '';
@@ -411,6 +415,7 @@ export function updatePluginFromGit(name) {
           cwd: pluginDir,
           stdio: ['ignore', 'pipe', 'pipe'],
           shell: true,
+          windowsHide: process.platform === 'win32',
         });
         npmProcess.on('close', (npmCode) => {
           if (npmCode !== 0) {

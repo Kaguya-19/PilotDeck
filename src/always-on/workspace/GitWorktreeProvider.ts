@@ -117,7 +117,10 @@ type GitResult = { exitCode: number; stdout: string; stderr: string };
 
 async function runGit(bin: string, args: string[]): Promise<GitResult> {
   return new Promise<GitResult>((resolvePromise) => {
-    const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(bin, args, {
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: process.platform === "win32",
+    });
     let stdout = "";
     let stderr = "";
     child.stdout?.on("data", (chunk) => {

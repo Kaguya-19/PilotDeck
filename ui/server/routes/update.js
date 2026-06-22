@@ -24,6 +24,10 @@ function execGit(args) {
   return execFileAsync('git', args, { cwd: PROJECT_ROOT, maxBuffer: 10 * 1024 * 1024 });
 }
 
+function isWindowsDesktop() {
+  return process.platform === 'win32' && process.env.PILOTDECK_DESKTOP === '1';
+}
+
 function parseUpstreamRef(value) {
   const upstream = String(value || '').trim();
   const slashIndex = upstream.indexOf('/');
@@ -175,6 +179,13 @@ router.post('/check', async (req, res) => {
  * Streams progress via newline-delimited JSON.
  */
 router.post('/apply', async (req, res) => {
+  if (isWindowsDesktop()) {
+    return res.status(501).json({
+      error: 'unsupported_on_windows_desktop',
+      message: 'PilotDeck Desktop on Windows cannot apply updates from inside the app yet. Please install a newer desktop build manually.',
+    });
+  }
+
   if (updateInProgress) {
     return res.status(409).json({
       error: 'Update already in progress',
@@ -203,6 +214,7 @@ router.post('/apply', async (req, res) => {
       cwd: PROJECT_ROOT,
       env: { ...process.env, FORCE_COLOR: '0' },
       stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: process.platform === 'win32',
     });
 
     let exitCode = null;
@@ -248,6 +260,14 @@ router.post('/apply', async (req, res) => {
  * Works in both Docker (process manager respawns) and local dev (self-respawn).
  */
 router.post('/restart', async (req, res) => {
+  if (isWindowsDesktop()) {
+    return res.status(501).json({
+      error: 'unsupported_on_windows_desktop',
+      message: 'Please close and reopen PilotDeck Desktop to restart it on Windows.',
+      status: 'manual_restart_required',
+    });
+  }
+
   res.json({
     message: 'Restart initiated.',
     status: 'restarting',
@@ -271,6 +291,7 @@ router.post('/restart', async (req, res) => {
       detached: true,
       stdio: 'ignore',
       env: { ...process.env },
+      windowsHide: process.platform === 'win32',
     });
     child.unref();
 
