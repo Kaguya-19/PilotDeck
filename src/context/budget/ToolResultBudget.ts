@@ -1,7 +1,10 @@
 import { mkdir, writeFile, access } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import type {
+  CanonicalContentBlock,
   CanonicalMessage,
+  CanonicalMediaReferenceBlock,
+  CanonicalPdfBlock,
   CanonicalToolResultBlock,
   CanonicalToolResultReferenceBlock,
 } from "../../model/index.js";
@@ -22,6 +25,18 @@ export type ToolResultReplacementRecord = {
   originalBytes: number;
   preview: string;
   mimeType?: string;
+  reason: string;
+};
+
+export type MediaReplacementRecord = {
+  id: string;
+  path: string;
+  originalBytes: number;
+  preview: string;
+  mimeType: string;
+  mediaType: "image" | "pdf" | "audio";
+  pages?: number;
+  detail?: "auto" | "low" | "high";
   reason: string;
 };
 
@@ -82,6 +97,23 @@ export class ToolResultBudget {
     return { ...message, content: newContent };
   }
 
+  async applyToSupplementalMessage(message: CanonicalMessage): Promise<CanonicalMessage> {
+    if (message.role !== "user") {
+      return message;
+    }
+    const newContent: CanonicalContentBlock[] = [];
+    let modified = false;
+    for (let index = 0; index < message.content.length; index += 1) {
+      const block = message.content[index];
+      const replaced = await this.maybeReplaceMedia(block, index);
+      if (replaced !== block) {
+        modified = true;
+      }
+      newContent.push(replaced);
+    }
+    return modified ? { ...message, content: newContent } : message;
+  }
+
   private async maybeReplace(
     block: CanonicalToolResultBlock,
   ): Promise<CanonicalToolResultBlock | CanonicalToolResultReferenceBlock> {
@@ -134,6 +166,60 @@ export class ToolResultBudget {
       reason: record.reason,
     };
   }
+
+  private async maybeReplaceMedia(
+    block: CanonicalContentBlock,
+    index: number,
+  ): Promise<CanonicalContentBlock> {
+    if (block.type !== "image" && block.type !== "pdf" && block.type !== "audio") {
+      return block;
+    }
+    const originalBytes = mediaOriginalBytes(block);
+    const encodedBytes = Buffer.byteLength(block.data, "utf8");
+    if (encodedBytes <= this.maxResultSizeChars) {
+      return block;
+    }
+
+    const mediaType = block.type;
+    const mimeType = block.mimeType;
+    const ext = extensionForMedia(mediaType, mimeType);
+    const id = `${mediaType}-${index}-${hashString(block.data).slice(0, 12)}`;
+    const path = resolve(this.toolResultsDir, `${id}.${ext}`);
+    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    try {
+      await access(path);
+    } catch {
+      await writeFile(path, block.data, { flag: "wx", mode: 0o600, encoding: "utf8" });
+    }
+
+    const record: MediaReplacementRecord = {
+      id,
+      path,
+      originalBytes,
+      preview: mediaPreview(mediaType, mimeType, originalBytes, block),
+      mimeType,
+      mediaType,
+      reason: "media_result_too_large",
+      ...(block.type === "pdf" && block.pages !== undefined ? { pages: block.pages } : {}),
+      ...(block.type === "image" && block.detail ? { detail: block.detail } : {}),
+    };
+    return this.toMediaReferenceBlock(record);
+  }
+
+  private toMediaReferenceBlock(record: MediaReplacementRecord): CanonicalMediaReferenceBlock {
+    return {
+      type: "media_reference",
+      path: record.path,
+      originalBytes: record.originalBytes,
+      preview: record.preview,
+      hasMore: true,
+      mimeType: record.mimeType,
+      mediaType: record.mediaType,
+      ...(record.pages !== undefined ? { pages: record.pages } : {}),
+      ...(record.detail ? { detail: record.detail } : {}),
+      reason: record.reason,
+    };
+  }
 }
 
 function looksLikeJson(value: string): boolean {
@@ -176,4 +262,37 @@ function headTailPreview(value: string, budgetBytes: number): string {
 /** Helper for tests / inspection. */
 export function flattenToolResultText(block: CanonicalToolResultBlock): string {
   return flattenToolResultBlockText(block);
+}
+
+function mediaOriginalBytes(block: Extract<CanonicalContentBlock, { type: "image" | "pdf" | "audio" }>): number {
+  return ("bytes" in block ? block.bytes : undefined) ?? Buffer.byteLength(block.data, "utf8");
+}
+
+function extensionForMedia(mediaType: "image" | "pdf" | "audio", mimeType: string): string {
+  if (mediaType === "pdf") return "pdf.b64";
+  const subType = mimeType.split("/")[1]?.toLowerCase().replace(/[^a-z0-9.+-]/g, "");
+  return `${subType || mediaType}.b64`;
+}
+
+function mediaPreview(
+  mediaType: "image" | "pdf" | "audio",
+  mimeType: string,
+  originalBytes: number,
+  block: Extract<CanonicalContentBlock, { type: "image" | "pdf" | "audio" }>,
+): string {
+  const size = `${originalBytes} bytes`;
+  if (mediaType === "pdf") {
+    const pages = (block as CanonicalPdfBlock).pages;
+    return `[PDF omitted from memory: ${mimeType}, ${size}${pages ? `, ${pages} pages` : ""}]`;
+  }
+  return `[${mediaType} omitted from memory: ${mimeType}, ${size}]`;
+}
+
+function hashString(value: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16);
 }

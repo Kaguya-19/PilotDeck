@@ -95,6 +95,22 @@ export type CanonicalToolResultReferenceBlock = {
   reason?: string;
 };
 
+export type CanonicalMediaReferenceBlock = {
+  type: "media_reference";
+  /** Absolute path to the persisted media body. */
+  path: string;
+  /** Original binary size when known, otherwise persisted payload bytes. */
+  originalBytes: number;
+  /** Human-readable placeholder shown to the model/UI. */
+  preview: string;
+  hasMore: boolean;
+  mimeType: string;
+  mediaType: "image" | "pdf" | "audio";
+  pages?: number;
+  detail?: "auto" | "low" | "high";
+  reason?: string;
+};
+
 export type CanonicalToolResult = CanonicalToolResultBlock;
 
 export type CanonicalContentBlock =
@@ -105,7 +121,8 @@ export type CanonicalContentBlock =
   | CanonicalAudioBlock
   | CanonicalToolCallBlock
   | CanonicalToolResultBlock
-  | CanonicalToolResultReferenceBlock;
+  | CanonicalToolResultReferenceBlock
+  | CanonicalMediaReferenceBlock;
 
 export type CanonicalMessageMetadata = {
   /** True for messages injected by the system (e.g. JSON self-correct prompts). */

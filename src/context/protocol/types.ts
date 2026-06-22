@@ -65,11 +65,14 @@ export type ContextToolResultInput = {
   turnId: string;
   /** New tool result blocks projected by the agent loop. */
   toolResultMessage: CanonicalMessage;
+  /** Supplemental user-role media messages emitted after the tool result. */
+  supplementalMessages?: CanonicalMessage[];
   messages: CanonicalMessage[];
 };
 
 export type ContextToolResultResult = {
   messages: CanonicalMessage[];
+  appendedMessages?: CanonicalMessage[];
   diagnostics: ContextDiagnostic[];
 };
 

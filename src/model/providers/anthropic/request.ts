@@ -182,6 +182,8 @@ function toAnthropicContentBlock(block: CanonicalContentBlock): unknown {
         }],
         is_error: false,
       };
+    case "media_reference":
+      return { type: "text", text: block.preview };
   }
 }
 
