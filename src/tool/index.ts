@@ -4,12 +4,20 @@ export type {
   PilotDeckToolAuditRecorder,
 } from "./audit/ToolAuditRecorder.js";
 export { ToolRuntime } from "./execution/ToolRuntime.js";
+export {
+  createToolErrorResult,
+  type CreateToolErrorResultOptions,
+} from "./execution/createToolErrorResult.js";
 export { validateToolInput } from "./execution/validateToolInput.js";
 export {
   ToolErrorEnricherRegistry,
   createDefaultToolErrorEnricherRegistry,
   type ToolErrorEnricher,
   type ToolErrorEnrichmentContext,
+  type ToolErrorRecoveryAdvice,
+  type ToolErrorRecoveryResult,
+  type PilotDeckCustomErrorHint,
+  type PilotDeckCustomErrorHintInput,
 } from "./execution/errorEnrichment.js";
 export {
   normalizeToolError,
@@ -36,6 +44,9 @@ export type {
 } from "./protocol/schema.js";
 export type {
   PilotDeckToolCall,
+  PilotDeckCustomToolValidator,
+  PilotDeckCustomToolValidatorInput,
+  PilotDeckCustomToolValidatorResult,
   PilotDeckToolDefinition,
   PilotDeckToolExecutionOutput,
   PilotDeckToolSupplementalMessage,

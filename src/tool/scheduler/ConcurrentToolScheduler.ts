@@ -2,9 +2,13 @@ import type {
   PilotDeckToolErrorResult,
   PilotDeckToolResult,
 } from "../protocol/result.js";
-import { toolError } from "../protocol/errors.js";
 import type { PilotDeckToolCall, PilotDeckToolRuntimeContext } from "../protocol/types.js";
 import type { ToolRuntime } from "../execution/ToolRuntime.js";
+import { createToolErrorResult } from "../execution/createToolErrorResult.js";
+import {
+  createDefaultToolErrorEnricherRegistry,
+  type ToolErrorEnricherRegistry,
+} from "../execution/errorEnrichment.js";
 import type { ToolRegistry } from "../registry/ToolRegistry.js";
 import type { PilotDeckToolScheduler } from "./ToolScheduler.js";
 
@@ -15,6 +19,7 @@ export type ConcurrentToolSchedulerOptions = {
   maxToolCallsPerTurn?: number;
   maxConcurrentToolCalls?: number;
   dedupeSameTurnReadOnlyToolCalls?: boolean;
+  errorEnrichers?: ToolErrorEnricherRegistry;
 };
 
 /**
@@ -28,6 +33,7 @@ export class ConcurrentToolScheduler implements PilotDeckToolScheduler {
   private readonly maxToolCallsPerTurn: number;
   private readonly maxConcurrentToolCalls: number;
   private readonly dedupeSameTurnReadOnlyToolCalls: boolean;
+  private readonly errorEnrichers: ToolErrorEnricherRegistry;
 
   constructor(
     private readonly runtime: ToolRuntime,
@@ -43,6 +49,7 @@ export class ConcurrentToolScheduler implements PilotDeckToolScheduler {
       DEFAULT_MAX_CONCURRENT_TOOL_CALLS,
     );
     this.dedupeSameTurnReadOnlyToolCalls = options.dedupeSameTurnReadOnlyToolCalls ?? true;
+    this.errorEnrichers = options.errorEnrichers ?? createDefaultToolErrorEnricherRegistry();
   }
 
   async executeAll(
@@ -53,7 +60,12 @@ export class ConcurrentToolScheduler implements PilotDeckToolScheduler {
     const executableCallCount = Math.min(calls.length, this.maxToolCallsPerTurn);
 
     for (let i = executableCallCount; i < calls.length; i++) {
-      const result = createTooManyToolCallsResult(calls[i], context, this.maxToolCallsPerTurn);
+      const result = createTooManyToolCallsResult(
+        calls[i],
+        context,
+        this.maxToolCallsPerTurn,
+        this.errorEnrichers,
+      );
       resultSlots[i] = result;
       await recordToolAudit(result, context);
     }
@@ -150,25 +162,30 @@ function createTooManyToolCallsResult(
   call: PilotDeckToolCall,
   context: PilotDeckToolRuntimeContext,
   maxToolCallsPerTurn: number,
+  errorEnrichers: ToolErrorEnricherRegistry,
 ): PilotDeckToolErrorResult {
-  const timestamp = (context.now?.() ?? new Date()).toISOString();
+  const startedAt = (context.now?.() ?? new Date()).toISOString();
   const message = `Too many tool calls in one turn: received more than ${maxToolCallsPerTurn}. Split the work across multiple turns and call fewer tools at once.`;
-  return {
-    type: "error",
+  return createToolErrorResult({
     toolCallId: call.id,
     toolName: call.name,
-    error: toolError("invalid_tool_input", message, {
+    code: "invalid_tool_input",
+    message,
+    startedAt,
+    now: () => context.now?.() ?? new Date(),
+    cwd: context.cwd,
+    permissionMode: context.permissionMode,
+    details: {
       maxToolCallsPerTurn,
-    }),
-    content: [{ type: "text", text: message }],
+    },
+    toolInput: call.input,
     metadata: {
       synthetic: true,
       reason: "max_tool_calls_per_turn",
       maxToolCallsPerTurn,
     },
-    startedAt: timestamp,
-    completedAt: timestamp,
-  };
+    errorEnrichers,
+  });
 }
 
 function buildDedupeKey(toolName: string, input: unknown): string {

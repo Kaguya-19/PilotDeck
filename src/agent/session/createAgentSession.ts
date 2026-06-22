@@ -40,12 +40,14 @@ export function createAgentSessionWithStorage(options: CreateAgentSessionOptions
 } {
   const eventBuf = options.dependencies.drainEvents ? undefined : createAgentEventBuffer();
   const emitter = options.dependencies.eventEmitter ?? eventBuf?.emitter;
-  const toolRuntime = new ToolRuntime(options.dependencies.tools.registry, new PermissionRuntime(), options.dependencies.lifecycle, emitter, createDefaultToolErrorEnricherRegistry());
+  const toolErrorEnrichers = createDefaultToolErrorEnricherRegistry(options.config.customErrorHints);
+  const toolRuntime = new ToolRuntime(options.dependencies.tools.registry, new PermissionRuntime(), options.dependencies.lifecycle, emitter, toolErrorEnrichers);
   const scheduler = options.dependencies.tools.scheduler
     ?? new ConcurrentToolScheduler(toolRuntime, options.dependencies.tools.registry, {
       maxToolCallsPerTurn: options.config.maxToolCallsPerTurn,
       maxConcurrentToolCalls: options.config.maxConcurrentToolCalls,
       dedupeSameTurnReadOnlyToolCalls: options.config.dedupeSameTurnReadOnlyToolCalls,
+      errorEnrichers: toolErrorEnrichers,
     });
   const dependencies: AgentRuntimeDependencies = {
     ...options.dependencies,
@@ -55,6 +57,7 @@ export function createAgentSessionWithStorage(options: CreateAgentSessionOptions
     },
     eventEmitter: emitter,
     drainEvents: options.dependencies.drainEvents ?? eventBuf?.drain,
+    toolErrorEnrichers,
   };
   const loop = new AgentLoop(options.config, dependencies, options.seedState);
   const storage = options.storage ?? (

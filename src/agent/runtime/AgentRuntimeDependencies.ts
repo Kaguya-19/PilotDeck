@@ -5,6 +5,7 @@ import type {
   PilotDeckFileUpdateNotifier,
   PilotDeckToolFileHistorySink,
   PilotDeckToolScheduler,
+  ToolErrorEnricherRegistry,
   ToolRegistry,
 } from "../../tool/index.js";
 import type { PlanFileManager } from "../../tool/builtin/planFile.js";
@@ -93,6 +94,7 @@ export type AgentRuntimeDependencies = {
   uuid?: () => string;
   auditRecorder?: PilotDeckToolAuditRecorder;
   lifecycle?: LifecycleRuntime;
+  toolErrorEnrichers?: ToolErrorEnricherRegistry;
   /** C3 sidechain transcript hooks (optional). */
   subagentTranscript?: AgentSubagentTranscriptHooks;
   /**

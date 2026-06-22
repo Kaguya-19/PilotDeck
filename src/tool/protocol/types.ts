@@ -131,6 +131,26 @@ export type PilotDeckToolExecutionOutput<Output = unknown> = {
   metadata?: Record<string, unknown>;
 };
 
+export type PilotDeckCustomToolValidatorInput = {
+  toolName: string;
+  toolInput: unknown;
+  toolCallId: string;
+  context: PilotDeckToolRuntimeContext;
+  isReadOnly: boolean;
+  isConcurrencySafe: boolean;
+};
+
+export type PilotDeckCustomToolValidatorResult =
+  | void
+  | { type?: "allow"; hint?: string }
+  | { type: "deny"; message: string; validatorName?: string; hint?: string }
+  | { type: "updateInput"; input: unknown; validatorName?: string; hint?: string }
+  | { type: "hint"; hint: string; validatorName?: string };
+
+export type PilotDeckCustomToolValidator = (
+  input: PilotDeckCustomToolValidatorInput,
+) => PilotDeckCustomToolValidatorResult | Promise<PilotDeckCustomToolValidatorResult>;
+
 /**
  * Tool progress event emitted via `PilotDeckToolRuntimeContext.progress`.
  * The sink is fire-and-forget — progress events MUST NOT replace the final
@@ -195,6 +215,8 @@ export type PilotDeckToolRuntimeContext = {
    * when a model emits a tool name that is not already registered.
    */
   toolAliases?: Record<string, string>;
+  /** Optional host/user policy validators that run before permission checks. */
+  customToolValidators?: PilotDeckCustomToolValidator[];
   /**
    * Optional streaming progress sink. Tools that produce incremental output
    * (e.g. `bash` stdout/stderr chunks) can call this to emit progress events

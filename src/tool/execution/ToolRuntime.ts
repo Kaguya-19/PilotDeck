@@ -1,6 +1,5 @@
 import { PermissionRuntime } from "../../permission/index.js";
 import type { LifecycleDispatchResult, LifecycleRuntime, PilotDeckHookEffect } from "../../lifecycle/index.js";
-import { toolError } from "../protocol/errors.js";
 import type { PilotDeckToolErrorCode } from "../protocol/errors.js";
 import { PLAN_MODE_ALLOWED_TOOLS, buildPlanModeViolationMessage } from "../planModeConstraints.js";
 import {
@@ -9,13 +8,18 @@ import {
   type PilotDeckToolResult,
   type PilotDeckToolSuccessResult,
 } from "../protocol/result.js";
-import type { PilotDeckToolCall, PilotDeckToolRuntimeContext } from "../protocol/types.js";
+import type {
+  PilotDeckCustomToolValidatorResult,
+  PilotDeckToolCall,
+  PilotDeckToolRuntimeContext,
+} from "../protocol/types.js";
 import type { ToolRegistry } from "../registry/ToolRegistry.js";
 import { validateToolInput } from "./validateToolInput.js";
 import { formatValidationError } from "./formatValidationError.js";
 import { normalizeToolError } from "../protocol/errors.js";
 import type { AgentEventEmitter } from "../../agent/protocol/events.js";
 import type { ToolErrorEnricherRegistry } from "./errorEnrichment.js";
+import { createToolErrorResult } from "./createToolErrorResult.js";
 import { repairToolName } from "../../model/streaming/repairToolName.js";
 
 export class ToolRuntime {
@@ -44,7 +48,7 @@ export class ToolRuntime {
     const toolName = tool?.name ?? call.name;
 
     if (context.abortSignal?.aborted) {
-      return this.errorResult(call.id, toolName, "tool_aborted", "Tool execution was aborted.", startedAt, context);
+      return this.errorResult(call.id, toolName, "tool_aborted", "Tool execution was aborted.", startedAt, context, undefined, call.input);
     }
 
     if (!tool) {
@@ -55,6 +59,8 @@ export class ToolRuntime {
         `Tool ${call.name} does not exist.`,
         startedAt,
         context,
+        undefined,
+        call.input,
       );
     }
 
@@ -66,6 +72,8 @@ export class ToolRuntime {
         buildPlanModeViolationMessage(tool.name),
         startedAt,
         context,
+        undefined,
+        call.input,
       );
     }
 
@@ -82,6 +90,7 @@ export class ToolRuntime {
         startedAt,
         context,
         { issues: validation.issues },
+        call.input,
       );
     }
 
@@ -114,9 +123,18 @@ export class ToolRuntime {
           startedAt,
           context,
           { issues: updatedValidation.issues },
+          executeInput,
         );
       }
     }
+
+    const customValidation = await this.runCustomValidators(call.id, tool.name, executeInput, tool, context, startedAt);
+    if (customValidation.type === "error") {
+      await this.recordToolAudit(customValidation.result, context, startedAtDate);
+      return customValidation.result;
+    }
+    executeInput = customValidation.input;
+    const validatorHints = customValidation.hints;
 
     const toolValidation = await tool.validateInput?.(executeInput, context);
     if (toolValidation && !toolValidation.ok) {
@@ -128,6 +146,8 @@ export class ToolRuntime {
         startedAt,
         context,
         { issues: toolValidation.issues },
+        executeInput,
+        validatorHints,
       );
     }
 
@@ -143,6 +163,8 @@ export class ToolRuntime {
         todoGateMessage,
         startedAt,
         context,
+        undefined,
+        executeInput,
       );
     }
 
@@ -188,11 +210,11 @@ export class ToolRuntime {
         decision.reason.type === "runtime" && decision.reason.message.includes("prompt") ?
           "permission_required" :
           "permission_denied";
-      return this.errorResult(call.id, tool.name, code, decision.message, startedAt, context);
+      return this.errorResult(call.id, tool.name, code, decision.message, startedAt, context, undefined, executeInput);
     }
 
     if (decision.type === "cancel") {
-      return this.errorResult(call.id, tool.name, "permission_cancelled", decision.message, startedAt, context);
+      return this.errorResult(call.id, tool.name, "permission_cancelled", decision.message, startedAt, context, undefined, executeInput);
     }
 
     if (decision.type === "ask") {
@@ -204,6 +226,7 @@ export class ToolRuntime {
         startedAt,
         context,
         { request: decision.request },
+        executeInput,
       );
     }
 
@@ -264,6 +287,7 @@ export class ToolRuntime {
       const hookAdditionalContext = failureHookResult.effects
         .filter(isAdditionalContextEffect)
         .map((e) => e.content);
+      hookAdditionalContext.push(...validatorHints);
       const result = this.createErrorResult(
         call.id,
         tool.name,
@@ -272,6 +296,7 @@ export class ToolRuntime {
         startedAt,
         context,
         normalized.details,
+        executeInput,
         hookAdditionalContext,
       );
       await this.recordToolAudit(result, context, startedAtDate);
@@ -287,11 +312,118 @@ export class ToolRuntime {
     startedAt: string,
     context: PilotDeckToolRuntimeContext,
     details?: Record<string, unknown>,
+    toolInput?: unknown,
+    hookAdditionalContext?: string[],
   ): Promise<PilotDeckToolErrorResult> {
     const startedAtDate = new Date(startedAt);
-    const result = this.createErrorResult(toolCallId, toolName, code, message, startedAt, context, details);
+    const result = this.createErrorResult(toolCallId, toolName, code, message, startedAt, context, details, toolInput, hookAdditionalContext);
     await this.recordToolAudit(result, context, startedAtDate);
     return result;
+  }
+
+  private async runCustomValidators(
+    toolCallId: string,
+    toolName: string,
+    initialInput: unknown,
+    tool: NonNullable<ReturnType<ToolRegistry["get"]>>,
+    context: PilotDeckToolRuntimeContext,
+    startedAt: string,
+  ): Promise<
+    | { type: "ok"; input: unknown; hints: string[] }
+    | { type: "error"; result: PilotDeckToolErrorResult }
+  > {
+    let input = initialInput;
+    const hints: string[] = [];
+    for (const validator of context.customToolValidators ?? []) {
+      let result: PilotDeckCustomToolValidatorResult;
+      try {
+        result = await validator({
+          toolName,
+          toolInput: input,
+          toolCallId,
+          context,
+          isReadOnly: tool.isReadOnly(input),
+          isConcurrencySafe: tool.isConcurrencySafe(input),
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return {
+          type: "error",
+          result: this.createErrorResult(
+            toolCallId,
+            toolName,
+            "tool_execution_failed",
+            `Custom tool validator failed: ${message}`,
+            startedAt,
+            context,
+            { source: "custom_validator", message },
+            input,
+          ),
+        };
+      }
+
+      if (!result || result.type === "allow" || result.type === undefined) {
+        if (result?.hint) hints.push(result.hint);
+        continue;
+      }
+
+      if (result.type === "hint") {
+        hints.push(result.hint);
+        continue;
+      }
+
+      if (result.hint) {
+        hints.push(result.hint);
+      }
+
+      if (result.type === "deny") {
+        const details = {
+          source: "custom_validator",
+          ...(result.validatorName ? { validatorName: result.validatorName } : {}),
+        };
+        return {
+          type: "error",
+          result: this.createErrorResult(
+            toolCallId,
+            toolName,
+            "permission_denied",
+            result.message,
+            startedAt,
+            context,
+            details,
+            input,
+            hints,
+          ),
+        };
+      }
+
+      if (result.type === "updateInput") {
+        input = result.input;
+        const updatedValidation = validateToolInput(input, tool.inputSchema);
+        if (!updatedValidation.ok) {
+          const details = {
+            issues: updatedValidation.issues,
+            source: "custom_validator",
+            ...(result.validatorName ? { validatorName: result.validatorName } : {}),
+          };
+          return {
+            type: "error",
+            result: this.createErrorResult(
+              toolCallId,
+              toolName,
+              "invalid_tool_input",
+              `Custom tool validator produced invalid input for ${toolName}.`,
+              startedAt,
+              context,
+              details,
+              input,
+              hints,
+            ),
+          };
+        }
+      }
+    }
+    return { type: "ok", input, hints };
   }
 
   private createErrorResult(
@@ -302,29 +434,23 @@ export class ToolRuntime {
     startedAt: string,
     context: PilotDeckToolRuntimeContext,
     details?: Record<string, unknown>,
+    toolInput?: unknown,
     hookAdditionalContext?: string[],
   ): PilotDeckToolErrorResult {
-    const completedAt = now(context).toISOString();
-    let modelMessage = message;
-    if (this.errorEnrichers && code !== "invalid_tool_input" && code !== "plan_mode_violation") {
-      modelMessage = this.errorEnrichers.enrich(code, toolName, message, {
-        cwd: context.cwd,
-        permissionMode: context.permissionMode,
-        toolName,
-      }, details);
-    }
-    if (hookAdditionalContext && hookAdditionalContext.length > 0) {
-      modelMessage += "\n\n" + hookAdditionalContext.map((c) => `[Hook hint]: ${c}`).join("\n");
-    }
-    return {
-      type: "error",
+    return createToolErrorResult({
       toolCallId,
       toolName,
-      error: toolError(code, message, details),
-      content: [{ type: "text", text: modelMessage }],
+      code,
+      message,
       startedAt,
-      completedAt,
-    };
+      now: () => now(context),
+      cwd: context.cwd,
+      permissionMode: context.permissionMode,
+      details,
+      toolInput,
+      hookAdditionalContext,
+      errorEnrichers: this.errorEnrichers,
+    });
   }
 
   private async recordToolAudit(

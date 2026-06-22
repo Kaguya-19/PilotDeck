@@ -21,7 +21,9 @@ import type {
   PilotDeckToolResult,
   PilotDeckToolRuntimeContext,
   PilotDeckWriteSnapshotMap,
+  ToolErrorEnricherRegistry,
 } from "../../tool/index.js";
+import { createDefaultToolErrorEnricherRegistry } from "../../tool/index.js";
 import {
   SUBAGENT_DEFINITIONS,
   getSubagentDefinition,
@@ -91,6 +93,7 @@ export type AgentLoopSeedState = {
 export class AgentLoop {
   private readonly readFileState: PilotDeckReadFileStateMap;
   private readonly writeSnapshots: PilotDeckWriteSnapshotMap;
+  private readonly toolErrorEnrichers: ToolErrorEnricherRegistry;
 
   constructor(
     private readonly config: AgentRuntimeConfig,
@@ -99,6 +102,7 @@ export class AgentLoop {
   ) {
     this.readFileState = cloneReadFileStateMap(seedState?.readFileState);
     this.writeSnapshots = cloneWriteSnapshotMap(seedState?.writeSnapshots);
+    this.toolErrorEnrichers = dependencies.toolErrorEnrichers ?? createDefaultToolErrorEnricherRegistry();
   }
 
   snapshotFileState(): AgentLoopSeedState {
@@ -178,6 +182,7 @@ export class AgentLoop {
     let lastInvalidFingerprint: string | undefined;
     let sameInvalidFingerprintCount = 0;
     let hasUsedInvalidGracePeriod = false;
+    let lastToolFailureFingerprint: string | undefined;
 
     const stickyInfo = this.dependencies.router.invalidateSticky?.(input.sessionId);
     let previousTier: string | undefined = stickyInfo?.previousTier;
@@ -437,7 +442,12 @@ export class AgentLoop {
       if (assembled.error) {
         if (toolCalls.length > 0) {
           const projected = projectToolResults(
-            toolCalls.map((call) => createMissingToolResult(call, this.now, "Model error interrupted tool execution.")),
+            toolCalls.map((call) => createMissingToolResult(
+              call,
+              this.now,
+              "Model error interrupted tool execution.",
+              this.toolErrorContext(),
+            )),
           );
           messages.push(...projected);
           yield { type: "tool_results_projected", sessionId: input.sessionId, turnId: input.turnId, message: projected[0]! };
@@ -870,7 +880,12 @@ export class AgentLoop {
         );
       } catch (error) {
         results = toolCalls.map((call) =>
-          createMissingToolResult(call, this.now, error instanceof Error ? error.message : String(error)),
+          createMissingToolResult(
+            call,
+            this.now,
+            error instanceof Error ? error.message : String(error),
+            this.toolErrorContext(),
+          ),
         );
       }
       if (input.abortSignal?.aborted) {
@@ -889,7 +904,19 @@ export class AgentLoop {
       }
       yield* this.drainEventBuffer();
 
-      const pairedResults = ensureToolResultPairing(toolCalls, results, this.now);
+      let pairedResults = ensureToolResultPairing(
+        toolCalls,
+        results,
+        this.now,
+        "Tool execution did not produce a result.",
+        this.toolErrorContext(),
+      );
+      const repeatedFailure = detectRepeatedToolFailure(
+        pairedResults,
+        lastToolFailureFingerprint,
+      );
+      pairedResults = annotateRepeatedToolFailures(pairedResults, repeatedFailure.repeatedKeys);
+      lastToolFailureFingerprint = repeatedFailure.currentFingerprint;
       const toolResultRepair = largeFileRepair.analyzeToolResults(pairedResults, {
         outputTruncated: assembled.finishReason === "length" || assembled.hasRepairedToolCalls === true,
         repairedToolCalls: assembled.hasRepairedToolCalls === true,
@@ -1053,6 +1080,9 @@ export class AgentLoop {
         sameInvalidFingerprintCount = 0;
         lastInvalidFingerprint = undefined;
         hasUsedInvalidGracePeriod = false;
+        if (!pairedResults.some((r) => r.type === "error")) {
+          lastToolFailureFingerprint = undefined;
+        }
         maxOutputRecoveryCount = 0;
         consecutiveEmptyCount = 0;
         hasAttemptedOutputRetry = false;
@@ -1204,6 +1234,7 @@ export class AgentLoop {
       env: this.config.env,
       maxResultBytes: this.config.maxResultBytes,
       toolAliases: this.config.toolAliases,
+      customToolValidators: this.config.customToolValidators,
       // Tools that need a secondary model call (e.g. `agent` subagents in
       // fallback mode, `web_fetch` extraction) get a thin adapter that
       // funnels into the router's stream so subagents inherit fallback /
@@ -1239,6 +1270,18 @@ export class AgentLoop {
             },
           }
         : {}),
+    };
+  }
+
+  private toolErrorContext(): {
+    cwd: string;
+    permissionMode: string;
+    errorEnrichers: ToolErrorEnricherRegistry;
+  } {
+    return {
+      cwd: this.config.cwd,
+      permissionMode: this.config.permissionMode,
+      errorEnrichers: this.toolErrorEnrichers,
     };
   }
 
@@ -1757,6 +1800,120 @@ function buildInvalidFingerprint(results: PilotDeckToolResult[]): string {
     .map((r) => `${r.toolName}::${r.error.message}`)
     .sort()
     .join("\n");
+}
+
+function detectRepeatedToolFailure(
+  results: PilotDeckToolResult[],
+  lastFingerprint: string | undefined,
+): {
+  currentFingerprint?: string;
+  repeatedKeys: Set<string>;
+} {
+  const keys = buildToolFailureKeys(results);
+  const fingerprint = keys.length > 0 ? keys.join("\n") : undefined;
+  const repeatedKeys = findRepeatedValues(keys);
+  if (fingerprint && fingerprint === lastFingerprint) {
+    for (const key of keys) {
+      repeatedKeys.add(key);
+    }
+  }
+  if (!fingerprint) {
+    return { repeatedKeys };
+  }
+  return {
+    currentFingerprint: fingerprint,
+    repeatedKeys,
+  };
+}
+
+function buildToolFailureKeys(results: PilotDeckToolResult[]): string[] {
+  return results
+    .filter((r): r is PilotDeckToolErrorResult => r.type === "error")
+    .map((result) => {
+      const recovery = readRecoveryMetadata(result);
+      return toolFailureKey(result, recovery);
+    })
+    .sort();
+}
+
+function annotateRepeatedToolFailures(
+  results: PilotDeckToolResult[],
+  repeatedKeys: Set<string>,
+): PilotDeckToolResult[] {
+  if (repeatedKeys.size === 0) {
+    return results;
+  }
+
+  return results.map((result) => {
+    if (result.type !== "error") {
+      return result;
+    }
+    const recovery = readRecoveryMetadata(result);
+    if (!repeatedKeys.has(toolFailureKey(result, recovery))) {
+      return result;
+    }
+    const avoidRetryReason = recovery?.avoidRetryReason
+      ?? "The same tool, error code, and recovery class repeated. Retrying unchanged is likely to fail again.";
+    const repeatedText =
+      `\n\nRepeated failure: ${avoidRetryReason}\n` +
+      "Change at least one of the tool, parameters, path, scope, permission path, or explain the blocker in text.";
+    return {
+      ...result,
+      content: appendTextToFirstContent(result.content, repeatedText),
+      metadata: {
+        ...(result.metadata ?? {}),
+        recovery: recovery
+          ? {
+              ...recovery,
+              avoidRetryReason,
+              repeatedFailure: true,
+            }
+          : {
+              avoidRetryReason,
+              repeatedFailure: true,
+            },
+      },
+    };
+  });
+}
+
+function toolFailureKey(
+  result: PilotDeckToolErrorResult,
+  recovery: Record<string, unknown> | undefined,
+): string {
+  return `${result.toolName}::${result.error.code}::${recovery?.failureClass ?? "unknown"}`;
+}
+
+function findRepeatedValues(values: string[]): Set<string> {
+  const seen = new Set<string>();
+  const repeated = new Set<string>();
+  for (const value of values) {
+    if (seen.has(value)) {
+      repeated.add(value);
+    } else {
+      seen.add(value);
+    }
+  }
+  return repeated;
+}
+
+function appendTextToFirstContent(
+  content: PilotDeckToolErrorResult["content"],
+  suffix: string,
+): PilotDeckToolErrorResult["content"] {
+  const [first, ...rest] = content;
+  if (!first) {
+    return [{ type: "text", text: suffix.trimStart() }];
+  }
+  if (first.type !== "text") {
+    return [{ type: "text", text: suffix.trimStart() }, first, ...rest];
+  }
+  return [{ ...first, text: `${first.text}${suffix}` }, ...rest];
+}
+
+function readRecoveryMetadata(result: PilotDeckToolErrorResult): Record<string, unknown> | undefined {
+  const recovery = result.metadata?.recovery;
+  return isRecord(recovery) ? recovery : undefined;
 }
 
 function collectPermissionDenials(results: PilotDeckToolResult[]): AgentPermissionDenial[] {

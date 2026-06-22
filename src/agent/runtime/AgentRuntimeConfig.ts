@@ -1,5 +1,6 @@
 import type { CanonicalThinkingConfig, CanonicalToolChoice, MultimodalConstraints } from "../../model/index.js";
 import type { PermissionContext, PermissionMode } from "../../permission/index.js";
+import type { PilotDeckCustomErrorHint, PilotDeckCustomToolValidator } from "../../tool/index.js";
 
 export type AgentRuntimeConfig = {
   provider: string;
@@ -68,6 +69,10 @@ export type AgentRuntimeConfig = {
    * Example: { "search": "grep", "cat": "read" }
    */
   toolAliases?: Record<string, string>;
+  /** Optional host/user validators that run before permission checks. */
+  customToolValidators?: PilotDeckCustomToolValidator[];
+  /** Optional host/user recovery hints appended to model-visible tool errors. */
+  customErrorHints?: PilotDeckCustomErrorHint[];
   /**
    * The agent's default-model context window (tokens). Passed through so the
    * loop can compare it with the routed model's window and trigger a

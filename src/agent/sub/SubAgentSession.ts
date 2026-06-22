@@ -247,17 +247,19 @@ export class SubAgentSession {
 
   private cloneDependencies(registry: ToolRegistry): AgentRuntimeDependencies {
     const permissionRuntime = new PermissionRuntime();
+    const toolErrorEnrichers = createDefaultToolErrorEnricherRegistry(this.options.parentConfig.customErrorHints);
     const toolRuntime = new ToolRuntime(
       registry,
       permissionRuntime,
       this.options.parentDependencies.lifecycle,
       this.options.parentDependencies.eventEmitter,
-      createDefaultToolErrorEnricherRegistry(),
+      toolErrorEnrichers,
     );
     const scheduler = new ConcurrentToolScheduler(toolRuntime, registry, {
       maxToolCallsPerTurn: this.options.parentConfig.maxToolCallsPerTurn,
       maxConcurrentToolCalls: this.options.parentConfig.maxConcurrentToolCalls,
       dedupeSameTurnReadOnlyToolCalls: this.options.parentConfig.dedupeSameTurnReadOnlyToolCalls,
+      errorEnrichers: toolErrorEnrichers,
     });
     return {
       router: this.options.parentDependencies.router,
@@ -267,6 +269,7 @@ export class SubAgentSession {
       uuid: this.options.parentDependencies.uuid,
       auditRecorder: this.options.parentDependencies.auditRecorder,
       lifecycle: this.options.parentDependencies.lifecycle,
+      toolErrorEnrichers,
       subagentTranscript: this.options.parentDependencies.subagentTranscript,
     };
   }
