@@ -58,6 +58,14 @@ export {
   type TokenBudgetSnapshot,
   type TokenWarningState,
 } from "./budget/TokenBudgetManager.js";
+export {
+  TokenAccountingRuntime,
+  type CountRequestInputOptions,
+  type EvaluateRequestBudgetOptions,
+  type TokenAccountingRuntimeOptions,
+  type TokenCountResult,
+  type TokenCountSource,
+} from "./budget/TokenAccountingRuntime.js";
 export { countTokens, getTokenizer } from "./budget/tokenizer.js";
 export {
   CompactionEngine,
@@ -78,6 +86,7 @@ export {
 export {
   MicroCompactionEngine,
   MICROCOMPACT_CLEARED,
+  type MicroCompactionEngineOptions,
   type MicroCompactionInput,
   type MicroCompactionResult,
 } from "./compaction/MicroCompactionEngine.js";
@@ -108,6 +117,18 @@ export {
   stripUnpairedToolCalls,
   stripUnpairedToolResults,
 } from "./compaction/toolPairIntegrity.js";
+export {
+  DEFAULT_PROTECTED_TOOL_RESULT_NAMES,
+  collectProtectedTurnIndexes,
+  collectToolNamesByCallId,
+  isProtectedContextMessage,
+  isProtectedToolCallId,
+  protectedToolNameSet,
+  splitMessagesIntoTurns,
+  type MessageTurn,
+  type ProtectedContextMessageOptions,
+  type ProtectedContextOptions,
+} from "./compaction/protectedContext.js";
 export {
   NullExtensionResolver,
   type ContributedCommand,

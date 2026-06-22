@@ -10,7 +10,7 @@ import type {
 } from "../protocol/canonical.js";
 import type { CanonicalModelError } from "../protocol/errors.js";
 import { extractTextToolCalls } from "./parseTextToolCalls.js";
-import { getAllMarkers } from "./toolCallFormats.js";
+import { looksLikeUnparsedToolCall } from "./toolCallFormats.js";
 
 export type ModelMessageAssemblerState = {
   content: CanonicalContentBlock[];
@@ -22,6 +22,8 @@ export type ModelMessageAssemblerState = {
   error?: CanonicalModelError;
   toolCalls: CanonicalToolCall[];
   hasRepairedToolCalls?: boolean;
+  hasJsonRepairedToolCalls?: boolean;
+  hasTextExtractedToolCalls?: boolean;
 };
 
 export type AssembledAssistantMessage = {
@@ -31,6 +33,8 @@ export type AssembledAssistantMessage = {
   toolCalls: CanonicalToolCall[];
   error?: CanonicalModelError;
   hasRepairedToolCalls?: boolean;
+  hasJsonRepairedToolCalls?: boolean;
+  hasTextExtractedToolCalls?: boolean;
 };
 
 export function createModelMessageAssemblerState(): ModelMessageAssemblerState {
@@ -71,6 +75,7 @@ export function applyModelEventToAssembler(
       });
       if (event.wasRepaired) {
         state.hasRepairedToolCalls = true;
+        state.hasJsonRepairedToolCalls = true;
       }
       return;
     case "message_end":
@@ -92,9 +97,8 @@ export function assembleAssistantMessage(state: ModelMessageAssemblerState): Ass
   flushTextBuffers(state);
 
   if (state.toolCalls.length === 0) {
-    const markers = getAllMarkers();
     const textIdx = state.content.findIndex(
-      (b): b is CanonicalTextBlock => b.type === "text" && markers.some((m) => b.text.includes(m)),
+      (b): b is CanonicalTextBlock => b.type === "text" && looksLikeUnparsedToolCall(b.text),
     );
     if (textIdx >= 0) {
       const textBlock = state.content[textIdx] as CanonicalTextBlock;
@@ -110,7 +114,7 @@ export function assembleAssistantMessage(state: ModelMessageAssemblerState): Ass
           state.content.push({ type: "tool_call", ...tc });
           state.toolCalls.push(tc);
         }
-        state.hasRepairedToolCalls = true;
+        state.hasTextExtractedToolCalls = true;
       } else if (parseResult.parseError && parseResult.detectedFormat) {
         state.error = {
           provider: "text_fallback",
@@ -134,6 +138,8 @@ export function assembleAssistantMessage(state: ModelMessageAssemblerState): Ass
     toolCalls: [...state.toolCalls],
     error: state.error,
     hasRepairedToolCalls: state.hasRepairedToolCalls,
+    hasJsonRepairedToolCalls: state.hasJsonRepairedToolCalls,
+    hasTextExtractedToolCalls: state.hasTextExtractedToolCalls,
   };
 }
 

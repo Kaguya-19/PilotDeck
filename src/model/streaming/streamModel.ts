@@ -218,7 +218,7 @@ async function sendProviderRequest(
   try {
     return await transport(buildEndpoint(provider, stream), {
       method: "POST",
-      headers: buildHeaders(provider),
+      headers: buildProviderHeaders(provider),
       body: JSON.stringify(finalBody),
       signal: controller.signal,
     });
@@ -254,7 +254,7 @@ function buildEndpoint(provider: ProviderConfig, _stream: boolean): string {
   return joinUrl(provider.url, "chat/completions");
 }
 
-function buildHeaders(provider: ProviderConfig): HeadersInit {
+export function buildProviderHeaders(provider: ProviderConfig): HeadersInit {
   const headers: Record<string, string> = {
     "content-type": "application/json",
     ...provider.headers,

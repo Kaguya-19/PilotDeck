@@ -163,6 +163,7 @@ export type GatewayEvent =
       ratio: number;
       state: "ok" | "warning" | "blocking";
     }
+  | { type: "warning"; code: string; message: string; metadata?: Record<string, unknown> }
   | { type: "turn_completed"; usage: TurnUsage; finishReason: AgentTurnResult["stopReason"] | string }
   | { type: "agent_status"; event: string; detail?: Record<string, unknown> }
   | { type: "error"; message: string; code?: string; recoverable: boolean };

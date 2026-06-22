@@ -37,6 +37,7 @@ import { TokenStatsCollector } from "./stats/TokenStatsCollector.js";
 import { classifyAndRoute } from "./tokenSaver/classifyAndRoute.js";
 import { countMessagesTokens, countResponseTokens, dispose as disposeTokenizer } from "./utils/countTokens.js";
 import type { TelemetryClient } from "../telemetry/index.js";
+import type { TokenAccountingRuntime } from "../context/index.js";
 
 export type RouterRuntimeDeps = {
   modelRuntime: ModelRuntime;
@@ -46,6 +47,7 @@ export type RouterRuntimeDeps = {
   loadSkillPrompt?: (extensionId: string) => Promise<string | undefined>;
   events?: RouterEventBus;
   telemetry?: TelemetryClient;
+  tokenAccounting?: TokenAccountingRuntime;
   now?: () => Date;
   /**
    * Externally-owned session store that survives config-reload cycles.
@@ -71,6 +73,7 @@ export type RouterRuntime = {
     request: CanonicalModelRequest,
     ctx: RouterExecuteContext & { sessionId: string; isMainAgent: boolean; previousTier?: string },
   ): AsyncIterable<CanonicalModelEvent>;
+  materializeRequest(decision: RouterDecision, request: CanonicalModelRequest): CanonicalModelRequest;
   /**
    * Clear routing sticky (provider/model/tier) for a session while preserving
    * orchestration state.  Call at the start of each new user turn so the
@@ -381,6 +384,7 @@ export function createRouterRuntime(
     let lastUsage: import("../model/index.js").CanonicalUsage | undefined;
     let lastAttempt: RouterModelRef | undefined;
     let lastDecision: RouterDecision = decision;
+    let lastAttemptRequest: CanonicalModelRequest = request;
     let lastHasYieldedContent = false;
 
     outer: for (let attemptIndex = 0; attemptIndex < attempts.length; attemptIndex += 1) {
@@ -395,12 +399,14 @@ export function createRouterRuntime(
         resolvedFrom: attemptIndex === 0 ? decision.resolvedFrom : "fallback",
       };
       const attemptRequest = applyDecisionToRequest(attemptDecision, request);
+      lastAttemptRequest = attemptRequest;
       lastAttempt = attempt;
       lastDecision = attemptDecision;
 
       if (decision.isSubagent && config.autoOrchestrate?.subagentMaxTokens) {
         const budget = config.autoOrchestrate.subagentMaxTokens;
-        const estimated = countMessagesTokens(attemptRequest.messages);
+        const estimated = deps.tokenAccounting?.estimateRequestInput(attemptRequest)
+          ?? countMessagesTokens(attemptRequest.messages);
         if (estimated > budget) {
           yield {
             type: "text_delta",
@@ -596,8 +602,10 @@ export function createRouterRuntime(
         const endedAt = (deps.now?.() ?? new Date()).toISOString();
         let finalUsage = outcome.usage;
         if (!finalUsage || (!finalUsage.inputTokens && !finalUsage.outputTokens)) {
-          const inputEst = countMessagesTokens(attemptRequest.messages);
-          const outputEst = countResponseTokens(outcome.buffered);
+          const inputEst = deps.tokenAccounting?.estimateRequestInput(attemptRequest)
+            ?? countMessagesTokens(attemptRequest.messages);
+          const outputEst = deps.tokenAccounting?.estimateResponseEvents(outcome.buffered)
+            ?? countResponseTokens(outcome.buffered);
           finalUsage = { inputTokens: inputEst, outputTokens: outputEst, totalTokens: inputEst + outputEst };
         }
         usageCache.observe(ctx.sessionId, finalUsage);
@@ -632,8 +640,10 @@ export function createRouterRuntime(
       const endedAt = (deps.now?.() ?? new Date()).toISOString();
       let failUsage = lastUsage;
       if (!failUsage || (!failUsage.inputTokens && !failUsage.outputTokens)) {
-        const inputEst = countMessagesTokens(request.messages);
-        const outputEst = countResponseTokens(lastBuffered);
+        const inputEst = deps.tokenAccounting?.estimateRequestInput(lastAttemptRequest)
+          ?? countMessagesTokens(lastAttemptRequest.messages);
+        const outputEst = deps.tokenAccounting?.estimateResponseEvents(lastBuffered)
+          ?? countResponseTokens(lastBuffered);
         failUsage = { inputTokens: inputEst, outputTokens: outputEst, totalTokens: inputEst + outputEst };
       }
       stats.observe({
@@ -705,6 +715,7 @@ export function createRouterRuntime(
     decide,
     execute,
     stream,
+    materializeRequest: applyDecisionToRequest,
     invalidateSticky,
     observeUsage(sessionId, usage) {
       usageCache.observe(sessionId, usage);

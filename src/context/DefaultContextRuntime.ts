@@ -287,6 +287,8 @@ export class DefaultContextRuntime implements ContextRuntime {
     messages: CanonicalMessage[];
     abortSignal?: AbortSignal;
     maxContextTokens?: number;
+    reservedOutputTokens?: number;
+    budgetEvaluator?: (messages: CanonicalMessage[]) => Promise<TokenBudgetSnapshot>;
   }): Promise<AutoCompactResult> {
     const effectiveMaxContextTokens = input.maxContextTokens ?? this.maxContextTokens;
     if (!this.autoCompactionPolicy || !this.tokenBudget) {
@@ -303,7 +305,16 @@ export class DefaultContextRuntime implements ContextRuntime {
       };
     }
     let messages = input.messages;
-    const decision = this.autoCompactionPolicy.evaluate(messages, effectiveMaxContextTokens);
+    const budgetOptions = { reservedOutputTokens: input.reservedOutputTokens };
+    const evaluateBudget = (candidate: CanonicalMessage[]) =>
+      input.budgetEvaluator
+        ? input.budgetEvaluator(candidate)
+        : Promise.resolve(this.tokenBudget!.evaluate(candidate, effectiveMaxContextTokens, {
+            usePadding: true,
+            ...budgetOptions,
+          }));
+    const initialSnapshot = await evaluateBudget(messages);
+    const decision = this.autoCompactionPolicy.evaluateSnapshot(initialSnapshot);
     if (decision.type !== "trigger") {
       return { type: "skipped", snapshot: decision.snapshot };
     }
@@ -313,8 +324,8 @@ export class DefaultContextRuntime implements ContextRuntime {
       const r = this.microCompaction.apply({ messages });
       if (r.rewritten > 0) {
         messages = r.messages;
-        const snap = this.tokenBudget.evaluate(messages, effectiveMaxContextTokens);
-        if (snap.state === "ok") {
+        const snap = await evaluateBudget(messages);
+        if (snap.state !== "blocking") {
           return {
             type: "compacted",
             messages: ensureTrailingUserMessage(messages),
@@ -325,13 +336,17 @@ export class DefaultContextRuntime implements ContextRuntime {
       }
     }
 
+    if (decision.reason === "warning_threshold") {
+      return { type: "skipped", snapshot: decision.snapshot };
+    }
+
     // Tier 2: SnipEngine — prune middle turns, keep head + tail.
     if (this.snipEngine) {
       const r = this.snipEngine.snip(messages);
       if (r.applied) {
         messages = r.messages;
-        const snap = this.tokenBudget.evaluate(messages, effectiveMaxContextTokens);
-        if (snap.state === "ok") {
+        const snap = await evaluateBudget(messages);
+        if (snap.state !== "blocking") {
           return {
             type: "compacted",
             messages: ensureTrailingUserMessage(messages),
@@ -350,7 +365,7 @@ export class DefaultContextRuntime implements ContextRuntime {
         signal: input.abortSignal,
       });
       const postCompactMessages = ensureTrailingUserMessage(buildPostCompactMessages(result));
-      const snapshot = this.tokenBudget.evaluate(postCompactMessages, effectiveMaxContextTokens);
+      const snapshot = await evaluateBudget(postCompactMessages);
       return {
         type: "compacted",
         messages: postCompactMessages,

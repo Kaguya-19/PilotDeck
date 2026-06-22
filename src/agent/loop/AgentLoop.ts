@@ -4,8 +4,10 @@ import {
   assembleAssistantMessage,
   cloneMessages,
   createModelMessageAssemblerState,
+  type AssembledAssistantMessage,
   type CanonicalToolCall,
   type CanonicalToolSchema,
+  type CanonicalToolCallBlock,
   PROMPT_TOO_LONG_ANTHROPIC_PATTERN,
   PROMPT_TOO_LONG_OPENAI_PATTERN,
   REQUEST_TOO_LARGE_PATTERN,
@@ -43,9 +45,11 @@ import { createMissingToolResult, ensureToolResultPairing } from "./ensureToolRe
 import { LargeFileRepair, type LargeFileRepairDecision } from "./LargeFileRepair.js";
 import { projectToolResults } from "./projectToolResults.js";
 import { getSelfCorrectPrompt, looksLikeUnparsedToolCall, detectFormatByText } from "../../model/streaming/toolCallFormats.js";
+import { repairToolName } from "../../model/streaming/repairToolName.js";
 
 const TOOL_EVENT_PUMP_INTERVAL_MS = 500;
 const SUBAGENT_STATUS_HEARTBEAT_MS = 2_000;
+const DEFAULT_RESERVED_OUTPUT_TOKENS = 4_096;
 
 type ActiveSubagentStatus = {
   subagentId: string;
@@ -238,9 +242,15 @@ export class AgentLoop {
       const ctx = this.dependencies.context;
       if (ctx?.tryAutoCompact) {
         try {
+          const reservedOutputTokens = this.getReservedOutputTokens();
           const compact = await ctx.tryAutoCompact({
             messages,
             abortSignal: input.abortSignal,
+            reservedOutputTokens,
+            budgetEvaluator: this.createBudgetEvaluator(input, {
+              maxContextTokens: this.config.maxContextTokens,
+              reservedOutputTokens,
+            }),
           });
           if (compact.type === "compacted") {
             messages = compact.messages;
@@ -294,7 +304,7 @@ export class AgentLoop {
       // Split decide + execute so we can insert a post-routing compact pass
       // when the routed model's context window is smaller than the agent's
       // default model (the window used by the first tryAutoCompact above).
-      const decision = await this.dependencies.router.decide({
+      let decision = await this.dependencies.router.decide({
         request,
         sessionId: input.sessionId,
         isMainAgent: !this.config.isSubagent,
@@ -307,14 +317,28 @@ export class AgentLoop {
         const routedMaxCtx = getMaxCtx(decision.provider, decision.model);
         if (routedMaxCtx !== undefined && routedMaxCtx < agentMaxCtx) {
           try {
+            const reservedOutputTokens = this.getReservedOutputTokens();
             const recompact = await ctx.tryAutoCompact({
               messages,
               abortSignal: input.abortSignal,
               maxContextTokens: routedMaxCtx,
+              reservedOutputTokens,
+              budgetEvaluator: this.createBudgetEvaluator(input, {
+                decision,
+                baseRequest: request,
+                maxContextTokens: routedMaxCtx,
+                reservedOutputTokens,
+              }),
             });
             if (recompact.type === "compacted") {
               messages = recompact.messages;
               request = await this.createModelRequest(messages, input);
+              decision = await this.dependencies.router.decide({
+                request,
+                sessionId: input.sessionId,
+                isMainAgent: !this.config.isSubagent,
+                metadata: previousTier ? { previousTier } : undefined,
+              });
               yield {
                 type: "turn_continued",
                 sessionId: input.sessionId,
@@ -415,6 +439,7 @@ export class AgentLoop {
       }
 
       const assembled = assembleAssistantMessage(assembler);
+      this.repairTextExtractedToolNames(assembled);
       usage = mergeUsage(usage, assembled.usage);
       finalMessage = assembled.message;
       messages.push(assembled.message);
@@ -787,7 +812,7 @@ export class AgentLoop {
       // was cut by max_tokens, the tool call arguments are likely incomplete
       // (e.g. half-written file content). Apply the same recovery as
       // max_output_reached: token doubling → continuation prompt → give up.
-      if (assembled.hasRepairedToolCalls && (assembled.finishReason === "length" || assembled.finishReason === "tool_call" || assembled.finishReason === "stop")) {
+      if (assembled.hasJsonRepairedToolCalls && (assembled.finishReason === "length" || assembled.finishReason === "tool_call" || assembled.finishReason === "stop")) {
         console.warn(
           `[AgentLoop] Blocking ${toolCalls.length} repaired-but-truncated tool call(s) — entering max_output recovery`,
         );
@@ -848,7 +873,7 @@ export class AgentLoop {
       let results: PilotDeckToolResult[];
       try {
         const toolContext = this.createToolContext(input, messages);
-        if (assembled.finishReason === "length" || assembled.hasRepairedToolCalls) {
+        if (assembled.finishReason === "length" || assembled.hasJsonRepairedToolCalls) {
           toolContext.outputTruncated = true;
         }
         results = yield* this.executeToolsWithEventPump(
@@ -879,8 +904,8 @@ export class AgentLoop {
 
       const pairedResults = ensureToolResultPairing(toolCalls, results, this.now);
       const toolResultRepair = largeFileRepair.analyzeToolResults(pairedResults, {
-        outputTruncated: assembled.finishReason === "length" || assembled.hasRepairedToolCalls === true,
-        repairedToolCalls: assembled.hasRepairedToolCalls === true,
+        outputTruncated: assembled.finishReason === "length" || assembled.hasJsonRepairedToolCalls === true,
+        repairedToolCalls: assembled.hasJsonRepairedToolCalls === true,
         finishReason: assembled.finishReason,
       });
       permissionDenials = [...permissionDenials, ...collectPermissionDenials(pairedResults)];
@@ -1090,13 +1115,11 @@ export class AgentLoop {
   private async createModelRequest(
     messages: CanonicalMessage[],
     input: AgentLoopInput,
+    options: { emitInstructionEvents?: boolean } = {},
   ): Promise<CanonicalModelRequest> {
     const contextRuntime = this.dependencies.context ?? new NullContextRuntime();
     const planTodo = this.dependencies.planTodoManager?.forSession(input.sessionId);
-    let tools = this.dependencies.tools.registry.toCanonicalSchemas();
-    if (this.config.permissionMode === "plan") {
-      tools = filterPlanModeTools(tools);
-    }
+    const tools = this.getAvailableToolSchemas();
 
     const prepared = await contextRuntime.prepareForModel({
       sessionId: input.sessionId,
@@ -1114,15 +1137,17 @@ export class AgentLoop {
       abortSignal: input.abortSignal,
     });
 
-    this.dispatchLifecycle(input, "InstructionsLoaded", {
-      hasSystemPrompt: !!prepared.systemPrompt,
-    }).catch(() => {});
-    this.dependencies.eventEmitter?.({
-      type: "instructions_loaded",
-      sessionId: input.sessionId,
-      turnId: input.turnId,
-      hasSystemPrompt: !!prepared.systemPrompt,
-    });
+    if (options.emitInstructionEvents !== false) {
+      this.dispatchLifecycle(input, "InstructionsLoaded", {
+        hasSystemPrompt: !!prepared.systemPrompt,
+      }).catch(() => {});
+      this.dependencies.eventEmitter?.({
+        type: "instructions_loaded",
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        hasSystemPrompt: !!prepared.systemPrompt,
+      });
+    }
 
     return {
       provider: this.config.provider,
@@ -1138,6 +1163,77 @@ export class AgentLoop {
       metadata: this.config.metadata,
       cacheBreakpoints: prepared.cacheBreakpoints,
     };
+  }
+
+  private createBudgetEvaluator(
+    input: AgentLoopInput,
+    options: {
+      decision?: import("../../router/index.js").RouterDecision;
+      baseRequest?: CanonicalModelRequest;
+      maxContextTokens?: number;
+      reservedOutputTokens: number;
+    },
+  ): ((candidateMessages: CanonicalMessage[]) => Promise<import("../../context/index.js").TokenBudgetSnapshot>) | undefined {
+    const tokenAccounting = this.dependencies.tokenAccounting;
+    const maxContextTokens = options.maxContextTokens;
+    if (!tokenAccounting || !maxContextTokens) {
+      return undefined;
+    }
+    return async (candidateMessages) => {
+      let candidateRequest = await this.createModelRequest(candidateMessages, input, {
+        emitInstructionEvents: false,
+      });
+      if (options.decision && options.baseRequest && this.dependencies.router.materializeRequest) {
+        const patchedBase = { ...options.baseRequest, messages: candidateRequest.messages };
+        candidateRequest = this.dependencies.router.materializeRequest(options.decision, {
+          ...patchedBase,
+          systemPrompt: candidateRequest.systemPrompt,
+          tools: candidateRequest.tools,
+          cacheBreakpoints: candidateRequest.cacheBreakpoints,
+        });
+      }
+      return tokenAccounting.evaluateRequestBudget(candidateRequest, {
+        maxContextTokens,
+        reservedOutputTokens: options.reservedOutputTokens,
+        signal: input.abortSignal,
+      });
+    };
+  }
+
+  private getReservedOutputTokens(): number {
+    return this.config.maxOutputTokens ?? DEFAULT_RESERVED_OUTPUT_TOKENS;
+  }
+
+  private getAvailableToolSchemas(): CanonicalToolSchema[] {
+    let tools = this.dependencies.tools.registry.toCanonicalSchemas();
+    if (this.config.permissionMode === "plan") {
+      tools = filterPlanModeTools(tools);
+    }
+    return tools;
+  }
+
+  private repairTextExtractedToolNames(assembled: AssembledAssistantMessage): void {
+    if (!assembled.hasTextExtractedToolCalls) {
+      return;
+    }
+    const validNames = new Set(this.getAvailableToolSchemas().map((tool) => tool.name));
+    if (validNames.size === 0) {
+      return;
+    }
+
+    const repairName = (name: string): string => {
+      const repaired = repairToolName(name, validNames, this.config.toolAliases);
+      return repaired?.name ?? name;
+    };
+
+    for (const call of assembled.toolCalls) {
+      call.name = repairName(call.name);
+    }
+    for (const block of assembled.message.content) {
+      if (block.type === "tool_call") {
+        (block as CanonicalToolCallBlock).name = repairName(block.name);
+      }
+    }
   }
 
   private createToolContext(

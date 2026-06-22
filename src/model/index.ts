@@ -59,7 +59,9 @@ export {
 export { cloneContentBlock, cloneMessage, cloneMessages } from "./protocol/clone.js";
 export {
   ANTHROPIC_STRUCTURED_OUTPUT_TOOL_NAME,
+  buildAnthropicRequest,
 } from "./providers/anthropic/request.js";
+export { buildOpenAIRequest } from "./providers/openai/request.js";
 export {
   extractStructuredOutput,
   type ExtractStructuredOutputOptions,

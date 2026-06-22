@@ -6,6 +6,11 @@ import {
   stripUnpairedToolCalls,
   stripUnpairedToolResults,
 } from "./toolPairIntegrity.js";
+import {
+  collectProtectedTurnIndexes,
+  protectedToolNameSet,
+  splitMessagesIntoTurns,
+} from "./protectedContext.js";
 
 export type SnipEngineOptions = {
   /** Number of head turns to keep (default 2). */
@@ -14,6 +19,8 @@ export type SnipEngineOptions = {
   keepTailTurns?: number;
   /** Master enable flag — when false, `snip` is a no-op (default true). */
   enabled?: boolean;
+  /** Tool names whose turns should be preserved through snip compaction. */
+  protectedToolNames?: Iterable<string>;
 };
 
 export type SnipResult = {
@@ -64,10 +71,8 @@ export function isSnipBoundaryMessage(message: CanonicalMessage): boolean {
  *      messages are part of that turn.
  *   S2 keepHeadTurns / keepTailTurns default 2 / 4. Configurable.
  *   S3 No-op when total turns ≤ headTurns + tailTurns.
- *   S4 Tool-pair integrity: any tool_call in kept assistant messages with no
- *      matching tool_result in the kept tail is removed; the corresponding
- *      tool_result_only user messages dangling on the other side are also
- *      removed.
+ *   S4 Tool-pair integrity: after head + protected middle + tail projection,
+ *      dangling tool_call / tool_result blocks are removed.
  *   S5 Boundary marker injected between head and tail.
  *   S6 `projectSnippedView` filters the input to head+boundary+tail in one
  *      call, used by callers that don't need the dangling-tool report.
@@ -78,43 +83,57 @@ export class SnipEngine {
   private readonly keepHeadTurns: number;
   private readonly keepTailTurns: number;
   private readonly enabled: boolean;
+  private readonly protectedToolNames: ReadonlySet<string>;
 
   constructor(options: SnipEngineOptions = {}) {
     this.keepHeadTurns = Math.max(0, options.keepHeadTurns ?? 2);
     this.keepTailTurns = Math.max(1, options.keepTailTurns ?? 4);
     this.enabled = options.enabled ?? true;
+    this.protectedToolNames = protectedToolNameSet(options.protectedToolNames);
   }
 
   snip(messages: CanonicalMessage[]): SnipResult {
     if (!this.enabled) {
       return { messages, applied: false, turnsSnipped: 0, danglingToolCallIds: [] };
     }
-    const turns = splitIntoTurns(messages);
+    const turns = splitMessagesIntoTurns(messages);
     if (turns.length <= this.keepHeadTurns + this.keepTailTurns) {
       return { messages, applied: false, turnsSnipped: 0, danglingToolCallIds: [] };
     }
 
-    const head = turns.slice(0, this.keepHeadTurns).flat();
-    const tail = turns.slice(turns.length - this.keepTailTurns).flat();
-    const turnsSnipped = turns.length - this.keepHeadTurns - this.keepTailTurns;
+    const keepIndexes = new Set<number>();
+    const headEnd = Math.min(this.keepHeadTurns, turns.length);
+    for (let index = 0; index < headEnd; index += 1) {
+      keepIndexes.add(index);
+    }
+    const tailStart = Math.max(headEnd, turns.length - this.keepTailTurns);
+    for (let index = tailStart; index < turns.length; index += 1) {
+      keepIndexes.add(index);
+    }
+    for (const index of collectProtectedTurnIndexes(messages, {
+      protectedToolNames: this.protectedToolNames,
+    })) {
+      keepIndexes.add(index);
+    }
+    if (keepIndexes.size >= turns.length) {
+      return { messages, applied: false, turnsSnipped: 0, danglingToolCallIds: [] };
+    }
+
+    const turnsSnipped = turns.length - keepIndexes.size;
+    const projected = stitchKeptTurnsWithBoundaries(turns, keepIndexes, this.keepHeadTurns, this.keepTailTurns);
 
     // S4: tool pair integrity.
-    const tailToolResultIds = collectToolResultIds(tail);
-    const headToolCallIds = collectToolCallIds(head);
-    const tailToolCallIds = collectToolCallIds(tail);
+    const toolResultIds = collectToolResultIds(projected);
+    const toolCallIds = collectToolCallIds(projected);
+    const withoutDanglingCalls = stripUnpairedToolCalls(projected, toolResultIds);
+    const pairedToolCallIds = collectToolCallIds(withoutDanglingCalls);
 
-    // From head: drop tool_calls whose tool_result is in the snipped middle.
-    const headCleaned = stripUnpairedToolCalls(head, tailToolResultIds);
-    // From tail: drop tool_results whose tool_call lives in the snipped middle.
-    const allToolCallIds = new Set<string>([...headToolCallIds, ...tailToolCallIds]);
-    const tailCleaned = stripUnpairedToolResults(tail, allToolCallIds);
+    const cleaned = stripUnpairedToolResults(withoutDanglingCalls, pairedToolCallIds);
 
-    const dangling = Array.from(headToolCallIds).filter((id) => !tailToolResultIds.has(id));
-
-    const boundary = createSnipBoundary(turnsSnipped, this.keepHeadTurns, this.keepTailTurns);
+    const dangling = Array.from(toolCallIds).filter((id) => !toolResultIds.has(id));
 
     return {
-      messages: ensureTrailingUserMessage([...headCleaned, boundary, ...tailCleaned]),
+      messages: ensureTrailingUserMessage(cleaned),
       applied: true,
       turnsSnipped,
       danglingToolCallIds: dangling,
@@ -134,28 +153,27 @@ export function projectSnippedView(
   return new SnipEngine(options).snip(messages).messages;
 }
 
-/**
- * Group messages into "turns". A turn is one user-initiated message
- * followed by all subsequent assistant + tool_result-bearing user messages
- * that share the same dispatch.
- */
-function splitIntoTurns(messages: CanonicalMessage[]): CanonicalMessage[][] {
-  const turns: CanonicalMessage[][] = [];
-  let current: CanonicalMessage[] = [];
-  for (const message of messages) {
-    const isUserStart = message.role === "user" && !isToolResultOnly(message);
-    if (isUserStart && current.length > 0) {
-      turns.push(current);
-      current = [];
+function stitchKeptTurnsWithBoundaries(
+  turns: ReturnType<typeof splitMessagesIntoTurns>,
+  keepIndexes: Set<number>,
+  headTurns: number,
+  tailTurns: number,
+): CanonicalMessage[] {
+  const out: CanonicalMessage[] = [];
+  let skipped = 0;
+  for (const turn of turns) {
+    if (!keepIndexes.has(turn.index)) {
+      skipped += 1;
+      continue;
     }
-    current.push(message);
+    if (skipped > 0) {
+      out.push(createSnipBoundary(skipped, headTurns, tailTurns));
+      skipped = 0;
+    }
+    out.push(...turn.messages);
   }
-  if (current.length > 0) turns.push(current);
-  return turns;
+  if (skipped > 0) {
+    out.push(createSnipBoundary(skipped, headTurns, tailTurns));
+  }
+  return out;
 }
-
-function isToolResultOnly(message: CanonicalMessage): boolean {
-  if (message.content.length === 0) return false;
-  return message.content.every((block) => block.type === "tool_result");
-}
-
