@@ -46,6 +46,8 @@ export function parseGatewayConfig(rawGateway: unknown, diagnostics: PilotConfig
     port: numberField(rawGateway, "port", 18789),
     bindAddress: "127.0.0.1",
     idleSessionTimeoutMinutes: numberField(rawGateway, "idleSessionTimeoutMinutes", 30),
+    idleSweepIntervalSeconds: numberField(rawGateway, "idleSweepIntervalSeconds", 60),
+    memoryDiagnostics: booleanField(rawGateway, "memoryDiagnostics", false),
     staticAssetsPath: stringField(rawGateway, "staticAssetsPath"),
     maxPerSessionMcpInstances: Math.max(1, maxMcp),
   };

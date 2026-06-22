@@ -111,6 +111,8 @@ export type PilotGatewayConfig = {
   port: number;
   bindAddress: "127.0.0.1";
   idleSessionTimeoutMinutes: number;
+  idleSweepIntervalSeconds: number;
+  memoryDiagnostics: boolean;
   staticAssetsPath?: string;
   /**
    * Maximum number of concurrent per-session MCP instances (e.g. browser-use

@@ -35,6 +35,9 @@ import {
   InProcessGateway,
   type InProcessGatewayOptions,
   SessionRouter,
+  isGatewayMemoryDiagnosticsEnabled,
+  logGatewayMemoryDiagnostic,
+  summarizeCanonicalMessages,
   type Gateway,
   type GatewayCronController,
   type GatewayProjectStorageOptions,
@@ -178,6 +181,10 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
     onProjectActivated: (activeProjectRoot) => extensionWatchManager.watchProject(activeProjectRoot),
   });
   const defaultRuntime = registry.resolve();
+  const memoryDiagnosticsEnabled = isGatewayMemoryDiagnosticsEnabled(
+    env,
+    defaultRuntime.snapshot.config.gateway?.memoryDiagnostics,
+  );
 
   const configStore = createPilotConfigStoreSync({ projectRoot, env });
   const stopConfigWatching = configStore.startWatching();
@@ -199,6 +206,14 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
     // eslint-disable-next-line no-console
     console.log("[pilotdeck] Config reloaded, invalidating runtimes:", changedPaths.join(", "));
     registry.invalidate();
+    if (memoryDiagnosticsEnabled) {
+      logGatewayMemoryDiagnostic({
+        event: "runtime_invalidated",
+        sessionCount: router?.cachedSessionCount(),
+        projectKey: projectRoot,
+        reason: "config_changed",
+      });
+    }
     router?.markAllDirty("config_changed");
     configChangeLifecycle.dispatch({
       event: "ConfigChange",
@@ -215,8 +230,23 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
     listSessions: (input) => registry.listSessions(input),
     idleSessionTimeoutMs:
       (defaultRuntime.snapshot.config.gateway?.idleSessionTimeoutMinutes ?? 30) * 60_000,
+    idleSweepIntervalMs:
+      Math.max(0, defaultRuntime.snapshot.config.gateway?.idleSweepIntervalSeconds ?? 60) * 1_000,
     now,
     onSessionEvict: (sessionKey) => registry.evictSessionMcp(sessionKey),
+    onSessionIdleEvict: memoryDiagnosticsEnabled
+      ? (_sessionKey, snapshot) => {
+          logGatewayMemoryDiagnostic({
+            event: "session_idle_evicted",
+            sessionCount: router?.cachedSessionCount(),
+            session: {
+              sessionKey: snapshot.sessionKey,
+              projectKey: snapshot.context.projectKey,
+              messageCount: snapshot.messageCount,
+            },
+          });
+        }
+      : undefined,
   });
   const skillManager = new SkillManager({ pilotHome });
   const gateway = new InProcessGateway(router, {
@@ -286,7 +316,20 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
     async refreshConfigBeforeTurn() {
       await configStore.reload("turn-start");
     },
-    afterTurnCompleted: ({ projectKey }) => {
+    afterTurnCompleted: ({ sessionKey, projectKey, runId }) => {
+      if (memoryDiagnosticsEnabled) {
+        const snapshot = router?.snapshotSession(sessionKey);
+        logGatewayMemoryDiagnostic({
+          event: "turn_completed",
+          sessionCount: router?.cachedSessionCount(),
+          session: {
+            sessionKey,
+            projectKey,
+            runId,
+            ...(snapshot ? summarizeCanonicalMessages(snapshot.messages) : {}),
+          },
+        });
+      }
       registry.scheduleMemoryMaintenance(projectKey ?? projectRoot);
     },
   });
@@ -300,6 +343,7 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
     registry,
     dispose: () => {
       registry.invalidate();
+      router?.shutdown();
       stopConfigWatching();
       stopExtensionWatching();
       if (ownsTelemetry) {
