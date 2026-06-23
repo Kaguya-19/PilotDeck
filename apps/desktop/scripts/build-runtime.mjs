@@ -18,6 +18,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const desktopRoot = resolve(__dirname, "..");
 const repoRoot = resolve(desktopRoot, "..", "..");
 const runtimeRoot = resolve(desktopRoot, ".runtime", "app");
+const DESKTOP_BUILD = "260623";
 
 const uiServerDependencies = [
   "@octokit/rest",
@@ -44,13 +45,13 @@ function readJson(file) {
   return JSON.parse(readFileSync(file, "utf8"));
 }
 
-function run(command, args, cwd) {
+function run(command, args, cwd, env = process.env) {
   console.log(`[desktop] ${command} ${args.join(" ")} (${cwd})`);
   const result = spawnSync(command, args, {
     cwd,
     stdio: "inherit",
     shell: process.platform === "win32" && command.endsWith(".cmd"),
-    env: process.env,
+    env,
   });
   if (result.error) {
     throw result.error;
@@ -66,8 +67,8 @@ const packageManager = isPnpmExecPath
   ? { command: process.execPath, args: [process.env.npm_execpath] }
   : { command: process.platform === "win32" ? "pnpm.cmd" : "pnpm", args: [] };
 
-function runPnpm(args, cwd = repoRoot) {
-  run(packageManager.command, [...packageManager.args, ...args], cwd);
+function runPnpm(args, cwd = repoRoot, env = process.env) {
+  run(packageManager.command, [...packageManager.args, ...args], cwd, env);
 }
 
 function copyFiltered(from, to, filter) {
@@ -295,7 +296,11 @@ run(process.execPath, [resolve(desktopRoot, "scripts", "download-node.mjs")], de
 
 if (process.env.PILOTDECK_DESKTOP_SKIP_RUNTIME_BUILD !== "1") {
   runPnpm(["--dir", repoRoot, "run", "build"]);
-  runPnpm(["--dir", repoRoot, "--filter", "pilotdeck-ui", "run", "build"]);
+  runPnpm(
+    ["--dir", repoRoot, "--filter", "pilotdeck-ui", "run", "build"],
+    repoRoot,
+    { ...process.env, VITE_PILOTDECK_DESKTOP_BUILD: DESKTOP_BUILD },
+  );
 }
 
 const sourceRequired = [

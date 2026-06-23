@@ -1029,6 +1029,7 @@
   "about": {
     "title": "关于",
     "version": "版本",
+    "desktopBuild": "桌面版 {{build}}",
     "checking": "正在检查更新...",
     "upToDate": "已是最新版本",
     "updateAvailable": "有新版本可用",

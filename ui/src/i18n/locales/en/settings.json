@@ -1035,6 +1035,7 @@
   "about": {
     "title": "About",
     "version": "Version",
+    "desktopBuild": "Desktop build {{build}}",
     "checking": "Checking for updates...",
     "upToDate": "Up to date",
     "updateAvailable": "Update available",

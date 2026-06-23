@@ -27,6 +27,7 @@ import { useUiPreferences } from '../../../hooks/useUiPreferences';
 import { usePilotDeckConfig } from '../../../hooks/usePilotDeckConfig';
 import { useSettingsController } from '../hooks/useSettingsController';
 import { useGitVersion } from '../../../hooks/useGitVersion';
+import { DESKTOP_BUILD } from '../../../constants/config';
 import type {
   CodeEditorSettingsState,
   ProjectSortOrder,
@@ -592,6 +593,7 @@ function VersionUpdateSection() {
     : info.hasUpdate
       ? t('about.updateAvailable')
       : t('about.upToDate');
+  const buildText = t('about.desktopBuild', { build: DESKTOP_BUILD });
 
   return (
     <SettingsGroup title={t('about.title')}>
@@ -601,7 +603,7 @@ function VersionUpdateSection() {
           <div className="min-w-0 flex-1">
             <div className="text-[15px] font-semibold leading-5 text-foreground">{t('about.version')}</div>
             <div className="mt-0.5 text-xs leading-5 text-muted-foreground">
-              {statusText}
+              {buildText} · {statusText}
             </div>
           </div>
           {info?.hasUpdate && phase === 'idle' && (

@@ -8,3 +8,7 @@ export const IS_PLATFORM = import.meta.env.VITE_IS_PLATFORM === 'true';
  * Matches server PILOTDECK_DISABLE_LOCAL_AUTH (injected in vite.config.js).
  */
 export const DISABLE_LOCAL_AUTH = import.meta.env.VITE_DISABLE_LOCAL_AUTH === 'true';
+
+const desktopBuild = import.meta.env.VITE_PILOTDECK_DESKTOP_BUILD?.trim();
+
+export const DESKTOP_BUILD = desktopBuild || '260623';
