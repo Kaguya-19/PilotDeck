@@ -40,10 +40,6 @@ const uiServerDependencies = [
   "yaml",
 ];
 
-const runtimeDevDependencies = [
-  "tsx",
-];
-
 function readJson(file) {
   return JSON.parse(readFileSync(file, "utf8"));
 }
@@ -93,13 +89,6 @@ function skipBuildArtifact(rel) {
   );
 }
 
-function skipRuntimeSource(rel) {
-  if (!rel) return true;
-  if (rel.includes("/__tests__/") || rel.includes("/tests/")) return false;
-  if (rel.endsWith(".map") || rel.endsWith(".tsbuildinfo")) return false;
-  return true;
-}
-
 function addDependency(target, sources, name) {
   for (const source of sources) {
     const version = source.dependencies?.[name] ?? source.devDependencies?.[name];
@@ -120,9 +109,6 @@ function createRuntimePackageJson(rootPackage, uiPackage) {
   }
   for (const name of uiServerDependencies) {
     addDependency(dependencies, [uiPackage, rootPackage], name);
-  }
-  for (const name of runtimeDevDependencies) {
-    addDependency(dependencies, [rootPackage, uiPackage], name);
   }
 
   return {
@@ -145,17 +131,17 @@ function prepareRuntimeTree() {
     resolve(runtimeRoot, "package.json"),
     `${JSON.stringify(createRuntimePackageJson(rootPackage, uiPackage), null, 2)}\n`,
   );
-  writeFileSync(
-    resolve(runtimeRoot, "tsconfig.json"),
-    readFileSync(resolve(repoRoot, "tsconfig.json")),
-  );
-
   copyFiltered(resolve(repoRoot, "dist"), resolve(runtimeRoot, "dist"), skipBuildArtifact);
-  copyFiltered(resolve(repoRoot, "src"), resolve(runtimeRoot, "src"), skipRuntimeSource);
+  copyFiltered(
+    resolve(repoRoot, "src", "context", "memory", "edgeclaw-memory-core"),
+    resolve(runtimeRoot, "src", "context", "memory", "edgeclaw-memory-core"),
+    skipBuildArtifact,
+  );
   copyFiltered(resolve(repoRoot, "ui", "server"), resolve(runtimeRoot, "ui", "server"), skipBuildArtifact);
   copyFiltered(resolve(repoRoot, "ui", "shared"), resolve(runtimeRoot, "ui", "shared"), skipBuildArtifact);
   copyFiltered(resolve(repoRoot, "ui", "public"), resolve(runtimeRoot, "ui", "public"), () => true);
   copyFiltered(resolve(repoRoot, "ui", "dist"), resolve(runtimeRoot, "ui", "dist"), () => true);
+  rewriteUiServerSourceImports(resolve(runtimeRoot, "ui", "server"));
   writeFileSync(
     resolve(runtimeRoot, "ui", "package.json"),
     `${JSON.stringify({
@@ -174,6 +160,8 @@ function prepareRuntimeTree() {
     "--no-frozen-lockfile",
     "--prefer-offline",
   ], runtimeRoot);
+
+  removeIfExists(resolve(runtimeRoot, "src"));
 }
 
 function pruneRuntimeTree() {
@@ -272,6 +260,35 @@ function prunePackageSpecificFiles() {
 
   removeIfExists(resolve(nodeModules, "better-sqlite3", "deps"));
   removeIfExists(resolve(nodeModules, "better-sqlite3", "src"));
+
+  removeIfExists(resolve(nodeModules, "edgeclaw-memory-core", "src"));
+  removeIfExists(resolve(nodeModules, "edgeclaw-memory-core", "tsconfig.json"));
+  removeIfExists(resolve(nodeModules, "edgeclaw-memory-core", "tsconfig.base.json"));
+}
+
+function rewriteUiServerSourceImports(serverRoot) {
+  const extensions = new Set([".js"]);
+
+  function visit(path) {
+    const stat = statSync(path);
+    if (stat.isDirectory()) {
+      for (const entry of cpSafeReadDir(path)) {
+        visit(resolve(path, entry));
+      }
+      return;
+    }
+    if (!extensions.has(path.slice(path.lastIndexOf(".")))) return;
+
+    const original = readFileSync(path, "utf8");
+    const rewritten = original
+      .replaceAll("../../src/", "../../dist/src/")
+      .replaceAll("../../../src/", "../../../dist/src/");
+    if (rewritten !== original) {
+      writeFileSync(path, rewritten, "utf8");
+    }
+  }
+
+  visit(serverRoot);
 }
 
 run(process.execPath, [resolve(desktopRoot, "scripts", "download-node.mjs")], desktopRoot);
@@ -302,17 +319,23 @@ const runtimeRequired = [
   resolve(runtimeRoot, "dist", "src", "cli", "pilotdeck.js"),
   resolve(runtimeRoot, "ui", "dist", "index.html"),
   resolve(runtimeRoot, "ui", "server", "index.js"),
-  resolve(runtimeRoot, "src", "context", "memory", "edgeclaw-memory-core", "lib", "index.js"),
-  resolve(runtimeRoot, "src", "context", "memory", "edgeclaw-memory-core", "ui-source", "index.html"),
-  resolve(runtimeRoot, "node_modules", "tsx"),
   resolve(runtimeRoot, "node_modules", "express"),
-  resolve(runtimeRoot, "node_modules", "edgeclaw-memory-core"),
+  resolve(runtimeRoot, "node_modules", "edgeclaw-memory-core", "lib", "index.js"),
+  resolve(runtimeRoot, "node_modules", "edgeclaw-memory-core", "ui-source", "index.html"),
 ];
 
 for (const file of runtimeRequired) {
   if (!existsSync(file)) {
     throw new Error(`Desktop runtime staged prerequisite missing: ${file}`);
   }
+}
+
+if (existsSync(resolve(runtimeRoot, "src"))) {
+  throw new Error(`Desktop runtime should not include source tree: ${resolve(runtimeRoot, "src")}`);
+}
+
+if (existsSync(resolve(runtimeRoot, "node_modules", "tsx"))) {
+  throw new Error(`Desktop runtime should not include tsx: ${resolve(runtimeRoot, "node_modules", "tsx")}`);
 }
 
 console.log(`[desktop] staged runtime ready: ${runtimeRoot}`);

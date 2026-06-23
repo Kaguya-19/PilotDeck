@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from "electron";
+import { app, BrowserWindow, ipcMain, Menu, shell } from "electron";
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
@@ -17,9 +17,18 @@ type RuntimeInfo = {
   logPath: string;
 };
 
+type RuntimeStatus = {
+  phase: "starting" | "config" | "gateway" | "server" | "ready" | "error" | "stopped";
+  message: string;
+  logPath?: string;
+  error?: string;
+};
+
 let mainWindow: BrowserWindow | null = null;
 let runtime: RuntimeManager | null = null;
 let isQuitting = false;
+let runtimeStartPromise: Promise<RuntimeInfo> | null = null;
+let lastRuntimeStatus: RuntimeStatus | null = null;
 
 const APP_ID = "cn.pilotdeck.desktop";
 const SENTINEL_API_KEY = "PLACEHOLDER_RUN_ONBOARDING_TO_REPLACE";
@@ -132,10 +141,24 @@ class RuntimeManager {
     return this.info;
   }
 
+  getLogPath(): string {
+    return this.logPath;
+  }
+
   async start(): Promise<RuntimeInfo> {
     fs.mkdirSync(path.dirname(this.logPath), { recursive: true });
     this.logStream = fs.createWriteStream(this.logPath, { flags: "a" });
+    publishRuntimeStatus({
+      phase: "starting",
+      message: "Preparing PilotDeck runtime...",
+      logPath: this.logPath,
+    });
     this.log(`PilotDeck Desktop runtime starting from ${this.runtimeRoot}`);
+    publishRuntimeStatus({
+      phase: "config",
+      message: "Checking local configuration...",
+      logPath: this.logPath,
+    });
     const config = ensurePilotConfig((message) => this.log(message));
 
     const serverPort = await findFreePort(3001);
@@ -153,12 +176,22 @@ class RuntimeManager {
       PILOTDECK_SKIP_DEFAULT_PROJECT: "1",
     };
 
+    publishRuntimeStatus({
+      phase: "gateway",
+      message: "Starting local gateway...",
+      logPath: this.logPath,
+    });
     const gateway = this.spawnRuntime("gateway", this.gatewayCommand(), this.runtimeRoot, commonEnv);
     await waitForPortOrProcessExit(gateway, "gateway", gatewayPort, "127.0.0.1", 90_000, this.logPath);
 
+    publishRuntimeStatus({
+      phase: "server",
+      message: "Starting Web UI server...",
+      logPath: this.logPath,
+    });
     const server = this.spawnRuntime(
       "server",
-      [this.nodeBinary, "--import", "tsx", "server/index.js"],
+      this.serverCommand(),
       path.join(this.runtimeRoot, "ui"),
       commonEnv,
     );
@@ -171,6 +204,11 @@ class RuntimeManager {
       logPath: this.logPath,
     };
     this.log(`PilotDeck Desktop runtime ready: http://127.0.0.1:${serverPort}`);
+    publishRuntimeStatus({
+      phase: "ready",
+      message: "PilotDeck is ready.",
+      logPath: this.logPath,
+    });
     return this.info;
   }
 
@@ -184,6 +222,12 @@ class RuntimeManager {
     this.log("PilotDeck Desktop runtime stopped");
     this.logStream?.end();
     this.logStream = null;
+    this.info = null;
+    publishRuntimeStatus({
+      phase: "stopped",
+      message: "PilotDeck runtime stopped.",
+      logPath: this.logPath,
+    });
   }
 
   private gatewayCommand(): string[] {
@@ -191,7 +235,17 @@ class RuntimeManager {
     if (fs.existsSync(builtEntry)) {
       return [this.nodeBinary, builtEntry, "server"];
     }
+    if (app.isPackaged || process.env.PILOTDECK_DESKTOP_RUNTIME_ROOT) {
+      throw new Error(`Compiled PilotDeck gateway entry not found: ${builtEntry}`);
+    }
     return [this.nodeBinary, "--import", "tsx", path.join("src", "cli", "pilotdeck.ts"), "server"];
+  }
+
+  private serverCommand(): string[] {
+    if (app.isPackaged || process.env.PILOTDECK_DESKTOP_RUNTIME_ROOT) {
+      return [this.nodeBinary, "server/index.js"];
+    }
+    return [this.nodeBinary, "--import", "tsx", "server/index.js"];
   }
 
   private spawnRuntime(
@@ -217,11 +271,11 @@ class RuntimeManager {
     child.on("exit", (code, signal) => {
       this.log(`[${name}] exited code=${code ?? "null"} signal=${signal ?? "null"}`);
       if (!isQuitting && this.info) {
-        void dialog.showMessageBox({
-          type: "error",
-          title: "PilotDeck runtime stopped",
+        publishRuntimeStatus({
+          phase: "error",
           message: `${name} exited unexpectedly. See runtime log for details.`,
-          detail: this.logPath,
+          logPath: this.logPath,
+          error: `${name} exited code=${code ?? "null"} signal=${signal ?? "null"}`,
         });
       }
     });
@@ -246,13 +300,19 @@ async function ensureRuntime(): Promise<RuntimeInfo> {
   if (runtime?.getInfo()) {
     return runtime.getInfo()!;
   }
+  if (runtimeStartPromise) {
+    return runtimeStartPromise;
+  }
   const runtimeRoot = resolveRuntimeRoot();
   const nodeBinary = resolveNodeBinary();
   runtime = new RuntimeManager(runtimeRoot, nodeBinary);
-  return runtime.start();
+  runtimeStartPromise = runtime.start().finally(() => {
+    runtimeStartPromise = null;
+  });
+  return runtimeStartPromise;
 }
 
-async function createOrShowWindow(info: RuntimeInfo): Promise<void> {
+async function createOrShowWindow(): Promise<void> {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.show();
     mainWindow.focus();
@@ -291,7 +351,214 @@ async function createOrShowWindow(info: RuntimeInfo): Promise<void> {
   });
 
   await mainWindow.webContents.session.clearCache();
+  await mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(renderLoadingHtml())}`);
+  if (lastRuntimeStatus) {
+    sendRuntimeStatus(lastRuntimeStatus);
+  }
+}
+
+async function loadRuntimeUrl(info: RuntimeInfo): Promise<void> {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    await createOrShowWindow();
+  }
+  if (!mainWindow || mainWindow.isDestroyed()) return;
   await mainWindow.loadURL(`http://127.0.0.1:${info.serverPort}`);
+}
+
+function publishRuntimeStatus(status: RuntimeStatus): void {
+  lastRuntimeStatus = status;
+  sendRuntimeStatus(status);
+}
+
+function sendRuntimeStatus(status: RuntimeStatus): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send("pilotdeck:runtime-status", status);
+}
+
+async function startRuntimeAndLoad(): Promise<void> {
+  try {
+    const info = await ensureRuntime();
+    await loadRuntimeUrl(info);
+  } catch (error) {
+    const detail = error instanceof Error ? error.stack ?? error.message : String(error);
+    publishRuntimeStatus({
+      phase: "error",
+      message: "PilotDeck failed to start.",
+      logPath: runtime?.getLogPath(),
+      error: detail,
+    });
+  }
+}
+
+async function retryRuntime(): Promise<void> {
+  const currentRuntime = runtime;
+  runtime = null;
+  runtimeStartPromise = null;
+  if (currentRuntime) {
+    await currentRuntime.stop().catch(() => undefined);
+  }
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    await createOrShowWindow();
+  } else {
+    await mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(renderLoadingHtml())}`);
+  }
+  await startRuntimeAndLoad();
+}
+
+function renderLoadingHtml(): string {
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PilotDeck</title>
+  <style>
+    :root { color-scheme: light dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0e1116;
+      color: #eef2f8;
+    }
+    main {
+      width: min(520px, calc(100vw - 48px));
+      display: grid;
+      gap: 18px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 22px;
+      font-weight: 650;
+      letter-spacing: 0;
+    }
+    .mark {
+      width: 34px;
+      height: 34px;
+      border-radius: 8px;
+      display: grid;
+      place-items: center;
+      background: #f2f6ff;
+      color: #0e1116;
+      font-weight: 800;
+    }
+    .panel {
+      border: 1px solid rgba(255,255,255,0.14);
+      border-radius: 8px;
+      padding: 22px;
+      background: rgba(255,255,255,0.045);
+      box-shadow: 0 18px 60px rgba(0,0,0,0.35);
+    }
+    .row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .spinner {
+      width: 18px;
+      height: 18px;
+      border: 2px solid rgba(255,255,255,0.25);
+      border-top-color: #eef2f8;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      flex: 0 0 auto;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #message {
+      margin: 0;
+      font-size: 15px;
+      line-height: 1.45;
+      color: #d8dee9;
+    }
+    #detail {
+      display: none;
+      margin: 14px 0 0;
+      padding: 12px;
+      max-height: 180px;
+      overflow: auto;
+      white-space: pre-wrap;
+      border-radius: 6px;
+      background: rgba(0,0,0,0.32);
+      color: #f4c7c7;
+      font: 12px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace;
+    }
+    #log {
+      margin-top: 12px;
+      color: #9ca8b8;
+      font-size: 12px;
+      word-break: break-all;
+    }
+    .actions {
+      display: none;
+      gap: 10px;
+      margin-top: 16px;
+    }
+    button {
+      appearance: none;
+      border: 1px solid rgba(255,255,255,0.18);
+      border-radius: 7px;
+      padding: 8px 12px;
+      background: #f2f6ff;
+      color: #0e1116;
+      font: inherit;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    button.secondary {
+      background: transparent;
+      color: #eef2f8;
+    }
+    .error .spinner { display: none; }
+    .error #detail,
+    .error .actions { display: flex; }
+    .error #detail { display: block; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="brand"><div class="mark">P</div><div>PilotDeck</div></div>
+    <section class="panel" id="panel">
+      <div class="row">
+        <div class="spinner" aria-hidden="true"></div>
+        <p id="message">Preparing PilotDeck runtime...</p>
+      </div>
+      <pre id="detail"></pre>
+      <div id="log"></div>
+      <div class="actions">
+        <button id="retry">Retry</button>
+        <button id="openLog" class="secondary">Open Log</button>
+      </div>
+    </section>
+  </main>
+  <script>
+    const panel = document.getElementById("panel");
+    const message = document.getElementById("message");
+    const detail = document.getElementById("detail");
+    const log = document.getElementById("log");
+    const retry = document.getElementById("retry");
+    const openLog = document.getElementById("openLog");
+
+    window.pilotdeckDesktop?.onRuntimeStatus((status) => {
+      message.textContent = status.message || "Starting PilotDeck...";
+      log.textContent = status.logPath ? "Log: " + status.logPath : "";
+      if (status.phase === "error") {
+        panel.classList.add("error");
+        detail.textContent = status.error || status.message || "Unknown startup error.";
+      } else {
+        panel.classList.remove("error");
+        detail.textContent = "";
+      }
+    });
+    retry.addEventListener("click", () => window.pilotdeckDesktop?.retryRuntime());
+    openLog.addEventListener("click", () => window.pilotdeckDesktop?.openRuntimeLog());
+  </script>
+</body>
+</html>`;
 }
 
 function resolveRuntimeRoot(): string {
@@ -459,18 +726,30 @@ function killProcessTree(child: ChildProcess): Promise<void> {
 }
 
 ipcMain.handle("pilotdeck:get-runtime-info", () => runtime?.getInfo());
+ipcMain.handle("pilotdeck:retry-runtime", () => retryRuntime());
+ipcMain.handle("pilotdeck:open-runtime-log", async () => {
+  const logPath = runtime?.getLogPath() ?? lastRuntimeStatus?.logPath;
+  if (logPath) {
+    await shell.openPath(logPath);
+  }
+});
 
 if (process.platform === "win32") {
   app.setAppUserModelId(APP_ID);
 }
 
 app.whenReady()
-  .then(ensureRuntime)
   .then(createOrShowWindow)
+  .then(startRuntimeAndLoad)
   .catch(async (error) => {
     const detail = error instanceof Error ? error.stack ?? error.message : String(error);
     await runtime?.stop().catch(() => undefined);
-    dialog.showErrorBox("PilotDeck failed to start", detail);
+    publishRuntimeStatus({
+      phase: "error",
+      message: "PilotDeck failed to start.",
+      logPath: runtime?.getLogPath(),
+      error: detail,
+    });
     app.quit();
   });
 
@@ -480,11 +759,16 @@ app.on("window-all-closed", () => {
 
 app.on("activate", () => {
   if (mainWindow === null || mainWindow.isDestroyed()) {
-    ensureRuntime()
-      .then(createOrShowWindow)
+    createOrShowWindow()
+      .then(startRuntimeAndLoad)
       .catch((error) => {
         const detail = error instanceof Error ? error.stack ?? error.message : String(error);
-        dialog.showErrorBox("PilotDeck failed to restore window", detail);
+        publishRuntimeStatus({
+          phase: "error",
+          message: "PilotDeck failed to restore window.",
+          logPath: runtime?.getLogPath(),
+          error: detail,
+        });
       });
   }
 });

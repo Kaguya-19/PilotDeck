@@ -80,10 +80,21 @@ module.exports = async function afterPack(context) {
     `[desktop] afterPack materialized ${runtimeSymlinks} runtime symlinks and ${nodeSymlinks} node symlinks`,
   );
 
-  for (const dependency of ["tsx", "express", "edgeclaw-memory-core"]) {
+  for (const dependency of ["express", "edgeclaw-memory-core"]) {
     const dependencyPath = join(target, dependency);
     if (!existsSync(dependencyPath)) {
       throw new Error(`Desktop runtime dependency was not packaged: ${dependencyPath}`);
     }
+  }
+  for (const requiredFile of [
+    join(target, "edgeclaw-memory-core", "lib", "index.js"),
+    join(target, "edgeclaw-memory-core", "ui-source", "index.html"),
+  ]) {
+    if (!existsSync(requiredFile)) {
+      throw new Error(`Desktop runtime dependency file was not packaged: ${requiredFile}`);
+    }
+  }
+  if (existsSync(join(target, "tsx"))) {
+    throw new Error(`Desktop runtime should not package tsx: ${join(target, "tsx")}`);
   }
 };

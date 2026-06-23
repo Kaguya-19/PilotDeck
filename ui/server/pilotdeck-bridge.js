@@ -25,8 +25,8 @@
  *
  *   - `pilotdeck server` (port 18789) owns the gateway, agent loop,
  *     model router, MCP runtime, cron daemon, and on-disk session
- *     transcripts. Edit `src/**` then restart this process to pick up
- *     changes — no `npm run build` required when running via `tsx`.
+ *     transcripts. In development, edit `src/**` then restart this process
+ *     to pick up changes through the dev server loader.
  *   - `ui/server/index.js` (port 3001) is the express bridge: REST
  *     endpoints for non-agent UI concerns + a WebSocket adapter that
  *     re-shapes gateway events into the legacy NormalizedMessage frames
@@ -48,11 +48,9 @@ import { installGlobalProxy } from '../../src/cli/proxy.js';
 await installGlobalProxy();
 
 import { resolvePilotHome, createProjectId, sanitizeSessionIdForPath } from './utils/pilotPaths.js';
-// Read the gateway client straight from TypeScript source via tsx — the UI
-// server is launched with `node --import tsx`, so no prior `npm run build`
-// is required. (A prior tsx 4.x JSDoc dynamic-import parse bug was fixed by
-// rewriting the offending @type annotation below to `ReturnType<typeof
-// createRemoteGateway>`, which is why this import can live on `src/` again.)
+// Read the gateway client from source in development. Desktop runtime staging
+// rewrites this import to the compiled `dist/src` tree so packaged builds do
+// not need a TypeScript loader.
 import { createRemoteGateway } from '../../src/gateway/index.js';
 import { createNormalizedMessage } from './pilotdeck-message.js';
 import { readPermissionSettings } from './services/permissionSettings.js';
@@ -120,10 +118,8 @@ const WEB_DEFAULT_PERMISSION_MODE =
 
 // Resolves to the Gateway returned by `createRemoteGateway`. We express
 // the type via `typeof createRemoteGateway` (the symbol is already imported
-// above) instead of a JSDoc dynamic-import annotation, because some tsx 4.x
-// builds mis-parse such tokens inside JSDoc when running through
-// `node --import tsx`, producing a spurious "Parse error" at EOF during
-// ESM rewriting on fresh installs.
+// above) instead of a JSDoc dynamic-import annotation, keeping runtime loaders
+// from parsing fragile type tokens inside comments.
 /** @type {ReturnType<typeof createRemoteGateway> | null} */
 let gatewayPromise = null;
 
