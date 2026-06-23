@@ -54,7 +54,7 @@ import {
 } from "../mcp/index.js";
 import { createModelRuntime, type ModelRuntime } from "../model/index.js";
 import { createDefaultPermissionContext, type PermissionRule } from "../permission/index.js";
-import { loadPilotConfig, resolvePilotHome } from "../pilot/index.js";
+import { loadPilotConfig, resolvePilotHome, resolveProjectStorageId } from "../pilot/index.js";
 import { createPilotConfigStoreSync, type PilotConfigStore } from "../pilot/config/PilotConfigStore.js";
 import type { PilotAgentModelSelection, PilotConfigSnapshot } from "../pilot/config/types.js";
 import { DEFAULT_JUDGE_TIMEOUT_MS, DEFAULT_SUBAGENT_MAX_TOKENS, DEFAULT_ALLOWED_TOOLS, DEFAULT_TRIGGER_TIERS, type RouterConfig } from "../router/config/schema.js";
@@ -139,6 +139,20 @@ export type CreateLocalGatewayResult = {
    */
   updateSubsystems: (update: SubsystemUpdate) => void;
 };
+
+export function resolveBrowserUseOutputDir(input: {
+  pilotHome: string;
+  projectRoot: string;
+  sessionKey: string;
+}): string {
+  const projectId = resolveProjectStorageId(input.projectRoot, input.pilotHome);
+  return joinPath(
+    input.pilotHome,
+    "browser_screenshots",
+    projectId,
+    sanitizeSessionIdForPath(input.sessionKey),
+  );
+}
 
 export function createLocalGateway(options: CreateLocalGatewayOptions = {}): CreateLocalGatewayResult {
   const baseEnv = options.env ?? process.env;
@@ -766,12 +780,11 @@ class ProjectRuntimeRegistry {
       this.evictSessionMcp(context.sessionKey);
       const patchedPerSpecs = perSpecs.map((spec) => {
         if (spec.transport === "stdio" && spec.id === "browser-use") {
-          const outDir = joinPath(
-            runtime.projectRoot,
-            ".pilotdeck",
-            "browser_screenshots",
-            sanitizeSessionIdForPath(context.sessionKey),
-          );
+          const outDir = resolveBrowserUseOutputDir({
+            pilotHome: this.options.pilotHome,
+            projectRoot: runtime.projectRoot,
+            sessionKey: context.sessionKey,
+          });
           mkdirSyncFs(outDir, { recursive: true });
           return { ...spec, cwd: outDir, args: [...(spec.args ?? []), `--output-dir=${outDir}`] };
         }
