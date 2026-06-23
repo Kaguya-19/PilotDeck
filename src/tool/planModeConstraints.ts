@@ -31,8 +31,8 @@ export const PLAN_MODE_ALLOWED_TOOLS = new Set([
  */
 export const PLAN_MODE_DESCRIPTION_SUFFIX: Record<string, string> = {
   bash: "\n\n[PLAN MODE] READ-ONLY commands only. Write/modify/delete commands will be rejected.",
-  write_file: "\n\n[PLAN MODE] ONLY for .md files under .pilotdeck/plans/. All other writes will be rejected.",
-  edit_file: "\n\n[PLAN MODE] ONLY for .md files under .pilotdeck/plans/. All other edits will be rejected.",
+  write_file: "\n\n[PLAN MODE] ONLY for .md files under the designated plan directory. All other writes will be rejected.",
+  edit_file: "\n\n[PLAN MODE] ONLY for .md files under the designated plan directory. All other edits will be rejected.",
 };
 
 const PLAN_MODE_VIOLATION_HEADER = "[PLAN_MODE_VIOLATION]";
@@ -45,7 +45,7 @@ export function buildPlanModeViolationMessage(toolName: string): string {
     "",
     "What you should do instead:",
     "1. Use read-only tools (read_file, grep, glob, bash with read-only commands) to explore",
-    "2. Write your plan as markdown under .pilotdeck/plans/",
+    "2. Write your plan as markdown under the designated plan directory",
     "3. Call exit_plan_mode when your plan is ready",
     "",
     "Do NOT retry this tool. It will fail again.",

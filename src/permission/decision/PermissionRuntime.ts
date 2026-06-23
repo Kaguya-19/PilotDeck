@@ -320,7 +320,7 @@ function summarizeInput(input: unknown): string {
 
 /**
  * Returns true when a filesystem write tool (write_file / edit_file) targets
- * a markdown file under the project-local `.pilotdeck/plans` directory.
+ * a markdown file under the current plan directory.
  * Resolves relative paths against the permission context cwd so `./foo.md`
  * and the absolute path both match.
  */

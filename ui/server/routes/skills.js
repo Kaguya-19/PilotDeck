@@ -33,7 +33,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import multer from 'multer';
 import { getPilotDeckGateway } from '../pilotdeck-bridge.js';
-import { resolvePilotHome } from '../utils/pilotPaths.js';
+import { isVirtualProjectPath, resolvePilotHome } from '../utils/pilotPaths.js';
 import { moveDirectoryAcrossDevicesSafe } from '../utils/fileMoves.js';
 
 const execFileAsync = promisify(execFile);
@@ -64,11 +64,9 @@ function safeSlug(slug) {
   return typeof slug === 'string' && SLUG_RE.test(slug) && !slug.includes('..');
 }
 
-const GENERAL_CWD_PATHS = [path.resolve(PILOT_HOME)];
-
 function isGeneralCwd(projectPath) {
   if (!projectPath) return false;
-  return GENERAL_CWD_PATHS.includes(path.resolve(projectPath));
+  return isVirtualProjectPath(projectPath, PILOT_HOME);
 }
 
 function resolveRequestedScope(scope, projectPath, { defaultToProjectWhenAvailable = false } = {}) {
@@ -77,7 +75,10 @@ function resolveRequestedScope(scope, projectPath, { defaultToProjectWhenAvailab
 
   if (scope === 'project') {
     if (generalCwd) {
-      return { ok: true, scope: 'user', projectPath: null, wantProject: false };
+      return {
+        ok: false,
+        error: "project scope requires a real project (general chat doesn't qualify)",
+      };
     }
     if (!effectiveProjectPath) {
       return {

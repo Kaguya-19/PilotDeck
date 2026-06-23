@@ -1,4 +1,5 @@
 import { PermissionRuntime } from "../../permission/index.js";
+import { resolve } from "node:path";
 import type { LifecycleRuntime, PilotDeckHookEffect } from "../../lifecycle/index.js";
 import { toolError } from "../protocol/errors.js";
 import type { PilotDeckToolErrorCode } from "../protocol/errors.js";
@@ -25,6 +26,7 @@ export class ToolRuntime {
   ) {}
 
   async execute(call: PilotDeckToolCall, context: PilotDeckToolRuntimeContext): Promise<PilotDeckToolResult> {
+    context = withPlanDirectoryWorkspaceRoot(context);
     const startedAtDate = now(context);
     const startedAt = startedAtDate.toISOString();
     const tool = this.registry.get(call.name);
@@ -343,6 +345,27 @@ export class ToolRuntime {
       nonBlockingErrors: [],
     };
   }
+}
+
+function withPlanDirectoryWorkspaceRoot(context: PilotDeckToolRuntimeContext): PilotDeckToolRuntimeContext {
+  const planDirectoryPath = context.permissionContext.planDirectoryPath;
+  if (context.permissionContext.mode !== "plan" || !planDirectoryPath) {
+    return context;
+  }
+
+  const resolvedPlanDirectory = resolve(planDirectoryPath);
+  const roots = context.permissionContext.additionalWorkingDirectories;
+  if (roots.some((root) => resolve(root) === resolvedPlanDirectory)) {
+    return context;
+  }
+
+  return {
+    ...context,
+    permissionContext: {
+      ...context.permissionContext,
+      additionalWorkingDirectories: [...roots, resolvedPlanDirectory],
+    },
+  };
 }
 
 function findEffect<Type extends PilotDeckHookEffect["type"]>(

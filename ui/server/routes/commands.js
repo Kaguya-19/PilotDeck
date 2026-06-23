@@ -2,14 +2,13 @@ import express from 'express';
 import { promises as fs } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import os from 'os';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { CURSOR_MODELS, CODEX_MODELS } from '../../shared/modelConstants.js';
 import { parseFrontmatter } from '../utils/frontmatter.js';
 import { getClaudeRuntimeModelConfig, getClaudeRuntimeModelValues } from '../utils/claude-runtime-config.js';
 import { readPilotDeckConfigFile, resolveModel } from '../services/pilotdeckConfig.js';
-import { resolvePilotHome } from '../utils/pilotPaths.js';
+import { isVirtualProjectPath, resolvePilotHome } from '../utils/pilotPaths.js';
 import { executeTurnkeySlashCommand } from '../turnkey-slash.js';
 import { getRegisteredCommands } from '../../../src/adapters/channel/protocol/ChannelCommandRegistry.js';
 
@@ -19,6 +18,42 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const router = express.Router();
+const PILOT_HOME = resolvePilotHome(process.env);
+
+function isRealProjectPath(projectPath) {
+  return Boolean(projectPath) && !isVirtualProjectPath(projectPath, PILOT_HOME);
+}
+
+function isUnderPath(base, candidate) {
+  const rel = path.relative(path.resolve(base), path.resolve(candidate));
+  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+
+function projectRootFromPilotDeckCommandPath(commandPath) {
+  const normalized = path.resolve(commandPath).replace(/\\/g, '/');
+  for (const marker of ['/.pilotdeck/commands/', '/.pilotdeck/skills/']) {
+    const idx = normalized.indexOf(marker);
+    if (idx > 0) {
+      const root = normalized.slice(0, idx);
+      return process.platform === 'win32' ? root.replace(/\//g, '\\') : root;
+    }
+  }
+  return null;
+}
+
+function commandAccessBases(projectPath) {
+  const bases = [
+    path.join(PILOT_HOME, 'commands'),
+    path.join(PILOT_HOME, 'skills'),
+  ];
+  if (isRealProjectPath(projectPath)) {
+    bases.push(
+      path.join(projectPath, '.pilotdeck', 'commands'),
+      path.join(projectPath, '.pilotdeck', 'skills'),
+    );
+  }
+  return bases.map((base) => path.resolve(base));
+}
 
 /**
  * Slash commands curated to always appear at the top of the menu in this exact
@@ -695,9 +730,7 @@ Custom commands can be created in:
     // PilotDeck's virtual "general" workspace roots at ~/.pilotdeck. It looks
     // like a real projectPath but the user's mental model is general chat →
     // user/global scope. Force user scope with --global when needed.
-    const GENERAL_CWD_PATHS = [path.resolve(resolvePilotHome(process.env))];
-    const isGeneralCwd =
-      projectPath && GENERAL_CWD_PATHS.includes(path.resolve(projectPath));
+    const isGeneralCwd = isVirtualProjectPath(projectPath, PILOT_HOME);
     const effectiveProjectPath = isGeneralCwd ? null : projectPath;
 
     const scope = scopeOverride || (effectiveProjectPath ? 'project' : 'user');
@@ -720,7 +753,7 @@ Custom commands can be created in:
       workdir = effectiveProjectPath;
       dir = path.join('.pilotdeck', 'skills');
     } else {
-      workdir = path.join(os.homedir(), '.pilotdeck');
+      workdir = PILOT_HOME;
       dir = 'skills';
     }
     const installPath = path.join(workdir, dir, slug);
@@ -846,11 +879,9 @@ Custom commands can be created in:
 router.post('/list', async (req, res) => {
   try {
     const { projectPath } = req.body;
-    const homeDir = os.homedir();
-
     const customCommandSources = [];
 
-    if (projectPath) {
+    if (isRealProjectPath(projectPath)) {
       const projectCommandsDir = path.join(projectPath, '.pilotdeck', 'commands');
       const projectSkillsDir = path.join(projectPath, '.pilotdeck', 'skills');
       const [projectCommands, projectSkills] = await Promise.all([
@@ -860,8 +891,8 @@ router.post('/list', async (req, res) => {
       customCommandSources.push(...projectCommands, ...projectSkills);
     }
 
-    const userCommandsDir = path.join(homeDir, '.pilotdeck', 'commands');
-    const userSkillsDir = path.join(homeDir, '.pilotdeck', 'skills');
+    const userCommandsDir = path.join(PILOT_HOME, 'commands');
+    const userSkillsDir = path.join(PILOT_HOME, 'skills');
     const [userCommands, userSkills] = await Promise.all([
       scanCommandsDirectory(userCommandsDir, userCommandsDir, 'user'),
       scanSkillsDirectory(userSkillsDir, 'user'),
@@ -935,11 +966,11 @@ router.post('/load', async (req, res) => {
       });
     }
 
-    // Security: Prevent path traversal. Allow paths under any
+    // Security: allow only user-scope commands/skills or real-project commands/skills.
     const resolvedPath = path.resolve(commandPath);
-    const inHome = resolvedPath.startsWith(path.resolve(os.homedir()));
-    const inPilotdeckSubdir = /\.pilotdeck\/(commands|skills)\//.test(resolvedPath);
-    if (!inHome && !inPilotdeckSubdir) {
+    const impliedProjectPath = projectRootFromPilotDeckCommandPath(resolvedPath);
+    const allowedBases = commandAccessBases(impliedProjectPath);
+    if (!allowedBases.some((base) => isUnderPath(base, resolvedPath))) {
       return res.status(403).json({
         error: 'Access denied',
         message: 'Command must be in a .pilotdeck/commands or .pilotdeck/skills directory'
@@ -1057,21 +1088,8 @@ router.post('/execute', async (req, res) => {
     // Security: validate commandPath is within allowed directories.
     {
       const resolvedPath = path.resolve(commandPath);
-      const allowedBases = [
-        path.resolve(path.join(os.homedir(), '.pilotdeck', 'commands')),
-        path.resolve(path.join(os.homedir(), '.pilotdeck', 'skills')),
-      ];
-      if (context?.projectPath) {
-        allowedBases.push(
-          path.resolve(path.join(context.projectPath, '.pilotdeck', 'commands')),
-          path.resolve(path.join(context.projectPath, '.pilotdeck', 'skills')),
-        );
-      }
-      const isUnder = (base) => {
-        const rel = path.relative(base, resolvedPath);
-        return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
-      };
-      if (!allowedBases.some(isUnder)) {
+      const allowedBases = commandAccessBases(context?.projectPath);
+      if (!allowedBases.some((base) => isUnderPath(base, resolvedPath))) {
         return res.status(403).json({
           error: 'Access denied',
           message: 'Command must be in a .pilotdeck/commands or .pilotdeck/skills directory'

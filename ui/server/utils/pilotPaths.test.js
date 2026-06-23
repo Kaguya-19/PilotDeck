@@ -10,6 +10,8 @@ import {
 import {
     createCollisionResistantProjectId,
     createProjectId,
+    isDesktopRuntimeProjectPath,
+    isVirtualProjectPath,
     resolveProjectStorageId,
 } from './pilotPaths.js';
 import { getAlwaysOnRoot } from '../services/always-on-paths.js';
@@ -114,6 +116,37 @@ describe('UI project storage ID resolution', () => {
             );
         } finally {
             Object.defineProperty(process, 'platform', { value: originalPlatform });
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    it('recognizes desktop resources/runtime roots as virtual projects', () => {
+        const root = mkdtempSync(join(tmpdir(), 'pilotdeck-ui-runtime-root-'));
+        try {
+            const pilotHome = join(root, 'pilot-home');
+            const runtimeRoot = join(root, 'Program Files', 'PilotDeck', 'resources', 'runtime');
+            const env = { PILOTDECK_DESKTOP: '1' };
+
+            expect(isDesktopRuntimeProjectPath(runtimeRoot, env)).toBe(true);
+            expect(isVirtualProjectPath(runtimeRoot, pilotHome, env)).toBe(true);
+            expect(isVirtualProjectPath(join(root, 'repo'), pilotHome, env)).toBe(false);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    it('honors explicit desktop runtime root env override', () => {
+        const root = mkdtempSync(join(tmpdir(), 'pilotdeck-ui-runtime-env-'));
+        try {
+            const runtimeRoot = join(root, 'bundled-runtime');
+
+            expect(
+                isDesktopRuntimeProjectPath(runtimeRoot, {
+                    PILOTDECK_DESKTOP: '1',
+                    PILOTDECK_DESKTOP_RUNTIME_ROOT: runtimeRoot,
+                }),
+            ).toBe(true);
+        } finally {
             rmSync(root, { recursive: true, force: true });
         }
     });

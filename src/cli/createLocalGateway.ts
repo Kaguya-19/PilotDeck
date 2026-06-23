@@ -54,7 +54,13 @@ import {
 } from "../mcp/index.js";
 import { createModelRuntime, type ModelRuntime } from "../model/index.js";
 import { createDefaultPermissionContext, type PermissionRule } from "../permission/index.js";
-import { loadPilotConfig, resolvePilotHome, resolveProjectStorageId } from "../pilot/index.js";
+import {
+  ensureWritableDirectory,
+  loadPilotConfig,
+  resolvePilotHome,
+  resolveProjectStorageId,
+  resolveRuntimeArtifactFallbackDir,
+} from "../pilot/index.js";
 import { createPilotConfigStoreSync, type PilotConfigStore } from "../pilot/config/PilotConfigStore.js";
 import type { PilotAgentModelSelection, PilotConfigSnapshot } from "../pilot/config/types.js";
 import { DEFAULT_JUDGE_TIMEOUT_MS, DEFAULT_SUBAGENT_MAX_TOKENS, DEFAULT_ALLOWED_TOOLS, DEFAULT_TRIGGER_TIERS, type RouterConfig } from "../router/config/schema.js";
@@ -146,12 +152,22 @@ export function resolveBrowserUseOutputDir(input: {
   sessionKey: string;
 }): string {
   const projectId = resolveProjectStorageId(input.projectRoot, input.pilotHome);
-  return joinPath(
+  const preferredDir = joinPath(
     input.pilotHome,
     "browser_screenshots",
     projectId,
     sanitizeSessionIdForPath(input.sessionKey),
   );
+  const fallbackDir = resolveRuntimeArtifactFallbackDir({
+    pilotHome: input.pilotHome,
+    purpose: "browser_screenshots",
+    key: `${projectId}-${sanitizeSessionIdForPath(input.sessionKey)}`,
+  });
+  return ensureWritableDirectory({
+    preferredDir,
+    fallbackDir,
+    purpose: "browser_screenshots",
+  }).dir;
 }
 
 export function createLocalGateway(options: CreateLocalGatewayOptions = {}): CreateLocalGatewayResult {
@@ -232,7 +248,7 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
     now,
     onSessionEvict: (sessionKey) => registry.evictSessionMcp(sessionKey),
   });
-  const skillManager = new SkillManager({ pilotHome });
+  const skillManager = new SkillManager({ pilotHome, env });
   const gateway = new InProcessGateway(router, {
     now,
     serverInfo: { mode: "in_process", projectKey: projectRoot },
@@ -1035,7 +1051,11 @@ class ProjectRuntimeRegistry {
           };
         },
       };
-      const planFileManager = createPlanFileManager({ projectRoot });
+      const planFileManager = createPlanFileManager({
+        projectRoot,
+        pilotHome: this.options.pilotHome,
+        env: this.options.env,
+      });
       const planTodoManager = createPlanTodoStateManager();
       return {
         context: contextRuntime,

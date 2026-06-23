@@ -261,7 +261,7 @@ async function main(argv = process.argv.slice(2)): Promise<void> {
     // --- Server startup ---
 
     const envPort = Number.parseInt(env.PILOTDECK_GATEWAY_PORT ?? "", 10);
-    const extraChannels = await loadEnabledChannels(snapshot.config.adapters);
+    const extraChannels = await loadEnabledChannels(snapshot.config.adapters, { pilotHome });
     const feishuCfg = snapshot.config.adapters?.feishu;
     const feishuChannel = feishuCfg?.enabled === true
       ? new FeishuChannel({

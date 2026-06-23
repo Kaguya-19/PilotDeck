@@ -31,7 +31,7 @@ const ENTER_PLAN_MODE_DESCRIPTION =
 
 const EXIT_PLAN_MODE_DESCRIPTION =
   "Signal that your plan is complete and ready for user review. " +
-  "Pass the plan_file_path for the markdown plan you want to submit from `.pilotdeck/plans`. " +
+  "Pass the plan_file_path for the markdown plan you want to submit from the designated plan directory. " +
   "Do NOT use ask_user_question to ask about plan approval — that is exactly what this tool does.";
 
 function buildEnterPlanModeResult(planDirectoryPath: string | undefined): string {
@@ -177,7 +177,7 @@ export function createExitPlanModeTool(): PilotDeckToolDefinition<ExitPlanModeIn
       properties: {
         plan_file_path: {
           type: "string",
-          description: "Path to the markdown plan file to submit from the current project's `.pilotdeck/plans` directory.",
+          description: "Path to the markdown plan file to submit from the designated plan directory.",
         },
       },
     },
@@ -196,7 +196,7 @@ export function createExitPlanModeTool(): PilotDeckToolDefinition<ExitPlanModeIn
       if (!resolvedPlanFilePath) {
         throw new PilotDeckToolRuntimeError(
           "invalid_tool_input",
-          "plan_file_path must point to a markdown file under the current project's .pilotdeck/plans directory.",
+          "plan_file_path must point to a markdown file under the designated plan directory.",
         );
       }
       let plan: string;

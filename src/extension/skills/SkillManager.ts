@@ -4,6 +4,7 @@ import { basename, isAbsolute, join, posix, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 
 import { getPilotExtensionPaths } from "../../pilot/paths.js";
+import { isVirtualProjectRoot } from "../../pilot/writablePaths.js";
 import type {
   SkillAddressInput,
   SkillCreateInput,
@@ -54,6 +55,7 @@ const RISKY_EXTS = new Set([
 export type SkillManagerOptions = {
   /** Resolved `~/.pilotdeck` root. Required. */
   pilotHome: string;
+  env?: Record<string, string | undefined>;
   /**
    * "General chat" cwds we treat as not-a-real-project. Defaults to
    * `pilotHome` (~/.pilotdeck). When the caller passes a `projectKey`
@@ -74,9 +76,11 @@ export type SkillManagerOptions = {
 export class SkillManager {
   private readonly pilotHome: string;
   private readonly generalCwdPaths: string[];
+  private readonly env?: Record<string, string | undefined>;
 
   constructor(options: SkillManagerOptions) {
     this.pilotHome = resolve(options.pilotHome);
+    this.env = options.env;
     const defaults = [this.pilotHome];
     this.generalCwdPaths = (options.generalCwdPaths ?? defaults).map((p) => resolve(p));
   }
@@ -95,7 +99,12 @@ export class SkillManager {
 
   private isGeneralCwd(projectKey: string | null | undefined): boolean {
     if (!projectKey) return false;
-    return this.generalCwdPaths.includes(resolve(projectKey));
+    return this.generalCwdPaths.includes(resolve(projectKey))
+      || isVirtualProjectRoot({
+        projectRoot: projectKey,
+        pilotHome: this.pilotHome,
+        env: this.env,
+      });
   }
 
   /** Resolve a `(scope, slug, projectKey)` triple to a target dir. */
