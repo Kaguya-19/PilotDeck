@@ -132,6 +132,7 @@ export type WebSubmitTurnInput = {
   attachments?: WebChannelAttachment[];
   mode?: WebGatewayMode;
   basePermissionMode?: WebGatewayMode;
+  /** Allow model-visible plan mode tools. Defaults to true only for explicit plan-mode turns. */
   allowPlanModeTools?: boolean;
   runId?: string;
 };

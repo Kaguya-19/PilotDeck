@@ -79,7 +79,7 @@ export type GatewaySubmitTurnInput = {
   mode?: GatewayMode;
   /** The user's actual permission preference before plan-mode override. */
   basePermissionMode?: GatewayMode;
-  /** Allow model-visible plan mode tools for this turn. Defaults to true for web, false elsewhere. */
+  /** Allow model-visible plan mode tools for this turn. Defaults to true only for explicit plan-mode turns. */
   allowPlanModeTools?: boolean;
   runId?: string;
   maxTurns?: number;
