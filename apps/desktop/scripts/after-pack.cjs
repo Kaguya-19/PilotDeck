@@ -7,6 +7,7 @@ const {
   realpathSync,
   rmSync,
 } = require("node:fs");
+const { execFileSync } = require("node:child_process");
 const { dirname, join, resolve } = require("node:path");
 
 function getResourcesDir(context) {
@@ -54,6 +55,46 @@ function materializeSymlinks(root) {
   return count;
 }
 
+function hasOwn(object, key) {
+  return Object.prototype.hasOwnProperty.call(object, key);
+}
+
+function hasPackagedSigningConfig() {
+  return Boolean(process.env.CSC_LINK || process.env.CSC_NAME);
+}
+
+function hasDiscoverableMacSigningIdentity() {
+  if (process.platform !== "darwin") return false;
+  if (process.env.CSC_IDENTITY_AUTO_DISCOVERY === "false") return false;
+
+  try {
+    const output = execFileSync("security", ["find-identity", "-v", "-p", "codesigning"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return /(Developer ID Application|Mac Developer):/.test(output);
+  } catch {
+    return false;
+  }
+}
+
+function ensureMacSigningFallback(context) {
+  if (context.electronPlatformName !== "darwin") return;
+
+  const packager = context.packager;
+  const configs = [
+    packager.platformSpecificBuildOptions,
+    packager._activePackConfig,
+  ].filter(Boolean);
+  if (configs.some((config) => hasOwn(config, "identity"))) return;
+  if (hasPackagedSigningConfig() || hasDiscoverableMacSigningIdentity()) return;
+
+  for (const config of configs) {
+    config.identity = "-";
+  }
+  console.log("[desktop] no macOS signing identity found; using ad-hoc signing fallback");
+}
+
 module.exports = async function afterPack(context) {
   const desktopRoot = resolve(__dirname, "..");
   const resourcesDir = getResourcesDir(context);
@@ -97,4 +138,5 @@ module.exports = async function afterPack(context) {
   if (existsSync(join(target, "tsx"))) {
     throw new Error(`Desktop runtime should not package tsx: ${join(target, "tsx")}`);
   }
+  ensureMacSigningFallback(context);
 };
