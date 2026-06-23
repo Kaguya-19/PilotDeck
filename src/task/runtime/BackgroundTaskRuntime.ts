@@ -4,9 +4,10 @@
  * LocalShellTask behaviour (T1-T11).
  *
  * Process model:
- *   - `start(spec)` spawns a *detached* child via `spawn(command, { shell:
- *     true, detached: true })` and immediately calls `child.unref()` so the
- *     PilotDeck process can exit without waiting for the child. (T11)
+ *   - `start(spec)` spawns a child via `spawn(command, { shell: true })`.
+ *     On macOS/Linux it is detached so `stop` can target the process group;
+ *     on Windows it is not detached because detached console processes create
+ *     visible console windows in GUI apps.
  *   - stdout / stderr are piped into a `TaskOutputStore` (1 MB ring buffer
  *     + optional disk spill). The runtime never blocks on the stream — the
  *     child runs free until either it exits or `stop` is called.
@@ -16,9 +17,8 @@
  *     hooks the cron-PR coordination notes call for (priority window
  *     200-299, see §6.5.5 step 7 of the deferred-feature guide).
  *
- * Platform support: macOS, Linux, and Windows. On Windows, `child.kill()`
- * maps SIGTERM/SIGKILL to TerminateProcess; `detached` creates a new
- * console group rather than a Unix process group.
+ * Platform support: macOS, Linux, and Windows. On Windows, `taskkill /T /F`
+ * stops the shell and descendants without creating a visible console window.
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
@@ -146,7 +146,7 @@ export class BackgroundTaskRuntime {
         env: spec.env,
         shell: true,
         stdio: ["ignore", "pipe", "pipe"],
-        detached: true,
+        detached: process.platform !== "win32",
         windowsHide: process.platform === "win32",
       });
       child.unref();
@@ -207,10 +207,23 @@ export class BackgroundTaskRuntime {
     if (task.status !== "running") return;
     if (!child) return;
     task.interrupted = true;
+    if (process.platform === "win32") {
+      await killWindowsProcessTree(child);
+      await waitForDoneOrTimeout(done, options.graceMs ?? DEFAULT_GRACE_MS);
+      return;
+    }
     try {
-      child.kill("SIGTERM");
+      if (child.pid) {
+        process.kill(-child.pid, "SIGTERM");
+      } else {
+        child.kill("SIGTERM");
+      }
     } catch {
-      // child already exited
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        // child already exited
+      }
     }
     const graceMs = options.graceMs ?? DEFAULT_GRACE_MS;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -219,9 +232,17 @@ export class BackgroundTaskRuntime {
       new Promise<void>((resolve) => {
         timer = setTimeout(() => {
           try {
-            child.kill("SIGKILL");
+            if (child.pid) {
+              process.kill(-child.pid, "SIGKILL");
+            } else {
+              child.kill("SIGKILL");
+            }
           } catch {
-            // already exited between the timer firing and kill()
+            try {
+              child.kill("SIGKILL");
+            } catch {
+              // already exited between the timer firing and kill()
+            }
           }
           resolve();
         }, graceMs);
@@ -258,4 +279,55 @@ export class BackgroundTaskRuntime {
     await entry.done;
     return entry.task;
   }
+}
+
+async function waitForDoneOrTimeout(done: Promise<void>, timeoutMs: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    done,
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, timeoutMs);
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
+}
+
+function killWindowsProcessTree(child: ChildProcess): Promise<void> {
+  if (!child.pid) {
+    child.kill("SIGTERM");
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+
+    try {
+      const killer = spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
+        stdio: "ignore",
+        windowsHide: true,
+      });
+      killer.once("exit", finish);
+      killer.once("error", () => {
+        try {
+          child.kill("SIGTERM");
+        } catch {
+          // best effort
+        }
+        finish();
+      });
+      killer.unref();
+    } catch {
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        // best effort
+      }
+      finish();
+    }
+  });
 }
