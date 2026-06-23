@@ -18,6 +18,7 @@ import { dirname } from 'path';
 import os from 'os';
 import { extractProjectDirectory } from '../projects.js';
 import { detectTaskMasterMCPServer } from '../utils/mcp-detector.js';
+import { prepareCliSpawn } from '../utils/processSpawn.js';
 import { broadcastTaskMasterProjectUpdate, broadcastTaskMasterTasksUpdate } from '../utils/taskmaster-websocket.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -32,11 +33,11 @@ const router = express.Router();
 async function checkTaskMasterInstallation() {
     return new Promise((resolve) => {
         // Check if task-master command is available
-        const child = spawn('which', ['task-master'], { 
+        const whichSpawn = prepareCliSpawn('which', ['task-master'], {
             stdio: ['ignore', 'pipe', 'pipe'],
             shell: true,
-            windowsHide: process.platform === 'win32'
         });
+        const child = spawn(whichSpawn.command, whichSpawn.args, whichSpawn.options);
         
         let output = '';
         let errorOutput = '';
@@ -52,11 +53,11 @@ async function checkTaskMasterInstallation() {
         child.on('close', (code) => {
             if (code === 0 && output.trim()) {
                 // TaskMaster is installed, get version
-                const versionChild = spawn('task-master', ['--version'], { 
+                const versionSpawn = prepareCliSpawn('task-master', ['--version'], {
                     stdio: ['ignore', 'pipe', 'pipe'],
                     shell: true,
-                    windowsHide: process.platform === 'win32'
                 });
+                const versionChild = spawn(versionSpawn.command, versionSpawn.args, versionSpawn.options);
                 
                 let versionOutput = '';
                 
@@ -476,14 +477,12 @@ router.get('/next/:projectName', async (req, res) => {
 
         // Try to execute task-master next command
         try {
-            const { spawn } = await import('child_process');
-            
-            const nextTaskCommand = spawn('task-master', ['next'], {
+            const nextSpawn = prepareCliSpawn('task-master', ['next'], {
                 cwd: projectPath,
                 stdio: ['pipe', 'pipe', 'pipe'],
                 shell: true,
-                windowsHide: process.platform === 'win32'
             });
+            const nextTaskCommand = spawn(nextSpawn.command, nextSpawn.args, nextSpawn.options);
 
             let stdout = '';
             let stderr = '';
@@ -1000,12 +999,12 @@ router.post('/init/:projectName', async (req, res) => {
         }
 
         // Run taskmaster init command
-        const initProcess = spawn('npx', ['task-master', 'init'], {
+        const initSpawn = prepareCliSpawn('npx', ['task-master', 'init'], {
             cwd: projectPath,
             stdio: ['pipe', 'pipe', 'pipe'],
             shell: true,
-            windowsHide: process.platform === 'win32'
         });
+        const initProcess = spawn(initSpawn.command, initSpawn.args, initSpawn.options);
 
         let stdout = '';
         let stderr = '';
@@ -1105,12 +1104,12 @@ router.post('/add-task/:projectName', async (req, res) => {
         }
 
         // Run task-master add-task command
-        const addTaskProcess = spawn('npx', args, {
+        const addTaskSpawn = prepareCliSpawn('npx', args, {
             cwd: projectPath,
             stdio: ['pipe', 'pipe', 'pipe'],
             shell: true,
-            windowsHide: process.platform === 'win32'
         });
+        const addTaskProcess = spawn(addTaskSpawn.command, addTaskSpawn.args, addTaskSpawn.options);
 
         let stdout = '';
         let stderr = '';
@@ -1187,12 +1186,12 @@ router.put('/update-task/:projectName/:taskId', async (req, res) => {
 
         // If only updating status, use set-status command
         if (status && Object.keys(req.body).length === 1) {
-            const setStatusProcess = spawn('npx', ['task-master-ai', 'set-status', `--id=${taskId}`, `--status=${status}`], {
+            const setStatusSpawn = prepareCliSpawn('npx', ['task-master-ai', 'set-status', `--id=${taskId}`, `--status=${status}`], {
                 cwd: projectPath,
                 stdio: ['pipe', 'pipe', 'pipe'],
                 shell: true,
-                windowsHide: process.platform === 'win32'
             });
+            const setStatusProcess = spawn(setStatusSpawn.command, setStatusSpawn.args, setStatusSpawn.options);
 
             let stdout = '';
             let stderr = '';
@@ -1241,12 +1240,12 @@ router.put('/update-task/:projectName/:taskId', async (req, res) => {
             
             const prompt = `Update task with the following changes: ${updates.join(', ')}`;
 
-            const updateProcess = spawn('npx', ['task-master-ai', 'update-task', `--id=${taskId}`, `--prompt=${prompt}`], {
+            const updateSpawn = prepareCliSpawn('npx', ['task-master-ai', 'update-task', `--id=${taskId}`, `--prompt=${prompt}`], {
                 cwd: projectPath,
                 stdio: ['pipe', 'pipe', 'pipe'],
                 shell: true,
-                windowsHide: process.platform === 'win32'
             });
+            const updateProcess = spawn(updateSpawn.command, updateSpawn.args, updateSpawn.options);
 
             let stdout = '';
             let stderr = '';
@@ -1342,12 +1341,12 @@ router.post('/parse-prd/:projectName', async (req, res) => {
         args.push('--research'); // Use research for better PRD parsing
 
         // Run task-master parse-prd command
-        const parsePRDProcess = spawn('npx', args, {
+        const parsePRDSpawn = prepareCliSpawn('npx', args, {
             cwd: projectPath,
             stdio: ['pipe', 'pipe', 'pipe'],
             shell: true,
-            windowsHide: process.platform === 'win32'
         });
+        const parsePRDProcess = spawn(parsePRDSpawn.command, parsePRDSpawn.args, parsePRDSpawn.options);
 
         let stdout = '';
         let stderr = '';

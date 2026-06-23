@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { spawn } from 'child_process';
+import { prepareCliSpawn } from './processSpawn.js';
 
 const PLUGINS_DIR = path.join(os.homedir(), '.pilotdeck', 'plugins');
 const PLUGINS_CONFIG_PATH = path.join(os.homedir(), '.pilotdeck', 'plugins.json');
@@ -106,12 +107,12 @@ function runBuildIfNeeded(dir, packageJsonPath, onSuccess, onError) {
     return onSuccess(); // Unreadable package.json — skip build
   }
 
-  const buildProcess = spawn('npm', ['run', 'build'], {
+  const buildSpawn = prepareCliSpawn('npm', ['run', 'build'], {
     cwd: dir,
     stdio: ['ignore', 'pipe', 'pipe'],
     shell: true,
-    windowsHide: process.platform === 'win32',
   });
+  const buildProcess = spawn(buildSpawn.command, buildSpawn.args, buildSpawn.options);
 
   let stderr = '';
   let settled = false;
@@ -341,12 +342,12 @@ export function installPluginFromGit(url) {
       // --ignore-scripts prevents postinstall hooks from executing arbitrary code.
       const packageJsonPath = path.join(tempDir, 'package.json');
       if (fs.existsSync(packageJsonPath)) {
-        const npmProcess = spawn('npm', ['install', '--ignore-scripts'], {
+        const npmSpawn = prepareCliSpawn('npm', ['install', '--ignore-scripts'], {
           cwd: tempDir,
           stdio: ['ignore', 'pipe', 'pipe'],
           shell: true,
-          windowsHide: process.platform === 'win32',
         });
+        const npmProcess = spawn(npmSpawn.command, npmSpawn.args, npmSpawn.options);
 
         npmProcess.on('close', (npmCode) => {
           if (npmCode !== 0) {
@@ -411,12 +412,12 @@ export function updatePluginFromGit(name) {
       // Re-run npm install if package.json exists
       const packageJsonPath = path.join(pluginDir, 'package.json');
       if (fs.existsSync(packageJsonPath)) {
-        const npmProcess = spawn('npm', ['install', '--ignore-scripts'], {
+        const npmSpawn = prepareCliSpawn('npm', ['install', '--ignore-scripts'], {
           cwd: pluginDir,
           stdio: ['ignore', 'pipe', 'pipe'],
           shell: true,
-          windowsHide: process.platform === 'win32',
         });
+        const npmProcess = spawn(npmSpawn.command, npmSpawn.args, npmSpawn.options);
         npmProcess.on('close', (npmCode) => {
           if (npmCode !== 0) {
             return reject(new Error(`npm install for ${name} failed (exit code ${npmCode})`));

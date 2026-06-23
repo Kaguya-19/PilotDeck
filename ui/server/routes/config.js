@@ -2,6 +2,7 @@ import express from 'express';
 import fsPromises from 'fs/promises';
 import path from 'path';
 import { spawn } from 'child_process';
+import { prepareBackgroundSpawnOptions } from '../utils/processSpawn.js';
 import { parse as parseYaml } from 'yaml';
 import {
   buildDefaultPilotDeckConfig,
@@ -467,11 +468,10 @@ router.post('/open', async (_req, res) => {
       : process.platform === 'win32'
         ? [`/select,${configPath}`]
         : [path.dirname(configPath)];
-    const child = spawn(command, args, {
+    const child = spawn(command, args, prepareBackgroundSpawnOptions({
       stdio: 'ignore',
       detached: true,
-      windowsHide: process.platform === 'win32',
-    });
+    }));
     child.unref();
     res.json({ success: true, path: configPath });
   } catch (error) {

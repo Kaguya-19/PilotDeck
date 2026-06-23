@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import { spawn } from 'child_process';
 import { getPilotDeckGateway } from '../pilotdeck-bridge.js';
+import { prepareCliSpawn } from '../utils/processSpawn.js';
 import {
   listMcpConfigFiles,
   readMcpConfigFile,
@@ -83,15 +84,11 @@ router.put('/config/:scope', async (req, res) => {
 router.get('/cli/list', async (req, res) => {
   try {
     console.log('📋 Listing MCP servers using Claude CLI');
-    
-    const { spawn } = await import('child_process');
-    const { promisify } = await import('util');
-    const exec = promisify(spawn);
-    
-    const process = spawn('claude', ['mcp', 'list'], {
+
+    const cliSpawn = prepareCliSpawn('claude', ['mcp', 'list'], {
       stdio: ['pipe', 'pipe', 'pipe'],
-      windowsHide: globalThis.process.platform === 'win32'
     });
+    const process = spawn(cliSpawn.command, cliSpawn.args, cliSpawn.options);
     
     let stdout = '';
     let stderr = '';
@@ -131,8 +128,6 @@ router.post('/cli/add', async (req, res) => {
     
     console.log(`➕ Adding MCP server using Claude CLI (${scope} scope):`, name);
     
-    const { spawn } = await import('child_process');
-    
     let cliArgs = ['mcp', 'add'];
     
     // Add scope flag
@@ -167,7 +162,6 @@ router.post('/cli/add', async (req, res) => {
     // For local scope, we need to run the command in the project directory
     const spawnOptions = {
       stdio: ['pipe', 'pipe', 'pipe'],
-      windowsHide: globalThis.process.platform === 'win32'
     };
     
     if (scope === 'local' && projectPath) {
@@ -175,7 +169,8 @@ router.post('/cli/add', async (req, res) => {
       console.log('📁 Running in project directory:', projectPath);
     }
     
-    const process = spawn('claude', cliArgs, spawnOptions);
+    const cliSpawn = prepareCliSpawn('claude', cliArgs, spawnOptions);
+    const process = spawn(cliSpawn.command, cliSpawn.args, cliSpawn.options);
     
     let stdout = '';
     let stderr = '';
@@ -249,8 +244,6 @@ router.post('/cli/add-json', async (req, res) => {
       });
     }
     
-    const { spawn } = await import('child_process');
-    
     const cliArgs = ['mcp', 'add-json', '--scope', scope, name];
     
     // Add the JSON config as a properly formatted string
@@ -262,7 +255,6 @@ router.post('/cli/add-json', async (req, res) => {
     // For local scope, we need to run the command in the project directory
     const spawnOptions = {
       stdio: ['pipe', 'pipe', 'pipe'],
-      windowsHide: globalThis.process.platform === 'win32'
     };
     
     if (scope === 'local' && projectPath) {
@@ -270,7 +262,8 @@ router.post('/cli/add-json', async (req, res) => {
       console.log('📁 Running in project directory:', projectPath);
     }
     
-    const process = spawn('claude', cliArgs, spawnOptions);
+    const cliSpawn = prepareCliSpawn('claude', cliArgs, spawnOptions);
+    const process = spawn(cliSpawn.command, cliSpawn.args, cliSpawn.options);
     
     let stdout = '';
     let stderr = '';
@@ -322,8 +315,6 @@ router.delete('/cli/remove/:name', async (req, res) => {
     
     console.log('🗑️ Removing MCP server using Claude CLI:', actualName, 'scope:', actualScope);
     
-    const { spawn } = await import('child_process');
-    
     // Build command args based on scope
     let cliArgs = ['mcp', 'remove'];
     
@@ -339,10 +330,10 @@ router.delete('/cli/remove/:name', async (req, res) => {
     
     console.log('🔧 Running Claude CLI command:', 'claude', cliArgs.join(' '));
     
-    const process = spawn('claude', cliArgs, {
+    const cliSpawn = prepareCliSpawn('claude', cliArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
-      windowsHide: globalThis.process.platform === 'win32'
     });
+    const process = spawn(cliSpawn.command, cliSpawn.args, cliSpawn.options);
     
     let stdout = '';
     let stderr = '';
@@ -382,12 +373,10 @@ router.get('/cli/get/:name', async (req, res) => {
     
     console.log('📄 Getting MCP server details using Claude CLI:', name);
     
-    const { spawn } = await import('child_process');
-    
-    const process = spawn('claude', ['mcp', 'get', name], {
+    const cliSpawn = prepareCliSpawn('claude', ['mcp', 'get', name], {
       stdio: ['pipe', 'pipe', 'pipe'],
-      windowsHide: globalThis.process.platform === 'win32'
     });
+    const process = spawn(cliSpawn.command, cliSpawn.args, cliSpawn.options);
     
     let stdout = '';
     let stderr = '';
