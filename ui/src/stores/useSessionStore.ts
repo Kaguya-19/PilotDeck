@@ -267,6 +267,59 @@ function isLocalInterruptDuplicate(
 // prior turns). The refreshFromServer cleanup already removes non-streaming
 // realtime messages once the server commits the current turn's data.
 
+function hasEquivalentServerMessage(
+  realtimeMessage: NormalizedMessage,
+  serverMessages: NormalizedMessage[],
+): boolean {
+  const realtimeText = normalizeRealtimeText(realtimeMessage.content);
+  if (!realtimeText) return false;
+
+  let candidates = serverMessages;
+  if (realtimeMessage.serverTailIdAtStart) {
+    const tailIndex = serverMessages.findIndex((message) =>
+      message.id === realtimeMessage.serverTailIdAtStart
+    );
+    if (tailIndex < 0) return false;
+    candidates = serverMessages.slice(tailIndex + 1);
+  } else {
+    let lastUserIndex = -1;
+    for (let index = serverMessages.length - 1; index >= 0; index -= 1) {
+      const message = serverMessages[index];
+      if (message.kind === 'text' && message.role === 'user') {
+        lastUserIndex = index;
+        break;
+      }
+    }
+    if (lastUserIndex >= 0) {
+      candidates = serverMessages.slice(lastUserIndex + 1);
+    }
+  }
+
+  return candidates.some((serverMessage) => {
+    if (serverMessage.kind !== realtimeMessage.kind) return false;
+    if (serverMessage.role !== realtimeMessage.role) return false;
+    return normalizeRealtimeText(serverMessage.content) === realtimeText;
+  });
+}
+
+export function shouldKeepRealtimeAfterServerRefresh(
+  realtimeMessage: NormalizedMessage,
+  serverMessages: NormalizedMessage[],
+): boolean {
+  if (realtimeMessage.id.startsWith('__streaming_')) {
+    return true;
+  }
+
+  if (
+    realtimeMessage.isFinal === true
+    && (realtimeMessage.kind === 'text' || realtimeMessage.kind === 'thinking')
+  ) {
+    return !hasEquivalentServerMessage(realtimeMessage, serverMessages);
+  }
+
+  return false;
+}
+
 /**
  * Compute merged messages: server + realtime, deduped by id.
  * Server messages take priority (they're the persisted source of truth).
@@ -554,7 +607,7 @@ export function useSessionStore() {
           messages.filter(m => m.kind === 'tool_use' && m.toolId).map(m => m.toolId!)
         );
         slot.realtimeMessages = slot.realtimeMessages.filter(m => {
-          if (m.id.startsWith('__streaming_')) return true;
+          if (shouldKeepRealtimeAfterServerRefresh(m, messages)) return true;
           if (serverIds.has(m.id)) return false;
           if (m.kind === 'tool_use' && m.toolId && serverToolIds.has(m.toolId)) return false;
           return (Date.parse(m.timestamp) || 0) > watermark;
@@ -908,14 +961,14 @@ export function useSessionStore() {
       slot.total = data.total ?? slot.serverMessages.length;
       slot.hasMore = Boolean(data.hasMore);
       slot.fetchedAt = Date.now();
-      // Server is authoritative — keep only active streaming messages in
-      // realtime (they have live content the server hasn't persisted yet).
-      // All other realtime messages are now redundant.
-      // BUT: only clean realtime if server actually returned data THIS time.
-      // If server returned empty (messages not committed yet), keep realtime intact.
+      // Server is authoritative, but a post-complete refresh can race the
+      // transcript writer/read path and return a non-empty yet not-quite-final
+      // snapshot. Keep finalized local stream text until the server returns
+      // an equivalent assistant message; otherwise the UI can show "complete"
+      // while the model's visible answer disappears.
       if (slot.realtimeMessages.length > 0 && incomingMessages.length > 0) {
-        slot.realtimeMessages = slot.realtimeMessages.filter(m =>
-          m.id.startsWith('__streaming_')
+        slot.realtimeMessages = slot.realtimeMessages.filter((message) =>
+          shouldKeepRealtimeAfterServerRefresh(message, incomingMessages)
         );
       }
       recomputeMergedIfNeeded(slot);
@@ -1011,6 +1064,7 @@ export function useSessionStore() {
         id: newId,
         kind: 'text',
         role: 'assistant',
+        isFinal: true,
       };
       recomputeMergedIfNeeded(slot);
       notify(sessionId);
@@ -1042,6 +1096,9 @@ export function useSessionStore() {
       notify(sessionId);
       return;
     } else {
+      const serverTailId = slot.serverMessages.length > 0
+        ? slot.serverMessages[slot.serverMessages.length - 1].id
+        : null;
       const msg: NormalizedMessage = {
         id: streamId,
         sessionId,
@@ -1049,6 +1106,7 @@ export function useSessionStore() {
         provider: msgProvider,
         kind: 'thinking',
         content: accumulatedText,
+        serverTailIdAtStart: serverTailId ?? undefined,
       };
       slot.realtimeMessages = [...slot.realtimeMessages, msg];
     }
@@ -1072,6 +1130,7 @@ export function useSessionStore() {
       slot.realtimeMessages[idx] = {
         ...stream,
         id: newId,
+        isFinal: true,
       };
       recomputeMergedIfNeeded(slot);
       notify(sessionId);

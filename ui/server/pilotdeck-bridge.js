@@ -903,8 +903,11 @@ export async function runChatViaGateway(
             ...(options.workspaceCwd ? { workspaceCwd: options.workspaceCwd } : {}),
         });
 
+        let sawTurnCompleted = false;
+        let sawGatewayError = false;
         for await (const event of stream) {
             if (event && event.type === 'error') {
+                sawGatewayError = true;
                 console.error(
                     '[pilotdeck-bridge] gateway error event:',
                     JSON.stringify(
@@ -934,6 +937,7 @@ export async function runChatViaGateway(
             // input box) does NOT trigger the stale-abort path while we
             // wait for the async generator to fully close.
             if (event && event.type === 'turn_completed') {
+                sawTurnCompleted = true;
                 clearActiveRunIfCurrent(state, runId);
             }
             for (const frame of gatewayEventToFrames(event, sessionKey, provider)) {
@@ -941,15 +945,20 @@ export async function runChatViaGateway(
             }
         }
 
-        writer.send(
-            createNormalizedMessage({
-                provider,
-                sessionId: sessionKey,
-                kind: 'complete',
-                exitCode: 0,
-                success: true,
-            }),
-        );
+        if (!sawTurnCompleted && !sawGatewayError) {
+            const message = 'Gateway stream ended before turn_completed; no final assistant response was received.';
+            console.warn(`[pilotdeck-bridge] ${message}`, { sessionKey, projectKey, runId });
+            writer.send(
+                createNormalizedMessage({
+                    provider,
+                    sessionId: sessionKey,
+                    kind: 'error',
+                    code: 'gateway_stream_ended_without_completion',
+                    content: message,
+                    userHint: 'The model stream ended before PilotDeck received a final turn result. Please retry this message; if it repeats, check the gateway/model provider logs.',
+                }),
+            );
+        }
     } catch (error) {
 
         console.error(
