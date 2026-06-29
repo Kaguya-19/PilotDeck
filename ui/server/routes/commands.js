@@ -9,6 +9,7 @@ import { CURSOR_MODELS, CODEX_MODELS } from '../../shared/modelConstants.js';
 import { parseFrontmatter } from '../utils/frontmatter.js';
 import { getClaudeRuntimeModelConfig, getClaudeRuntimeModelValues } from '../utils/claude-runtime-config.js';
 import { readPilotDeckConfigFile, resolveModel } from '../services/pilotdeckConfig.js';
+import { execClawhub, isClawhubNotFoundError } from '../utils/clawhubCli.js';
 import { resolvePilotHome } from '../utils/pilotPaths.js';
 import { executeTurnkeySlashCommand } from '../turnkey-slash.js';
 import { getRegisteredCommands } from '../../../src/adapters/channel/protocol/ChannelCommandRegistry.js';
@@ -736,7 +737,7 @@ Custom commands can be created in:
     let stderr = '';
     let runError = null;
     try {
-      const result = await execFileAsync('clawhub', clawArgs, {
+      const result = await execClawhub(clawArgs, {
         timeout: 120_000,
         maxBuffer: 10 * 1024 * 1024,
       });
@@ -768,14 +769,14 @@ Custom commands can be created in:
       /* SKILL.md missing — installed stays false */
     }
 
-    if (runError && runError.code === 'ENOENT') {
+    if (runError && isClawhubNotFoundError(runError)) {
       return {
         type: 'builtin',
         action: 'skillInstall',
         data: {
           error: true,
           message:
-            'clawhub CLI not found in PATH. Install it with `npm install -g clawhub`, then retry.',
+            'ClawHub CLI is unavailable. Reinstall PilotDeck or install `clawhub` on PATH, then retry.',
         },
       };
     }

@@ -29,14 +29,12 @@ import express from 'express';
 import { promises as fs } from 'fs';
 import path from 'path';
 import os from 'os';
-import { execFile } from 'child_process';
-import { promisify } from 'util';
 import multer from 'multer';
 import { getPilotDeckGateway } from '../pilotdeck-bridge.js';
+import { execClawhub, isClawhubNotFoundError } from '../utils/clawhubCli.js';
 import { resolvePilotHome } from '../utils/pilotPaths.js';
 import { moveDirectoryAcrossDevicesSafe } from '../utils/fileMoves.js';
 
-const execFileAsync = promisify(execFile);
 const router = express.Router();
 
 const upload = multer({
@@ -487,13 +485,13 @@ router.post('/clawhub/search', async (req, res) => {
 
     let stdout = '';
     try {
-      const r = await execFileAsync('clawhub', args, { timeout: 30_000, maxBuffer: 4 * 1024 * 1024 });
+      const r = await execClawhub(args, { timeout: 30_000, maxBuffer: 4 * 1024 * 1024 });
       stdout = r.stdout || '';
     } catch (e) {
-      if (e.code === 'ENOENT') {
+      if (isClawhubNotFoundError(e)) {
         return res
           .status(503)
-          .json({ error: 'clawhub CLI not found in PATH. Install with `npm install -g clawhub`.' });
+          .json({ error: 'ClawHub CLI is unavailable. Reinstall PilotDeck or install `clawhub` on PATH.' });
       }
       stdout = e.stdout || '';
       if (!stdout) {
@@ -557,14 +555,14 @@ router.post('/clawhub/install', async (req, res) => {
     let stderr = '';
     let runError = null;
     try {
-      const r = await execFileAsync('clawhub', args, { timeout: 120_000, maxBuffer: 10 * 1024 * 1024 });
+      const r = await execClawhub(args, { timeout: 120_000, maxBuffer: 10 * 1024 * 1024 });
       stdout = r.stdout || '';
       stderr = r.stderr || '';
     } catch (e) {
-      if (e.code === 'ENOENT') {
+      if (isClawhubNotFoundError(e)) {
         return res
           .status(503)
-          .json({ error: 'clawhub CLI not found in PATH. Install with `npm install -g clawhub`.' });
+          .json({ error: 'ClawHub CLI is unavailable. Reinstall PilotDeck or install `clawhub` on PATH.' });
       }
       runError = e;
       stdout = e.stdout || '';
