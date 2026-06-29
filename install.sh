@@ -555,22 +555,13 @@ else
 fi
 echo ""
 
-echo "Checking bundled ClawHub CLI..."
-cd "$INSTALL_DIR"
-if CLAWHUB_VERSION="$(node --input-type=module - <<'NODE'
-import { execClawhub } from './ui/server/utils/clawhubCli.js';
-
-try {
-  const result = await execClawhub(['--cli-version'], { timeout: 30_000 });
-  process.stdout.write((result.stdout || result.stderr || '').trim());
-} catch {
-  process.exit(1);
-}
-NODE
-)"; then
-  ok "Bundled ClawHub CLI available (${CLAWHUB_VERSION:-unknown version})"
+echo "Installing ClawHub CLI..."
+if command -v clawhub >/dev/null 2>&1; then
+  ok "ClawHub CLI already installed ($(clawhub --cli-version 2>/dev/null || echo 'unknown version'))"
 else
-  warn "Bundled ClawHub CLI check failed (skill marketplace features may not work)"
+  npm install -g clawhub --loglevel=error </dev/null && \
+    ok "ClawHub CLI installed" || \
+    warn "ClawHub CLI install failed (skill marketplace features may not work)"
 fi
 echo ""
 
