@@ -25,6 +25,7 @@ const uiServerDependencies = [
   "bcrypt",
   "better-sqlite3",
   "chokidar",
+  "clawhub",
   "cors",
   "express",
   "gray-matter",

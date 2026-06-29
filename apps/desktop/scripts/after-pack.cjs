@@ -95,6 +95,10 @@ function ensureMacSigningFallback(context) {
   console.log("[desktop] no macOS signing identity found; using ad-hoc signing fallback");
 }
 
+function getClawHubShimName(context) {
+  return context.electronPlatformName === "win32" ? "clawhub.cmd" : "clawhub";
+}
+
 module.exports = async function afterPack(context) {
   const desktopRoot = resolve(__dirname, "..");
   const resourcesDir = getResourcesDir(context);
@@ -114,14 +118,13 @@ module.exports = async function afterPack(context) {
     force: true,
     dereference: true,
   });
-  rmSync(join(target, ".bin"), { recursive: true, force: true });
   const runtimeSymlinks = materializeSymlinks(runtimeRoot);
   const nodeSymlinks = materializeSymlinks(nodeRoot);
   console.log(
     `[desktop] afterPack materialized ${runtimeSymlinks} runtime symlinks and ${nodeSymlinks} node symlinks`,
   );
 
-  for (const dependency of ["express", "edgeclaw-memory-core"]) {
+  for (const dependency of ["express", "edgeclaw-memory-core", "clawhub"]) {
     const dependencyPath = join(target, dependency);
     if (!existsSync(dependencyPath)) {
       throw new Error(`Desktop runtime dependency was not packaged: ${dependencyPath}`);
@@ -130,6 +133,8 @@ module.exports = async function afterPack(context) {
   for (const requiredFile of [
     join(target, "edgeclaw-memory-core", "lib", "index.js"),
     join(target, "edgeclaw-memory-core", "ui-source", "index.html"),
+    join(target, "clawhub", "bin", "clawdhub.js"),
+    join(target, ".bin", getClawHubShimName(context)),
   ]) {
     if (!existsSync(requiredFile)) {
       throw new Error(`Desktop runtime dependency file was not packaged: ${requiredFile}`);

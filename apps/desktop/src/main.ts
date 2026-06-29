@@ -163,7 +163,7 @@ class RuntimeManager {
 
     const serverPort = await findFreePort(3001);
     const gatewayPort = await findFreePort(18789);
-    const commonEnv = {
+    const commonEnv = withRuntimeCommandPath({
       ...process.env,
       HOST: "127.0.0.1",
       PILOT_HOME: config.pilotHome,
@@ -174,7 +174,7 @@ class RuntimeManager {
       PILOTDECK_DESKTOP: "1",
       PILOTDECK_SKIP_BROWSER_OPEN: "1",
       PILOTDECK_SKIP_DEFAULT_PROJECT: "1",
-    };
+    }, this.runtimeRoot, this.nodeBinary);
 
     publishRuntimeStatus({
       phase: "gateway",
@@ -593,6 +593,29 @@ function resolveAppIcon(): string | undefined {
     ? path.join(process.resourcesPath, "icons", fileName)
     : path.resolve(__dirname, "..", "resources", "icons", fileName);
   return fs.existsSync(iconPath) ? iconPath : undefined;
+}
+
+function getPathEnvKey(env: NodeJS.ProcessEnv): string {
+  if (process.platform !== "win32") return "PATH";
+  return Object.keys(env).find((key) => key.toLowerCase() === "path") ?? "Path";
+}
+
+function withRuntimeCommandPath(
+  env: NodeJS.ProcessEnv,
+  runtimeRoot: string,
+  nodeBinary: string,
+): NodeJS.ProcessEnv {
+  const pathKey = getPathEnvKey(env);
+  const currentPath = env[pathKey] || "";
+  const entries = [
+    path.dirname(nodeBinary),
+    currentPath,
+    path.join(runtimeRoot, "node_modules", ".bin"),
+  ].filter(Boolean);
+  return {
+    ...env,
+    [pathKey]: entries.join(path.delimiter),
+  };
 }
 
 function ensurePilotConfig(log: (message: string) => void): { pilotHome: string; configPath: string } {
