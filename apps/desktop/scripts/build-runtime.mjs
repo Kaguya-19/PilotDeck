@@ -13,7 +13,10 @@ import {
 import { dirname, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { resolvePlaywrightMirrorMode } from "./download-playwright-browsers.mjs";
+import {
+  resolvePlaywrightBrowserSet,
+  resolvePlaywrightMirrorMode,
+} from "./download-playwright-browsers.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const desktopRoot = resolve(__dirname, "..");
@@ -182,6 +185,7 @@ function installRuntimePlaywrightBrowser() {
   if (!existsSync(cli)) {
     throw new Error(`Desktop runtime Playwright MCP CLI missing: ${cli}`);
   }
+  const browserSet = resolvePlaywrightBrowserSet(process.env);
   const mirrorMode = resolvePlaywrightMirrorMode(process.env);
   if (mirrorMode === "npmmirror") {
     run(
@@ -195,12 +199,35 @@ function installRuntimePlaywrightBrowser() {
   if (mirrorMode !== "official") {
     throw new Error(`Unsupported desktop Playwright browser mirror: ${mirrorMode}`);
   }
+  const args = [cli, "install-browser", DESKTOP_PLAYWRIGHT_BROWSER];
+  if (browserSet === "browser-only") {
+    args.push("--no-shell");
+  }
   run(
     process.execPath,
-    [cli, "install-browser", DESKTOP_PLAYWRIGHT_BROWSER],
+    args,
     runtimeRoot,
     withBundledPlaywrightEnv(),
   );
+  pruneRuntimePlaywrightBrowsers(browserSet);
+}
+
+function pruneRuntimePlaywrightBrowsers(browserSet) {
+  if (browserSet === "full") return;
+  if (browserSet !== "browser-only") {
+    throw new Error(`Unsupported desktop Playwright browser set: ${browserSet}`);
+  }
+
+  const browsersRoot = resolve(runtimeRoot, "node_modules", "playwright-core", ".local-browsers");
+  let removed = 0;
+  for (const entry of cpSafeReadDir(browsersRoot)) {
+    if (entry === ".links" || entry.startsWith("chromium-")) continue;
+    rmSync(resolve(browsersRoot, entry), { recursive: true, force: true });
+    removed += 1;
+  }
+  if (removed) {
+    console.log(`[desktop] pruned ${removed} unused Playwright browser entries`);
+  }
 }
 
 function pruneRuntimeTree() {

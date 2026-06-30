@@ -15,12 +15,21 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const desktopRoot = resolve(__dirname, "..");
 const DEFAULT_CHROME_BASE_URL = "https://cdn.npmmirror.com/binaries/chrome-for-testing";
 const DEFAULT_FFMPEG_BASE_URL = "https://cdn.npmmirror.com/binaries/playwright";
+const DEFAULT_BROWSER_SET = "browser-only";
 
 export function resolvePlaywrightMirrorMode(env = process.env) {
   if (env.PILOTDECK_DESKTOP_PLAYWRIGHT_ARCHIVE_DIR?.trim()) return "npmmirror";
   const explicit = env.PILOTDECK_DESKTOP_PLAYWRIGHT_MIRROR?.trim().toLowerCase();
   if (explicit) return explicit;
   return isChinaMirrorPreset(env) ? "npmmirror" : "official";
+}
+
+export function resolvePlaywrightBrowserSet(env = process.env) {
+  const explicit = env.PILOTDECK_DESKTOP_PLAYWRIGHT_BROWSER_SET?.trim().toLowerCase();
+  if (!explicit) return DEFAULT_BROWSER_SET;
+  if (explicit === "minimal" || explicit === "browser") return "browser-only";
+  if (explicit === "browser-only" || explicit === "full") return explicit;
+  throw new Error(`Unsupported desktop Playwright browser set: ${explicit}`);
 }
 
 export function resolvePlaywrightHostPlatform({
@@ -47,23 +56,28 @@ export function buildPlaywrightBrowserPlan({
   const hostPlatform = resolvePlaywrightHostPlatform({ platform, arch, macMajor });
   const chromePlatform = resolveChromeForTestingPlatform(hostPlatform);
   const chromium = getBrowserDescriptor(browsersJson, "chromium", hostPlatform);
-  const headless = getBrowserDescriptor(browsersJson, "chromium-headless-shell", hostPlatform);
-  const ffmpeg = getBrowserDescriptor(browsersJson, "ffmpeg", hostPlatform);
   const chromeBaseUrl = trimUrlBase(
     env.PILOTDECK_DESKTOP_PLAYWRIGHT_CHROME_BASE_URL || DEFAULT_CHROME_BASE_URL,
   );
-  const ffmpegBaseUrl = trimUrlBase(
-    env.PILOTDECK_DESKTOP_PLAYWRIGHT_FFMPEG_BASE_URL || DEFAULT_FFMPEG_BASE_URL,
-  );
-  const ffmpegArchiveName = resolveFfmpegArchiveName(hostPlatform);
-
-  return [
+  const plan = [
     {
       name: "chromium",
       directoryName: getBrowserDirectoryName(chromium, hostPlatform),
       archiveName: `chrome-${chromePlatform}.zip`,
       url: joinUrl(chromeBaseUrl, chromium.browserVersion, chromePlatform, `chrome-${chromePlatform}.zip`),
     },
+  ];
+
+  if (resolvePlaywrightBrowserSet(env) === "browser-only") return plan;
+
+  const headless = getBrowserDescriptor(browsersJson, "chromium-headless-shell", hostPlatform);
+  const ffmpeg = getBrowserDescriptor(browsersJson, "ffmpeg", hostPlatform);
+  const ffmpegBaseUrl = trimUrlBase(
+    env.PILOTDECK_DESKTOP_PLAYWRIGHT_FFMPEG_BASE_URL || DEFAULT_FFMPEG_BASE_URL,
+  );
+  const ffmpegArchiveName = resolveFfmpegArchiveName(hostPlatform);
+
+  plan.push(
     {
       name: "chromium-headless-shell",
       directoryName: getBrowserDirectoryName(headless, hostPlatform),
@@ -81,7 +95,8 @@ export function buildPlaywrightBrowserPlan({
       archiveName: ffmpegArchiveName,
       url: joinUrl(ffmpegBaseUrl, "builds", "ffmpeg", ffmpeg.revision, ffmpegArchiveName),
     },
-  ];
+  );
+  return plan;
 }
 
 export async function installMirroredPlaywrightBrowsers(runtimeRoot, env = process.env) {

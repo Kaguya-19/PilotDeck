@@ -18,6 +18,7 @@ import {
 import {
   buildPlaywrightBrowserPlan,
   installMirroredPlaywrightBrowsers,
+  resolvePlaywrightBrowserSet,
   resolvePlaywrightMirrorMode,
 } from "./download-playwright-browsers.mjs";
 
@@ -107,7 +108,18 @@ test("resolvePlaywrightMirrorMode follows explicit mirror and china preset", () 
   assert.equal(resolvePlaywrightMirrorMode({ PILOTDECK_DESKTOP_PLAYWRIGHT_ARCHIVE_DIR: "/cache" }), "npmmirror");
 });
 
-test("buildPlaywrightBrowserPlan maps mac arm64 to npmmirror archives", () => {
+test("resolvePlaywrightBrowserSet defaults to browser-only and accepts full", () => {
+  assert.equal(resolvePlaywrightBrowserSet({}), "browser-only");
+  assert.equal(resolvePlaywrightBrowserSet({ PILOTDECK_DESKTOP_PLAYWRIGHT_BROWSER_SET: "minimal" }), "browser-only");
+  assert.equal(resolvePlaywrightBrowserSet({ PILOTDECK_DESKTOP_PLAYWRIGHT_BROWSER_SET: "browser" }), "browser-only");
+  assert.equal(resolvePlaywrightBrowserSet({ PILOTDECK_DESKTOP_PLAYWRIGHT_BROWSER_SET: "full" }), "full");
+  assert.throws(
+    () => resolvePlaywrightBrowserSet({ PILOTDECK_DESKTOP_PLAYWRIGHT_BROWSER_SET: "everything" }),
+    /Unsupported desktop Playwright browser set/,
+  );
+});
+
+test("buildPlaywrightBrowserPlan maps default mac arm64 browser-only archive", () => {
   const plan = buildPlaywrightBrowserPlan({
     browsersJson: fakeBrowsersJson,
     platform: "darwin",
@@ -118,13 +130,27 @@ test("buildPlaywrightBrowserPlan maps mac arm64 to npmmirror archives", () => {
 
   assert.deepEqual(plan.map((item) => item.directoryName), [
     "chromium-1224",
-    "chromium_headless_shell-1224",
-    "ffmpeg-1011",
   ]);
   assert.equal(
     plan[0].url,
     "https://cdn.npmmirror.com/binaries/chrome-for-testing/149.0.7827.3/mac-arm64/chrome-mac-arm64.zip",
   );
+});
+
+test("buildPlaywrightBrowserPlan maps full mac arm64 npmmirror archives", () => {
+  const plan = buildPlaywrightBrowserPlan({
+    browsersJson: fakeBrowsersJson,
+    platform: "darwin",
+    arch: "arm64",
+    macMajor: 15,
+    env: { PILOTDECK_DESKTOP_PLAYWRIGHT_BROWSER_SET: "full" },
+  });
+
+  assert.deepEqual(plan.map((item) => item.directoryName), [
+    "chromium-1224",
+    "chromium_headless_shell-1224",
+    "ffmpeg-1011",
+  ]);
   assert.equal(
     plan[1].url,
     "https://cdn.npmmirror.com/binaries/chrome-for-testing/149.0.7827.3/mac-arm64/chrome-headless-shell-mac-arm64.zip",
@@ -135,7 +161,7 @@ test("buildPlaywrightBrowserPlan maps mac arm64 to npmmirror archives", () => {
   );
 });
 
-test("buildPlaywrightBrowserPlan maps Windows x64 to npmmirror archives", () => {
+test("buildPlaywrightBrowserPlan maps default Windows x64 browser-only archive", () => {
   const plan = buildPlaywrightBrowserPlan({
     browsersJson: fakeBrowsersJson,
     platform: "win32",
@@ -147,14 +173,7 @@ test("buildPlaywrightBrowserPlan maps Windows x64 to npmmirror archives", () => 
     plan[0].url,
     "https://cdn.npmmirror.com/binaries/chrome-for-testing/149.0.7827.3/win64/chrome-win64.zip",
   );
-  assert.equal(
-    plan[1].url,
-    "https://cdn.npmmirror.com/binaries/chrome-for-testing/149.0.7827.3/win64/chrome-headless-shell-win64.zip",
-  );
-  assert.equal(
-    plan[2].url,
-    "https://cdn.npmmirror.com/binaries/playwright/builds/ffmpeg/1011/ffmpeg-win64.zip",
-  );
+  assert.deepEqual(plan.map((item) => item.archiveName), ["chrome-win64.zip"]);
 });
 
 test("installMirroredPlaywrightBrowsers installs from local archive dir", async () => {
