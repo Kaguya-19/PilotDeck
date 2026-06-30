@@ -443,13 +443,13 @@ export function createRouterRuntime(
     if (decision.mutations.subagentTagStripped) {
       messages = stripSubagentTagFromMessages(messages);
     }
-    return {
+    return clampMaxOutputTokensToModelCap({
       ...request,
       ...decision.requestPatch,
       provider: decision.provider,
       model: decision.model,
       messages,
-    };
+    }, deps.modelRuntime);
   }
 
   async function* execute(
@@ -463,8 +463,9 @@ export function createRouterRuntime(
         provider: decision.provider,
         model: decision.model,
       };
+      const cappedPassthroughRequest = clampMaxOutputTokensToModelCap(passthroughRequest, deps.modelRuntime);
       let sawErrorEvent = false;
-      for await (const item of streamAttempt(passthroughRequest, deps.modelRuntime, ctx.abortSignal)) {
+      for await (const item of streamAttempt(cappedPassthroughRequest, deps.modelRuntime, ctx.abortSignal)) {
         if (item.kind === "event") {
           if (item.event.type === "error") {
             sawErrorEvent = true;
@@ -956,6 +957,26 @@ function isContentEvent(event: CanonicalModelEvent): boolean {
     event.type === "tool_call_delta" ||
     event.type === "tool_call_end"
   );
+}
+
+function clampMaxOutputTokensToModelCap(
+  request: CanonicalModelRequest,
+  modelRuntime: ModelRuntime,
+): CanonicalModelRequest {
+  const requested = request.maxOutputTokens;
+  if (requested === undefined) {
+    return request;
+  }
+
+  try {
+    const cap = modelRuntime.getCapabilities(request.provider, request.model).maxOutputTokens;
+    if (Number.isFinite(cap) && cap > 0 && requested > cap) {
+      return { ...request, maxOutputTokens: cap };
+    }
+  } catch {
+    // Unknown provider/model — let validateModelRequest surface the real error.
+  }
+  return request;
 }
 
 /**

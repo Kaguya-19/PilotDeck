@@ -26,7 +26,7 @@ export function normalizeModelError(
   status?: number,
 ): CanonicalModelError {
   const raw = error;
-  const record = isRecord(error) ? error : undefined;
+  const record = firstErrorRecord(error);
   const nestedError = record && isRecord(record.error) ? record.error : undefined;
   const source = nestedError ?? record;
 
@@ -67,6 +67,16 @@ export function normalizeModelError(
     result.retryAfterMs = retryAfterMs;
   }
   return result;
+}
+
+function firstErrorRecord(error: unknown): Record<string, unknown> | undefined {
+  if (isRecord(error)) {
+    return error;
+  }
+  if (!Array.isArray(error)) {
+    return undefined;
+  }
+  return error.find(isRecord);
 }
 
 /**

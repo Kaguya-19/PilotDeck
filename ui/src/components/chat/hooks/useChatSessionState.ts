@@ -929,6 +929,37 @@ export function useChatSessionState({
     }
   }, [currentSessionId, isLoading, pendingViewSessionRef, processingSessions, selectedSession?.id, sessionIsReadOnly]);
 
+  useEffect(() => {
+    const pendingSessionId = pendingViewSessionRef.current?.sessionId ?? null;
+    const activeViewSessionId =
+      selectedSession?.id || (pendingSessionId === currentSessionId ? currentSessionId : null);
+    if (sessionIsReadOnly) return;
+    if (!activeViewSessionId || !processingSessions) return;
+    if (!processingSessions.has(activeViewSessionId)) return;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+    const requestStatus = () => {
+      sendMessage({
+        type: 'check-session-status',
+        sessionId: activeViewSessionId,
+        provider: 'pilotdeck',
+        includeActiveTurnMessages: false,
+      });
+    };
+
+    requestStatus();
+    const timer = setInterval(requestStatus, 1200);
+    return () => clearInterval(timer);
+  }, [
+    currentSessionId,
+    pendingViewSessionRef,
+    processingSessions,
+    selectedSession?.id,
+    sendMessage,
+    sessionIsReadOnly,
+    ws,
+  ]);
+
   // "Load all" overlay
   const prevLoadingRef = useRef(false);
   useEffect(() => {

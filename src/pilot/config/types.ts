@@ -70,6 +70,8 @@ export type PilotAgentConfig = {
    * or when you want compaction to kick in earlier.
    */
   maxContextTokens?: number;
+  /** Override the selected model catalog's output-token cap. */
+  maxOutputTokens?: number;
   thinking?: { enabled: boolean; budgetTokens?: number };
   subagents?: {
     timeoutMs?: number;

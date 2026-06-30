@@ -348,6 +348,7 @@ function parseAgent(
   const model = parseAgentModelSelection(rawAgent.model, "agent.model", modelConfig, diagnostics);
   const subagents = parseAgentSubagents(rawAgent.subagents, diagnostics);
   const maxContextTokens = readOptionalPositiveInteger(rawAgent.maxContextTokens, "agent.maxContextTokens");
+  const maxOutputTokens = readOptionalPositiveInteger(rawAgent.maxOutputTokens, "agent.maxOutputTokens");
   const thinking = parseAgentThinking(rawAgent.thinking);
   if (rawAgent.fallbackModel !== undefined) {
     diagnostics.push({
@@ -364,6 +365,7 @@ function parseAgent(
   return {
     model,
     ...(maxContextTokens !== undefined ? { maxContextTokens } : {}),
+    ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
     ...(thinking ? { thinking } : {}),
     ...(subagents ? { subagents } : {}),
   };

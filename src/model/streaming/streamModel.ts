@@ -174,15 +174,26 @@ export async function* streamModel(
 
     const state = createStreamNormalizerState(provider.protocol);
     let streamCompleted = false;
+    let sawCompletionSentinel = false;
 
     const streamIdleTimeoutMs = resolveStreamIdleTimeout(provider);
 
     try {
-      for await (const rawEvent of readServerSentEvents(response.body, options.signal, streamIdleTimeoutMs)) {
-        for (const event of normalizeStreamEvent(provider.protocol, rawEvent, state)) {
+      for await (const sseEvent of readServerSentEvents(response.body, options.signal, streamIdleTimeoutMs)) {
+        if (sseEvent.type === "done") {
+          sawCompletionSentinel = true;
+          continue;
+        }
+        for (const event of normalizeStreamEvent(provider.protocol, sseEvent.data, state)) {
+          if (event.type === "message_end") {
+            sawCompletionSentinel = true;
+          }
           checkpoint.onEvent(event);
           yield event;
         }
+      }
+      if (!sawCompletionSentinel) {
+        throw new IncompleteStreamError();
       }
       streamCompleted = true;
     } catch (error) {
@@ -380,6 +391,9 @@ function isRetryableStreamError(error: unknown): boolean {
   if (error instanceof StreamIdleTimeoutError) {
     return true;
   }
+  if (error instanceof IncompleteStreamError) {
+    return true;
+  }
   if (error instanceof Error) {
     const msg = error.message.toLowerCase();
     return (
@@ -534,11 +548,22 @@ class StreamIdleTimeoutError extends Error {
   }
 }
 
+class IncompleteStreamError extends Error {
+  constructor() {
+    super("Network stream ended before provider completion sentinel.");
+    this.name = "IncompleteStreamError";
+  }
+}
+
+type ServerSentEvent =
+  | { type: "data"; data: unknown }
+  | { type: "done" };
+
 async function* readServerSentEvents(
   body: ReadableStream<Uint8Array>,
   signal?: AbortSignal,
   idleTimeoutMs?: number,
-): AsyncIterable<unknown> {
+): AsyncIterable<ServerSentEvent> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -569,21 +594,35 @@ async function* readServerSentEvents(
       buffer = chunks.pop() ?? "";
 
       for (const chunk of chunks) {
-        const dataLines = chunk
-          .split(/\n/)
-          .filter((line) => line.startsWith("data:"))
-          .map((line) => line.slice("data:".length).trim());
+        yield* parseServerSentEventChunk(chunk);
+      }
+    }
 
-        for (const data of dataLines) {
-          if (!data || data === "[DONE]") {
-            continue;
-          }
-          yield JSON.parse(data);
-        }
+    if (buffer.trim().length > 0) {
+      for (const event of parseServerSentEventChunk(buffer)) {
+        yield event;
       }
     }
   } finally {
     signal?.removeEventListener("abort", cancelReader);
+  }
+}
+
+function* parseServerSentEventChunk(chunk: string): Iterable<ServerSentEvent> {
+  const dataLines = chunk
+    .split(/\n/)
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.slice("data:".length).trim());
+
+  for (const data of dataLines) {
+    if (!data) {
+      continue;
+    }
+    if (data === "[DONE]") {
+      yield { type: "done" };
+      continue;
+    }
+    yield { type: "data", data: JSON.parse(data) };
   }
 }
 

@@ -86,6 +86,7 @@ type MessageRowV2Props = {
   onFork?: (message: ChatMessage, carriedMessageCount: number) => void;
   forkCarriedMessageCount?: number;
   forkDisabled?: boolean;
+  showAssistantActions?: boolean;
 };
 
 // Fall back to the heavy legacy renderer for anything that isn't a vanilla
@@ -126,6 +127,7 @@ function MessageRowV2({
   onFork,
   forkCarriedMessageCount = 0,
   forkDisabled = false,
+  showAssistantActions,
 }: MessageRowV2Props) {
   const { t } = useTranslation('chat');
   const delegate = useMemo(() => shouldDelegate(message), [message]);
@@ -408,9 +410,10 @@ function MessageRowV2({
   // Assistant: plain prose, no avatar and no bubble.
   const hasAssistantProse = formattedContent.trim().length > 0;
   const showStreamingCursor = Boolean(message.isStreaming && !contentDisplayText);
-  const showAssistantCopyButton = hasAssistantProse;
-  const canRenderAssistantForkButton = Boolean(onFork && hasAssistantProse);
-  const showAssistantActions = showAssistantCopyButton || canRenderAssistantForkButton;
+  const resolvedShowAssistantActions = showAssistantActions ?? true;
+  const showAssistantCopyButton = resolvedShowAssistantActions && hasAssistantProse;
+  const canRenderAssistantForkButton = Boolean(resolvedShowAssistantActions && onFork && hasAssistantProse);
+  const shouldRenderAssistantActions = showAssistantCopyButton || canRenderAssistantForkButton;
   const assistantForkDisabled = Boolean(
     forkDisabled || isSessionRunning || message.isStreaming || !message.entryId,
   );
@@ -422,7 +425,7 @@ function MessageRowV2({
         <Markdown className="prose prose-sm prose-neutral max-w-none dark:prose-invert prose-headings:mb-2 prose-headings:mt-4 prose-h2:text-lg prose-h3:text-base prose-p:my-2 prose-pre:my-3 prose-ol:my-2 prose-ul:my-2 prose-table:my-0 prose-hr:my-4" projectName={selectedProject?.name}
         onFileOpen={onFileOpen} isStreaming={message.isStreaming}>{contentDisplayText}</Markdown>
       )}
-      {showAssistantActions ? (
+      {shouldRenderAssistantActions ? (
         <div className="mt-1.5 flex justify-end gap-1">
           {canRenderAssistantForkButton ? (
             <ForkMessageButton

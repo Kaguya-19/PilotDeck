@@ -787,6 +787,7 @@ export function useChatComposerState({
         sendMessage,
         selectedProject,
         command: messageContent,
+        userVisibleInput,
         sessionId: effectiveSessionId,
         temporarySessionId: sessionToActivate,
         toolsSettings,
@@ -1135,6 +1136,7 @@ export function useChatComposerState({
           sendMessage({
             type: 'elicitation-response',
             requestId,
+            sessionId: pending?.sessionId,
             answer,
           });
           return;
@@ -1143,6 +1145,7 @@ export function useChatComposerState({
         sendMessage({
           type: 'permission-response',
           requestId,
+          sessionId: pending?.sessionId,
           allow: Boolean(decision?.allow),
           updatedInput: decision?.updatedInput,
           message: decision?.message,

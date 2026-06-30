@@ -96,6 +96,22 @@ function isStreamingThinkingMessage(message: ChatMessage): boolean {
   return Boolean(message.isThinking && String(message.id || '').startsWith('__streaming_thinking_'));
 }
 
+function isRenderableAssistantProse(message: ChatMessage): boolean {
+  return (
+    message.type === 'assistant' &&
+    !message.isToolUse &&
+    !message.isThinking &&
+    !message.isStreaming &&
+    !message.isInteractivePrompt &&
+    !message.isSubagentContainer &&
+    !message.isTaskNotification &&
+    !message.isAgentActivity &&
+    !message.isAgentActivitySummary &&
+    typeof message.content === 'string' &&
+    message.content.trim().length > 0
+  );
+}
+
 function isSubagentThinkingPlaceholder(message: ChatMessage): boolean {
   const id = String(message.id || '');
   return Boolean(message.isThinking && (id.startsWith('subagent_thinking_') || id.startsWith('__subagent_thinking_')));
@@ -785,6 +801,31 @@ export default function MessagesPaneV2({
     );
     const anchoredLiveGroups = liveProcessGroupsByAnchor.get(item.originalIndex) || [];
     const rendersLiveHeaderAfterItem = item.renderIndex === liveProcessHeaderIndex - 1;
+    const showAssistantActions = (() => {
+      if (!isRenderableAssistantProse(item.message)) {
+        return false;
+      }
+      if (isAssistantWorking && item.renderIndex >= liveProcessHeaderIndex) {
+        return false;
+      }
+
+      for (let index = item.renderIndex + 1; index < keyedMessageItems.length; index += 1) {
+        const candidate = keyedMessageItems[index]?.message;
+        if (!candidate) {
+          continue;
+        }
+        if (candidate.type === 'user') {
+          break;
+        }
+        if (candidate.type === 'error') {
+          return false;
+        }
+        if (isRenderableAssistantProse(candidate)) {
+          return false;
+        }
+      }
+      return true;
+    })();
 
     return (
       <Fragment key={item.itemKey}>
@@ -833,6 +874,7 @@ export default function MessagesPaneV2({
             onFork={onFork}
             forkCarriedMessageCount={forkCarriedMessageCount}
             forkDisabled={forkDisabled}
+            showAssistantActions={showAssistantActions}
           />
           {rendersLiveHeaderAfterItem ? (
             <LiveProcessHeader

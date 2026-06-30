@@ -6,6 +6,7 @@ type StartSessionOptions = {
   sendMessage: (message: unknown) => void;
   selectedProject: Project;
   command: string;
+  userVisibleInput?: string;
   sessionId?: string | null;
   temporarySessionId?: string;
   permissionMode?: PermissionMode | string;
@@ -79,6 +80,7 @@ export function startSessionCommand({
   sendMessage,
   selectedProject,
   command,
+  userVisibleInput,
   sessionId,
   temporarySessionId,
   permissionMode = 'default',
@@ -108,6 +110,9 @@ export function startSessionCommand({
       ...(basePermissionMode ? { basePermissionMode } : {}),
       ...(model ? { model } : {}),
       sessionSummary,
+      ...(typeof userVisibleInput === 'string' && userVisibleInput.trim()
+        ? { userVisibleInput: userVisibleInput.trim() }
+        : {}),
       ...(alwaysOnPlanId ? { alwaysOnPlanId } : {}),
       ...(alwaysOnExecutionToken ? { alwaysOnExecutionToken } : {}),
       ...(Array.isArray(images) && images.length > 0 ? { images } : {}),

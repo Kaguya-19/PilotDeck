@@ -137,6 +137,8 @@ export function useChatRealtimeHandlers({
 
   // Track which sessions have active thinking (just a boolean flag now)
   const thinkingBySessionRef = useRef<Map<string, boolean>>(new Map());
+  // Dedup volatile active-turn replay chunks across reconnect/status polls.
+  const activeTurnReplaySignatureRef = useRef<Map<string, string>>(new Map());
 
   const handleMessage = useCallback((latestMessage: LatestChatMessage, fallbackSessionId?: string | null) => {
     if (!latestMessage) return;
@@ -182,15 +184,46 @@ export function useChatRealtimeHandlers({
 
           if (isCurrentSession && Array.isArray(msg.activeTurnMessages) && msg.activeTurnMessages.length > 0) {
             clearAccumulators();
+            const slot = sessionStore.getSessionSlot?.(statusSessionId);
+            const hasLiveStreaming = Boolean(slot?.realtimeMessages?.some((message) => (
+              message.id === `__streaming_${statusSessionId}`
+              || message.id === `__streaming_thinking_${statusSessionId}`
+            )));
+            const replayedToolIds = new Set(
+              (slot?.realtimeMessages || [])
+                .filter((message) => message.kind === 'tool_use' && typeof message.toolId === 'string')
+                .map((message) => message.toolId as string),
+            );
+            const activeTurnToolIds = new Set(
+              msg.activeTurnMessages
+                .filter((message) => message?.kind === 'tool_use' && typeof message?.toolId === 'string')
+                .map((message) => message.toolId as string),
+            );
+            const hasReplayedCurrentTurnToolUse = activeTurnToolIds.size > 0
+              && [...activeTurnToolIds].some((toolId) => replayedToolIds.has(toolId));
+            const volatileSignature = msg.activeTurnMessages
+              .filter((message) => ['thinking', 'stream_delta', 'stream_end'].includes(String(message?.kind)))
+              .map((message) => `${message.kind}:${message.id || ''}:${message.content || ''}`)
+              .join('||');
+            const previousVolatileSignature = activeTurnReplaySignatureRef.current.get(statusSessionId);
+            const hasSeenSameVolatileReplay = Boolean(
+              volatileSignature && previousVolatileSignature === volatileSignature,
+            );
             // Only replay messages that have stable IDs and can be deduped
             // against server data (tool_use by toolId, tool_result/status by id).
             // Skip thinking, stream_delta, stream_end — these create messages
-            // with generated IDs that can't be matched to server copies,
-            // causing duplication. fetchFromServer provides authoritative copies.
+            // with generated IDs that can't be matched to server copies.
+            // But if this tab has no active streaming state (e.g. another tab
+            // started the turn), we need to replay them so content renders.
             const skipKinds = new Set(['thinking', 'stream_delta', 'stream_end']);
+            const skipVolatileReplay =
+              hasLiveStreaming || hasReplayedCurrentTurnToolUse || hasSeenSameVolatileReplay;
             for (const activeTurnMessage of msg.activeTurnMessages) {
-              if (skipKinds.has(activeTurnMessage.kind)) continue;
+              if (skipVolatileReplay && skipKinds.has(activeTurnMessage.kind)) continue;
               handleMessage(activeTurnMessage, statusSessionId);
+            }
+            if (volatileSignature) {
+              activeTurnReplaySignatureRef.current.set(statusSessionId, volatileSignature);
             }
           }
 
@@ -435,6 +468,7 @@ export function useChatRealtimeHandlers({
 
       case 'complete': {
         if (sid) {
+          activeTurnReplaySignatureRef.current.delete(sid);
           // Finalize both thinking and content streams
           if (thinkingBySessionRef.current.has(sid)) {
             thinkingBySessionRef.current.delete(sid);
@@ -507,6 +541,7 @@ export function useChatRealtimeHandlers({
           setPilotDeckStatus(null);
         }
         if (sid) {
+          activeTurnReplaySignatureRef.current.delete(sid);
           onSessionInactive?.(sid);
           onSessionNotProcessing?.(sid);
           sessionStore.refreshFromServer(sid, { provider, projectName: selectedProject?.name, projectPath: selectedProject?.fullPath || selectedProject?.path || '' });
@@ -518,6 +553,7 @@ export function useChatRealtimeHandlers({
         if (!msg.requestId) break;
         const isForCurrentSession = isForActiveView;
         if (!isForCurrentSession) break;
+        onSessionProcessing?.(sid);
         setPendingPermissionRequests((prev) => {
           if (prev.some((r: PendingPermissionRequest) => r.requestId === msg.requestId)) return prev;
           return [...prev, {
@@ -545,6 +581,9 @@ export function useChatRealtimeHandlers({
       }
 
       case 'status': {
+        if (msg.text && msg.text !== 'token_budget' && msg.text !== 'clear_status') {
+          onSessionProcessing?.(sid);
+        }
         if (!isForActiveView) break;
         if (msg.text === 'token_budget' && msg.tokenBudget) {
           setTokenBudget(msg.tokenBudget as Record<string, unknown>);
@@ -572,6 +611,7 @@ export function useChatRealtimeHandlers({
       }
 
       case 'compact_boundary': {
+        onSessionProcessing?.(sid);
         if (isForActiveView) {
           setClaudeStatus(null);
           setPilotDeckStatus(null);

@@ -94,6 +94,12 @@ export type AgentRuntimeDependencies = {
    * unknown models so the caller can skip re-compaction gracefully.
    */
   getModelMaxContextTokens?: (provider: string, model: string) => number | undefined;
+  /**
+   * Look up a model's maximum output-token cap by provider/model id. Used by
+   * max-output recovery to avoid retrying with a lower synthetic default than
+   * the selected model already receives from the catalog.
+   */
+  getModelMaxOutputTokens?: (provider: string, model: string) => number | undefined;
   now?: () => Date;
   uuid?: () => string;
   auditRecorder?: PilotDeckToolAuditRecorder;

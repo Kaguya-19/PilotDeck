@@ -12,6 +12,7 @@ import {
   type AgentSession,
   type CreateAgentSessionOptions,
 } from "../agent/index.js";
+import { resolveRoutedModelMaxContextTokens } from "../agent/runtime/modelContextWindow.js";
 import {
   AutoCompactionPolicy,
   CachedMicroCompactionEngine,
@@ -1018,9 +1019,16 @@ class ProjectRuntimeRegistry {
       now: this.options.now,
       eventEmitter: eventBuf.emitter,
       drainEvents: eventBuf.drain,
-      getModelMaxContextTokens: (provider, model) => {
+      getModelMaxContextTokens: (provider, model) => resolveRoutedModelMaxContextTokens({
+        modelRuntime: runtime.model,
+        agentModel: runtime.snapshot.config.agent.model,
+        agentMaxContextTokens: runtime.snapshot.config.agent.maxContextTokens,
+        provider,
+        model,
+      }),
+      getModelMaxOutputTokens: (provider, model) => {
         try {
-          return runtime.model.getCapabilities(provider, model).maxContextTokens;
+          return runtime.model.getCapabilities(provider, model).maxOutputTokens;
         } catch {
           return undefined;
         }
@@ -1219,6 +1227,9 @@ class ProjectRuntimeRegistry {
     } catch {
       maxContextTokens = agent.maxContextTokens;
     }
+    const maxOutputTokens = readPositiveIntegerEnv(this.options.env.PILOTDECK_MAX_OUTPUT_TOKENS)
+      ?? agent.maxOutputTokens
+      ?? undefined;
     return {
       provider: agent.model.provider,
       model: agent.model.model,
@@ -1228,6 +1239,7 @@ class ProjectRuntimeRegistry {
       jsonSelfCorrect: true,
       subagentTimeoutMs: agent.subagents?.timeoutMs,
       maxContextTokens,
+      maxOutputTokens,
       thinking: agent.thinking,
       permissionContext: createDefaultPermissionContext({
         cwd,
@@ -1368,4 +1380,11 @@ function buildDefaultAutoOrchestrate() {
     slimSystemPrompt: true,
     allowedTools: [...DEFAULT_ALLOWED_TOOLS],
   };
+}
+
+function readPositiveIntegerEnv(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  const parsed = Number.parseInt(value.trim(), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return undefined;
+  return Math.floor(parsed);
 }
