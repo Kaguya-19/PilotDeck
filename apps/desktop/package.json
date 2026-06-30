@@ -79,6 +79,9 @@
       "gatekeeperAssess": false,
       "entitlements": "resources/entitlements.mac.plist",
       "entitlementsInherit": "resources/entitlements.mac.plist",
+      "signIgnore": [
+        "Contents/Resources/runtime/node_modules/playwright-core/\\.local-browsers/"
+      ],
       "target": [
         "dmg"
       ]
