@@ -33,21 +33,6 @@ const HARD_DENY_PATTERNS: RegExp[] = [
 
   // Windows — filesystem formatting.
   /\bFormat-Volume\b/i,
-];
-
-const DANGEROUS_ASK_PATTERNS: RegExp[] = [
-  // Unix
-  commandPattern(String.raw`rm\s+${RM_RECURSIVE_LOOKAHEAD}`),
-  commandPattern(String.raw`sudo\b`),
-  /\bchmod\s+-R\s+777\b/,
-  /\bchown\s+-R\b/,
-  /\bdd\s+if=/,
-  /\b(curl|wget)\b[^|;&]*\|\s*(?:\/?[\w.-]+\/)*(?:ba)?sh(?:\s|$|-c)/i,
-
-  // Cross-platform
-  /\bgit\s+reset\s+--hard\b/,
-  /\bgit\s+clean\s+-[^\s]*f/,
-
   // Windows — PowerShell recursive delete (Remove-Item -Recurse -Force)
   /\bRemove-Item\b[^|;&]*-Recurse\b/i,
   // Windows — CMD recursive delete
@@ -63,6 +48,20 @@ const DANGEROUS_ASK_PATTERNS: RegExp[] = [
   /\bSet-ExecutionPolicy\s+(Unrestricted|Bypass)\b/i,
   // Windows — stop arbitrary processes
   /\bStop-Process\b[^|;&]*-Force\b/i,
+];
+
+const DANGEROUS_ASK_PATTERNS: RegExp[] = [
+  // Unix
+  commandPattern(String.raw`rm\s+${RM_RECURSIVE_LOOKAHEAD}`),
+  commandPattern(String.raw`sudo\b`),
+  /\bchmod\s+-R\s+777\b/,
+  /\bchown\s+-R\b/,
+  /\bdd\s+if=/,
+  /\b(curl|wget)\b[^|;&]*\|\s*(?:\/?[\w.-]+\/)*(?:ba)?sh(?:\s|$|-c)/i,
+
+  // Cross-platform
+  /\bgit\s+reset\s+--hard\b/,
+  /\bgit\s+clean\s+-[^\s]*f/,
 ];
 
 const SIMPLE_READ_COMMANDS = new Set([
@@ -172,30 +171,29 @@ export function isReadOnlyShellCommand(command: string): boolean {
 }
 
 const GIT_GLOBAL_OPTIONS_WITH_VALUE = new Set([
+  "-C",
+  "--git-dir",
   "--namespace",
   "--super-prefix",
+  "--work-tree",
 ]);
 
 const GIT_GLOBAL_OPTIONS_WITH_VALUE_PREFIXES = [
+  "--git-dir=",
   "--namespace=",
   "--super-prefix=",
+  "--work-tree=",
 ];
 
 const GIT_UNSAFE_GLOBAL_OPTIONS_WITH_VALUE = new Set([
-  "-C",
   "-c",
   "--config-env",
   "--exec-path",
-  "--git-dir",
-  "--work-tree",
 ]);
 const GIT_UNSAFE_GLOBAL_OPTIONS_WITH_VALUE_PREFIXES = [
-  "-C",
   "-c",
   "--config-env=",
   "--exec-path=",
-  "--git-dir=",
-  "--work-tree=",
 ];
 
 function getGitSubcommand(args: string[]): string | undefined {
