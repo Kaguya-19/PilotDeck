@@ -19,6 +19,7 @@ const desktopRoot = resolve(__dirname, "..");
 const repoRoot = resolve(desktopRoot, "..", "..");
 const runtimeRoot = resolve(desktopRoot, ".runtime", "app");
 const DESKTOP_BUILD = "260623";
+const DESKTOP_PLAYWRIGHT_BROWSER = "chrome-for-testing";
 
 const uiServerDependencies = [
   "@octokit/rest",
@@ -70,6 +71,13 @@ const packageManager = isPnpmExecPath
 
 function runPnpm(args, cwd = repoRoot, env = process.env) {
   run(packageManager.command, [...packageManager.args, ...args], cwd, env);
+}
+
+function withBundledPlaywrightEnv(env = process.env) {
+  return {
+    ...env,
+    PLAYWRIGHT_BROWSERS_PATH: "0",
+  };
 }
 
 function copyFiltered(from, to, filter) {
@@ -161,12 +169,29 @@ function prepareRuntimeTree() {
     "--config.node-linker=hoisted",
     "--no-frozen-lockfile",
     "--prefer-offline",
-  ], runtimeRoot);
+  ], runtimeRoot, withBundledPlaywrightEnv());
+
+  installRuntimePlaywrightBrowser();
 
   removeIfExists(resolve(runtimeRoot, "src"));
 }
 
+function installRuntimePlaywrightBrowser() {
+  const cli = resolve(runtimeRoot, "node_modules", "@playwright", "mcp", "cli.js");
+  if (!existsSync(cli)) {
+    throw new Error(`Desktop runtime Playwright MCP CLI missing: ${cli}`);
+  }
+  run(
+    process.execPath,
+    [cli, "install-browser", DESKTOP_PLAYWRIGHT_BROWSER],
+    runtimeRoot,
+    withBundledPlaywrightEnv(),
+  );
+}
+
 function pruneRuntimeTree() {
+  const nodeModules = resolve(runtimeRoot, "node_modules");
+  const playwrightBrowsersRoot = resolve(nodeModules, "playwright-core", ".local-browsers");
   const pruneExtensions = new Set([".map", ".d.ts", ".pdb", ".tsbuildinfo"]);
   const pruneDirs = new Set([
     ".cache",
@@ -181,6 +206,8 @@ function pruneRuntimeTree() {
   ]);
 
   function visit(path) {
+    if (path === playwrightBrowsersRoot) return;
+
     const stat = statSync(path);
     if (stat.isDirectory()) {
       const name = path.split(/[\\/]/).pop();
@@ -202,7 +229,7 @@ function pruneRuntimeTree() {
     }
   }
 
-  visit(resolve(runtimeRoot, "node_modules"));
+  visit(nodeModules);
   prunePackageSpecificFiles();
 }
 
@@ -326,6 +353,8 @@ const runtimeRequired = [
   resolve(runtimeRoot, "ui", "dist", "index.html"),
   resolve(runtimeRoot, "ui", "server", "index.js"),
   resolve(runtimeRoot, "node_modules", "express"),
+  resolve(runtimeRoot, "node_modules", "@playwright", "mcp", "cli.js"),
+  resolve(runtimeRoot, "node_modules", "playwright-core", ".local-browsers"),
   resolve(runtimeRoot, "node_modules", "edgeclaw-memory-core", "lib", "index.js"),
   resolve(runtimeRoot, "node_modules", "edgeclaw-memory-core", "ui-source", "index.html"),
 ];

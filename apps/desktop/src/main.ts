@@ -175,6 +175,7 @@ class RuntimeManager {
       PILOTDECK_DESKTOP: "1",
       PILOTDECK_SKIP_BROWSER_OPEN: "1",
       PILOTDECK_SKIP_DEFAULT_PROJECT: "1",
+      PLAYWRIGHT_BROWSERS_PATH: "0",
     }, this.runtimeRoot, this.nodeBinary);
 
     publishRuntimeStatus({

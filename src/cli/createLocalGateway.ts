@@ -1,6 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync as mkdirSyncFs, renameSync } from "node:fs";
-import { resolve, join as joinPath } from "node:path";
+import { dirname, resolve, join as joinPath } from "node:path";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import type { EdgeClawMemoryService } from "edgeclaw-memory-core";
 import type { SessionConfigOverrides } from "../always-on/runtime/SessionConfigOverrides.js";
 import {
@@ -54,6 +55,7 @@ import {
   createMcpToolDefinitionsFromRuntime,
   loadMcpServerConfig,
   parsePluginMcpServers,
+  type PilotDeckMcpServerSpec,
 } from "../mcp/index.js";
 import { createModelRuntime, type ModelRuntime } from "../model/index.js";
 import { createDefaultPermissionContext, type PermissionRule } from "../permission/index.js";
@@ -172,6 +174,54 @@ export function resolveBrowserUseOutputDir(input: {
     fallbackDir,
     purpose: "browser_screenshots",
   }).dir;
+}
+
+type StdioMcpServerSpec = Extract<PilotDeckMcpServerSpec, { transport: "stdio" }>;
+
+const PLAYWRIGHT_MCP_PACKAGE_ARG = /^@playwright\/mcp(?:@.+)?$/u;
+const LOCAL_MODULE_DIR = dirname(fileURLToPath(import.meta.url));
+
+function resolveLocalPlaywrightMcpCli(): string | undefined {
+  const candidates = [
+    resolve(process.cwd(), "node_modules", "@playwright", "mcp", "cli.js"),
+    resolve(LOCAL_MODULE_DIR, "..", "..", "node_modules", "@playwright", "mcp", "cli.js"),
+    resolve(LOCAL_MODULE_DIR, "..", "..", "..", "node_modules", "@playwright", "mcp", "cli.js"),
+  ];
+  return candidates.find((cli) => existsSync(cli));
+}
+
+function shouldUseLocalPlaywrightMcp(spec: StdioMcpServerSpec): boolean {
+  const commandName = spec.command
+    .split(/[\\/]/u)
+    .pop()
+    ?.toLowerCase()
+    .replace(/\.(?:cmd|exe|ps1)$/u, "");
+  return commandName === "npx" ||
+    commandName === "playwright-mcp" ||
+    PLAYWRIGHT_MCP_PACKAGE_ARG.test(spec.args?.[0] ?? "");
+}
+
+function withLocalPlaywrightMcpEnv(env?: Record<string, string>): Record<string, string> | undefined {
+  const next = { ...(env ?? {}) };
+  if (process.env.PLAYWRIGHT_BROWSERS_PATH) {
+    next.PLAYWRIGHT_BROWSERS_PATH = process.env.PLAYWRIGHT_BROWSERS_PATH;
+  }
+  return Object.keys(next).length > 0 ? next : undefined;
+}
+
+function withLocalPlaywrightMcpCommand(spec: StdioMcpServerSpec): StdioMcpServerSpec {
+  if (!shouldUseLocalPlaywrightMcp(spec)) return spec;
+  const cli = resolveLocalPlaywrightMcpCli();
+  if (!cli) return spec;
+  const args = spec.args?.[0] && PLAYWRIGHT_MCP_PACKAGE_ARG.test(spec.args[0])
+    ? spec.args.slice(1)
+    : spec.args ?? [];
+  return {
+    ...spec,
+    command: process.execPath,
+    args: [cli, ...args],
+    env: withLocalPlaywrightMcpEnv(spec.env),
+  };
 }
 
 export function createLocalGateway(options: CreateLocalGatewayOptions = {}): CreateLocalGatewayResult {
@@ -847,13 +897,14 @@ class ProjectRuntimeRegistry {
       this.evictSessionMcp(context.sessionKey);
       const patchedPerSpecs = perSpecs.map((spec) => {
         if (spec.transport === "stdio" && spec.id === "browser-use") {
+          const localSpec = withLocalPlaywrightMcpCommand(spec);
           const outDir = resolveBrowserUseOutputDir({
             pilotHome: this.options.pilotHome,
             projectRoot: runtime.projectRoot,
             sessionKey: context.sessionKey,
           });
           mkdirSyncFs(outDir, { recursive: true });
-          return { ...spec, cwd: outDir, args: [...(spec.args ?? []), `--output-dir=${outDir}`] };
+          return { ...localSpec, cwd: outDir, args: [...(localSpec.args ?? []), `--output-dir=${outDir}`] };
         }
         return spec;
       });
