@@ -54,6 +54,7 @@ import mime from 'mime-types';
 import JSZip from 'jszip';
 import { readPermissionSettings } from './services/permissionSettings.js';
 import { getOpenUrlSpawnCommand } from './utils/processSpawn.js';
+import { isPathInsideOrEqual } from './utils/pathSafety.js';
 
 import { getProjects, getProjectCronJobsOverview, getSessions, renameProject, deleteSession, deleteProject, addProjectManually, extractProjectDirectory, clearProjectDirectoryCache, searchConversations } from './projects.js';
 import {
@@ -841,11 +842,19 @@ function resolvePathInProject(projectRoot, targetPath = '') {
         : path.resolve(projectRoot, targetPath);
     const normalizedRoot = path.resolve(projectRoot);
 
-    if (resolved !== normalizedRoot && !resolved.startsWith(normalizedRoot + path.sep)) {
+    if (!isPathInsideOrEqual(normalizedRoot, resolved)) {
         return { valid: false, error: 'Path must be under project root' };
     }
 
     return { valid: true, resolved };
+}
+
+function isProjectDescendant(projectRoot, targetPath) {
+    const normalizedRoot = path.resolve(projectRoot);
+    const resolved = path.isAbsolute(targetPath)
+        ? path.resolve(targetPath)
+        : path.resolve(projectRoot, targetPath);
+    return resolved !== normalizedRoot && isPathInsideOrEqual(normalizedRoot, resolved);
 }
 
 function setPreviewContentType(res, filePath) {
@@ -1033,8 +1042,7 @@ app.get('/api/projects/:projectName/file', authenticateToken, async (req, res) =
         const resolved = path.isAbsolute(filePath)
             ? path.resolve(filePath)
             : path.resolve(projectRoot, filePath);
-        const normalizedRoot = path.resolve(projectRoot) + path.sep;
-        if (!resolved.startsWith(normalizedRoot)) {
+        if (!isProjectDescendant(projectRoot, resolved)) {
             return res.status(403).json({ error: 'Path must be under project root' });
         }
 
@@ -1074,8 +1082,7 @@ app.get('/api/projects/:projectName/files/content', authenticateToken, async (re
         const resolved = path.isAbsolute(filePath)
             ? path.resolve(filePath)
             : path.resolve(projectRoot, filePath);
-        const normalizedRoot = path.resolve(projectRoot) + path.sep;
-        if (!resolved.startsWith(normalizedRoot)) {
+        if (!isProjectDescendant(projectRoot, resolved)) {
             return res.status(403).json({ error: 'Path must be under project root' });
         }
 
@@ -1219,8 +1226,7 @@ app.put('/api/projects/:projectName/file', authenticateToken, async (req, res) =
         const resolved = path.isAbsolute(filePath)
             ? path.resolve(filePath)
             : path.resolve(projectRoot, filePath);
-        const normalizedRoot = path.resolve(projectRoot) + path.sep;
-        if (!resolved.startsWith(normalizedRoot)) {
+        if (!isProjectDescendant(projectRoot, resolved)) {
             return res.status(403).json({ error: 'Path must be under project root' });
         }
 
@@ -1288,8 +1294,7 @@ function validatePathInProject(projectRoot, targetPath) {
     const resolved = path.isAbsolute(targetPath)
         ? path.resolve(targetPath)
         : path.resolve(projectRoot, targetPath);
-    const normalizedRoot = path.resolve(projectRoot) + path.sep;
-    if (!resolved.startsWith(normalizedRoot)) {
+    if (!isProjectDescendant(projectRoot, resolved)) {
         return { valid: false, error: 'Path must be under project root' };
     }
     return { valid: true, resolved };
