@@ -13,6 +13,7 @@ import {
 import { dirname, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { resolvePlaywrightMirrorMode } from "./download-playwright-browsers.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const desktopRoot = resolve(__dirname, "..");
@@ -180,6 +181,19 @@ function installRuntimePlaywrightBrowser() {
   const cli = resolve(runtimeRoot, "node_modules", "@playwright", "mcp", "cli.js");
   if (!existsSync(cli)) {
     throw new Error(`Desktop runtime Playwright MCP CLI missing: ${cli}`);
+  }
+  const mirrorMode = resolvePlaywrightMirrorMode(process.env);
+  if (mirrorMode === "npmmirror") {
+    run(
+      process.execPath,
+      [resolve(desktopRoot, "scripts", "download-playwright-browsers.mjs"), runtimeRoot],
+      runtimeRoot,
+      withBundledPlaywrightEnv(),
+    );
+    return;
+  }
+  if (mirrorMode !== "official") {
+    throw new Error(`Unsupported desktop Playwright browser mirror: ${mirrorMode}`);
   }
   run(
     process.execPath,

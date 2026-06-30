@@ -13,7 +13,8 @@
     "dist:mac": "node scripts/build-runtime.mjs && tsc -p tsconfig.json && electron-builder --mac",
     "dist:win": "node scripts/build-runtime.mjs && tsc -p tsconfig.json && electron-builder --win",
     "download-git-bash": "node scripts/download-git-bash.mjs",
-    "download-node": "node scripts/download-node.mjs"
+    "download-node": "node scripts/download-node.mjs",
+    "download-playwright-browsers": "node scripts/download-playwright-browsers.mjs"
   },
   "dependencies": {},
   "devDependencies": {

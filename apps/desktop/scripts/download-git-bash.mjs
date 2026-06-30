@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-import { createWriteStream, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { pipeline } from "node:stream/promises";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { downloadToFile, resolveDownloadSource } from "./download-sources.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const desktopRoot = resolve(__dirname, "..");
@@ -47,21 +47,34 @@ if (verifyExistingGit()) {
   process.exit(0);
 }
 
+const archiveName = `PortableGit-${version}-64-bit.7z.exe`;
+const source = resolveDownloadSource({
+  archiveEnv: "PILOTDECK_DESKTOP_GIT_ARCHIVE",
+  urlEnv: "PILOTDECK_DESKTOP_GIT_URL",
+  baseEnv: "PILOTDECK_DESKTOP_GIT_BASE_URL",
+  chinaBaseUrl: "https://mirrors.huaweicloud.com/git-for-windows",
+  officialBaseUrl: "https://github.com/git-for-windows/git/releases/download",
+  relativePath: `${releaseTag}/${archiveName}`,
+});
+
+rmSync(tmpDir, { recursive: true, force: true });
 mkdirSync(tmpDir, { recursive: true });
+
+let archivePath;
+if (source.type === "archive") {
+  archivePath = source.path;
+  if (!existsSync(archivePath)) {
+    throw new Error(`Bundled Git Bash archive not found: ${archivePath}`);
+  }
+  console.log(`[desktop] using bundled Git Bash archive from ${source.source}: ${archivePath}`);
+} else {
+  archivePath = join(tmpDir, archiveName);
+  await downloadToFile(source.url, archivePath);
+}
+
 rmSync(targetDir, { recursive: true, force: true });
 mkdirSync(targetDir, { recursive: true });
 writePlaceholder();
-
-const archiveName = `PortableGit-${version}-64-bit.7z.exe`;
-const archivePath = join(tmpDir, archiveName);
-const url = `https://github.com/git-for-windows/git/releases/download/${releaseTag}/${archiveName}`;
-
-console.log(`[desktop] downloading ${url}`);
-const response = await fetch(url);
-if (!response.ok || !response.body) {
-  throw new Error(`Failed to download Git for Windows ${version}: ${response.status} ${response.statusText}`);
-}
-await pipeline(response.body, createWriteStream(archivePath));
 
 console.log(`[desktop] extracting ${archivePath}`);
 const extract = spawnSync(archivePath, ["-y", `-o${targetDir}`], {

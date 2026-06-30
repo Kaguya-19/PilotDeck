@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-import { chmodSync, createWriteStream, existsSync, mkdirSync, rmSync, renameSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, rmSync, renameSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { pipeline } from "node:stream/promises";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { downloadToFile, resolveDownloadSource } from "./download-sources.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const desktopRoot = resolve(__dirname, "..");
@@ -70,20 +70,34 @@ if (existsSync(nodeBinary)) {
   }
 }
 
-mkdirSync(tmpDir, { recursive: true });
-rmSync(targetDir, { recursive: true, force: true });
-
 const name = `node-v${version}-${nodePlatform}-${nodeArch}`;
 const ext = process.platform === "win32" ? "zip" : "tar.gz";
-const archivePath = join(tmpDir, `${name}.${ext}`);
-const url = `https://nodejs.org/dist/v${version}/${name}.${ext}`;
+const archiveName = `${name}.${ext}`;
+const source = resolveDownloadSource({
+  archiveEnv: "PILOTDECK_DESKTOP_NODE_ARCHIVE",
+  urlEnv: "PILOTDECK_DESKTOP_NODE_URL",
+  baseEnv: "PILOTDECK_DESKTOP_NODE_BASE_URL",
+  chinaBaseUrl: "https://mirrors.aliyun.com/nodejs-release",
+  officialBaseUrl: "https://nodejs.org/dist",
+  relativePath: `v${version}/${archiveName}`,
+});
 
-console.log(`[desktop] downloading ${url}`);
-const response = await fetch(url);
-if (!response.ok || !response.body) {
-  throw new Error(`Failed to download Node ${version}: ${response.status} ${response.statusText}`);
+rmSync(tmpDir, { recursive: true, force: true });
+mkdirSync(tmpDir, { recursive: true });
+
+let archivePath;
+if (source.type === "archive") {
+  archivePath = source.path;
+  if (!existsSync(archivePath)) {
+    throw new Error(`Bundled Node archive not found: ${archivePath}`);
+  }
+  console.log(`[desktop] using bundled Node archive from ${source.source}: ${archivePath}`);
+} else {
+  archivePath = join(tmpDir, archiveName);
+  await downloadToFile(source.url, archivePath);
 }
-await pipeline(response.body, createWriteStream(archivePath));
+
+rmSync(targetDir, { recursive: true, force: true });
 
 console.log(`[desktop] extracting ${archivePath}`);
 const extract = spawnSync("tar", ["-xf", archivePath, "-C", tmpDir], { stdio: "inherit" });
