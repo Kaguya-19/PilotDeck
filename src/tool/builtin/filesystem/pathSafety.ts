@@ -13,7 +13,7 @@ const DEFAULT_WRITE_DENY_DIRECTORIES = new Set([".git", "node_modules", "dist"])
 export function resolvePilotDeckWorkspacePath(
   inputPath: string,
   context: PilotDeckToolRuntimeContext,
-  options?: { forWrite?: boolean; mustExist?: boolean },
+  options?: { forWrite?: boolean; mustExist?: boolean; allowOutsideWorkspace?: boolean },
 ): PilotDeckPathSafetyResult {
   if (!inputPath || inputPath.includes("\0")) {
     return {
@@ -41,6 +41,17 @@ export function resolvePilotDeckWorkspacePath(
   const root = roots.find((candidate) => isPathWithinRoot(absolutePath, candidate));
 
   if (!root) {
+    if (options?.allowOutsideWorkspace) {
+      const relativePath = path.relative(context.cwd, absolutePath) || ".";
+      if (options?.forWrite && isWriteDenied(relativePath)) {
+        return {
+          ok: false,
+          error: toolError("path_not_allowed", `Writing to ${relativePath} is not allowed by default.`),
+        };
+      }
+      return { ok: true, absolutePath, relativePath, root: context.cwd };
+    }
+
     return {
       ok: false,
       error: toolError("path_not_allowed", `Path ${inputPath} is outside the PilotDeck workspace.`),

@@ -4,7 +4,13 @@ import type { AgentControlBoundaryTranscriptEntry, SessionMetadataValue } from "
 import type { AgentTranscriptWriter, AgentTranscriptWriterState } from "./TranscriptWriter.js";
 
 export type InMemoryTranscriptEntry =
-  | { type: "accepted_input"; sessionId: string; turnId: string; messages: CanonicalMessage[] }
+  | {
+      type: "accepted_input";
+      sessionId: string;
+      turnId: string;
+      messages: CanonicalMessage[];
+      metadata?: Record<string, unknown>;
+    }
   | { type: "durable_message"; sessionId: string; turnId: string; message: CanonicalMessage }
   | { type: "turn_result"; sessionId: string; turnId: string; result: AgentTurnResult }
   | { type: "session_metadata"; sessionId: string; turnId: string; metadata: SessionMetadataValue }
@@ -18,8 +24,19 @@ export type InMemoryTranscriptEntry =
 export class InMemoryTranscriptWriter implements AgentTranscriptWriter {
   readonly entries: InMemoryTranscriptEntry[] = [];
 
-  recordAcceptedInput(sessionId: string, turnId: string, messages: CanonicalMessage[]): void {
-    this.entries.push({ type: "accepted_input", sessionId, turnId, messages });
+  recordAcceptedInput(
+    sessionId: string,
+    turnId: string,
+    messages: CanonicalMessage[],
+    metadata?: Record<string, unknown>,
+  ): void {
+    this.entries.push({
+      type: "accepted_input",
+      sessionId,
+      turnId,
+      messages,
+      ...(metadata && Object.keys(metadata).length > 0 ? { metadata } : {}),
+    });
   }
 
   recordDurableMessage(sessionId: string, turnId: string, message: CanonicalMessage): void {

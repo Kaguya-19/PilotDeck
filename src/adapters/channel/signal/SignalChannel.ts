@@ -3,6 +3,7 @@ import type { ChannelAdapter, ChannelHandle, ChannelLogger, ChannelStartDeps } f
 import { SignalSessionMapper } from "./SignalSessionMapper.js";
 import { renderSignalEvent } from "./signal-render.js";
 import { ImElicitationHelper } from "../protocol/ImElicitationHelper.js";
+import { ImPermissionHelper } from "../protocol/ImPermissionHelper.js";
 
 const MAX_MESSAGE_LENGTH = 2000;
 const DEFAULT_REST_URL = "http://127.0.0.1:8080";
@@ -72,6 +73,7 @@ export class SignalChannel implements ChannelAdapter {
   private running = false;
   private activeChats = new Set<string>();
   private readonly elicitation = new ImElicitationHelper();
+  private readonly permissions = new ImPermissionHelper();
   private recipientByChat = new Map<string, string>();
 
   constructor(options: SignalChannelOptions = {}) {
@@ -143,7 +145,9 @@ export class SignalChannel implements ChannelAdapter {
           const lines = carry.split(/\r?\n/);
           carry = lines.pop() ?? "";
           for (const line of lines) {
-            await this.parseLine(line);
+            void this.parseLine(line).catch((e) => {
+              this.logger?.error?.(`signal: parseLine error: ${e}`);
+            });
           }
         }
       } catch (e) {
@@ -184,6 +188,16 @@ export class SignalChannel implements ChannelAdapter {
       return;
     }
 
+    if (this.permissions.hasPending(sessionChatId) && this.gateway) {
+      try {
+        const confirmation = await this.permissions.answer(sessionChatId, text, this.gateway);
+        if (confirmation) await this.sendReply(sessionChatId, confirmation);
+      } catch (e) {
+        this.logger?.error?.(`signal: permission answer error: ${e}`);
+      }
+      return;
+    }
+
     if (this.activeChats.has(sessionChatId)) {
       this.logger?.info?.(`signal: chat ${sessionChatId} already active, skipping`);
       return;
@@ -219,6 +233,11 @@ export class SignalChannel implements ChannelAdapter {
           await this.sendReply(chatId, questionText);
           continue;
         }
+        if (event.type === "permission_request") {
+          const questionText = this.permissions.capture(chatId, sessionKey, event);
+          await this.sendReply(chatId, questionText);
+          continue;
+        }
         const fragment = renderSignalEvent(event);
         if (fragment != null) replyText += fragment;
       }
@@ -228,6 +247,7 @@ export class SignalChannel implements ChannelAdapter {
     }
 
     this.elicitation.clear(chatId);
+    this.permissions.clear(chatId);
 
     const finalText = replyText.trim();
     if (finalText) {

@@ -14,6 +14,20 @@ function hasWindowsExecutableExtension(command) {
   return /\.(?:cmd|exe|bat|com)$/i.test(command);
 }
 
+function isWindowsCommandScript(command) {
+  return /\.(?:cmd|bat)$/i.test(command);
+}
+
+function quoteWindowsCmdArg(value) {
+  const text = String(value);
+  if (text.length === 0) return '""';
+  return `"${text.replace(/(["^&|<>()%!])/g, '^$1')}"`;
+}
+
+function buildWindowsCmdLine(command, args) {
+  return [command, ...args].map(quoteWindowsCmdArg).join(' ');
+}
+
 export function resolveWindowsCliCommand(command, platform = process.platform) {
   if (!isWindows(platform)) return command;
 
@@ -27,14 +41,26 @@ export function resolveWindowsCliCommand(command, platform = process.platform) {
 
 export function prepareCliSpawn(command, args = [], options = {}, platform = process.platform) {
   const windows = isWindows(platform);
+  const resolvedCommand = resolveWindowsCliCommand(command, platform);
+  const windowsOptions = windows
+    ? { ...options, shell: false, windowsHide: true }
+    : { ...options, shell: options.shell };
+
+  if (windows && isWindowsCommandScript(resolvedCommand)) {
+    return {
+      command: 'cmd.exe',
+      args: ['/d', '/s', '/c', `"${buildWindowsCmdLine(resolvedCommand, args)}"`],
+      options: {
+        ...windowsOptions,
+        windowsVerbatimArguments: true,
+      },
+    };
+  }
+
   return {
-    command: resolveWindowsCliCommand(command, platform),
+    command: resolvedCommand,
     args,
-    options: {
-      ...options,
-      shell: windows ? false : options.shell,
-      windowsHide: windows ? true : options.windowsHide,
-    },
+    options: windowsOptions,
   };
 }
 

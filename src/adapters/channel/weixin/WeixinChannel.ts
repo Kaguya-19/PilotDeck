@@ -7,6 +7,7 @@ import type { Gateway, GatewayChannelKey } from "../../../gateway/index.js";
 import type { ChannelAdapter, ChannelHandle, ChannelLogger, ChannelStartDeps } from "../protocol/ChannelAdapter.js";
 import { executeChannelCommand } from "../protocol/ChannelCommandRegistry.js";
 import { ImElicitationHelper } from "../protocol/ImElicitationHelper.js";
+import { ImPermissionHelper } from "../protocol/ImPermissionHelper.js";
 import {
   ImLiveReplyController,
   type ImLiveReplyControllerOptions,
@@ -16,6 +17,9 @@ import { WeixinSessionMapper } from "./WeixinSessionMapper.js";
 
 const CREDENTIALS_PATH = join(homedir(), ".pilotdeck", "weixin-credentials.json");
 const POLL_RETRY_DELAY_MS = 3000;
+const WEIXIN_ACTIVITY_DELAY_MS = 300;
+const WEIXIN_ACTIVITY_UPDATE_THROTTLE_MS = 3000;
+const WEIXIN_ACTIVITY_MAX_UPDATES = 120;
 let ilinkFetchCompatibilityInstalled = false;
 
 export type WeixinChannelOptions = {
@@ -55,7 +59,9 @@ export class WeixinChannel implements ChannelAdapter {
   private loopAbort = new AbortController();
   private pollPromise: Promise<void> | null = null;
   private activeChats = new Set<string>();
+  private activeLiveReplies = new Map<string, ImLiveReplyController<void>>();
   private readonly elicitation = new ImElicitationHelper();
+  private readonly permissions = new ImPermissionHelper();
   private contextTokens = new Map<string, string>();
   private consecutivePollErrors = 0;
 
@@ -210,6 +216,20 @@ export class WeixinChannel implements ChannelAdapter {
       return;
     }
 
+    if (this.permissions.hasPending(fromUser) && this.gateway) {
+      try {
+        const trimmed = text.trim();
+        const confirmation = await this.permissions.answer(fromUser, text, this.gateway);
+        if (confirmation) await this.sendReply(fromUser, confirmation);
+        if (trimmed === "1" || trimmed === "2") {
+          await this.activeLiveReplies.get(fromUser)?.resumeActivity("tool");
+        }
+      } catch (e) {
+        this.logger?.error?.(`weixin: permission answer error: ${e}`);
+      }
+      return;
+    }
+
     const mapped = this.mapper.resolve({ chatId: fromUser, text });
     if (mapped.command === "new" && !mapped.message) {
       await this.sendReply(fromUser, "已创建新会话。");
@@ -252,14 +272,20 @@ export class WeixinChannel implements ChannelAdapter {
   ): Promise<void> {
     if (!this.gateway) return;
 
+    const turnTimeoutMs = this.liveReplyOptions?.turnTimeoutMs ?? 600_000;
     const liveReply = new ImLiveReplyController<void>({
       ...this.liveReplyOptions,
+      activityDelayMs: this.liveReplyOptions?.activityDelayMs ?? WEIXIN_ACTIVITY_DELAY_MS,
+      activityUpdateThrottleMs:
+        this.liveReplyOptions?.activityUpdateThrottleMs ?? WEIXIN_ACTIVITY_UPDATE_THROTTLE_MS,
+      activityMaxUpdates: this.liveReplyOptions?.activityMaxUpdates ?? WEIXIN_ACTIVITY_MAX_UPDATES,
+      activityTtlMs: this.liveReplyOptions?.activityTtlMs ?? turnTimeoutMs,
       transport: this.createLiveReplyTransport(userId),
       onTransportError: (error, phase) => {
         this.logger?.warn?.(`weixin: live reply ${phase} failed: ${formatWeixinError(error)}`);
       },
     });
-    const turnTimeoutMs = this.liveReplyOptions?.turnTimeoutMs ?? 600_000;
+    this.activeLiveReplies.set(userId, liveReply);
     let activeRunId: string | undefined;
     let watchdogSettled = false;
     const watchdog = turnTimeoutMs > 0
@@ -279,6 +305,7 @@ export class WeixinChannel implements ChannelAdapter {
     watchdog?.unref?.();
 
     try {
+      void this.sendTypingIfPossible(userId);
       for await (const event of this.gateway.submitTurn({
         sessionKey,
         channelKey: "weixin",
@@ -292,6 +319,12 @@ export class WeixinChannel implements ChannelAdapter {
         }
         if (event.type === "elicitation_request") {
           const questionText = this.elicitation.capture(userId, sessionKey, event);
+          await liveReply.pauseActivity();
+          await this.sendReply(userId, questionText);
+          continue;
+        }
+        if (event.type === "permission_request") {
+          const questionText = this.permissions.capture(userId, sessionKey, event);
           await liveReply.pauseActivity();
           await this.sendReply(userId, questionText);
           continue;
@@ -316,9 +349,11 @@ export class WeixinChannel implements ChannelAdapter {
     } finally {
       watchdogSettled = true;
       if (watchdog) clearTimeout(watchdog);
+      this.activeLiveReplies.delete(userId);
     }
 
     this.elicitation.clear(userId);
+    this.permissions.clear(userId);
     await liveReply.flushFinal();
   }
 

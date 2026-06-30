@@ -249,10 +249,10 @@ export function getSessionTokenBudget(sessionKey) {
  * Convert UI-shape image attachments into Gateway-shape ChannelAttachment[].
  *
  * UI sends:
- *   { name, data: 'data:image/png;base64,XXX', size, mimeType }
+ *   { name, data: 'data:image/png;base64,XXX', path, size, mimeType }
  *
  * Gateway expects ChannelAttachment:
- *   { type: 'image', name, mimeType, content: <raw base64, no data: prefix>, bytes }
+ *   { type: 'image', name, path, mimeType, content: <raw base64, no data: prefix>, bytes }
  *
  * The bare-base64 form matches how `CanonicalImageBlock` and the
  * AttachmentResolver store the payload elsewhere in the codebase.
@@ -261,7 +261,7 @@ export function getSessionTokenBudget(sessionKey) {
  * spread it conditionally without injecting an empty array.
  *
  * @param {unknown} images
- * @returns {Array<{type:'image',name?:string,mimeType:string,content:string,bytes?:number}>|undefined}
+ * @returns {Array<{type:'image',name?:string,path?:string,mimeType:string,content:string,bytes?:number}>|undefined}
  */
 function uiImagesToAttachments(images) {
     if (!Array.isArray(images) || images.length === 0) return undefined;
@@ -280,6 +280,7 @@ function uiImagesToAttachments(images) {
         out.push({
             type: 'image',
             name: typeof img.name === 'string' ? img.name : undefined,
+            ...(typeof img.path === 'string' && img.path ? { path: img.path } : {}),
             mimeType,
             content: base64,
             ...(typeof img.size === 'number' ? { bytes: img.size } : {}),

@@ -3,6 +3,7 @@ import type { PilotDeckToolDefinition } from "../protocol/types.js";
 import { PilotDeckToolRuntimeError } from "../protocol/errors.js";
 import { isNotebookPath } from "./filesystem/fileTypeSafety.js";
 import { resolvePilotDeckWorkspacePath } from "./filesystem/pathSafety.js";
+import { checkFilesystemWritePermission } from "./filesystem/writePermissions.js";
 import { readTextFile } from "./filesystem/readTextFile.js";
 import { writeTextFile } from "./filesystem/writeTextFile.js";
 import {
@@ -25,7 +26,7 @@ export function createEditFileTool(): PilotDeckToolDefinition<EditFileInput> {
     name: "edit_file",
     aliases: ["Edit"],
     description:
-      "Edit a workspace text file by replacing an exact string match.\n\nUsage:\n- You must read the target file with read_file before editing it. This tool will reject the input if the file has not been read in this session.\n- old_string must exactly match the file content character-by-character, including indentation. Copy old_string directly from read_file output without adding or removing spaces.\n- Use this tool for targeted changes to an existing file.\n- old_string must appear in the target file.\n- If old_string is not unique, either provide a more specific old_string or set replace_all to update every occurrence.\n- Use replace_all when renaming or replacing repeated text across the same file.\n- If the file is outside the workspace or does not exist, the tool returns a controlled error.",
+      "Edit a workspace text file, or an outside-workspace text file after explicit host permission, by replacing an exact string match.\n\nUsage:\n- You must read the target file with read_file before editing it. This tool will reject the input if the file has not been read in this session.\n- old_string must exactly match the file content character-by-character, including indentation. Copy old_string directly from read_file output without adding or removing spaces.\n- Use this tool for targeted changes to an existing file.\n- old_string must appear in the target file.\n- If old_string is not unique, either provide a more specific old_string or set replace_all to update every occurrence.\n- Use replace_all when renaming or replacing repeated text across the same file.\n- Paths outside the workspace require explicit user permission before execution.",
     kind: "filesystem",
     inputSchema: {
       type: "object",
@@ -34,7 +35,7 @@ export function createEditFileTool(): PilotDeckToolDefinition<EditFileInput> {
       properties: {
         file_path: {
           type: "string",
-          description: "Relative or absolute path of the file to edit. The path must resolve inside the workspace.",
+          description: "Relative or absolute path of the file to edit. Paths outside the workspace require explicit user permission.",
         },
         old_string: {
           type: "string",
@@ -54,8 +55,13 @@ export function createEditFileTool(): PilotDeckToolDefinition<EditFileInput> {
     isReadOnly: () => false,
     isConcurrencySafe: () => false,
     isDestructive: () => false,
+    checkPermissions: async (input, context) =>
+      checkFilesystemWritePermission("edit_file", input.file_path, context),
     validateInput: async (input, context) => {
-      const resolved = resolvePilotDeckWorkspacePath(input.file_path, context, { forWrite: true });
+      const resolved = resolvePilotDeckWorkspacePath(input.file_path, context, {
+        forWrite: true,
+        allowOutsideWorkspace: true,
+      });
       if (!resolved.ok) {
         return {
           ok: false,
@@ -143,7 +149,10 @@ export function createEditFileTool(): PilotDeckToolDefinition<EditFileInput> {
       };
     },
     execute: async (input, context) => {
-      const resolved = resolvePilotDeckWorkspacePath(input.file_path, context, { forWrite: true });
+      const resolved = resolvePilotDeckWorkspacePath(input.file_path, context, {
+        forWrite: true,
+        allowOutsideWorkspace: context.currentPermissionDecision?.type === "allow",
+      });
       if (!resolved.ok) {
         throw new PilotDeckToolRuntimeError(resolved.error.code, resolved.error.message, resolved.error.details);
       }

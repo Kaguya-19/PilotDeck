@@ -5,6 +5,7 @@ export type WorkspaceProviderId = WorkspaceStrategyId;
 export type WorkspacePrepareInput = {
   projectRoot: string;
   runId: string;
+  planTitle: string;
 };
 
 export type WorkspacePublishOutput = {

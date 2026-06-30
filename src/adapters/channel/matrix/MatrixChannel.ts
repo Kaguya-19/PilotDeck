@@ -5,6 +5,7 @@ import type { ChannelAdapter, ChannelHandle, ChannelLogger, ChannelStartDeps } f
 import { MatrixSessionMapper } from "./MatrixSessionMapper.js";
 import { renderMatrixEvent } from "./matrix-render.js";
 import { ImElicitationHelper } from "../protocol/ImElicitationHelper.js";
+import { ImPermissionHelper } from "../protocol/ImPermissionHelper.js";
 
 let MatrixSdk: any;
 try {
@@ -40,6 +41,7 @@ export class MatrixChannel implements ChannelAdapter {
   private userId: string | null = null;
   private activeChats = new Set<string>();
   private readonly elicitation = new ImElicitationHelper();
+  private readonly permissions = new ImPermissionHelper();
 
   constructor(options: MatrixChannelOptions = {}) {
     this.mapper = options.mapper ?? new MatrixSessionMapper();
@@ -138,6 +140,16 @@ export class MatrixChannel implements ChannelAdapter {
       return;
     }
 
+    if (this.permissions.hasPending(roomId) && this.gateway) {
+      try {
+        const confirmation = await this.permissions.answer(roomId, text, this.gateway);
+        if (confirmation) await this.sendReply(roomId, confirmation);
+      } catch (e) {
+        this.logger?.error?.(`matrix: permission answer error: ${e}`);
+      }
+      return;
+    }
+
     if (this.activeChats.has(roomId)) {
       this.logger?.info?.(`matrix: room ${roomId} already active, skipping`);
       return;
@@ -173,6 +185,11 @@ export class MatrixChannel implements ChannelAdapter {
           await this.sendReply(roomId, questionText);
           continue;
         }
+        if (event.type === "permission_request") {
+          const questionText = this.permissions.capture(roomId, sessionKey, event);
+          await this.sendReply(roomId, questionText);
+          continue;
+        }
         const fragment = renderMatrixEvent(event);
         if (fragment != null) replyText += fragment;
       }
@@ -182,6 +199,7 @@ export class MatrixChannel implements ChannelAdapter {
     }
 
     this.elicitation.clear(roomId);
+    this.permissions.clear(roomId);
 
     const finalText = replyText.trim();
     if (finalText) {

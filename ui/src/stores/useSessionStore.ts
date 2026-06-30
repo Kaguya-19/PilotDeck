@@ -130,6 +130,11 @@ export interface NormalizedMessage {
   // Cursor-specific ordering
   sequence?: number;
   rowid?: number;
+  /** Transcript entry id for history fork targeting. */
+  entryId?: string;
+  /** True when the corresponding transcript entry has non-text prefill content. */
+  forkUnsupportedContent?: boolean;
+  forkUnsupportedReason?: string;
   // Streaming-only: id of slot.serverMessages tail at the moment the
   // streaming row was created. computeMerged uses this for an id-based
   // same-turn-snapshot test instead of a timestamp window.
@@ -394,7 +399,7 @@ function computeMerged(server: NormalizedMessage[], realtime: NormalizedMessage[
     const streamMsg = extra[streamIdx];
     const isAssistantText = lastServer.kind === 'text' && lastServer.role === 'assistant';
     const tailIdChanged = streamMsg.serverTailIdAtStart !== undefined
-      && lastServer.id !== streamMsg.serverTailIdAtStart;
+      && !sameMessageId(lastServer.id, streamMsg.serverTailIdAtStart);
     if (isAssistantText && tailIdChanged) {
       return [...server.slice(0, -1), ...extra];
     }

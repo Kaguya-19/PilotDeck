@@ -215,6 +215,17 @@ export class ImLiveReplyController<Handle = ImLiveReplyHandle> {
     await this.stopNativeActivity();
   }
 
+  async resumeActivity(kind: ImLiveReplyActivityKind = "thinking"): Promise<void> {
+    if (this.closed) return;
+    this.clearActivityTimers();
+    const segment = this.currentSegment;
+    segment.activityKind = kind;
+    segment.activityStartedAt = Date.now();
+    segment.activityArmed = true;
+    segment.activityUpdates = 0;
+    await this.flushActivity({ force: true });
+  }
+
   async clear(): Promise<void> {
     this.clearTextTimer();
     this.clearTurnTimer();

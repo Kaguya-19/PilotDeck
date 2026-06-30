@@ -21,6 +21,7 @@ export type TurnRunnerOptions = {
   basePermissionMode?: PermissionMode;
   /** Allow model-visible plan mode tools for this turn. */
   allowPlanModeTools?: boolean;
+  canPrompt?: boolean;
   permissionRules?: Partial<PermissionRuleSet>;
   abortSignal?: AbortSignal;
 };
@@ -59,7 +60,12 @@ export class TurnRunner {
     const messages = [...options.messages, ...accepted.messages];
 
     try {
-      await this.transcript.recordAcceptedInput(options.sessionId, options.turnId, accepted.messages);
+      await this.transcript.recordAcceptedInput(
+        options.sessionId,
+        options.turnId,
+        accepted.messages,
+        acceptedInputMetadata(options),
+      );
     } catch (error) {
       const agentTranscriptError = agentError("agent_transcript_error", "Failed to record accepted input.", error);
       const result = this.createErrorResult(options, agentTranscriptError);
@@ -111,6 +117,7 @@ export class TurnRunner {
         permissionMode: options.permissionMode,
         basePermissionMode: options.basePermissionMode,
         allowPlanModeTools: options.allowPlanModeTools,
+        canPrompt: options.canPrompt,
         permissionRules: options.permissionRules,
         abortSignal: options.abortSignal,
         onDurableMessage: (msg) => this.transcript.recordDurableMessage(options.sessionId, options.turnId, msg),
@@ -154,6 +161,20 @@ export class TurnRunner {
       errors: [error],
     };
   }
+}
+
+function acceptedInputMetadata(options: TurnRunnerOptions): Record<string, unknown> | undefined {
+  const metadata: Record<string, unknown> = {};
+  if (options.permissionMode) {
+    metadata.permissionMode = options.permissionMode;
+  }
+  if (options.basePermissionMode) {
+    metadata.basePermissionMode = options.basePermissionMode;
+  }
+  if (options.allowPlanModeTools !== undefined) {
+    metadata.allowPlanModeTools = options.allowPlanModeTools;
+  }
+  return Object.keys(metadata).length > 0 ? metadata : undefined;
 }
 
 function emptyUsage(): CanonicalUsage {

@@ -1,8 +1,9 @@
 import { memo, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
-import { AlertTriangle, Check, ChevronRight, Copy, FileText, Loader2 } from 'lucide-react';
+import { AlertTriangle, Check, ChevronRight, Copy, FileText, GitBranch, Loader2 } from 'lucide-react';
 import { copyTextToClipboard } from '../../utils/clipboard';
+import { cn } from '../../lib/utils.js';
 import { useTypewriter } from './useTypewriter';
 import type { Project, SessionProvider } from '../../types/app';
 import type {
@@ -82,6 +83,9 @@ type MessageRowV2Props = {
   subagentActivityById?: Map<string, ChatMessage>;
   subagentThinkingById?: Map<string, string>;
   isSessionRunning?: boolean;
+  onFork?: (message: ChatMessage, carriedMessageCount: number) => void;
+  forkCarriedMessageCount?: number;
+  forkDisabled?: boolean;
 };
 
 // Fall back to the heavy legacy renderer for anything that isn't a vanilla
@@ -101,7 +105,6 @@ const shouldDelegate = (message: ChatMessage): boolean => {
 function MessageRowV2({
   message,
   prevMessage,
-  nextMessage,
   beforeProcessAttachments = [],
   afterProcessAttachments = [],
   provider,
@@ -120,6 +123,9 @@ function MessageRowV2({
   subagentActivityById,
   subagentThinkingById,
   isSessionRunning,
+  onFork,
+  forkCarriedMessageCount = 0,
+  forkDisabled = false,
 }: MessageRowV2Props) {
   const { t } = useTranslation('chat');
   const delegate = useMemo(() => shouldDelegate(message), [message]);
@@ -144,6 +150,11 @@ function MessageRowV2({
         : [],
     [message.attachments],
   );
+  const [userImageLightbox, setUserImageLightbox] = useState<number | null>(null);
+  const hasForkUnsupportedContent =
+    Boolean(message.forkUnsupportedContent) ||
+    messageImages.length > 0 ||
+    messageAttachments.length > 0;
 
   if (message.isAgentActivitySummary) {
     return (
@@ -233,7 +244,6 @@ function MessageRowV2({
 
   const isUser = message.type === 'user';
   const isError = message.type === 'error';
-  const [userImageLightbox, setUserImageLightbox] = useState<number | null>(null);
 
   // User: right-aligned grey bubble.
   if (isUser) {
@@ -243,7 +253,22 @@ function MessageRowV2({
       mimeType: image.mimeType,
     }));
     return withProcessRows(
-      <div className="flex w-full justify-end">
+      <div className="group/user-msg flex w-full items-end justify-end gap-1.5">
+        {onFork ? (
+          <ForkMessageButton
+            carriedMessageCount={forkCarriedMessageCount}
+            disabled={forkDisabled || isSessionRunning || !message.entryId || hasForkUnsupportedContent}
+            disabledReason={hasForkUnsupportedContent
+              ? String(message.forkUnsupportedReason || t('fork.unsupportedAttachments', {
+                  defaultValue: 'Forking messages with attachments or media is not supported yet',
+                }))
+              : undefined}
+            onFork={() => {
+              if (message.entryId && !hasForkUnsupportedContent) onFork(message, forkCarriedMessageCount);
+            }}
+            t={t}
+          />
+        ) : null}
         <div className="min-w-0 max-w-[78%] overflow-hidden rounded-[22px] bg-neutral-100 px-4 py-2.5 text-[14px] leading-relaxed text-neutral-900 dark:bg-neutral-800 dark:text-neutral-100">
           {message.isStreaming && !formattedContent ? (
             <span className="inline-block h-4 w-2 animate-pulse bg-neutral-400 dark:bg-neutral-500" />
@@ -297,7 +322,8 @@ function MessageRowV2({
                 </div>
               ) : null}
               {formattedContent ? (
-                <Markdown className="prose prose-sm prose-neutral max-w-none dark:prose-invert prose-p:my-1 prose-ol:my-1 prose-ul:my-1 prose-li:my-0 min-w-0 break-words [overflow-wrap:anywhere]" projectName={selectedProject?.name}>{formattedContent}</Markdown>
+                <Markdown className="prose prose-sm prose-neutral max-w-none dark:prose-invert prose-p:my-1 prose-ol:my-1 prose-ul:my-1 prose-li:my-0 min-w-0 break-words [overflow-wrap:anywhere]" projectName={selectedProject?.name}
+          onFileOpen={onFileOpen}>{formattedContent}</Markdown>
               ) : null}
             </>
           )}
@@ -321,7 +347,8 @@ function MessageRowV2({
           <AlertTriangle className="h-3.5 w-3.5" strokeWidth={2} />
         </div>
         <div className="min-w-0 flex-1 pt-0.5 text-[14px] leading-relaxed text-red-500">
-          <Markdown projectName={selectedProject?.name}>{formattedContent}</Markdown>
+          <Markdown projectName={selectedProject?.name}
+          onFileOpen={onFileOpen}>{formattedContent}</Markdown>
         </div>
       </div>,
     );
@@ -351,7 +378,8 @@ function MessageRowV2({
                 ? 'border-blue-400/50 text-neutral-600 dark:border-blue-500/40 dark:text-neutral-300'
                 : 'border-blue-400/30 text-neutral-600 dark:border-blue-500/30 dark:text-neutral-400'
             }`}>
-              <Markdown projectName={selectedProject?.name} isStreaming={isThinkingStreaming}>
+              <Markdown projectName={selectedProject?.name}
+          onFileOpen={onFileOpen} isStreaming={isThinkingStreaming}>
                 {isThinkingStreaming ? thinkingDisplayText : formattedContent}
               </Markdown>
             </div>
@@ -369,7 +397,8 @@ function MessageRowV2({
             <span>{t('thinking.completed', { defaultValue: 'Thought process' })}</span>
           </summary>
           <div className="mt-1.5 max-h-64 overflow-y-auto border-l-2 border-neutral-300 pl-3 text-[13px] text-neutral-500 dark:border-neutral-700 dark:text-neutral-400">
-            <Markdown projectName={selectedProject?.name}>{formattedContent}</Markdown>
+            <Markdown projectName={selectedProject?.name}
+          onFileOpen={onFileOpen}>{formattedContent}</Markdown>
           </div>
         </details>
       </div>,
@@ -377,23 +406,46 @@ function MessageRowV2({
   }
 
   // Assistant: plain prose, no avatar and no bubble.
-  return withProcessRows(
+  const hasAssistantProse = formattedContent.trim().length > 0;
+  const showStreamingCursor = Boolean(message.isStreaming && !contentDisplayText);
+  const showAssistantCopyButton = hasAssistantProse;
+  const canRenderAssistantForkButton = Boolean(onFork && hasAssistantProse);
+  const showAssistantActions = showAssistantCopyButton || canRenderAssistantForkButton;
+  const assistantForkDisabled = Boolean(
+    forkDisabled || isSessionRunning || message.isStreaming || !message.entryId,
+  );
+  const assistantBody = (hasAssistantProse || showStreamingCursor) ? (
     <div className="min-w-0 text-[14px] leading-relaxed text-neutral-900 dark:text-neutral-100">
-      {message.isStreaming && !contentDisplayText ? (
+      {showStreamingCursor ? (
         <span className="inline-block h-4 w-2 animate-pulse bg-neutral-400 dark:bg-neutral-500" />
       ) : (
-        <>
-          <Markdown className="prose prose-sm prose-neutral max-w-none dark:prose-invert prose-headings:mb-2 prose-headings:mt-4 prose-h2:text-lg prose-h3:text-base prose-p:my-2 prose-pre:my-3 prose-ol:my-2 prose-ul:my-2 prose-table:my-0 prose-hr:my-4" projectName={selectedProject?.name} isStreaming={message.isStreaming}>{contentDisplayText}</Markdown>
-          {formattedContent.trim() &&
-           (!nextMessage || nextMessage.type === 'user' || nextMessage.type === 'error') ? (
-            <div className="mt-1.5 flex justify-end">
-              <CopyMarkdownButton content={formattedContent} />
-            </div>
-          ) : null}
-        </>
+        <Markdown className="prose prose-sm prose-neutral max-w-none dark:prose-invert prose-headings:mb-2 prose-headings:mt-4 prose-h2:text-lg prose-h3:text-base prose-p:my-2 prose-pre:my-3 prose-ol:my-2 prose-ul:my-2 prose-table:my-0 prose-hr:my-4" projectName={selectedProject?.name}
+        onFileOpen={onFileOpen} isStreaming={message.isStreaming}>{contentDisplayText}</Markdown>
       )}
-    </div>,
-  );
+      {showAssistantActions ? (
+        <div className="mt-1.5 flex justify-end gap-1">
+          {canRenderAssistantForkButton ? (
+            <ForkMessageButton
+              carriedMessageCount={forkCarriedMessageCount}
+              disabled={assistantForkDisabled}
+              onFork={() => {
+                if (!assistantForkDisabled && message.entryId) onFork?.(message, forkCarriedMessageCount);
+              }}
+              t={t}
+              variant="action-row"
+            />
+          ) : null}
+          {showAssistantCopyButton ? <CopyMarkdownButton content={formattedContent} /> : null}
+        </div>
+      ) : null}
+    </div>
+  ) : null;
+
+  if (!assistantBody && beforeProcessAttachments.length === 0 && afterProcessAttachments.length === 0) {
+    return null;
+  }
+
+  return withProcessRows(assistantBody);
 }
 
 function CopyMarkdownButton({ content }: { content: string }) {
@@ -417,6 +469,49 @@ function CopyMarkdownButton({ content }: { content: string }) {
       title={copied ? 'Copied' : 'Copy'}
     >
       {copied ? <Check className="h-3.5 w-3.5" strokeWidth={2} /> : <Copy className="h-3.5 w-3.5" strokeWidth={2} />}
+    </button>
+  );
+}
+
+function ForkMessageButton({
+  carriedMessageCount,
+  disabled,
+  disabledReason,
+  onFork,
+  t,
+  variant = 'user-hover',
+}: {
+  carriedMessageCount: number;
+  disabled?: boolean;
+  disabledReason?: string;
+  onFork: () => void;
+  t: TFunction;
+  variant?: 'user-hover' | 'action-row';
+}) {
+  const title = disabledReason ?? t('fork.fromHere', {
+    count: carriedMessageCount,
+    defaultValue: `Fork from here · carries ${carriedMessageCount} messages`,
+  });
+
+  return (
+    <button
+      type="button"
+      onClick={onFork}
+      disabled={disabled}
+      className={cn(
+        variant === 'user-hover'
+          ? 'mb-1 rounded-md p-1.5 text-neutral-400 opacity-0 transition-all group-hover/user-msg:opacity-100 focus-visible:opacity-100'
+          : 'rounded p-1 text-neutral-400 transition-colors hover:text-neutral-600 dark:text-neutral-500 dark:hover:text-neutral-300',
+        disabled
+          ? 'cursor-not-allowed opacity-30'
+          : variant === 'user-hover'
+            ? 'hover:bg-neutral-200/80 hover:text-neutral-700 dark:hover:bg-neutral-700 dark:hover:text-neutral-200'
+            : undefined,
+      )}
+      aria-label={title}
+      title={title}
+    >
+      <GitBranch className="h-3.5 w-3.5" strokeWidth={2} />
     </button>
   );
 }

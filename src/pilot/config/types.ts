@@ -83,7 +83,12 @@ export type PilotAgentConfig = {
  */
 export type PilotRouterConfig = RouterConfig;
 
-export type PilotMemoryApiType = "openai-responses" | "responses" | "openai-completions";
+export type PilotMemoryApiType =
+  | "openai-responses"
+  | "responses"
+  | "openai-completions"
+  | "anthropic"
+  | "google";
 export type PilotMemoryReasoningMode = "answer_first" | "accuracy_first";
 
 export type PilotMemoryScheduleConfig = {
@@ -111,6 +116,8 @@ export type PilotGatewayConfig = {
   port: number;
   bindAddress: "127.0.0.1";
   idleSessionTimeoutMinutes: number;
+  idleSweepIntervalSeconds: number;
+  memoryDiagnostics: boolean;
   staticAssetsPath?: string;
   /**
    * Maximum number of concurrent per-session MCP instances (e.g. browser-use

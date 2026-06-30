@@ -7,6 +7,7 @@ import type {
 } from "../../model/index.js";
 import type {
   PermissionContext,
+  PermissionDecision,
   PermissionMode,
   PermissionResult,
 } from "../../permission/index.js";
@@ -187,6 +188,12 @@ export type PilotDeckToolRuntimeContext = {
   permissionMode: PermissionMode;
   permissionContext: PermissionContext;
   auditRecorder?: PilotDeckToolAuditRecorder;
+  /**
+   * The final allow decision for the current tool call, populated by
+   * ToolRuntime after permission checks pass and before tool execution.
+   * Direct tool invocations leave this unset.
+   */
+  currentPermissionDecision?: Extract<PermissionDecision, { type: "allow" }>;
   now?: () => Date;
   env?: NodeJS.ProcessEnv;
   maxResultBytes?: number;

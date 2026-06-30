@@ -163,7 +163,7 @@ async function killCDPPort() {
     if (process.platform === 'win32') {
       const raw = execSync(
         `netstat -ano | findstr "LISTENING" | findstr ":${CDP_PORT} "`,
-        { encoding: 'utf8', windowsHide: true }
+        { encoding: 'utf8', windowsHide: true },
       ).trim();
       for (const line of raw.split('\n')) {
         const parts = line.trim().split(/\s+/);

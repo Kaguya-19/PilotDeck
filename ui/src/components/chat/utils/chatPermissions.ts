@@ -9,9 +9,11 @@ import {
 
 export function buildPilotDeckToolPermissionEntry(toolName?: string, toolInput?: unknown) {
   if (!toolName) return null;
+  const fileWriteToolName = normalizeFileWriteToolName(toolName);
+  if (fileWriteToolName) return buildFileWritePermissionEntry(fileWriteToolName, toolInput);
   if (toolName !== 'Bash' && toolName !== 'bash') return toolName;
 
-  const parsed = safeJsonParse(toolInput);
+  const parsed = parseToolInputRecord(toolInput);
   const command = typeof parsed?.command === 'string' ? parsed.command.trim() : '';
   if (!command) return 'bash';
 
@@ -22,6 +24,43 @@ export function buildPilotDeckToolPermissionEntry(toolName?: string, toolInput?:
     return `bash:${tokens[0]} ${tokens[1]}:*`;
   }
   return `bash:${tokens[0]}:*`;
+}
+
+function normalizeFileWriteToolName(toolName: string) {
+  if (toolName === 'write_file' || toolName === 'Write') return 'write_file';
+  if (toolName === 'edit_file' || toolName === 'Edit') return 'edit_file';
+  return null;
+}
+
+function buildFileWritePermissionEntry(toolName: 'write_file' | 'edit_file', toolInput: unknown) {
+  const parsed = parseToolInputRecord(toolInput);
+  const filePath = typeof parsed?.file_path === 'string' ? parsed.file_path.trim() : '';
+  if (!isAbsoluteFilePath(filePath)) return null;
+  const parent = dirnameForPermission(filePath);
+  if (!parent) return null;
+  return `${toolName}:${parent.endsWith('/') || parent.endsWith('\\') ? `${parent}*` : `${parent}/*`}`;
+}
+
+function parseToolInputRecord(toolInput: unknown): Record<string, unknown> | null {
+  if (toolInput && typeof toolInput === 'object' && !Array.isArray(toolInput)) {
+    return toolInput as Record<string, unknown>;
+  }
+  return safeJsonParse(toolInput);
+}
+
+function isAbsoluteFilePath(filePath: string) {
+  return filePath.startsWith('/') || /^[A-Za-z]:[\\/]/.test(filePath);
+}
+
+function dirnameForPermission(filePath: string) {
+  const normalized = filePath.replace(/\\/g, '/').replace(/\/+$/, '') || '/';
+  const driveMatch = /^([A-Za-z]:)(\/.*)?$/.exec(normalized);
+  const value = driveMatch ? `${driveMatch[1]}${driveMatch[2] ?? '/'}` : normalized;
+  const index = value.lastIndexOf('/');
+  if (index < 0) return '';
+  if (index === 0) return '/';
+  if (/^[A-Za-z]:\/[^/]*$/.test(value)) return `${value.slice(0, 2)}/`;
+  return value.slice(0, index);
 }
 
 export function formatToolInputForDisplay(input: unknown) {

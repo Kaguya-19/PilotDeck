@@ -118,7 +118,8 @@ export class TokenBudgetManager {
         // T13: PilotDeck-only block; preview only.
         return this.estimateTextTokens(block.preview);
       case "media_reference":
-        return this.estimateTextTokens(block.preview);
+        // Media references materialize back to media blocks before provider requests.
+        return this.multimediaTokens;
     }
     return 0;
   }

@@ -67,6 +67,9 @@ export type MainContentProps = {
   onShowSettings: () => void;
   onSelectProjectByName?: (projectName: string) => void;
   externalMessageUpdate: number;
+  /** When the URL uses /session/<file> by mistake, open the file in the editor. */
+  misroutedFileFromUrl?: string | null;
+  onMisroutedFileUrlHandled?: () => void;
 };
 
 export type MainContentStateViewProps = {

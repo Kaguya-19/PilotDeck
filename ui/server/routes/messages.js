@@ -37,6 +37,15 @@ router.get('/:sessionId/messages', async (req, res) => {
       projectKey: projectPath,
       limit: limit ?? undefined,
       cursor: offset > 0 ? String(offset) : undefined,
+      ...(typeof req.query.sessionKind === 'string' && req.query.sessionKind
+        ? { sessionKind: req.query.sessionKind }
+        : {}),
+      ...(typeof req.query.parentSessionId === 'string' && req.query.parentSessionId
+        ? { parentSessionId: req.query.parentSessionId }
+        : {}),
+      ...(typeof req.query.relativeTranscriptPath === 'string' && req.query.relativeTranscriptPath
+        ? { relativeTranscriptPath: req.query.relativeTranscriptPath }
+        : {}),
     });
 
     const messages = result.messages.map((message) => mapWebMessageToNormalized(message, sessionId));
@@ -56,6 +65,43 @@ router.get('/:sessionId/messages', async (req, res) => {
   }
 });
 
+router.post('/:sessionId/fork', async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const projectPath = String(req.body?.projectPath || req.body?.projectName || req.query.projectPath || REPO_ROOT);
+    const fromEntryId = String(req.body?.fromEntryId || '');
+    if (!fromEntryId) {
+      return res.status(400).json({ error: 'fromEntryId is required' });
+    }
+
+    const gateway = await getPilotDeckGateway();
+    const result = await gateway.forkSession({
+      sessionKey: sessionId,
+      projectKey: projectPath,
+      fromEntryId,
+    });
+
+    return res.json({
+      newSessionId: result.newSessionKey,
+      prefillText: result.prefillText,
+      carriedMessageCount: result.carriedMessageCount,
+      ...(result.mode ? { mode: result.mode } : {}),
+    });
+  } catch (error) {
+    console.error('[messages] fork_session failed:', error);
+    const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
+    if (code.startsWith('fork_')) {
+      return res.status(400).json({
+        error: error instanceof Error ? error.message : 'Fork failed',
+        code,
+      });
+    }
+    return res.status(500).json({
+      error: error instanceof Error ? error.message : 'Fork failed',
+    });
+  }
+});
+
 router.get('/:sessionId/subagent/:subagentId/messages', async (req, res) => {
   try {
     const { sessionId, subagentId } = req.params;
@@ -66,6 +112,15 @@ router.get('/:sessionId/subagent/:subagentId/messages', async (req, res) => {
       sessionKey: sessionId,
       subagentId,
       projectKey: projectPath,
+      ...(typeof req.query.sessionKind === 'string' && req.query.sessionKind
+        ? { sessionKind: req.query.sessionKind }
+        : {}),
+      ...(typeof req.query.parentSessionId === 'string' && req.query.parentSessionId
+        ? { parentSessionId: req.query.parentSessionId }
+        : {}),
+      ...(typeof req.query.relativeTranscriptPath === 'string' && req.query.relativeTranscriptPath
+        ? { relativeTranscriptPath: req.query.relativeTranscriptPath }
+        : {}),
     });
 
     const messages = result.messages.map((message) =>
@@ -89,9 +144,13 @@ function mapWebMessageToNormalized(message, sessionId) {
     sessionId,
     timestamp: message.createdAt,
     provider: message.provider || 'pilotdeck',
+    ...(message.entryId ? { entryId: message.entryId } : {}),
   };
   switch (message.kind) {
-    case 'text':
+    case 'text': {
+      const payload = message.payload && typeof message.payload === 'object'
+        ? message.payload
+        : {};
       return createNormalizedMessage({
         ...base,
         kind: 'text',
@@ -100,7 +159,16 @@ function mapWebMessageToNormalized(message, sessionId) {
         ...(Array.isArray(message.images) && message.images.length > 0
           ? { images: message.images.map((image) => image?.data).filter(Boolean) }
           : {}),
+        ...(payload.forkUnsupportedContent === true
+          ? {
+              forkUnsupportedContent: true,
+              forkUnsupportedReason: typeof payload.forkUnsupportedReason === 'string'
+                ? payload.forkUnsupportedReason
+                : undefined,
+            }
+          : {}),
       });
+    }
     case 'thinking':
       return createNormalizedMessage({ ...base, kind: 'thinking', content: message.text || '' });
     case 'tool_use':

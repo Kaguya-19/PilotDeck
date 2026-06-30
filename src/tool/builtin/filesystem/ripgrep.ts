@@ -4,7 +4,6 @@ import path from "node:path";
 import { PilotDeckToolRuntimeError } from "../../protocol/errors.js";
 
 const require = createRequire(import.meta.url);
-const { rgPath } = require("@vscode/ripgrep") as { rgPath: string };
 
 const DEFAULT_TIMEOUT_MS = 20_000;
 const DEFAULT_KILL_GRACE_MS = 1_000;
@@ -19,16 +18,19 @@ export type RipgrepRunInput = {
   toolName: "glob" | "grep";
 };
 
+let cachedRipgrepPath: string | undefined;
+
 export async function runRipgrep(input: RipgrepRunInput): Promise<string> {
   const env = input.env ?? process.env;
   const args = [...input.args];
+  const ripgrepPath = resolveBundledRipgrepPath(input.toolName);
 
   return await new Promise<string>((resolve, reject) => {
-    const child = spawn(rgPath, args, {
+    const child = spawn(ripgrepPath, args, {
       cwd: input.cwd,
       env,
       stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: process.platform === "win32",
+      windowsHide: true,
     });
 
     let stdout = "";
@@ -69,12 +71,7 @@ export async function runRipgrep(input: RipgrepRunInput): Promise<string> {
       if (settled) return;
       settled = true;
       if (isEnoent(error)) {
-        reject(
-          new PilotDeckToolRuntimeError(
-            "unsupported_tool",
-            `${input.toolName} requires ripgrep (\`rg\`) to be installed and available on PATH.`,
-          ),
-        );
+        reject(createBundledRipgrepUnavailableError(input.toolName, error));
         return;
       }
       reject(
@@ -118,6 +115,34 @@ export async function runRipgrep(input: RipgrepRunInput): Promise<string> {
       );
     });
   });
+}
+
+function resolveBundledRipgrepPath(toolName: RipgrepRunInput["toolName"]): string {
+  if (cachedRipgrepPath) {
+    return cachedRipgrepPath;
+  }
+
+  try {
+    const resolved = require("@vscode/ripgrep") as { rgPath?: unknown };
+    if (typeof resolved.rgPath !== "string" || resolved.rgPath.length === 0) {
+      throw new Error("@vscode/ripgrep did not expose a valid rgPath.");
+    }
+    cachedRipgrepPath = resolved.rgPath;
+    return cachedRipgrepPath;
+  } catch (error) {
+    throw createBundledRipgrepUnavailableError(toolName, error);
+  }
+}
+
+function createBundledRipgrepUnavailableError(
+  toolName: RipgrepRunInput["toolName"],
+  cause: unknown,
+): PilotDeckToolRuntimeError {
+  return new PilotDeckToolRuntimeError(
+    "unsupported_tool",
+    `${toolName} requires the bundled ripgrep binary from @vscode/ripgrep, but it is not available for ${process.platform}-${process.arch}. Reinstall dependencies with optional dependencies enabled.`,
+    { cause: cause instanceof Error ? cause.message : String(cause) },
+  );
 }
 
 export function splitRipgrepLines(stdout: string): string[] {

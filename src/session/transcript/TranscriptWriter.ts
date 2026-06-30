@@ -12,7 +12,12 @@ export type AgentTranscriptWriterState = {
 };
 
 export type AgentTranscriptWriter = {
-  recordAcceptedInput(sessionId: string, turnId: string, messages: CanonicalMessage[]): void | Promise<void>;
+  recordAcceptedInput(
+    sessionId: string,
+    turnId: string,
+    messages: CanonicalMessage[],
+    metadata?: Record<string, unknown>,
+  ): void | Promise<void>;
   recordDurableMessage(sessionId: string, turnId: string, message: CanonicalMessage): void | Promise<void>;
   recordTurnResult(sessionId: string, turnId: string, result: AgentTurnResult): void | Promise<void>;
   recordSessionMetadata?(sessionId: string, turnId: string, metadata: SessionMetadataValue): void | Promise<void>;

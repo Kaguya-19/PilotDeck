@@ -557,7 +557,9 @@
 	    "actions": {
 	      "opening": "Opening...",
 	      "revealFile": "Reveal in Finder",
+	      "revealFileMac": "Reveal in Finder",
 	      "revealFileWindows": "Reveal in Explorer",
+	      "revealFileGeneric": "Reveal in file manager",
 	      "refresh": "Refresh",
 	      "reloadCurrent": "Reload current config",
 	      "saving": "Saving...",
@@ -688,10 +690,11 @@
         "protocol": "Protocol",
         "protocolOptions": {
           "openai": "openai (chat-completions)",
-          "anthropic": "anthropic (messages API)"
+          "anthropic": "anthropic (messages API)",
+          "google": "google (Gemini API)"
         },
         "baseUrl": "Base URL",
-        "baseUrlHint": "For OpenAI-compatible providers, include the /v1 suffix, for example https://api.example.com/v1.",
+        "baseUrlHint": "For native Google Gemini, use https://generativelanguage.googleapis.com. For OpenAI-compatible providers, include the /v1 suffix.",
         "defaultsTo": "Defaults to",
         "fromCatalog": "from catalog.",
         "effective": "Effective:",

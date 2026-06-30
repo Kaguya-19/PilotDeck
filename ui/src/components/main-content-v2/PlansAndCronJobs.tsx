@@ -35,6 +35,7 @@ type PlanDisplayStatus =
   | 'preparingWorkspace'
   | 'executing'
   | 'completedWaiting'
+  | 'completedNoReport'
   | 'failed'
   | 'archived';
 
@@ -48,6 +49,8 @@ function mapPlanStatus(status: DiscoveryPlanStatus): PlanDisplayStatus {
       return 'executing';
     case 'completed':
       return 'completedWaiting';
+    case 'completed_no_report':
+      return 'completedNoReport';
     case 'failed':
       return 'failed';
     case 'archived':
@@ -62,6 +65,7 @@ const PLAN_STATUS_STYLE: Record<PlanDisplayStatus, string> = {
   preparingWorkspace: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
   executing: 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300',
   completedWaiting: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300',
+  completedNoReport: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
   failed: 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300',
   archived: 'bg-neutral-100 text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400',
 };
@@ -71,6 +75,7 @@ const PLAN_STATUS_LABEL: Record<PlanDisplayStatus, { key: string; defaultValue: 
   preparingWorkspace: { key: 'plansCron.status.preparingWorkspace', defaultValue: 'Preparing Workspace' },
   executing: { key: 'plansCron.status.executing', defaultValue: 'Executing' },
   completedWaiting: { key: 'plansCron.status.completedWaiting', defaultValue: 'Completed' },
+  completedNoReport: { key: 'plansCron.status.completedNoReport', defaultValue: 'Report Unavailable' },
   failed: { key: 'plansCron.status.failed', defaultValue: 'Failed' },
   archived: { key: 'plansCron.status.archived', defaultValue: 'Archived' },
 };
@@ -365,7 +370,10 @@ export default function PlansAndCronJobs({ onApplyWorkCycle, onOpenPlanDetail }:
                   const cronItems = items.filter((i) => i.kind === 'cron');
                   const cycles = cyclesByProject.get(projectKey) ?? [];
                   const activeCycle = cycles.find((c) => c.status === 'active' || c.status === 'applying');
-                  const hasCompletedPlan = planItems.some((p) => (p.data as DiscoveryPlanOverview).status === 'completed');
+                  const hasCompletedPlan = planItems.some((p) => {
+                    const s = (p.data as DiscoveryPlanOverview).status;
+                    return s === 'completed' || s === 'completed_no_report';
+                  });
                   const canApply = !!activeCycle && activeCycle.status === 'active' && hasCompletedPlan;
                   const canArchive = !!activeCycle && activeCycle.status === 'active';
                   const isApplying = activeCycle?.status === 'applying';

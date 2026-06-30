@@ -379,6 +379,30 @@ function canHostProcessSummary(message: ChatMessage): boolean {
   );
 }
 
+export function isEmptyAssistantShell(message: ChatMessage): boolean {
+  return (
+    message.type === 'assistant' &&
+    !message.isToolUse &&
+    !message.isThinking &&
+    !message.isStreaming &&
+    !message.isInteractivePrompt &&
+    !message.isSubagentContainer &&
+    !message.isTaskNotification &&
+    !message.isAgentActivity &&
+    !message.isAgentActivitySummary &&
+    typeof message.content === 'string' &&
+    message.content.trim().length === 0
+  );
+}
+
+function isEmptyRenderableMessageItem(item: RenderableMessageItem): boolean {
+  if (item.beforeRunAttachment || item.afterRunAttachment) return false;
+  if (item.beforeProcessAttachments.length > 0 || item.afterProcessAttachments.length > 0) {
+    return false;
+  }
+  return isEmptyAssistantShell(item.message);
+}
+
 function isCollapsibleCompletedProcessMessage(message: ChatMessage): boolean {
   return isProcessMessage(message);
 }
@@ -620,12 +644,6 @@ function collectCompletedProcessSegments(messages: ChatMessage[], turn: MessageT
       return;
     }
 
-    if (segmentMessages.every((m) => m.isThinking)) {
-      segmentStartIndex = -1;
-      segmentMessages = [];
-      return;
-    }
-
     const endIndex = beforeOriginalIndex - 1;
     const first = segmentMessages[0];
     const nextHostIndex = previousHostIndex == null
@@ -649,6 +667,10 @@ function collectCompletedProcessSegments(messages: ChatMessage[], turn: MessageT
   for (let index = turn.start; index < turn.end; index += 1) {
     const message = messages[index];
     if (!message || message.isAgentActivity || message.isAgentActivitySummary) {
+      continue;
+    }
+
+    if (isEmptyAssistantShell(message)) {
       continue;
     }
 
@@ -848,6 +870,7 @@ export function buildRenderableMessageItems(
 
   return [...items, ...syntheticItems]
     .filter((item) => !collapsedIndices.has(item.originalIndex))
+    .filter((item) => !isEmptyRenderableMessageItem(item))
     .sort((a, b) => a.originalIndex - b.originalIndex);
 }
 
@@ -914,6 +937,11 @@ export function getLiveProcessGroups(
       continue;
     }
 
+    if (isEmptyAssistantShell(message)) {
+      finishGroup(index);
+      continue;
+    }
+
     finishGroup(index);
     previousVisibleIndex = index;
   }
@@ -936,6 +964,68 @@ export function shouldRenderLiveProcessGroup(group: LiveProcessGroup, runMode: C
     return true;
   }
   return !group.messages.every((message) => message.isCompactBoundary);
+}
+
+const WEB_FETCH_TOOL_NAMES = new Set(['web_fetch', 'webfetch']);
+
+export function isWebFetchToolMessage(message: ChatMessage): boolean {
+  const normalized = String(message.toolName || '')
+    .toLowerCase()
+    .replace(/[\s-]+/g, '_');
+  return WEB_FETCH_TOOL_NAMES.has(normalized);
+}
+
+function getLatestToolMessage(group: LiveProcessGroup): ChatMessage | undefined {
+  return [...group.messages].reverse().find((message) => message.isToolUse || message.type === 'tool');
+}
+
+export function isPendingToolUseMessage(message: ChatMessage): boolean {
+  if (!message.isToolUse && message.type !== 'tool') {
+    return false;
+  }
+  if (!message.toolResult) {
+    return true;
+  }
+  const content = typeof message.toolResult.content === 'string'
+    ? message.toolResult.content.trim()
+    : '';
+  return content.length === 0 && !message.toolResult.isError;
+}
+
+export function shouldShowWebFetchWaitingHint(
+  group: LiveProcessGroup,
+  planModeActive: boolean,
+): boolean {
+  if (!planModeActive || !group.isRunning) {
+    return false;
+  }
+
+  const latestTool = getLatestToolMessage(group);
+  return Boolean(latestTool && isWebFetchToolMessage(latestTool) && isPendingToolUseMessage(latestTool));
+}
+
+export function hasPendingWebFetchInRunningGroup(
+  groups: LiveProcessGroup[],
+  planModeActive: boolean,
+): boolean {
+  if (!planModeActive) {
+    return false;
+  }
+
+  return groups.some((group) => shouldShowWebFetchWaitingHint(group, planModeActive));
+}
+
+export function getWebFetchWaitingStep(
+  groupId: string,
+  t: TFunction<'chat'>,
+): ProcessTraceStep {
+  return {
+    id: `${groupId}-web-fetch-waiting`,
+    title: t('working.waitingForWebFetch', { defaultValue: 'Fetching web content...' }),
+    phase: 'tool',
+    state: 'running',
+    toolName: 'web_fetch',
+  };
 }
 
 function numberField(message: ChatMessage, key: string): number {

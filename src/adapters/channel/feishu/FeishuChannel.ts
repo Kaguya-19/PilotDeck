@@ -4,6 +4,7 @@ import type { Gateway } from "../../../gateway/index.js";
 import type { ChannelAdapter, ChannelHandle, ChannelLogger, ChannelStartDeps } from "../protocol/ChannelAdapter.js";
 import { executeChannelCommand, resolveCommand } from "../protocol/ChannelCommandRegistry.js";
 import { ImElicitationHelper } from "../protocol/ImElicitationHelper.js";
+import { ImPermissionHelper } from "../protocol/ImPermissionHelper.js";
 import {
   ImLiveReplyController,
   type ImLiveReplyControllerOptions,
@@ -99,6 +100,7 @@ export class FeishuChannel implements ChannelAdapter {
   private readonly seenEvents = new Set<string>();
   private readonly activeChats = new Set<string>();
   private readonly elicitation = new ImElicitationHelper();
+  private readonly permissions = new ImPermissionHelper();
 
   private wsClient: any = null;
 
@@ -265,6 +267,16 @@ export class FeishuChannel implements ChannelAdapter {
       return;
     }
 
+    if (this.permissions.hasPending(chatId)) {
+      try {
+        const confirmation = await this.permissions.answer(chatId, text, this.gateway);
+        if (confirmation) await this.send({ chatId, text: confirmation });
+      } catch (e) {
+        this.logger?.error?.(`feishu: permission answer error: ${e}`);
+      }
+      return;
+    }
+
     const mapped = this.mapper.resolve({ chatId, text });
 
     if (mapped.command === "new" && !mapped.message) {
@@ -341,6 +353,12 @@ export class FeishuChannel implements ChannelAdapter {
             await this.send({ chatId, text: questionText });
             continue;
           }
+          if (event.type === "permission_request") {
+            const questionText = this.permissions.capture(chatId, mapped.sessionKey, event);
+            await liveReply.pauseActivity();
+            await this.send({ chatId, text: questionText });
+            continue;
+          }
           if (event.type === "error" && event.code === "agent_aborted") {
             await liveReply.markAborted();
             continue;
@@ -364,6 +382,7 @@ export class FeishuChannel implements ChannelAdapter {
       }
 
       this.elicitation.clear(chatId);
+      this.permissions.clear(chatId);
       await liveReply.flushFinal();
     } finally {
       if (reactionId && messageId) {

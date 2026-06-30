@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useMatch, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import ReactDOM from 'react-dom';
@@ -23,6 +23,7 @@ import {
   type SessionProvider,
 } from '../../types/app';
 import { api } from '../../utils/api';
+import { resolveMarkdownFileHref } from '../chat/utils/resolveMarkdownFileHref';
 import SidebarV2 from './SidebarV2';
 import MainAreaV2 from './MainAreaV2';
 import { ConnectionBanner } from '../ui/ConnectionBanner';
@@ -149,6 +150,24 @@ export default function AppShellV2() {
     isMobile,
     activeSessions,
   });
+
+  const misroutedFileFromUrl = useMemo(() => {
+    if (!sessionId) return null;
+    const filePath = resolveMarkdownFileHref(`/session/${sessionId}`);
+    if (!filePath) return null;
+    if (isLoadingProjects) return filePath;
+    const hasMatchingSession = sidebarSharedProps.projects.some((project) =>
+      (project.sessions ?? []).some((session) => session.id === sessionId),
+    );
+    return hasMatchingSession ? null : filePath;
+  }, [sessionId, isLoadingProjects, sidebarSharedProps.projects]);
+
+  const handleMisroutedFileUrlHandled = useCallback(() => {
+    const target = selectedProject
+      ? `/p/${encodeURIComponent(selectedProject.name)}`
+      : '/';
+    navigate(target, { replace: true });
+  }, [navigate, selectedProject]);
 
   // Sync URL projectName -> selectedProject for deep links like /p/:projectName.
   // When the URL also carries a session id (/p/.../c/:sessionId or
@@ -486,7 +505,7 @@ export default function AppShellV2() {
       }
       const target = (project.sessions ?? []).find((s) => s.id === sessId);
       if (target) {
-        handleSessionSelect(target);
+        handleSessionSelect(fallbackSession ? { ...target, ...fallbackSession } : target);
       } else if (fallbackSession) {
         handleSessionSelect(fallbackSession);
       } else {
@@ -650,6 +669,8 @@ export default function AppShellV2() {
           isSidebarCollapsed={!isMobile && !desktopSidebarOpen}
           onOpenSidebar={onOpenDesktopSidebar}
           externalMessageUpdate={externalMessageUpdate}
+          misroutedFileFromUrl={misroutedFileFromUrl}
+          onMisroutedFileUrlHandled={handleMisroutedFileUrlHandled}
         />
       </main>
 

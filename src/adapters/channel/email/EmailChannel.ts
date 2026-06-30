@@ -3,6 +3,7 @@ import type { ChannelAdapter, ChannelHandle, ChannelLogger, ChannelStartDeps } f
 import { EmailSessionMapper } from "./EmailSessionMapper.js";
 import { renderEmailEvent } from "./email-render.js";
 import { ImElicitationHelper } from "../protocol/ImElicitationHelper.js";
+import { ImPermissionHelper } from "../protocol/ImPermissionHelper.js";
 
 let ImapFlow: any;
 let nodemailer: any;
@@ -42,6 +43,7 @@ export class EmailChannel implements ChannelAdapter {
   private defaultSubject = "Message";
   private activeChats = new Set<string>();
   private readonly elicitation = new ImElicitationHelper();
+  private readonly permissions = new ImPermissionHelper();
   private stopped = false;
 
   constructor(options: EmailChannelOptions = {}) {
@@ -218,6 +220,16 @@ export class EmailChannel implements ChannelAdapter {
       return;
     }
 
+    if (this.permissions.hasPending(chatId) && this.gateway) {
+      try {
+        const confirmation = await this.permissions.answer(chatId, text, this.gateway);
+        if (confirmation) await this.sendReply(chatId, confirmation);
+      } catch (e) {
+        this.logger?.error?.(`email: permission answer error: ${e}`);
+      }
+      return;
+    }
+
     if (this.activeChats.has(chatId)) {
       this.logger?.info?.(`email: chat ${chatId} already active, skipping`);
       return;
@@ -253,6 +265,11 @@ export class EmailChannel implements ChannelAdapter {
           await this.sendReply(chatId, questionText);
           continue;
         }
+        if (event.type === "permission_request") {
+          const questionText = this.permissions.capture(chatId, sessionKey, event);
+          await this.sendReply(chatId, questionText);
+          continue;
+        }
         const fragment = renderEmailEvent(event);
         if (fragment != null) replyText += fragment;
       }
@@ -262,6 +279,7 @@ export class EmailChannel implements ChannelAdapter {
     }
 
     this.elicitation.clear(chatId);
+    this.permissions.clear(chatId);
 
     const finalText = replyText.trim();
     if (finalText) {

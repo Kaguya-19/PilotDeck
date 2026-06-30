@@ -177,7 +177,7 @@ export default function MainAreaV2(props: MainAreaV2Props) {
         ) : null}
         <div className="flex min-w-0 flex-1 items-center gap-2 text-[13px]">
           <span className="shrink-0 text-neutral-500 dark:text-neutral-400">
-            {selectedProject ? projectDisplayName(selectedProject) : t('home', { defaultValue: 'Home' })}
+            {selectedProject ? projectDisplayName(selectedProject) : t('navigation.home', { defaultValue: 'Home' })}
           </span>
           <span className="shrink-0 text-neutral-400/60 dark:text-neutral-500/60">/</span>
           <span className="shrink-0 font-medium">{tabLabel}</span>

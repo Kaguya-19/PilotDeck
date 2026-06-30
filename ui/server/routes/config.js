@@ -58,6 +58,38 @@ function broadcastConfigEvent(payload) {
   process.emit('pilotdeck:config-broadcast', payload);
 }
 
+function normalizeGoogleProbeModel(model) {
+  const text = String(model || '').trim();
+  const withoutProvider = text.startsWith('google/') ? text.slice('google/'.length) : text;
+  if (withoutProvider === 'gemini-3-pro') return 'gemini-3-pro-preview';
+  if (withoutProvider === 'gemini-3.1-pro') return 'gemini-3.1-pro-preview';
+  if (withoutProvider === 'gemini-3-flash') return 'gemini-3-flash-preview';
+  if (withoutProvider === 'gemini-3.1-flash' || withoutProvider === 'gemini-3.1-flash-preview') {
+    return 'gemini-3-flash-preview';
+  }
+  if (withoutProvider === 'gemini-3.1-flash-lite') return 'gemini-3.1-flash-lite-preview';
+  return withoutProvider;
+}
+
+function buildGoogleGenerateContentUrl(baseUrl, model) {
+  const normalizedBaseUrl = String(baseUrl || 'https://generativelanguage.googleapis.com').trim().replace(/\/+$/, '')
+    || 'https://generativelanguage.googleapis.com';
+  const url = new URL(normalizedBaseUrl);
+  const parts = url.pathname.split('/').filter(Boolean);
+  const last = parts.at(-1);
+  const apiVersion = last === 'v1' || last === 'v1beta' ? last : 'v1beta';
+  const baseParts = last === 'v1' || last === 'v1beta' ? parts.slice(0, -1) : parts;
+  url.pathname = `/${[
+    ...baseParts,
+    apiVersion,
+    'models',
+    `${encodeURIComponent(normalizeGoogleProbeModel(model))}:generateContent`,
+  ].join('/')}`;
+  url.search = '';
+  url.hash = '';
+  return url.toString();
+}
+
 router.get('/', (_req, res) => {
   try {
     const record = readPilotDeckConfigFile();
@@ -214,10 +246,11 @@ router.post('/test-connection', async (req, res) => {
     return res.status(400).json({ ok: false, error: 'baseUrl, apiKey, and model are required' });
   }
 
-  // Accept V2 protocols ('openai' | 'anthropic') as well as the legacy
+  // Accept V2 protocols ('openai' | 'anthropic' | 'google') as well as the legacy
   // onboarding values ('openai-chat' | 'anthropic') for compatibility.
   const normalizedType = String(providerType || '').toLowerCase();
   const isAnthropic = normalizedType === 'anthropic';
+  const isGoogle = normalizedType === 'google';
   const normalizedBaseUrl = String(baseUrl).trim().replace(/\/+$/, '');
   const timeout = 10_000;
   const controller = new AbortController();
@@ -227,7 +260,21 @@ router.post('/test-connection', async (req, res) => {
     let url;
     let fetchOptions;
 
-    if (isAnthropic) {
+    if (isGoogle) {
+      url = buildGoogleGenerateContentUrl(normalizedBaseUrl, model);
+      fetchOptions = {
+        method: 'POST',
+        headers: {
+          'x-goog-api-key': apiKey,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: 'Hi' }] }],
+          generationConfig: { maxOutputTokens: 1 },
+        }),
+        signal: controller.signal,
+      };
+    } else if (isAnthropic) {
       url = `${normalizedBaseUrl}/v1/messages`;
       fetchOptions = {
         method: 'POST',
@@ -263,6 +310,14 @@ router.post('/test-connection', async (req, res) => {
     const response = await fetch(url, fetchOptions);
     clearTimeout(timer);
     const responseText = await response.text();
+    const expectedShape = isAnthropic
+      ? 'Anthropic message'
+      : isGoogle
+        ? 'Google Gemini generateContent response'
+        : 'OpenAI chat completion';
+    const baseUrlHint = isGoogle
+      ? 'For native Google Gemini, the base URL is usually https://generativelanguage.googleapis.com.'
+      : 'For OpenAI-compatible endpoints, the base URL usually ends with /v1.';
 
     if (response.ok) {
       let body;
@@ -271,17 +326,19 @@ router.post('/test-connection', async (req, res) => {
       } catch {
         return res.json({
           ok: false,
-          error: `Expected a JSON completion response but received non-JSON content from ${url}. For OpenAI-compatible endpoints, the base URL usually ends with /v1.`,
+          error: `Expected a JSON ${expectedShape} but received non-JSON content from ${url}. ${baseUrlHint}`,
         });
       }
 
       const hasCompletionShape = isAnthropic
         ? Array.isArray(body?.content) || body?.type === 'message'
+        : isGoogle
+          ? Array.isArray(body?.candidates)
         : Array.isArray(body?.choices);
       if (!hasCompletionShape) {
         return res.json({
           ok: false,
-          error: `Endpoint returned HTTP ${response.status}, but the response was not a valid ${isAnthropic ? 'Anthropic message' : 'OpenAI chat completion'}. Check the base URL path.`,
+          error: `Endpoint returned HTTP ${response.status}, but the response was not a valid ${expectedShape}. Check the base URL path.`,
         });
       }
 
@@ -468,10 +525,7 @@ router.post('/open', async (_req, res) => {
       : process.platform === 'win32'
         ? [`/select,${configPath}`]
         : [path.dirname(configPath)];
-    const child = spawn(command, args, prepareBackgroundSpawnOptions({
-      stdio: 'ignore',
-      detached: true,
-    }));
+    const child = spawn(command, args, prepareBackgroundSpawnOptions({ stdio: 'ignore', detached: true }));
     child.unref();
     res.json({ success: true, path: configPath });
   } catch (error) {

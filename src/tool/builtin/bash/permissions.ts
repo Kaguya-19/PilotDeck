@@ -1,13 +1,48 @@
 import type { PermissionResult } from "../../../permission/index.js";
 
-const DENY_PATTERNS: RegExp[] = [
+const COMMAND_POSITION = String.raw`(?:^|[;&|]\s*)`;
+const SHELL_SEGMENT = String.raw`[^;&|\n]*`;
+const RM_RECURSIVE_LOOKAHEAD = String.raw`(?=${SHELL_SEGMENT}(?:-[^\s;&|]*r|--recursive\b))`;
+const OPTIONAL_SHELL_QUOTE = String.raw`["']?`;
+const ROOT_DELETE_TARGET = String.raw`${OPTIONAL_SHELL_QUOTE}(?:/|/\*|/ \*|//+|/\.)${OPTIONAL_SHELL_QUOTE}`;
+const SYSTEM_DELETE_TARGET = String.raw`${OPTIONAL_SHELL_QUOTE}/(?:bin|boot|etc|home|lib|lib64|root|sbin|usr|var)(?:/|${OPTIONAL_SHELL_QUOTE}(?:\s|$))`;
+const HOME_DELETE_TARGET = String.raw`${OPTIONAL_SHELL_QUOTE}(?:~|\$HOME|\$\{HOME\})(?:/|${OPTIONAL_SHELL_QUOTE}(?:\s|$))`;
+const ROOT_DELETE_TARGET_LOOKAHEAD = String.raw`(?=${SHELL_SEGMENT}\s${ROOT_DELETE_TARGET}(?:\s|$))`;
+const SYSTEM_DELETE_TARGET_LOOKAHEAD = String.raw`(?=${SHELL_SEGMENT}\s${SYSTEM_DELETE_TARGET})`;
+const HOME_DELETE_TARGET_LOOKAHEAD = String.raw`(?=${SHELL_SEGMENT}\s${HOME_DELETE_TARGET})`;
+
+const HARD_DENY_PATTERNS: RegExp[] = [
+  // Unix — catastrophic filesystem destruction.
+  commandPattern(String.raw`rm\s+${RM_RECURSIVE_LOOKAHEAD}${ROOT_DELETE_TARGET_LOOKAHEAD}`),
+  commandPattern(String.raw`rm\s+${RM_RECURSIVE_LOOKAHEAD}${SYSTEM_DELETE_TARGET_LOOKAHEAD}`),
+  commandPattern(String.raw`rm\s+${RM_RECURSIVE_LOOKAHEAD}${HOME_DELETE_TARGET_LOOKAHEAD}`),
+  commandPattern(String.raw`mkfs(?:\.[a-z0-9]+)?\b`),
+  commandPattern(String.raw`dd\b${SHELL_SEGMENT}\bof=/dev/(?:sd|nvme|hd|mmcblk|vd|xvd)[a-z0-9]*\b`),
+  />\s*\/dev\/(?:sd|nvme|hd|mmcblk|vd|xvd)[a-z0-9]*\b/i,
+
+  // Unix — host shutdown / denial of service.
+  /:\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:/,
+  commandPattern(String.raw`kill\s+(-[^\s]+\s+)*-1\b`),
+  commandPattern(String.raw`(?:sudo\s+(?:-[^\s]+\s+)*)?(?:shutdown|reboot|halt|poweroff)\b`),
+  commandPattern(String.raw`(?:sudo\s+(?:-[^\s]+\s+)*)?init\s+[06]\b`),
+  commandPattern(String.raw`(?:sudo\s+(?:-[^\s]+\s+)*)?systemctl\s+(?:poweroff|reboot|halt|kexec)\b`),
+  commandPattern(String.raw`(?:sudo\s+(?:-[^\s]+\s+)*)?telinit\s+[06]\b`),
+
+  // Unix — password guessing / stdin privilege escalation.
+  commandPattern(String.raw`sudo\b${SHELL_SEGMENT}(?:\s--stdin\b|\s-[A-Za-z]*S[A-Za-z]*\b)`, ""),
+
+  // Windows — filesystem formatting.
+  /\bFormat-Volume\b/i,
+];
+
+const DANGEROUS_ASK_PATTERNS: RegExp[] = [
   // Unix
-  /\brm\s+-[^&|;]*r[^&|;]*f\s+\//,
-  /\bsudo\b/,
+  commandPattern(String.raw`rm\s+${RM_RECURSIVE_LOOKAHEAD}`),
+  commandPattern(String.raw`sudo\b`),
   /\bchmod\s+-R\s+777\b/,
   /\bchown\s+-R\b/,
   /\bdd\s+if=/,
-  /\b(curl|wget)\b[^|;&]*\|\s*(sh|bash)\b/,
+  /\b(curl|wget)\b[^|;&]*\|\s*(?:\/?[\w.-]+\/)*(?:ba)?sh(?:\s|$|-c)/i,
 
   // Cross-platform
   /\bgit\s+reset\s+--hard\b/,
@@ -19,8 +54,6 @@ const DENY_PATTERNS: RegExp[] = [
   /\bdel\s+\/[^\s]*s\b/i,
   /\brd\s+\/s\b/i,
   /\brmdir\s+\/s\b/i,
-  // Windows — Format disk volume
-  /\bFormat-Volume\b/i,
   // Windows — download-and-execute (iex(iwr ...) / Invoke-Expression(Invoke-WebRequest ...))
   /\biex\s*\(\s*iwr\b/i,
   /\bInvoke-Expression\b[^|;&]*\bInvoke-WebRequest\b/i,
@@ -65,7 +98,7 @@ const WINDOWS_READ_COMMANDS = new Set([
 const READ_ONLY_GIT_SUBCOMMANDS = new Set(["diff", "log", "show", "status"]);
 
 export function classifyBashPermission(command: string): PermissionResult {
-  if (DENY_PATTERNS.some((pattern) => pattern.test(command))) {
+  if (HARD_DENY_PATTERNS.some((pattern) => pattern.test(command))) {
     return {
       type: "deny",
       reason: { type: "safety", message: "Dangerous shell command denied." },
@@ -73,10 +106,18 @@ export function classifyBashPermission(command: string): PermissionResult {
     };
   }
 
+  if (DANGEROUS_ASK_PATTERNS.some((pattern) => pattern.test(command))) {
+    return askForShellPermission(command);
+  }
+
   if (isReadOnlyShellCommand(command)) {
     return { type: "passthrough" };
   }
 
+  return askForShellPermission(command);
+}
+
+function askForShellPermission(command: string): PermissionResult {
   return {
     type: "ask",
     reason: { type: "tool", toolName: "bash", message: "Shell command may have side effects." },
@@ -92,6 +133,10 @@ export function classifyBashPermission(command: string): PermissionResult {
       ],
     },
   };
+}
+
+function commandPattern(pattern: string, flags = "i"): RegExp {
+  return new RegExp(`${COMMAND_POSITION}${pattern}`, flags);
 }
 
 export function isReadOnlyShellCommand(command: string): boolean {
@@ -127,22 +172,29 @@ export function isReadOnlyShellCommand(command: string): boolean {
 }
 
 const GIT_GLOBAL_OPTIONS_WITH_VALUE = new Set([
+  "--namespace",
+  "--super-prefix",
+]);
+
+const GIT_GLOBAL_OPTIONS_WITH_VALUE_PREFIXES = [
+  "--namespace=",
+  "--super-prefix=",
+];
+
+const GIT_UNSAFE_GLOBAL_OPTIONS_WITH_VALUE = new Set([
   "-C",
   "-c",
   "--config-env",
   "--exec-path",
   "--git-dir",
-  "--namespace",
-  "--super-prefix",
   "--work-tree",
 ]);
-
-const GIT_GLOBAL_OPTIONS_WITH_VALUE_PREFIXES = [
+const GIT_UNSAFE_GLOBAL_OPTIONS_WITH_VALUE_PREFIXES = [
+  "-C",
+  "-c",
   "--config-env=",
   "--exec-path=",
   "--git-dir=",
-  "--namespace=",
-  "--super-prefix=",
   "--work-tree=",
 ];
 
@@ -150,6 +202,12 @@ function getGitSubcommand(args: string[]): string | undefined {
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]!;
     if (arg === "--") {
+      return undefined;
+    }
+    if (
+      GIT_UNSAFE_GLOBAL_OPTIONS_WITH_VALUE.has(arg)
+      || GIT_UNSAFE_GLOBAL_OPTIONS_WITH_VALUE_PREFIXES.some((prefix) => arg.startsWith(prefix))
+    ) {
       return undefined;
     }
     if (GIT_GLOBAL_OPTIONS_WITH_VALUE.has(arg)) {

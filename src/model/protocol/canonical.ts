@@ -2,7 +2,7 @@ import type { ModelCapabilities } from "./capabilities.js";
 import type { CanonicalModelError } from "./errors.js";
 import type { MultimodalConstraints } from "./multimodal.js";
 
-export type ModelProtocol = "anthropic" | "openai";
+export type ModelProtocol = "anthropic" | "openai" | "google";
 
 export type CanonicalRole = "user" | "assistant";
 
@@ -131,6 +131,10 @@ export type CanonicalMessageMetadata = {
   /** True for messages injected by the system (e.g. JSON self-correct prompts). */
   synthetic?: boolean;
   purpose?: string;
+  forkCarryover?: {
+    sourceSessionId: string;
+    sourceTurnId?: string;
+  };
 };
 
 export type CanonicalMessage = {

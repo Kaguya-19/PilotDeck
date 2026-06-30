@@ -6,6 +6,7 @@ import type { ChannelAdapter, ChannelHandle, ChannelLogger, ChannelStartDeps } f
 import { WeComCallbackSessionMapper } from "./WeComCallbackSessionMapper.js";
 import { renderWeComCallbackEvent } from "./wecom-callback-render.js";
 import { ImElicitationHelper } from "../protocol/ImElicitationHelper.js";
+import { ImPermissionHelper } from "../protocol/ImPermissionHelper.js";
 
 const QYAPI = "https://qyapi.weixin.qq.com/cgi-bin";
 const DEFAULT_PORT = 8780;
@@ -90,6 +91,7 @@ export class WeComCallbackChannel implements ChannelAdapter {
   private accessTokenExpires = 0;
   private activeChats = new Set<string>();
   private readonly elicitation = new ImElicitationHelper();
+  private readonly permissions = new ImPermissionHelper();
 
   constructor(options: WeComCallbackChannelOptions = {}) {
     this.mapper = options.mapper ?? new WeComCallbackSessionMapper();
@@ -215,6 +217,16 @@ export class WeComCallbackChannel implements ChannelAdapter {
       return;
     }
 
+    if (this.permissions.hasPending(chatId) && this.gateway) {
+      try {
+        const confirmation = await this.permissions.answer(chatId, text, this.gateway);
+        if (confirmation) await this.sendReply(chatId, confirmation);
+      } catch (e) {
+        this.logger?.error?.(`wecom_callback: permission answer error: ${e}`);
+      }
+      return;
+    }
+
     if (this.activeChats.has(chatId)) {
       this.logger?.info?.(`wecom_callback: chat ${chatId} already active, skipping`);
       return;
@@ -250,6 +262,11 @@ export class WeComCallbackChannel implements ChannelAdapter {
           await this.sendReply(chatId, questionText);
           continue;
         }
+        if (event.type === "permission_request") {
+          const questionText = this.permissions.capture(chatId, sessionKey, event);
+          await this.sendReply(chatId, questionText);
+          continue;
+        }
         const fragment = renderWeComCallbackEvent(event);
         if (fragment != null) replyText += fragment;
       }
@@ -259,6 +276,7 @@ export class WeComCallbackChannel implements ChannelAdapter {
     }
 
     this.elicitation.clear(chatId);
+    this.permissions.clear(chatId);
 
     const finalText = replyText.trim();
     if (finalText) {

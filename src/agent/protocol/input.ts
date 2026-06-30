@@ -14,5 +14,6 @@ export type AgentSubmitOptions = {
   basePermissionMode?: PermissionMode;
   /** Allow model-visible plan mode tools for this turn. */
   allowPlanModeTools?: boolean;
+  canPrompt?: boolean;
   permissionRules?: Partial<PermissionRuleSet>;
 };

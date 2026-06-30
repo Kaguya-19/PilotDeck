@@ -28,13 +28,14 @@
     "expand": "Expand to full width",
     "collapse": "Collapse to split view",
     "close": "Close",
+    "goBack": "Go back",
     "previewMarkdown": "Preview markdown",
     "editMarkdown": "Edit markdown"
   },
   "footer": {
     "lines": "Lines:",
     "characters": "Characters:",
-    "shortcuts": "Press Ctrl+S to save • Esc to close"
+    "shortcuts": "Press Ctrl+S to save • Esc to go back or close"
   },
   "binaryFile": {
     "title": "Binary File",

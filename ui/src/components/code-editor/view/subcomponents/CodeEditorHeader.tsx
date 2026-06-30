@@ -1,4 +1,4 @@
-import { ChevronsLeftRight, ChevronsRightLeft, Code2, Download, Eye, Maximize2, Minimize2, Save, X } from 'lucide-react';
+import { ArrowLeft, ChevronsLeftRight, ChevronsRightLeft, Code2, Download, Eye, Maximize2, Minimize2, Save, X } from 'lucide-react';
 import type { CodeEditorFile } from '../../types/types';
 
 type CodeEditorHeaderProps = {
@@ -9,6 +9,9 @@ type CodeEditorHeaderProps = {
   markdownPreview: boolean;
   saving: boolean;
   saveSuccess: boolean;
+  canGoBack?: boolean;
+  parentFileName?: string | null;
+  onGoBack?: (() => void) | null;
   // Only relevant in sidebar (split-pane) mode: lets the user toggle between
   // a left-tree+right-editor split and a full-width editor that occupies the
   // whole main area. Both must be defined for the toggle to render — when
@@ -33,6 +36,7 @@ type CodeEditorHeaderProps = {
     expand: string;
     collapse: string;
     close: string;
+    goBack: string;
   };
 };
 
@@ -46,6 +50,9 @@ export default function CodeEditorHeader({
   saveSuccess,
   isExpanded = false,
   onToggleExpand = null,
+  canGoBack = false,
+  parentFileName = null,
+  onGoBack = null,
   onToggleMarkdownPreview,
   onDownload,
   onSave,
@@ -61,6 +68,20 @@ export default function CodeEditorHeader({
   return (
     <div className="flex min-w-0 flex-shrink-0 items-center justify-between gap-2 border-b border-neutral-200 bg-white px-4 py-2 dark:border-neutral-800 dark:bg-neutral-950">
       <div className="flex min-w-0 flex-1 shrink items-center gap-2">
+        {canGoBack && onGoBack ? (
+          <button
+            type="button"
+            onClick={onGoBack}
+            className="flex h-7 shrink-0 items-center gap-1 rounded-md px-1.5 text-neutral-500 transition-colors hover:bg-neutral-100 hover:text-neutral-900 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-100"
+            title={parentFileName ? `${labels.goBack}: ${parentFileName}` : labels.goBack}
+            aria-label={labels.goBack}
+          >
+            <ArrowLeft className="h-3.5 w-3.5" strokeWidth={1.75} />
+            {parentFileName ? (
+              <span className="max-w-[7rem] truncate text-xxs">{parentFileName}</span>
+            ) : null}
+          </button>
+        ) : null}
         <div className="min-w-0 shrink">
           <div className="flex min-w-0 items-center gap-2">
             <h3 className="truncate text-[13px] font-medium text-neutral-900 dark:text-neutral-100">

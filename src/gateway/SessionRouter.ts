@@ -18,6 +18,7 @@ export type SessionRouterOptions = {
   recreateSession?: GatewaySessionRecreator;
   listSessions?: (input: ListSessionsInput) => Promise<ListSessionsResult>;
   idleSessionTimeoutMs?: number;
+  idleSweepIntervalMs?: number;
   now?: () => Date;
   /**
    * Called (fire-and-forget) when a session is evicted from the router —
@@ -25,6 +26,7 @@ export type SessionRouterOptions = {
    * per-session resources (e.g. per-session MCP runtimes / browser processes).
    */
   onSessionEvict?: (sessionKey: string) => void;
+  onSessionIdleEvict?: (sessionKey: string, record: SessionEvictionSnapshot) => void;
 };
 
 type SessionRecord = {
@@ -34,17 +36,33 @@ type SessionRecord = {
   dirtyReason?: string;
 };
 
+export type SessionEvictionSnapshot = {
+  sessionKey: string;
+  lastUsedAt: number;
+  context: GatewaySessionContext;
+  messageCount?: number;
+};
+
 const DEFAULT_IDLE_SESSION_TIMEOUT_MS = 30 * 60 * 1000;
+const DEFAULT_IDLE_SWEEP_INTERVAL_MS = 60 * 1000;
 
 export class SessionRouter {
   private readonly sessions = new Map<string, SessionRecord>();
   private readonly inFlightTurns = new Map<string, string>();
   private readonly idleSessionTimeoutMs: number;
+  private readonly idleSweepIntervalMs: number;
   private readonly now: () => Date;
+  private readonly idleSweepTimer?: ReturnType<typeof setInterval>;
+  private isShutdown = false;
 
   constructor(private readonly options: SessionRouterOptions) {
     this.idleSessionTimeoutMs = options.idleSessionTimeoutMs ?? DEFAULT_IDLE_SESSION_TIMEOUT_MS;
+    this.idleSweepIntervalMs = options.idleSweepIntervalMs ?? DEFAULT_IDLE_SWEEP_INTERVAL_MS;
     this.now = options.now ?? (() => new Date());
+    if (this.idleSweepIntervalMs > 0) {
+      this.idleSweepTimer = setInterval(() => this.sweepIdle(), this.idleSweepIntervalMs);
+      this.idleSweepTimer.unref?.();
+    }
   }
 
   async getOrCreate(context: GatewaySessionContext): Promise<AgentSession> {
@@ -53,7 +71,7 @@ export class SessionRouter {
     if (cached) {
       cached.context = mergeSessionContext(cached.context, context);
       if (cached.dirtyReason && this.options.recreateSession) {
-        this.options.onSessionEvict?.(context.sessionKey);
+        this.emitSessionEvict(context.sessionKey, cached, "dirty_recreate");
         cached.session = await this.options.recreateSession(cached.context, cached.session);
         cached.dirtyReason = undefined;
       }
@@ -99,8 +117,9 @@ export class SessionRouter {
   }
 
   async close(sessionKey: string): Promise<void> {
-    if (this.sessions.delete(sessionKey)) {
-      this.options.onSessionEvict?.(sessionKey);
+    const record = this.sessions.get(sessionKey);
+    if (record && this.sessions.delete(sessionKey)) {
+      this.emitSessionEvict(sessionKey, record, "closed");
     }
   }
 
@@ -151,6 +170,27 @@ export class SessionRouter {
     return this.sessions.size;
   }
 
+  cachedSessionCount(): number {
+    return this.sessions.size;
+  }
+
+  snapshotSession(sessionKey: string): ReturnType<AgentSession["snapshot"]> | undefined {
+    return this.sessions.get(sessionKey)?.session.snapshot();
+  }
+
+  shutdown(): void {
+    if (this.isShutdown) return;
+    this.isShutdown = true;
+    if (this.idleSweepTimer) {
+      clearInterval(this.idleSweepTimer);
+    }
+    for (const [sessionKey, record] of this.sessions) {
+      this.emitSessionEvict(sessionKey, record, "shutdown");
+    }
+    this.sessions.clear();
+    this.inFlightTurns.clear();
+  }
+
   /**
    * Returns true when at least one *user* turn (not always-on / cron) is
    * in flight for the given project.  Used by the Always-On scheduler to
@@ -167,6 +207,7 @@ export class SessionRouter {
   }
 
   private sweepIdle(): void {
+    if (this.isShutdown) return;
     const now = this.nowMs();
     for (const [sessionKey, record] of this.sessions) {
       if (this.inFlightTurns.has(sessionKey)) {
@@ -174,14 +215,40 @@ export class SessionRouter {
       }
       if (now - record.lastUsedAt > this.idleSessionTimeoutMs) {
         this.sessions.delete(sessionKey);
-        this.options.onSessionEvict?.(sessionKey);
+        this.emitSessionEvict(sessionKey, record, "idle");
       }
+    }
+  }
+
+  private emitSessionEvict(
+    sessionKey: string,
+    record: SessionRecord,
+    reason: "idle" | "closed" | "dirty_recreate" | "shutdown",
+  ): void {
+    this.options.onSessionEvict?.(sessionKey);
+    if (reason === "idle") {
+      this.options.onSessionIdleEvict?.(sessionKey, snapshotEvictedSession(sessionKey, record));
     }
   }
 
   private nowMs(): number {
     return this.now().getTime();
   }
+}
+
+function snapshotEvictedSession(sessionKey: string, record: SessionRecord): SessionEvictionSnapshot {
+  let messageCount: number | undefined;
+  try {
+    messageCount = record.session.snapshot().messages.length;
+  } catch {
+    messageCount = undefined;
+  }
+  return {
+    sessionKey,
+    lastUsedAt: record.lastUsedAt,
+    context: { ...record.context },
+    ...(messageCount !== undefined ? { messageCount } : {}),
+  };
 }
 
 function mergeSessionContext(

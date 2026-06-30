@@ -7,14 +7,6 @@ export function getAlwaysOnRoot(projectRoot) {
   return path.join(pilotHome, 'always-on', 'projects', projectId);
 }
 
-export function getAlwaysOnHeartbeatsDir(projectRoot) {
-  return path.join(getAlwaysOnRoot(projectRoot), 'heartbeats');
-}
-
-export function getAlwaysOnHeartbeatPath(projectRoot, fileName) {
-  return path.join(getAlwaysOnHeartbeatsDir(projectRoot), fileName);
-}
-
 export function getAlwaysOnDiscoveryLockPath(projectRoot) {
   return path.join(getAlwaysOnRoot(projectRoot), 'locks', 'discovery.lock');
 }

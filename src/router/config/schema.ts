@@ -50,8 +50,6 @@ export type RouterAutoOrchestrateConfig = {
   subagentMaxTokens?: number;
 };
 
-export const DEFAULT_SUBAGENT_MAX_TOKENS = 48000;
-
 export type RouterStatsConfig = {
   enabled: boolean;
   modelPricing?: Record<string, { input?: number; output?: number; cacheRead?: number }>;
@@ -68,6 +66,11 @@ export type RouterCustomRouterConfig = {
 };
 
 export type RouterConfig = {
+  /**
+   * Master switch for all router behavior. When false, router-specific
+   * model refs are ignored and requests pass through to agent.model.
+   */
+  enabled?: boolean;
   /**
    * Resolved scenario→model map.
    *

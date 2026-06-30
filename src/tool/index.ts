@@ -67,7 +67,7 @@ export {
 } from "./builtin/agent.js";
 export { createReadFileTool, type ReadFileInput } from "./builtin/readFile.js";
 export { createReadSkillTool, type ReadSkillDeps, type ReadSkillInput } from "./builtin/readSkill.js";
-export { createGlobTool, type GlobInput } from "./builtin/glob.js";
+export { createGlobTool, extractGlobBaseDirectory, type GlobInput } from "./builtin/glob.js";
 export { createGrepTool, type GrepInput } from "./builtin/grep.js";
 export { createEditFileTool, type EditFileInput } from "./builtin/editFile.js";
 export {
@@ -106,6 +106,7 @@ export {
   createWebFetchTool,
   type CreateWebFetchToolOptions,
   type WebFetchInput,
+  type WebFetchMode,
   type WebFetchOutput,
 } from "./builtin/webFetch.js";
 export {
@@ -196,7 +197,6 @@ export {
 } from "./builtin/todoWrite.js";
 export {
   PLAN_MODE_ALLOWED_TOOLS,
-  PLAN_MODE_DESCRIPTION_SUFFIX,
   buildPlanModeViolationMessage,
   buildPlanModeBashViolationMessage,
   isPlanModeViolationText,

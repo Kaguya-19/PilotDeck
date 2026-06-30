@@ -257,11 +257,15 @@ export class DefaultContextRuntime implements ContextRuntime {
     let supplementalMessages = input.supplementalMessages ?? [];
     if (this.toolResultBudget) {
       try {
-        appended = await this.toolResultBudget.applyToMessage(input.toolResultMessage);
+        appended = await this.toolResultBudget.applyToMessage(input.toolResultMessage, { turnId: input.turnId });
         supplementalMessages = await Promise.all(
           supplementalMessages.map(async ({ toolCallId, message }) => ({
             toolCallId,
-            message: await this.toolResultBudget!.applyToSupplementalMessage(message, toolCallId),
+            message: await this.toolResultBudget!.applyToSupplementalMessage(
+              message,
+              toolCallId,
+              { turnId: input.turnId },
+            ),
           })),
         );
       } catch (error) {
@@ -278,11 +282,12 @@ export class DefaultContextRuntime implements ContextRuntime {
 
   async captureTurn(input: ContextCaptureTurnInput): Promise<void> {
     if (!this.memoryResolver) return;
+    if (isAlwaysOnSession(input.sessionId)) return;
     try {
       await this.memoryResolver.captureTurn({
         sessionId: input.sessionId,
         projectRoot: this.projectRoot ?? "",
-        messages: input.messages,
+        messages: input.messages.filter((message) => !message.metadata?.forkCarryover),
         errored: input.errored,
       });
     } catch {
@@ -410,6 +415,16 @@ export class DefaultContextRuntime implements ContextRuntime {
       reason: "ptl-first-attempt",
     };
   }
+}
+
+function isAlwaysOnSession(sessionId: string): boolean {
+  return [
+    "always-on/discovery:",
+    "always-on/workspace:",
+    "always-on/execute:",
+    "always-on/report:",
+    "always-on/apply:",
+  ].some((prefix) => sessionId.startsWith(prefix));
 }
 
 function instructionScopeDescription(scope: InstructionScope): string {

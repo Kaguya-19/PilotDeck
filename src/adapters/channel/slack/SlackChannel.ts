@@ -1,6 +1,7 @@
 import type { Gateway, GatewayChannelKey } from "../../../gateway/index.js";
 import type { ChannelAdapter, ChannelHandle, ChannelLogger, ChannelStartDeps } from "../protocol/ChannelAdapter.js";
 import { ImElicitationHelper } from "../protocol/ImElicitationHelper.js";
+import { ImPermissionHelper } from "../protocol/ImPermissionHelper.js";
 import { SlackSessionMapper } from "./SlackSessionMapper.js";
 import { renderSlackEvent } from "./slack-render.js";
 
@@ -33,6 +34,7 @@ export class SlackChannel implements ChannelAdapter {
   private botUserId: string | null = null;
   private activeChats = new Set<string>();
   private readonly elicitation = new ImElicitationHelper();
+  private readonly permissions = new ImPermissionHelper();
 
   constructor(options: SlackChannelOptions = {}) {
     this.mapper = options.mapper ?? new SlackSessionMapper();
@@ -128,6 +130,16 @@ export class SlackChannel implements ChannelAdapter {
       return;
     }
 
+    if (this.permissions.hasPending(chatId) && this.gateway) {
+      try {
+        const confirmation = await this.permissions.answer(chatId, text, this.gateway);
+        if (confirmation) await this.sendReply({ channelId, threadTs }, confirmation);
+      } catch (e) {
+        this.logger?.error?.(`slack: permission answer error: ${e}`);
+      }
+      return;
+    }
+
     if (this.activeChats.has(chatId)) {
       this.logger?.info?.(`slack: chat ${chatId} already active, skipping`);
       return;
@@ -170,6 +182,11 @@ export class SlackChannel implements ChannelAdapter {
           await this.sendReply(ctx, questionText);
           continue;
         }
+        if (event.type === "permission_request") {
+          const questionText = this.permissions.capture(chatId, sessionKey, event);
+          await this.sendReply(ctx, questionText);
+          continue;
+        }
         const fragment = renderSlackEvent(event);
         if (fragment != null) replyText += fragment;
       }
@@ -179,6 +196,7 @@ export class SlackChannel implements ChannelAdapter {
     }
 
     this.elicitation.clear(chatId);
+    this.permissions.clear(chatId);
     const finalText = replyText.trim();
     if (finalText) {
       await this.sendReply(ctx, finalText);

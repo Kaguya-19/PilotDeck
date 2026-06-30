@@ -4,7 +4,7 @@ import { authenticatedFetch } from '../../../utils/api';
 import type { ChatMessage, ClaudeWorkStatus, PilotDeckWorkStatus } from '../types/types';
 import {
   getSessionRequestParams,
-  isBackgroundTaskSession,
+  isReadOnlySession,
   type Project,
   type ProjectSession,
   type SessionProvider,
@@ -323,7 +323,7 @@ export function useChatSessionState({
   }
 
   const activeSessionId = selSid ?? effectiveCurrentRef.current;
-  const isReadOnlyBackgroundSession = isBackgroundTaskSession(selectedSession);
+  const sessionIsReadOnly = isReadOnlySession(selectedSession);
   const sessionRequestParams = useMemo(
     () => getSessionRequestParams(selectedSession),
     [selectedSession],
@@ -597,7 +597,15 @@ export function useChatSessionState({
     }
 
     const provider = 'pilotdeck';
-    const sessionKey = `${selectedSession.id}:${selectedProject.name}:${provider}`;
+    const sessionKey = JSON.stringify([
+      selectedSession.id,
+      selectedProject.name,
+      provider,
+      sessionRequestParams.sessionKind ?? '',
+      sessionRequestParams.parentSessionId ?? '',
+      sessionRequestParams.relativeTranscriptPath ?? '',
+      sessionIsReadOnly ? 'readonly' : 'readwrite',
+    ]);
 
     // Skip if already loaded and fresh, or if stale but has live realtime
     // content (re-fetching while streaming would prune in-flight messages).
@@ -645,7 +653,7 @@ export function useChatSessionState({
     setSessionLoadError(null);
 
     // Check session status
-    if (ws && !isReadOnlyBackgroundSession) {
+    if (ws && !sessionIsReadOnly) {
       sendMessage({ type: 'check-session-status', sessionId: selectedSession.id, provider });
     }
 
@@ -691,7 +699,7 @@ export function useChatSessionState({
     selectedSession,
     sendMessage,
     ws,
-    isReadOnlyBackgroundSession,
+    sessionIsReadOnly,
     sessionRequestParams,
     sessionStore,
   ]);
@@ -839,7 +847,7 @@ export function useChatSessionState({
       setTokenBudget(null);
       return;
     }
-    if (isReadOnlyBackgroundSession) {
+    if (sessionIsReadOnly) {
       setTokenBudget(null);
       return;
     }
@@ -858,7 +866,7 @@ export function useChatSessionState({
       }
     };
     fetchInitialTokenUsage();
-  }, [isReadOnlyBackgroundSession, selectedProject, selectedSession?.id]);
+  }, [sessionIsReadOnly, selectedProject, selectedSession?.id]);
 
   const visibleMessages = useMemo(() => {
     if (chatMessages.length <= visibleMessageCount) return chatMessages;
@@ -912,13 +920,14 @@ export function useChatSessionState({
     const pendingSessionId = pendingViewSessionRef.current?.sessionId ?? null;
     const activeViewSessionId =
       selectedSession?.id || (pendingSessionId === currentSessionId ? currentSessionId : null);
+    if (sessionIsReadOnly) return;
     if (!activeViewSessionId || !processingSessions) return;
     const shouldBeProcessing = processingSessions.has(activeViewSessionId);
     if (shouldBeProcessing && !isLoading) {
       setIsLoading(true);
       setCanAbortSession(true);
     }
-  }, [currentSessionId, isLoading, pendingViewSessionRef, processingSessions, selectedSession?.id]);
+  }, [currentSessionId, isLoading, pendingViewSessionRef, processingSessions, selectedSession?.id, sessionIsReadOnly]);
 
   // "Load all" overlay
   const prevLoadingRef = useRef(false);

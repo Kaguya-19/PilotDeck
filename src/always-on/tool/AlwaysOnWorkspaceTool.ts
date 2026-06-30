@@ -64,6 +64,7 @@ export function createAlwaysOnWorkspaceTool(
         prepared = await ctx.workspaceRegistry.prepare({
           projectRoot: ctx.projectKey,
           runId: ctx.runId,
+          planTitle: ctx.planTitle,
         });
       } else {
         const provider = ctx.workspaceRegistry.findById(input.strategy);
@@ -76,6 +77,7 @@ export function createAlwaysOnWorkspaceTool(
         const handle = await provider.prepare({
           projectRoot: ctx.projectKey,
           runId: ctx.runId,
+          planTitle: ctx.planTitle,
         });
         prepared = { handle, provider };
       }

@@ -194,6 +194,11 @@ package-lock.json
 # Test output
 test-results/
 
+# Local test drafts (force-add intentional new tests with git add -f)
+test/
+test.ts
+*.test.ts
+
 # Auto-Research-Skills (local-only)
 Auto-Research-Skills/
 

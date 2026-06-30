@@ -27,12 +27,15 @@
     "fullscreen": "全屏",
     "expand": "展开为全宽",
     "collapse": "收起为分栏视图",
-    "close": "关闭"
+    "close": "关闭",
+    "goBack": "返回",
+    "previewMarkdown": "预览 Markdown",
+    "editMarkdown": "编辑 Markdown"
   },
   "footer": {
     "lines": "行数：",
     "characters": "字符数：",
-    "shortcuts": "按 Ctrl+S 保存 • Esc 关闭"
+    "shortcuts": "按 Ctrl+S 保存 • Esc 返回或关闭"
   },
   "binaryFile": {
     "title": "二进制文件",

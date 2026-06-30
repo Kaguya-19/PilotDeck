@@ -7,7 +7,7 @@ import type { WorkspaceProvider, WorkspacePrepareInput, WorkspacePublishOutput }
 
 export type GitWorktreeProviderOptions = {
   baseDir: string;
-  /** When true, refuses to prepare on a dirty worktree. Default true. */
+  /** @deprecated Dirty worktrees are now checkpointed automatically. */
   refuseDirty?: boolean;
   /** Override `git` executable path (tests). */
   gitBin?: string;
@@ -26,11 +26,6 @@ export class GitWorktreeProvider implements WorkspaceProvider {
     if (!top || top.exitCode !== 0) return false;
     const head = await runGit(this.git(), ["-C", projectRoot, "rev-parse", "HEAD"]).catch(() => undefined);
     if (!head || head.exitCode !== 0) return false;
-    if (this.options.refuseDirty !== false) {
-      const status = await runGit(this.git(), ["-C", projectRoot, "status", "--porcelain"]).catch(() => undefined);
-      if (!status || status.exitCode !== 0) return false;
-      if (status.stdout.trim().length > 0) return false;
-    }
     return true;
   }
 
@@ -38,6 +33,8 @@ export class GitWorktreeProvider implements WorkspaceProvider {
     const top = await runGit(this.git(), ["-C", input.projectRoot, "rev-parse", "--show-toplevel"]);
     expectOk(top, "git rev-parse --show-toplevel");
     const repoRoot = top.stdout.trim();
+    await this.checkpointDirtyWorktree(repoRoot, input.planTitle);
+
     const branchRes = await runGit(this.git(), ["-C", repoRoot, "rev-parse", "--abbrev-ref", "HEAD"]);
     expectOk(branchRes, "git rev-parse --abbrev-ref HEAD");
     const baseBranch = branchRes.stdout.trim();
@@ -110,6 +107,35 @@ export class GitWorktreeProvider implements WorkspaceProvider {
 
   private git(): string {
     return this.options.gitBin ?? "git";
+  }
+
+  private async checkpointDirtyWorktree(repoRoot: string, planTitle: string): Promise<void> {
+    const status = await runGit(this.git(), ["-C", repoRoot, "status", "--porcelain"]);
+    expectOk(status, "git status --porcelain");
+    if (!status.stdout.trim()) return;
+
+    const add = await runGit(this.git(), ["-C", repoRoot, "add", "-A"]);
+    expectOk(add, "git add -A");
+
+    const normalizedTitle = planTitle.replace(/\s+/g, " ").trim() || "untitled plan";
+    const commit = await runGit(this.git(), [
+      "-C",
+      repoRoot,
+      "commit",
+      "-m",
+      `chore(always-on): checkpoint before executing ${normalizedTitle}`,
+    ]);
+    expectOk(commit, "git commit");
+
+    const cleanStatus = await runGit(this.git(), ["-C", repoRoot, "status", "--porcelain"]);
+    expectOk(cleanStatus, "git status --porcelain");
+    if (cleanStatus.stdout.trim()) {
+      throw new AlwaysOnError(
+        "workspace_prepare_failed",
+        "git worktree remained dirty after the Always-On checkpoint commit.",
+        { repoRoot },
+      );
+    }
   }
 }
 

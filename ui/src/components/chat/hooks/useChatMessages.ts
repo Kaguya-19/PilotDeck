@@ -43,9 +43,14 @@ function convertSingleMessage(
         if (!content.trim() && userAttachments.length === 0 && (!userImages || userImages.length === 0)) return null;
         return {
           id: msg.id,
+          entryId: msg.entryId,
           type: 'user',
           content: unescapeWithMathProtection(decodeHtmlEntities(content)),
           timestamp: msg.timestamp,
+          ...(msg.forkUnsupportedContent ? {
+            forkUnsupportedContent: true,
+            forkUnsupportedReason: msg.forkUnsupportedReason,
+          } : {}),
           ...(userImages && userImages.length > 0 ? { images: userImages } : {}),
           ...(userAttachments.length > 0 ? { attachments: userAttachments } : {}),
         };
@@ -53,8 +58,10 @@ function convertSingleMessage(
         let text = decodeHtmlEntities(content);
         text = unescapeWithMathProtection(text);
         text = formatUsageLimitText(text);
+        if (!text.trim()) return null;
         return {
           id: msg.id,
+          entryId: msg.entryId,
           type: 'assistant',
           content: text,
           timestamp: msg.timestamp,

@@ -112,6 +112,8 @@ export function assembleAssistantMessage(state: ModelMessageAssemblerState): Ass
     }
   }
 
+  normalizeToolCallIds(state);
+
   return {
     message: {
       role: "assistant",
@@ -123,6 +125,35 @@ export function assembleAssistantMessage(state: ModelMessageAssemblerState): Ass
     error: state.error,
     hasRepairedToolCalls: state.hasRepairedToolCalls,
   };
+}
+
+function normalizeToolCallIds(state: ModelMessageAssemblerState): void {
+  if (state.toolCalls.length === 0) return;
+
+  const used = new Set<string>();
+  const normalizedToolCalls = state.toolCalls.map((toolCall, index) => {
+    const id = nextToolCallId(toolCall.id, index, used);
+    used.add(id);
+    return id === toolCall.id ? toolCall : { ...toolCall, id };
+  });
+
+  let toolCallIndex = 0;
+  state.content = state.content.map((block) => {
+    if (block.type !== "tool_call") return block;
+    const normalized = normalizedToolCalls[toolCallIndex++];
+    return normalized ? { ...block, id: normalized.id } : block;
+  });
+  state.toolCalls = normalizedToolCalls;
+}
+
+function nextToolCallId(rawId: string | undefined, index: number, used: Set<string>): string {
+  const base = rawId && rawId.trim().length > 0 ? rawId.trim() : `call_${index}`;
+  if (!used.has(base)) return base;
+
+  for (let suffix = 2; ; suffix += 1) {
+    const candidate = `${base}_${suffix}`;
+    if (!used.has(candidate)) return candidate;
+  }
 }
 
 const TEXT_TOOL_CALL_MARKERS = [

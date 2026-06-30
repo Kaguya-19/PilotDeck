@@ -5,6 +5,7 @@ import type { ChannelAdapter, ChannelHandle, ChannelLogger, ChannelStartDeps } f
 import { BlueBubblesSessionMapper } from "./BlueBubblesSessionMapper.js";
 import { renderBlueBubblesEvent } from "./bluebubbles-render.js";
 import { ImElicitationHelper } from "../protocol/ImElicitationHelper.js";
+import { ImPermissionHelper } from "../protocol/ImPermissionHelper.js";
 
 const POLL_MS = 2500;
 const MESSAGE_LIMIT = 50;
@@ -43,6 +44,7 @@ export class BlueBubblesChannel implements ChannelAdapter {
   private seenGuids = new Set<string>();
   private activeChats = new Set<string>();
   private readonly elicitation = new ImElicitationHelper();
+  private readonly permissions = new ImPermissionHelper();
   private running = false;
 
   constructor(options: BlueBubblesChannelOptions = {}) {
@@ -149,6 +151,16 @@ export class BlueBubblesChannel implements ChannelAdapter {
       return;
     }
 
+    if (this.permissions.hasPending(chatGuid) && this.gateway) {
+      try {
+        const confirmation = await this.permissions.answer(chatGuid, text, this.gateway);
+        if (confirmation) await this.sendReply(chatGuid, confirmation);
+      } catch (e) {
+        this.logger?.error?.(`bluebubbles: permission answer error: ${e}`);
+      }
+      return;
+    }
+
     if (this.activeChats.has(chatGuid)) {
       this.logger?.info?.(`bluebubbles: chat ${chatGuid} already active, skipping`);
       return;
@@ -184,6 +196,11 @@ export class BlueBubblesChannel implements ChannelAdapter {
           await this.sendReply(chatGuid, questionText);
           continue;
         }
+        if (event.type === "permission_request") {
+          const questionText = this.permissions.capture(chatGuid, sessionKey, event);
+          await this.sendReply(chatGuid, questionText);
+          continue;
+        }
         const fragment = renderBlueBubblesEvent(event);
         if (fragment != null) replyText += fragment;
       }
@@ -193,6 +210,7 @@ export class BlueBubblesChannel implements ChannelAdapter {
     }
 
     this.elicitation.clear(chatGuid);
+    this.permissions.clear(chatGuid);
 
     const finalText = replyText.trim();
     if (finalText) {

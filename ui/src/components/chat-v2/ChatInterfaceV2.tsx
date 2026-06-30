@@ -1,16 +1,19 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useTasksSettings } from '../../contexts/TasksSettingsContext';
-import type { ChatInterfaceProps, ChatRunMode, Provider } from '../chat/types/types';
+import { useToast } from '../../contexts/ToastContext';
+import { api } from '../../utils/api';
+import type { ChatInterfaceProps, ChatMessage, ChatRunMode, Provider } from '../chat/types/types';
 import {
   getSessionRequestParams,
-  isBackgroundTaskSession,
+  isReadOnlySession,
 } from '../../types/app';
 import { useChatProviderState } from '../chat/hooks/useChatProviderState';
 import { useChatSessionState } from '../chat/hooks/useChatSessionState';
 import { useChatRealtimeHandlers } from '../chat/hooks/useChatRealtimeHandlers';
 import { useChatComposerState } from '../chat/hooks/useChatComposerState';
 import { useSessionStore } from '../../stores/useSessionStore';
+import { safeLocalStorage } from '../chat/utils/chatStorage';
 import MessagesPaneV2 from './MessagesPaneV2';
 import ComposerV2 from './ComposerV2';
 
@@ -58,7 +61,7 @@ function ChatInterfaceV2({
   const { t } = useTranslation('chat');
   const { tasksEnabled: _tasksEnabled, isTaskMasterInstalled: _isTaskMasterInstalled } =
     useTasksSettings();
-  const isReadOnlyBackgroundSession = isBackgroundTaskSession(selectedSession);
+  const sessionIsReadOnly = isReadOnlySession(selectedSession);
   const sessionRequestParams = React.useMemo(
     () => getSessionRequestParams(selectedSession),
     [selectedSession],
@@ -71,6 +74,8 @@ function ChatInterfaceV2({
   const pendingViewSessionRef = useRef<PendingViewSession | null>(null);
   const [isAbortPending, setIsAbortPending] = useState(false);
   const [runMode, setRunMode] = useState<ChatRunMode>('agent');
+  const [isForkPending, setIsForkPending] = useState(false);
+  const { addToast } = useToast();
 
   const resetStreamingState = useCallback(() => {
     if (streamTimerRef.current) {
@@ -311,6 +316,89 @@ function ChatInterfaceV2({
     setIsAbortPending(true);
   }, [canAbortSession, handleAbortSession, isAbortPending, isLoading]);
 
+  const handleFork = useCallback(async (message: ChatMessage, _carriedPreview: number) => {
+    if (isForkPending || isLoading || sessionIsReadOnly) return;
+    const sessionId = currentSessionId || selectedSession?.id;
+    const fromEntryId = message.entryId;
+    if (!sessionId || !fromEntryId || !selectedProject) {
+      addToast('error', t('fork.missingTarget', { defaultValue: 'Cannot fork this message.' }));
+      return;
+    }
+
+    const projectPath = selectedProject.fullPath || selectedProject.path || '';
+    setIsForkPending(true);
+    try {
+      const response = await api.forkSession(sessionId, { projectPath, fromEntryId });
+      let result: { newSessionId?: string; prefillText?: string; mode?: string; error?: string } = {};
+      try {
+        result = await response.json();
+      } catch {
+        result = {};
+      }
+      if (!response.ok) {
+        throw new Error(result?.error || `Fork failed (${response.status})`);
+      }
+      const newSessionId = result?.newSessionId;
+      if (!newSessionId) {
+        throw new Error('Fork did not return a new session id');
+      }
+      setRunMode(result.mode === 'plan' ? 'plan' : 'agent');
+
+      if (typeof window.refreshProjects === 'function') {
+        try {
+          await window.refreshProjects();
+        } catch {
+          // Keep the fork usable even if the sidebar refresh races/fails.
+        }
+      }
+
+      const forkDraft = typeof result.prefillText === 'string'
+        ? result.prefillText
+        : message.type === 'user'
+          ? message.content || ''
+          : '';
+      if (forkDraft) {
+        safeLocalStorage.setItem(`draft_input_${selectedProject.name}`, forkDraft);
+      } else {
+        safeLocalStorage.removeItem(`draft_input_${selectedProject.name}`);
+      }
+
+      onNavigateToSession?.(newSessionId);
+      setInput(forkDraft);
+      requestAnimationFrame(() => {
+        textareaRef.current?.focus();
+        scrollToBottom?.();
+      });
+      // Messages load asynchronously after the session switch; scroll again
+      // once the carried history has had a chance to render.
+      setTimeout(() => scrollToBottom?.(), 400);
+      addToast(
+        'success',
+        t('fork.ready', {
+          defaultValue: 'Fork created — edit the prompt and send when ready.',
+        }),
+      );
+    } catch (error) {
+      const messageText = error instanceof Error ? error.message : String(error);
+      addToast('error', messageText || t('fork.failed', { defaultValue: 'Fork failed.' }));
+    } finally {
+      setIsForkPending(false);
+    }
+  }, [
+    addToast,
+    currentSessionId,
+    isForkPending,
+    isLoading,
+    sessionIsReadOnly,
+    onNavigateToSession,
+    scrollToBottom,
+    selectedProject,
+    selectedSession?.id,
+    setInput,
+    t,
+    textareaRef,
+  ]);
+
   useEffect(() => {
     if (!isLoading || !canAbortSession) return;
     const handleGlobalEscape = (event: KeyboardEvent) => {
@@ -353,11 +441,11 @@ function ChatInterfaceV2({
 
   // The composer is identical in welcome / normal mode — just rendered in a
   // different parent container. Pulled out so we don't drift between the two.
-  const composer = isReadOnlyBackgroundSession ? (
+  const composer = sessionIsReadOnly ? (
     <div className="mx-auto w-full max-w-[720px] px-6 pb-6 pt-3">
       <div className="rounded-xl border border-neutral-200 bg-neutral-50 px-4 py-3 text-[13px] text-neutral-600 dark:border-neutral-800 dark:bg-neutral-900 dark:text-neutral-400">
-        {t('session.readonlyBackground', {
-          defaultValue: 'This background task transcript is read-only.',
+        {t('session.readonlyTranscript', {
+          defaultValue: 'This transcript is read-only.',
         })}
       </div>
     </div>
@@ -480,7 +568,10 @@ function ChatInterfaceV2({
         isAssistantWorking={isLoading}
         workingStatus={claudeStatus || pilotDeckStatus}
         runMode={runMode}
+        planModeActive={effectivePermissionMode === 'plan'}
         sessionStore={sessionStore}
+        onFork={sessionIsReadOnly ? undefined : handleFork}
+        forkDisabled={isForkPending}
       />
       {composer}
     </div>

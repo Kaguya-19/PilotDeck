@@ -62,6 +62,27 @@ export function parseRouterConfig(
     return { diagnostics };
   }
 
+  let enabled = true;
+  if (raw.enabled !== undefined) {
+    if (typeof raw.enabled === "boolean") {
+      enabled = raw.enabled;
+    } else {
+      diagnostics.push({
+        code: "ROUTER_ENABLED_INVALID",
+        severity: "fatal",
+        path: "router.enabled",
+        message: "router.enabled must be a boolean.",
+      });
+    }
+  }
+
+  if (!enabled) {
+    return {
+      config: { enabled: false },
+      diagnostics,
+    };
+  }
+
   const scenarios = parseScenarios(raw.scenarios, modelConfig, diagnostics);
   // Don't early-return on `scenarios === undefined`: that's the legitimate
   // "user only filled in tokenSaver / fallback" case. `ensureRouterConfig`
@@ -78,6 +99,7 @@ export function parseRouterConfig(
 
   return {
     config: {
+      enabled,
       ...(scenarios ? { scenarios } : {}),
       fallback,
       zeroUsageRetry,

@@ -80,6 +80,7 @@ export class AgentSession {
       permissionMode: submitOptions.permissionMode,
       basePermissionMode: submitOptions.basePermissionMode,
       allowPlanModeTools: submitOptions.allowPlanModeTools,
+      canPrompt: submitOptions.canPrompt,
       permissionRules: submitOptions.permissionRules,
       abortSignal: this.state.abortController.signal,
     });

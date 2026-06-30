@@ -99,7 +99,6 @@ router:
       - grep
       - glob
       - read_skill
-    subagentMaxTokens: 48000
   stats:
     enabled: true
 cron:

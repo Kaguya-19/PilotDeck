@@ -173,8 +173,8 @@ function validateProvider(id, provider, errors) {
   }
   const protocol = normalizeString(provider.protocol).toLowerCase();
   if (!protocol) errors.push(`model.providers.${id}.protocol is required`);
-  else if (protocol !== 'openai' && protocol !== 'anthropic') {
-    errors.push(`model.providers.${id}.protocol must be "openai" or "anthropic"`);
+  else if (protocol !== 'openai' && protocol !== 'anthropic' && protocol !== 'google') {
+    errors.push(`model.providers.${id}.protocol must be "openai", "anthropic", or "google"`);
   }
   if (!normalizeString(provider.url)) errors.push(`model.providers.${id}.url is required`);
   if (!normalizeString(provider.apiKey)) errors.push(`model.providers.${id}.apiKey is required`);
@@ -191,6 +191,7 @@ function validateModelRef(config, ref, label, errors) {
 function validateRouterModelRefs(config, errors) {
   const router = config.router;
   if (!isRecord(router)) return;
+  if (router.enabled === false) return;
 
   if (isRecord(router.scenarios)) {
     for (const [key, ref] of Object.entries(router.scenarios)) {
@@ -297,9 +298,7 @@ export function preserveMaskedSecrets(nextValue, previousValue) {
 // ─── Runtime env derivation ──────────────────────────────────────────────────
 
 function providerProtocolToMemoryApi(protocol) {
-  // V2 catalog only uses 'openai' (Chat Completions) and 'anthropic'.
-  // The /responses style is only relevant when a user manually sets
-  // memory.apiType, which they can do alongside protocol="openai".
+  if (protocol === 'anthropic' || protocol === 'google') return protocol;
   return 'openai-completions';
 }
 
@@ -335,6 +334,10 @@ export function buildRuntimeEnv(config) {
     env.OPENAI_MODEL = main.model;
     env.ANTHROPIC_API_KEY = main.provider.apiKey || '';
     env.ANTHROPIC_MODEL = main.model;
+    env.GEMINI_API_KEY = main.provider.apiKey || '';
+    env.GOOGLE_API_KEY = main.provider.apiKey || '';
+    env.GOOGLE_GENERATIVE_AI_API_KEY = main.provider.apiKey || '';
+    env.GEMINI_MODEL = main.model;
   }
 
   // Reasoning models (DeepSeek-R1, MiniMax-M2.7, etc.) need a generous
@@ -466,6 +469,7 @@ export function syncAgentModelWithRouter(config) {
   const modelId = agentRef.slice(slash + 1);
 
   if (!isRecord(config.router)) return config;
+  if (config.router.enabled === false) return config;
   if (!isRecord(config.router.scenarios)) return config;
   const currentDefault = config.router.scenarios.default;
   // Accept both string ("provider/model") and object ref shapes.

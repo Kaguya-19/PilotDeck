@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import type { Gateway, GatewayChannelKey } from "../../../gateway/index.js";
 import type { ChannelAdapter, ChannelHandle, ChannelLogger, ChannelStartDeps } from "../protocol/ChannelAdapter.js";
 import { ImElicitationHelper } from "../protocol/ImElicitationHelper.js";
+import { ImPermissionHelper } from "../protocol/ImPermissionHelper.js";
 import { WhatsAppSessionMapper } from "./WhatsAppSessionMapper.js";
 import { renderWhatsAppEvent } from "./whatsapp-render.js";
 
@@ -40,6 +41,7 @@ export class WhatsAppChannel implements ChannelAdapter {
   private seenIds = new Set<string>();
   private activeChats = new Set<string>();
   private readonly elicitation = new ImElicitationHelper();
+  private readonly permissions = new ImPermissionHelper();
   private running = false;
 
   constructor(options: WhatsAppChannelOptions = {}) {
@@ -200,6 +202,16 @@ export class WhatsAppChannel implements ChannelAdapter {
       return;
     }
 
+    if (this.permissions.hasPending(msg.chatId) && this.gateway) {
+      try {
+        const confirmation = await this.permissions.answer(msg.chatId, msg.text, this.gateway);
+        if (confirmation) await this.sendReply(msg.chatId, confirmation);
+      } catch (e) {
+        this.logger?.error?.(`whatsapp: permission answer error: ${e}`);
+      }
+      return;
+    }
+
     if (this.activeChats.has(msg.chatId)) {
       this.logger?.info?.(`whatsapp: chat ${msg.chatId} already active, skipping`);
       return;
@@ -235,6 +247,11 @@ export class WhatsAppChannel implements ChannelAdapter {
           await this.sendReply(chatId, questionText);
           continue;
         }
+        if (event.type === "permission_request") {
+          const questionText = this.permissions.capture(chatId, sessionKey, event);
+          await this.sendReply(chatId, questionText);
+          continue;
+        }
         const fragment = renderWhatsAppEvent(event);
         if (fragment != null) replyText += fragment;
       }
@@ -244,6 +261,7 @@ export class WhatsAppChannel implements ChannelAdapter {
     }
 
     this.elicitation.clear(chatId);
+    this.permissions.clear(chatId);
     const finalText = replyText.trim();
     if (finalText) {
       await this.sendReply(chatId, finalText);

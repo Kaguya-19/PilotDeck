@@ -245,18 +245,9 @@ export function ProcessTrace({
     }
     onExpandedChange?.(resolvedExpanded);
   };
-  const hasDetails = Boolean(statusLabel) || metrics.length > 0 || steps.length > 0 || Boolean(children);
+  const hasDetails = steps.length > 0 || Boolean(children);
   const visibleCollapsedDetail = !expanded && collapsedDetail;
-  const statusStep: ProcessTraceStep | null =
-    statusLabel || metrics.length > 0
-      ? {
-          id: 'process-status',
-          title: statusLabel,
-          detail: metrics.map((metric) => metric.label).join(', '),
-          state: status,
-        }
-      : null;
-  const summaryIconStep = steps[0] || statusStep || { title: label, state: status };
+  const summaryIconStep = steps[0] || { title: label, state: status };
   const SummaryIcon = getStepIcon(summaryIconStep);
   const isRunning = status === 'running';
 
@@ -302,7 +293,6 @@ export function ProcessTrace({
 
       {expanded ? (
         <div className="mt-1.5 space-y-1.5 pl-5">
-          {statusStep ? <ProcessTraceLine step={statusStep} /> : null}
           {steps.length > 3 ? (
             <AgentTimeline steps={steps} />
           ) : (

@@ -3,19 +3,33 @@ import { useEffect } from 'react';
 type UseEditorKeyboardShortcutsParams = {
   onSave: () => void;
   onClose: () => void;
+  onGoBack?: () => void;
+  canGoBack?: boolean;
   dependency: string;
 };
 
 export const useEditorKeyboardShortcuts = ({
   onSave,
   onClose,
+  onGoBack,
+  canGoBack = false,
   dependency,
 }: UseEditorKeyboardShortcutsParams) => {
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         event.preventDefault();
+        if (canGoBack && onGoBack) {
+          onGoBack();
+          return;
+        }
         onClose();
+        return;
+      }
+
+      if (event.key === 'Backspace' && event.altKey && canGoBack && onGoBack) {
+        event.preventDefault();
+        onGoBack();
         return;
       }
 
@@ -33,5 +47,5 @@ export const useEditorKeyboardShortcuts = ({
     return () => {
       document.removeEventListener('keydown', handleKeyDown);
     };
-  }, [dependency, onClose, onSave]);
+  }, [canGoBack, dependency, onClose, onGoBack, onSave]);
 };

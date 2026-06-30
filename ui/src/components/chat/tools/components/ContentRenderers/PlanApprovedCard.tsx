@@ -1,6 +1,7 @@
 import React from 'react';
 import { ClipboardList, FileText } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { Markdown } from '../../../view/subcomponents/Markdown';
 
 interface PlanApprovedCardProps {
   planTitle: string;
@@ -28,8 +29,10 @@ export const PlanApprovedCard: React.FC<PlanApprovedCardProps> = ({
       </div>
 
       {planSummary && (
-        <div className="px-4 py-2.5 text-xs leading-relaxed text-neutral-600 line-clamp-2 dark:text-neutral-400">
-          {planSummary}
+        <div className="max-h-28 overflow-hidden px-4 py-2.5">
+          <Markdown className="prose prose-sm max-w-none text-xs leading-relaxed text-neutral-600 dark:prose-invert dark:text-neutral-400 prose-table:my-0 prose-th:px-2 prose-th:py-0.5 prose-td:px-2 prose-td:py-0.5">
+            {planSummary}
+          </Markdown>
         </div>
       )}
 

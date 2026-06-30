@@ -36,11 +36,13 @@ function createPaneElement({
   activityMessages = [],
   isAssistantWorking = false,
   runMode = 'agent',
+  planModeActive = false,
 }: {
   messages: ChatMessage[];
   activityMessages?: ChatMessage[];
   isAssistantWorking?: boolean;
   runMode?: ChatRunMode;
+  planModeActive?: boolean;
 }) {
   const scrollContainerRef = React.createRef<HTMLDivElement>();
 
@@ -68,6 +70,7 @@ function createPaneElement({
       setInput={() => {}}
       isAssistantWorking={isAssistantWorking}
       runMode={runMode}
+      planModeActive={planModeActive}
     />
   );
 }
@@ -77,6 +80,7 @@ function renderPane(options: {
   activityMessages?: ChatMessage[];
   isAssistantWorking?: boolean;
   runMode?: ChatRunMode;
+  planModeActive?: boolean;
 }) {
   return render(createPaneElement(options));
 }
@@ -666,6 +670,70 @@ describe('MessagesPaneV2 render behavior', () => {
     expect(container.querySelector('.border-l-red-500')).toBeNull();
   });
 
+  it('shows a waiting status below an in-progress web_fetch in plan mode', () => {
+    const now = new Date().toISOString();
+    const messages: ChatMessage[] = [
+      {
+        id: 'u-1',
+        type: 'user',
+        content: '搜索一下',
+        timestamp: now,
+      },
+      {
+        id: 'a-1',
+        type: 'assistant',
+        content: '我去查一下文档。',
+        timestamp: now,
+      },
+      {
+        id: 'tool-fetch-1',
+        type: 'assistant',
+        content: '',
+        timestamp: now,
+        isToolUse: true,
+        toolName: 'web_fetch',
+        toolId: 'tool-fetch-1',
+        toolInput: '{"url":"https://example.com"}',
+      },
+    ];
+
+    renderPane({ messages, isAssistantWorking: true, runMode: 'plan', planModeActive: true });
+
+    expect(screen.getByText('Fetching web content...')).toBeTruthy();
+  });
+
+  it('does not show the web_fetch waiting status in agent mode', () => {
+    const now = new Date().toISOString();
+    const messages: ChatMessage[] = [
+      {
+        id: 'u-1',
+        type: 'user',
+        content: '搜索一下',
+        timestamp: now,
+      },
+      {
+        id: 'a-1',
+        type: 'assistant',
+        content: '我去查一下文档。',
+        timestamp: now,
+      },
+      {
+        id: 'tool-fetch-1',
+        type: 'assistant',
+        content: '',
+        timestamp: now,
+        isToolUse: true,
+        toolName: 'web_fetch',
+        toolId: 'tool-fetch-1',
+        toolInput: '{"url":"https://example.com"}',
+      },
+    ];
+
+    renderPane({ messages, isAssistantWorking: true, runMode: 'agent' });
+
+    expect(screen.queryByText('Fetching web content...')).toBeNull();
+  });
+
   it('does not render a completed compact boundary as a plan-mode process row', () => {
     const now = new Date().toISOString();
     const messages: ChatMessage[] = [
@@ -690,7 +758,7 @@ describe('MessagesPaneV2 render behavior', () => {
       },
     ];
 
-    renderPane({ messages, isAssistantWorking: true, runMode: 'plan' });
+    renderPane({ messages, isAssistantWorking: true, runMode: 'plan', planModeActive: true });
 
     expect(screen.getByText('I will make a plan first.')).toBeTruthy();
     expect(screen.queryByText('Compacted context')).toBeNull();

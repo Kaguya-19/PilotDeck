@@ -24,7 +24,7 @@ import {
 } from "../../model/index.js";
 import { listProjectSessions, readTranscript, findLastCompactBoundaryIndex, type SessionInfo } from "../../session/index.js";
 import type { AgentTranscriptEntry } from "../../session/transcript/TranscriptEntry.js";
-import { resolve, dirname } from "node:path";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { getPilotProjectChatDir } from "../../pilot/index.js";
 import { sanitizeSessionIdForPath } from "../../session/storage/ProjectSessionStorage.js";
 import type {
@@ -45,21 +45,20 @@ export async function readWebSessionMessages(
   options: ReadWebSessionMessagesOptions,
 ): Promise<WebReadSessionMessagesResult> {
   const effectiveProjectRoot = input.projectKey ?? options.projectRoot;
-  const sessionInfo = await locateSession(input.sessionKey, {
+  const chatDir = getPilotProjectChatDir(effectiveProjectRoot, options.pilotHome);
+  const transcriptPath = resolveTranscriptPath(input, chatDir);
+  const isBackgroundTask = isBackgroundTaskInput(input);
+  const sessionInfo = isBackgroundTask ? undefined : await locateSession(input.sessionKey, {
     ...options,
     projectRoot: effectiveProjectRoot,
   });
-  const transcriptPath = resolve(
-    getPilotProjectChatDir(effectiveProjectRoot, options.pilotHome),
-    `${sanitizeSessionIdForPath(input.sessionKey)}.jsonl`,
-  );
   const { entries } = await readTranscript(transcriptPath);
   const webReplay = extractWebVisibleMessages(entries);
   const entryTimestamps = webReplay.timestamps;
+  const entryIds = webReplay.entryIds;
   const incompleteTurnIds = extractIncompleteTurnIds(entries);
 
   const flattenedPerMessage: WebMessage[][] = webReplay.messages
-    .filter((message) => !message.metadata?.synthetic)
     .map((message, index) =>
       flattenCanonicalMessage(message, {
         index,
@@ -67,6 +66,8 @@ export async function readWebSessionMessages(
         projectKey: input.projectKey,
         now: options.now,
         entryTimestamp: entryTimestamps[index],
+        entryId: entryIds[index],
+        forkUnsupportedContent: webReplay.forkUnsupportedContents[index],
       }),
     );
 
@@ -130,6 +131,10 @@ export async function readWebSessionMessages(
       cwd: sessionInfo?.cwd,
       tag: sessionInfo?.tag,
       createdAt: sessionInfo?.createdAt,
+      ...(isBackgroundTask ? { sessionKind: "background_task" as const } : {}),
+      parentSessionId: input.parentSessionId ?? sessionInfo?.parentSessionId,
+      relativeTranscriptPath: input.relativeTranscriptPath,
+      forkedFromTurnId: sessionInfo?.forkedFromTurnId,
     },
   };
 }
@@ -140,15 +145,19 @@ export async function readWebSessionMessages(
  * session transcript path + subagentId.
  */
 export async function readSubagentWebMessages(
-  input: { sessionKey: string; subagentId: string; projectKey?: string },
+  input: {
+    sessionKey: string;
+    subagentId: string;
+    projectKey?: string;
+    sessionKind?: "background_task";
+    parentSessionId?: string;
+    relativeTranscriptPath?: string;
+  },
   options: ReadWebSessionMessagesOptions,
 ): Promise<{ messages: WebMessage[]; total: number }> {
   const effectiveProjectRoot = input.projectKey ?? options.projectRoot;
   const chatDir = getPilotProjectChatDir(effectiveProjectRoot, options.pilotHome);
-  const parentTranscriptPath = resolve(
-    chatDir,
-    `${sanitizeSessionIdForPath(input.sessionKey)}.jsonl`,
-  );
+  const parentTranscriptPath = resolveTranscriptPath(input, chatDir);
 
   const { entries: parentEntries } = await readTranscript(parentTranscriptPath);
   let sidechainRelative: string | undefined;
@@ -163,7 +172,11 @@ export async function readSubagentWebMessages(
     return { messages: [], total: 0 };
   }
 
-  const sidechainPath = resolve(dirname(parentTranscriptPath), sidechainRelative);
+  const sidechainPath = resolveRelativeTranscriptPath(
+    sidechainRelative,
+    dirname(parentTranscriptPath),
+    chatDir,
+  );
   const { entries } = await readTranscript(sidechainPath);
   const webReplay = extractSubagentExecutionMessages(entries);
 
@@ -209,6 +222,49 @@ export async function readSubagentWebMessages(
   }
 
   return { messages: allMessages, total: allMessages.length };
+}
+
+function isBackgroundTaskInput(input: {
+  sessionKind?: string;
+  relativeTranscriptPath?: string;
+}): input is { sessionKind: "background_task"; relativeTranscriptPath: string } {
+  return input.sessionKind === "background_task" &&
+    typeof input.relativeTranscriptPath === "string" &&
+    input.relativeTranscriptPath.length > 0;
+}
+
+function resolveTranscriptPath(
+  input: {
+    sessionKey: string;
+    sessionKind?: string;
+    relativeTranscriptPath?: string;
+  },
+  chatDir: string,
+): string {
+  if (isBackgroundTaskInput(input)) {
+    return resolveRelativeTranscriptPath(input.relativeTranscriptPath, chatDir, chatDir);
+  }
+  return resolve(chatDir, `${sanitizeSessionIdForPath(input.sessionKey)}.jsonl`);
+}
+
+function resolveRelativeTranscriptPath(
+  path: string,
+  baseDir: string,
+  allowedRoot: string,
+): string {
+  if (!path || isAbsolute(path)) {
+    throw new Error("relativeTranscriptPath must be a relative path.");
+  }
+  const candidate = resolve(baseDir, path);
+  if (!isWithinDirectory(allowedRoot, candidate) || !candidate.endsWith(".jsonl")) {
+    throw new Error("relativeTranscriptPath points outside the project transcript directory.");
+  }
+  return candidate;
+}
+
+function isWithinDirectory(parentDir: string, candidatePath: string): boolean {
+  const rel = relative(parentDir, candidatePath);
+  return Boolean(rel) && !rel.startsWith("..") && !isAbsolute(rel);
 }
 
 function createIncompleteTurnStatusMessage(
@@ -279,6 +335,10 @@ type ProjectionContext = {
   now?: () => Date;
   /** Actual transcript entry timestamp — preferred over now(). */
   entryTimestamp?: string;
+  /** Transcript entry id for fork targeting. */
+  entryId?: string;
+  /** True when this entry cannot be fork-prefilled losslessly by the web UI. */
+  forkUnsupportedContent?: boolean;
 };
 
 /**
@@ -317,6 +377,15 @@ export function flattenCanonicalMessage(
       kind: "text",
       text: textBuffer,
       ...(pendingImages.length > 0 ? { images: pendingImages } : {}),
+      ...(context.forkUnsupportedContent
+        ? {
+            payload: {
+              forkUnsupportedContent: true,
+              forkUnsupportedReason: "This turn contains attachments or media.",
+            },
+          }
+        : {}),
+      ...(context.entryId ? { entryId: context.entryId } : {}),
       source: "history",
     });
     textBuffer = "";
@@ -532,11 +601,15 @@ type CompactBoundaryInfo = {
 function extractWebVisibleMessages(entries: AgentTranscriptEntry[]): {
   messages: CanonicalMessage[];
   timestamps: string[];
+  entryIds: Array<string | undefined>;
+  forkUnsupportedContents: boolean[];
   compactBoundaries: CompactBoundaryInfo[];
 } {
   const lastBoundaryIndex = findLastCompactBoundaryIndex(entries);
   const messages: CanonicalMessage[] = [];
   const timestamps: string[] = [];
+  const entryIds: Array<string | undefined> = [];
+  const forkUnsupportedContents: boolean[] = [];
   const compactBoundaries: CompactBoundaryInfo[] = [];
 
   for (let index = 0; index < entries.length; index += 1) {
@@ -546,9 +619,17 @@ function extractWebVisibleMessages(entries: AgentTranscriptEntry[]): {
     switch (entry.type) {
       case "accepted_input":
         if (!beforeBoundary) {
+          const entryForkUnsupported = entry.messages.some((message) =>
+            message.content.some((block) => block.type !== "text"),
+          );
           for (const message of entry.messages) {
+            if (message.metadata?.synthetic) {
+              continue;
+            }
             messages.push(cloneMessage(message));
             timestamps.push(entry.createdAt);
+            entryIds.push(entry.entryId);
+            forkUnsupportedContents.push(entryForkUnsupported);
           }
         }
         break;
@@ -556,8 +637,13 @@ function extractWebVisibleMessages(entries: AgentTranscriptEntry[]): {
       case "tool_result_message":
       case "durable_message":
         if (!beforeBoundary) {
+          if (entry.message.metadata?.synthetic) {
+            break;
+          }
           messages.push(cloneMessage(entry.message));
           timestamps.push(entry.createdAt);
+          entryIds.push(entry.entryId);
+          forkUnsupportedContents.push(false);
         }
         break;
       case "control_boundary": {
@@ -582,7 +668,7 @@ function extractWebVisibleMessages(entries: AgentTranscriptEntry[]): {
     }
   }
 
-  return { messages, timestamps, compactBoundaries };
+  return { messages, timestamps, entryIds, forkUnsupportedContents, compactBoundaries };
 }
 
 function extractSubagentExecutionMessages(entries: AgentTranscriptEntry[]): {
@@ -657,8 +743,13 @@ function attachSubagentIds(
   entries: AgentTranscriptEntry[],
   allMessages: WebMessage[],
 ): void {
+  const lastBoundaryIndex = findLastCompactBoundaryIndex(entries);
   const subagentQueue: string[] = [];
-  for (const entry of entries) {
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+    if (lastBoundaryIndex !== -1 && index < lastBoundaryIndex) {
+      continue;
+    }
     if (entry.type === "subagent_started") {
       subagentQueue.push(entry.subagentId);
     }

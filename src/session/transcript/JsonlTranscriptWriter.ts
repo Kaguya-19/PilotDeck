@@ -66,11 +66,17 @@ export class JsonlTranscriptWriter implements AgentTranscriptWriter {
     };
   }
 
-  recordAcceptedInput(sessionId: string, turnId: string, messages: CanonicalMessage[]): Promise<void> {
+  recordAcceptedInput(
+    sessionId: string,
+    turnId: string,
+    messages: CanonicalMessage[],
+    metadata?: Record<string, unknown>,
+  ): Promise<void> {
     return this.recordEntry({
       type: "accepted_input",
       ...this.baseEntry(sessionId, turnId),
       messages,
+      ...(metadata && Object.keys(metadata).length > 0 ? { metadata } : {}),
     });
   }
 

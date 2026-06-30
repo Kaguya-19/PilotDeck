@@ -9,35 +9,63 @@ type UseEditorSidebarOptions = {
   initialWidth?: number;
 };
 
+const buildEditorFile = (
+  filePath: string,
+  projectName: string | undefined,
+  diffInfo: CodeEditorDiffInfo | null = null,
+): CodeEditorFile => {
+  const normalizedPath = filePath.replace(/\\/g, '/');
+  const fileName = normalizedPath.split('/').pop() || filePath;
+  return {
+    name: fileName,
+    path: normalizedPath,
+    projectName,
+    diffInfo,
+  };
+};
+
 export const useEditorSidebar = ({
   selectedProject,
   isMobile,
   initialWidth = 600,
 }: UseEditorSidebarOptions) => {
-  const [editingFile, setEditingFile] = useState<CodeEditorFile | null>(null);
+  const [fileStack, setFileStack] = useState<CodeEditorFile[]>([]);
   const [editorWidth, setEditorWidth] = useState(initialWidth);
   const [editorExpanded, setEditorExpanded] = useState(false);
   const [isResizing, setIsResizing] = useState(false);
   const [hasManualWidth, setHasManualWidth] = useState(false);
   const resizeHandleRef = useRef<HTMLDivElement | null>(null);
 
+  const editingFile = fileStack.at(-1) ?? null;
+  const canGoBack = fileStack.length > 1;
+  const parentFile = canGoBack ? fileStack.at(-2) ?? null : null;
+
   const handleFileOpen = useCallback(
     (filePath: string, diffInfo: CodeEditorDiffInfo | null = null) => {
-      const normalizedPath = filePath.replace(/\\/g, '/');
-      const fileName = normalizedPath.split('/').pop() || filePath;
+      setFileStack([buildEditorFile(filePath, selectedProject?.name, diffInfo)]);
+    },
+    [selectedProject?.name],
+  );
 
-      setEditingFile({
-        name: fileName,
-        path: filePath,
-        projectName: selectedProject?.name,
-        diffInfo,
+  // Push onto the stack when following a markdown cross-reference inside preview.
+  const handlePreviewFileOpen = useCallback(
+    (filePath: string) => {
+      const nextFile = buildEditorFile(filePath, selectedProject?.name);
+      setFileStack((previous) => {
+        const current = previous.at(-1);
+        if (current?.path === nextFile.path) return previous;
+        return [...previous, nextFile];
       });
     },
     [selectedProject?.name],
   );
 
+  const handleFileGoBack = useCallback(() => {
+    setFileStack((previous) => (previous.length > 1 ? previous.slice(0, -1) : previous));
+  }, []);
+
   const handleCloseEditor = useCallback(() => {
-    setEditingFile(null);
+    setFileStack([]);
     setEditorExpanded(false);
   }, []);
 
@@ -46,7 +74,7 @@ export const useEditorSidebar = ({
   // sessions within the same project keeps the editor open because
   // `selectedProject?.name` stays the same.
   useEffect(() => {
-    setEditingFile(null);
+    setFileStack([]);
     setEditorExpanded(false);
   }, [selectedProject?.name]);
 
@@ -114,11 +142,15 @@ export const useEditorSidebar = ({
 
   return {
     editingFile,
+    canGoBack,
+    parentFile,
     editorWidth,
     editorExpanded,
     hasManualWidth,
     resizeHandleRef,
     handleFileOpen,
+    handlePreviewFileOpen,
+    handleFileGoBack,
     handleCloseEditor,
     handleToggleEditorExpand,
     handleResizeStart,

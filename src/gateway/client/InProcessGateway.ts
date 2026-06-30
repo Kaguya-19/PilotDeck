@@ -40,6 +40,8 @@ import type {
   WebReadSessionMessagesResult,
   WebReadSubagentMessagesInput,
   WebReadSubagentMessagesResult,
+  WebForkSessionInput,
+  WebForkSessionResult,
 } from "../protocol/types.js";
 import type {
   CronCreateInput,
@@ -92,6 +94,7 @@ export type InProcessGatewayOptions = {
    */
   readSessionMessages?: (input: WebReadSessionMessagesInput) => Promise<WebReadSessionMessagesResult>;
   readSubagentMessages?: (input: WebReadSubagentMessagesInput) => Promise<WebReadSubagentMessagesResult>;
+  forkSession?: (input: WebForkSessionInput) => Promise<WebForkSessionResult>;
   /**
    * Web Phase 3 — pluggable project enumerator + describer.
    */
@@ -388,6 +391,7 @@ export class InProcessGateway implements Gateway {
             permissionMode,
             basePermissionMode,
             allowPlanModeTools,
+            canPrompt: input.canPrompt,
             permissionRules: {
               ...persistedRules,
               allow: [...sessionAllowRules, ...persistedRules.allow],
@@ -624,6 +628,15 @@ export class InProcessGateway implements Gateway {
       );
     }
     return this.options.readSubagentMessages(input);
+  }
+
+  async forkSession(input: WebForkSessionInput): Promise<WebForkSessionResult> {
+    if (!this.options.forkSession) {
+      throw new Error(
+        "fork_session is not configured. Wire `forkSession` via createLocalGateway.",
+      );
+    }
+    return this.options.forkSession(input);
   }
 
   async listProjects(): Promise<WebListProjectsResult> {
@@ -1179,8 +1192,13 @@ export function mapAgentEvent(event: AgentEvent, runId: string): GatewayEvent[] 
       const PERSIST_THRESHOLD = 4096;
       let resultPath: string | undefined;
       if (totalBytes > PERSIST_THRESHOLD) {
-        const dir = resolve(tmpdir(), "pilotdeck-tool-results");
-        resultPath = resolve(dir, `${event.result.toolCallId}.txt`);
+        const dir = resolve(
+          tmpdir(),
+          "pilotdeck-tool-results",
+          safeGatewayPathPart(event.sessionId),
+          safeGatewayPathPart(event.turnId),
+        );
+        resultPath = resolve(dir, `${safeGatewayPathPart(event.result.toolCallId)}.txt`);
         void (async () => {
           try {
             await mkdir(dir, { recursive: true });
@@ -1494,12 +1512,19 @@ function previewUnknown(value: unknown): string | undefined {
   }
 }
 
+function safeGatewayPathPart(value: string): string {
+  return value.trim().replace(/[^A-Za-z0-9_.-]+/g, "-").replace(/^-+|-+$/g, "") || "value";
+}
+
+const ATTACHMENT_PATH_NOTE_MARKER = "[Files attached by user and available for reading in the project:]";
+
 async function buildAgentInputWithAttachments(
   message: string,
   attachments: ChannelAttachment[] | undefined,
 ): Promise<AgentInput> {
   const attachmentBlocks = await attachmentsToContentBlocks(attachments);
-  if (attachmentBlocks.length === 0) {
+  const pathNote = buildImageAttachmentPathNote(attachments);
+  if (attachmentBlocks.length === 0 && !pathNote) {
     return { type: "text", text: message };
   }
   const blocks: CanonicalContentBlock[] = [];
@@ -1509,7 +1534,35 @@ async function buildAgentInputWithAttachments(
   for (const block of attachmentBlocks) {
     blocks.push(block);
   }
+  if (pathNote) {
+    blocks.push(pathNote);
+  }
   return { type: "blocks", content: blocks };
+}
+
+function buildImageAttachmentPathNote(
+  attachments: ChannelAttachment[] | undefined,
+): CanonicalContentBlock | undefined {
+  if (!attachments || attachments.length === 0) return undefined;
+  const seen = new Set<string>();
+  const lines: string[] = [];
+
+  for (const attachment of attachments) {
+    if (!attachment.path) continue;
+    const isImage = attachment.type === "image" || attachment.mimeType?.startsWith("image/");
+    if (!isImage || seen.has(attachment.path)) continue;
+    seen.add(attachment.path);
+
+    const fallbackName = attachment.path.split(/[\\/]/).pop() || "image";
+    const name = String(attachment.name || fallbackName).replace(/[\r\n]+/g, " ").trim() || fallbackName;
+    lines.push(`- ${name}: ${attachment.path}`);
+  }
+
+  if (lines.length === 0) return undefined;
+  return {
+    type: "text",
+    text: `\n\n${ATTACHMENT_PATH_NOTE_MARKER}\n${lines.join("\n")}`,
+  };
 }
 
 async function attachmentsToContentBlocks(

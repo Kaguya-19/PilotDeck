@@ -26,6 +26,7 @@ export type WorkspaceRunContext = {
   kind: "workspace";
   sessionKey: string;
   runId: string;
+  planTitle: string;
   projectKey: string;
   paths: AlwaysOnPaths;
   workspaceRegistry: WorkspaceProviderRegistry;

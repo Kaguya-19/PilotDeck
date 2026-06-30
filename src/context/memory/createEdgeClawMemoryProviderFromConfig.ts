@@ -18,7 +18,7 @@
 
 import { EdgeClawMemoryService, type EdgeClawMemoryLlmOptions } from "edgeclaw-memory-core";
 import { EdgeClawMemoryProvider } from "./EdgeClawMemoryProvider.js";
-import type { ModelConfig } from "../../model/protocol/canonical.js";
+import type { ModelConfig, ModelProtocol } from "../../model/protocol/canonical.js";
 import type { PilotMemoryConfig } from "../../pilot/config/types.js";
 import type { TelemetryClient } from "../../telemetry/index.js";
 
@@ -96,8 +96,15 @@ function resolveMemoryLlm(
     baseUrl: providerEntry?.url,
     apiKey: providerEntry?.apiKey,
   };
-  if (cfg.apiType !== undefined) {
-    llm.apiType = cfg.apiType;
+  const apiType = cfg.apiType ?? memoryApiTypeForProtocol(providerEntry?.protocol);
+  if (apiType !== undefined) {
+    llm.apiType = apiType as EdgeClawMemoryLlmOptions["apiType"];
   }
   return llm;
+}
+
+function memoryApiTypeForProtocol(protocol: ModelProtocol | undefined): PilotMemoryConfig["apiType"] | "openai-completions" | undefined {
+  if (protocol === "anthropic" || protocol === "google") return protocol;
+  if (protocol === "openai") return "openai-completions";
+  return undefined;
 }

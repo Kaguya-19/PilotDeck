@@ -25,6 +25,10 @@ type CodeEditorProps = {
   isExpanded?: boolean;
   onToggleExpand?: (() => void) | null;
   onPopOut?: (() => void) | null;
+  onPreviewFileOpen?: (filePath: string) => void;
+  canGoBack?: boolean;
+  parentFileName?: string | null;
+  onGoBack?: () => void;
 };
 
 export default function CodeEditor({
@@ -35,6 +39,10 @@ export default function CodeEditor({
   isExpanded = false,
   onToggleExpand = null,
   onPopOut = null,
+  onPreviewFileOpen,
+  canGoBack = false,
+  parentFileName = null,
+  onGoBack,
 }: CodeEditorProps) {
   const { t } = useTranslation('codeEditor');
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -151,6 +159,8 @@ export default function CodeEditor({
   useEditorKeyboardShortcuts({
     onSave: handleSave,
     onClose,
+    onGoBack,
+    canGoBack,
     dependency: content,
   });
 
@@ -225,6 +235,9 @@ export default function CodeEditor({
             saveSuccess={saveSuccess}
             isExpanded={isExpanded}
             onToggleExpand={onToggleExpand}
+            canGoBack={canGoBack}
+            parentFileName={parentFileName}
+            onGoBack={onGoBack}
             onToggleMarkdownPreview={() => setMarkdownPreview((previous) => !previous)}
             onDownload={handleDownload}
             onSave={handleSave}
@@ -243,6 +256,7 @@ export default function CodeEditor({
               expand: t('actions.expand', { defaultValue: 'Expand to full width' }),
               collapse: t('actions.collapse', { defaultValue: 'Collapse to split view' }),
               close: t('actions.close'),
+              goBack: t('actions.goBack'),
             }}
           />
 
@@ -262,6 +276,8 @@ export default function CodeEditor({
               fontSize={fontSize}
               showLineNumbers={showLineNumbers}
               extensions={extensions}
+              baseFilePath={file.path}
+              onFileOpen={onPreviewFileOpen}
             />
           </div>
 

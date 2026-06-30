@@ -17,10 +17,12 @@ export type CatalogModel = {
   maxContextTokens?: number;
 };
 
+export type CatalogProviderProtocol = 'anthropic' | 'openai' | 'google';
+
 export type CatalogProvider = {
   id: string;
   displayName: string;
-  protocol: 'anthropic' | 'openai';
+  protocol: CatalogProviderProtocol;
   defaultUrl: string;
   models: CatalogModel[];
 };
@@ -67,12 +69,13 @@ export const CATALOG_PROVIDERS: CatalogProvider[] = [
   },
   {
     id: 'google',
-    displayName: 'Google AI',
-    protocol: 'openai',
-    defaultUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
+    displayName: 'Google AI (Gemini)',
+    protocol: 'google',
+    defaultUrl: 'https://generativelanguage.googleapis.com',
     models: [
-      { id: 'gemini-2.5-pro', displayName: 'Gemini 2.5 Pro', supportsImage: true, maxContextTokens: 1048576 },
+      { id: 'gemini-3.1-pro-preview', displayName: 'Gemini 3.1 Pro Preview', supportsImage: true, maxContextTokens: 1048576 },
       { id: 'gemini-2.5-flash', displayName: 'Gemini 2.5 Flash', supportsImage: true, maxContextTokens: 1048576 },
+      { id: 'gemini-2.5-pro', displayName: 'Gemini 2.5 Pro', supportsImage: true, maxContextTokens: 1048576 },
       { id: 'gemini-2.0-flash', displayName: 'Gemini 2.0 Flash', supportsImage: true, maxContextTokens: 1048576 },
     ],
   },

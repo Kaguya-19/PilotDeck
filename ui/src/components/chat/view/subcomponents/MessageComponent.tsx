@@ -328,7 +328,8 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, o
               <>
                 <div className="flex flex-col">
                   <div className="flex flex-col">
-                    <Markdown className="prose prose-sm max-w-none dark:prose-invert" projectName={selectedProject?.name}>
+                    <Markdown className="prose prose-sm max-w-none dark:prose-invert" projectName={selectedProject?.name}
+                      onFileOpen={onFileOpen}>
                       {String(message.displayText || '')}
                     </Markdown>
                   </div>
@@ -382,17 +383,17 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, o
                   message.toolResult.isError ? (
                     <div id={`tool-result-${message.toolId}`} className="scroll-mt-4">
                       {(() => {
-                        if (isWebSearchError(message.toolName)) {
+                        if (isWebSearchError(message.toolName) && message.toolResult?.errorCode === 'setup_required') {
                           return (
                             <div className="my-1.5 overflow-hidden rounded-lg border border-amber-200 bg-amber-50/70 dark:border-amber-800/50 dark:bg-amber-950/20">
                               <div className="flex items-start gap-3 px-4 py-3">
                                 <Search className="mt-0.5 h-4 w-4 flex-shrink-0 text-amber-600 dark:text-amber-400" />
                                 <div className="min-w-0 flex-1">
                                   <div className="text-sm font-medium text-amber-800 dark:text-amber-200">
-                                    {t('toolUseError.webSearchNotConfigured.title', { defaultValue: 'Web Search Not Configured' })}
+                                    {t('toolUseError.webSearchNotConfigured.title', { defaultValue: 'Web Search Not Ready' })}
                                   </div>
                                   <div className="mt-1 text-xs leading-5 text-amber-700/90 dark:text-amber-300/80">
-                                    {t('toolUseError.webSearchNotConfigured.description', { defaultValue: 'The web search tool requires an API key to work. Please go to Settings → Config → Search to set up your search provider and API key.' })}
+                                    {t('toolUseError.webSearchNotConfigured.description', { defaultValue: 'The search API key is missing or invalid. Please go to Settings -> Config -> Search to check your search provider and API key.' })}
                                   </div>
                                   <button
                                     type="button"
@@ -466,7 +467,8 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, o
                               toolCategory="default"
                               autoExpandable={false}
                             >
-                              <Markdown className="prose prose-sm max-w-none dark:prose-invert" projectName={selectedProject?.name}>
+                              <Markdown className="prose prose-sm max-w-none dark:prose-invert" projectName={selectedProject?.name}
+                      onFileOpen={onFileOpen}>
                                 {renderedErrorContent}
                               </Markdown>
                             </CollapsibleDisplay>
@@ -501,7 +503,8 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, o
                                 ) : null}
                               </summary>
                               <div className="mt-1.5 pl-[18px] text-xs leading-5 text-gray-700 dark:text-gray-300">
-                                <Markdown className="prose prose-sm prose-red max-w-none dark:prose-invert" projectName={selectedProject?.name}>
+                                <Markdown className="prose prose-sm prose-red max-w-none dark:prose-invert" projectName={selectedProject?.name}
+                      onFileOpen={onFileOpen}>
                                   {renderedErrorContent}
                                 </Markdown>
                                 <div className="mt-3 border-t border-red-200/60 pt-3 dark:border-red-800/60">
@@ -681,7 +684,8 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, o
                     <span>{t('thinking.emoji')}</span>
                   </summary>
                   <div className="mt-2 border-l-2 border-gray-300 pl-4 text-sm text-gray-600 dark:border-gray-600 dark:text-gray-400">
-                    <Markdown className="prose prose-sm prose-gray max-w-none dark:prose-invert" projectName={selectedProject?.name}>
+                    <Markdown className="prose prose-sm prose-gray max-w-none dark:prose-invert" projectName={selectedProject?.name}
+                      onFileOpen={onFileOpen}>
                       {messageContent}
                     </Markdown>
                   </div>
@@ -738,7 +742,8 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, o
 
                   // Normal rendering for non-JSON content
                   return message.type === 'assistant' ? (
-                    <Markdown className="prose prose-sm prose-gray max-w-none dark:prose-invert" projectName={selectedProject?.name}>
+                    <Markdown className="prose prose-sm prose-gray max-w-none dark:prose-invert" projectName={selectedProject?.name}
+                      onFileOpen={onFileOpen}>
                       {content}
                     </Markdown>
                   ) : (

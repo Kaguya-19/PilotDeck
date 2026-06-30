@@ -108,6 +108,8 @@ export type WebGatewayMethod =
   | "permission_decide"
   | "grant_session_permission"
   | "read_session_messages"
+  | "read_subagent_messages"
+  | "fork_session"
   | "rename_session"
   | "delete_session"
   | "list_projects"
@@ -134,6 +136,7 @@ export type WebSubmitTurnInput = {
   basePermissionMode?: WebGatewayMode;
   /** Allow model-visible plan mode tools. Defaults to true only for explicit plan-mode turns. */
   allowPlanModeTools?: boolean;
+  canPrompt?: boolean;
   runId?: string;
 };
 
@@ -159,6 +162,10 @@ export type WebSessionInfo = {
   cwd?: string;
   tag?: string;
   createdAt?: number;
+  sessionKind?: "background_task";
+  parentSessionId?: string;
+  relativeTranscriptPath?: string;
+  forkedFromTurnId?: string;
 };
 
 export type WebListSessionsInput = {
@@ -228,6 +235,9 @@ export type WebSessionPermissionGrant = {
 export type WebReadSessionMessagesInput = {
   sessionKey: string;
   projectKey?: string;
+  sessionKind?: "background_task";
+  parentSessionId?: string;
+  relativeTranscriptPath?: string;
   limit?: number;
   cursor?: string;
   direction?: "forward" | "backward";
@@ -244,11 +254,28 @@ export type WebReadSubagentMessagesInput = {
   sessionKey: string;
   subagentId: string;
   projectKey?: string;
+  sessionKind?: "background_task";
+  parentSessionId?: string;
+  relativeTranscriptPath?: string;
 };
 
 export type WebReadSubagentMessagesResult = {
   messages: import("./webMessage.js").WebMessage[];
   total: number;
+};
+
+export type WebForkSessionInput = {
+  sessionKey: string;
+  projectKey?: string;
+  /** Transcript entry id of the user turn to fork from (accepted_input entryId). */
+  fromEntryId: string;
+};
+
+export type WebForkSessionResult = {
+  newSessionKey: string;
+  prefillText: string;
+  carriedMessageCount: number;
+  mode?: WebGatewayMode;
 };
 
 export type WebActiveTurnSnapshotInput = {

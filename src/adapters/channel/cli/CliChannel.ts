@@ -70,6 +70,9 @@ export class CliChannel implements ChannelAdapter {
       channelKey: "cli",
       projectKey: this.options.projectKey,
       message,
+      // The plain CLI stream has no mid-turn answer path for elicitation or
+      // permission prompts; avoid exposing tools that would park the turn.
+      canPrompt: false,
     };
     for await (const event of gateway.submitTurn(input)) {
       const rendered = renderCliEvent(event);

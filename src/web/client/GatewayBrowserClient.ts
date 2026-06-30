@@ -204,6 +204,15 @@ export class GatewayBrowserClient {
     );
   }
 
+  readSubagentMessages(
+    input: import("./protocol.js").WebReadSubagentMessagesInput,
+  ) {
+    return this.request<import("./protocol.js").WebReadSubagentMessagesResult>(
+      "read_subagent_messages",
+      input,
+    );
+  }
+
   listProjects(): Promise<import("./protocol.js").WebListProjectsResult> {
     return this.request<import("./protocol.js").WebListProjectsResult>("list_projects", {});
   }

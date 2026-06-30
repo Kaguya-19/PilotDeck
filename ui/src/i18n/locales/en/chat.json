@@ -26,7 +26,7 @@
     "description": "",
     "webSearchNotConfigured": {
       "title": "Web Search Not Ready",
-      "description": "The search API key is missing or invalid. Please go to Settings → Config → Search to check your search provider and API key.",
+      "description": "The search API key is missing or invalid. Please go to Settings -> Config -> Search to check your search provider and API key.",
       "openSettings": "Go to Settings"
     }
   },
@@ -60,7 +60,8 @@
     "compactingLevel": "Triggering level {{level}} compaction: {{label}}",
     "waitingForPermission": "Waiting for permission",
     "retrying": "Reconnecting {{attempt}}/{{max}}{{delay}}",
-    "waitingForSubagent": "Waiting for subagent"
+    "waitingForSubagent": "Waiting for subagent",
+    "waitingForWebFetch": "Fetching web content..."
   },
   "process": {
     "summary": {
@@ -250,6 +251,8 @@
     "showAllCommands": "Show all commands",
     "clearInput": "Clear input",
     "scrollToBottom": "Scroll to bottom",
+    "contextStatus": "{{percent}}% used. {{used}} tokens used out of {{total}}. Auto compact runs near the limit.",
+    "contextStatusUnknown": "Context usage unknown. It will appear after the next model response.",
     "permissions": {
       "default": "Default Permissions",
       "defaultDescription": "Ask before risky operations",
@@ -331,6 +334,8 @@
     }
   },
   "session": {
+    "loadFailedTitle": "Could not load this conversation",
+    "retryLoad": "Retry",
     "continue": {
       "title": "Continue your conversation",
       "description": "Ask questions about your code, request changes, or get help with development tasks"
@@ -342,12 +347,26 @@
     "messages": {
       "showingOf": "Showing {{shown}} of {{total}} messages",
       "scrollToLoad": "Scroll up to load more",
-      "showingLast": "Showing last {{count}} messages ({{total}} total)",
+      "showingLast": "Showing last {{visibleCount}} of {{total}}",
       "loadEarlier": "Load earlier messages",
       "loadAll": "Load all messages",
       "loadingAll": "Loading all messages...",
       "allLoaded": "All messages loaded",
       "perfWarning": "All messages loaded — scrolling may be slower. Click \"Scroll to bottom\" to restore performance."
+    }
+  },
+  "loading": "Loading...",
+  "emptyChat": {
+    "title": "Start a new conversation",
+    "noProject": "Pick a project from the sidebar",
+    "emptySessionTitle": "No displayable messages in this conversation",
+    "emptySessionDescription": "This conversation exists, but it does not contain messages that can be rendered here.",
+    "readonlyBackgroundTitle": "No displayable messages in this task transcript",
+    "readonlyBackgroundDescription": "This read-only background task transcript only contains records the chat view cannot display.",
+    "prompts": {
+      "plan": "Plan a refactor for this project",
+      "summary": "Summarize recent changes",
+      "review": "Review the most recent file I touched"
     }
   },
   "shell": {

@@ -185,6 +185,12 @@ export function createExitPlanModeTool(): PilotDeckToolDefinition<ExitPlanModeIn
     isConcurrencySafe: () => true,
     requiresUserInteraction: () => true,
     execute: async (input, context) => {
+      if (context?.permissionMode !== "plan") {
+        throw new PilotDeckToolRuntimeError(
+          "tool_execution_failed",
+          "exit_plan_mode can only be used while plan mode is active.",
+        );
+      }
       const channel = context?.elicitation;
       if (!channel) {
         throw new PilotDeckToolRuntimeError(

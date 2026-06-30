@@ -14,9 +14,15 @@ export type RouterMutationsLog = {
   systemPromptSlim?: { from: number; to: number; preservedKeywords: string[] };
   toolsStripped?: { before: number; after: number; mode?: "allowlist" | "blocklist"; patterns: string[] };
   orchestrationPromptInjected?: { tier: string; chars: number };
+  orchestrationActivated?: { tier: string; continued: boolean };
   asyncAgentLaunchedRewritten?: boolean;
   subagentTagStripped?: boolean;
   subagentModelOverride?: boolean;
+  mediaCapabilityRerouted?: {
+    required: import("../../model/protocol/multimodal.js").InputModality[];
+    from: string;
+    to: string;
+  };
 };
 
 export type RouterRequestPatch = Pick<

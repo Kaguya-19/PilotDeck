@@ -57,6 +57,7 @@ export type DiscoveryPlanStatus =
   | "ready"
   | "executing"
   | "completed"
+  | "completed_no_report"
   | "failed"
   | "archived";
 

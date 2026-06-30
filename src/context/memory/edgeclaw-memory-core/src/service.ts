@@ -45,7 +45,9 @@ type LoggerLike = {
 export type EdgeClawMemoryApiType =
   | "openai-responses"
   | "responses"
-  | "openai-completions";
+  | "openai-completions"
+  | "anthropic"
+  | "google";
 
 export interface EdgeClawMemoryLlmOptions {
   provider?: string;

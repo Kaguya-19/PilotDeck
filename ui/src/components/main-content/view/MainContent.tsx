@@ -16,10 +16,6 @@ import type {
   ProjectSession,
 } from '../../../types/app';
 import { api } from '../../../utils/api';
-import {
-  clearAlwaysOnPresence,
-  sendAlwaysOnPresence,
-} from '../../../utils/alwaysOnPresence';
 import MainContentStateView from './subcomponents/MainContentStateView';
 import ErrorBoundary from './ErrorBoundary';
 
@@ -94,6 +90,8 @@ function MainContent({
   onShowSettings,
   onSelectProjectByName,
   externalMessageUpdate,
+  misroutedFileFromUrl,
+  onMisroutedFileUrlHandled,
 }: MainContentProps) {
   const { i18n } = useTranslation();
   const { preferences } = useUiPreferences();
@@ -101,18 +99,21 @@ function MainContent({
 
   const { currentProject, setCurrentProject } = useTaskMaster() as TaskMasterContextValue;
   const { tasksEnabled, isTaskMasterInstalled } = useTasksSettings() as TasksSettingsContextValue;
-  const lastUserMsgAtRef = useRef<string | null>(null);
   const [toast, setToast] = useState<MainContentToast>(null);
 
   const shouldShowTasksTab = Boolean(tasksEnabled && isTaskMasterInstalled);
 
   const {
     editingFile,
+    canGoBack,
+    parentFile,
     editorWidth,
     editorExpanded,
     hasManualWidth,
     resizeHandleRef,
     handleFileOpen,
+    handlePreviewFileOpen,
+    handleFileGoBack,
     handleCloseEditor,
     handleToggleEditorExpand,
     handleResizeStart,
@@ -120,6 +121,28 @@ function MainContent({
     selectedProject,
     isMobile,
   });
+
+  const handledMisroutedFileRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!misroutedFileFromUrl || !selectedProject) return;
+    if (handledMisroutedFileRef.current === misroutedFileFromUrl) return;
+    handledMisroutedFileRef.current = misroutedFileFromUrl;
+    handleFileOpen(misroutedFileFromUrl);
+    setActiveTab('chat');
+    onMisroutedFileUrlHandled?.();
+  }, [
+    misroutedFileFromUrl,
+    selectedProject,
+    handleFileOpen,
+    setActiveTab,
+    onMisroutedFileUrlHandled,
+  ]);
+
+  useEffect(() => {
+    if (!misroutedFileFromUrl) {
+      handledMisroutedFileRef.current = null;
+    }
+  }, [misroutedFileFromUrl]);
 
   useEffect(() => {
     const selectedProjectName = selectedProject?.name;
@@ -141,51 +164,6 @@ function MainContent({
       void window.refreshProjects();
     }
   }, []);
-
-  const trackedSendMessage = useCallback((message: unknown) => {
-    if (
-      message &&
-      typeof message === 'object' &&
-      'type' in message &&
-      ['claude-command', 'cursor-command', 'codex-command', 'gemini-command','pilotdeck-command'].includes(
-        String((message as { type?: unknown }).type),
-      )
-    ) {
-      lastUserMsgAtRef.current = new Date().toISOString();
-    }
-    sendMessage(message);
-  }, [sendMessage]);
-
-  const publishPresence = useCallback(() => {
-    const alwaysOnProjects = projects.filter(project =>
-      project.alwaysOn?.discovery?.triggerEnabled === true
-    );
-    if (!selectedProject && alwaysOnProjects.length === 0) {
-      return;
-    }
-    sendAlwaysOnPresence(sendMessage, {
-      selectedProject,
-      alwaysOnProjects,
-      processingSessionIds: Array.from(processingSessions),
-      lastUserMsgAt: lastUserMsgAtRef.current,
-    });
-  }, [processingSessions, projects, selectedProject, sendMessage]);
-
-  useEffect(() => {
-    const hasAlwaysOnProject = projects.some(project =>
-      project.alwaysOn?.discovery?.triggerEnabled === true
-    );
-    if (!ws || (!selectedProject && !hasAlwaysOnProject)) {
-      return undefined;
-    }
-
-    publishPresence();
-    const timer = window.setInterval(publishPresence, 30000);
-    return () => {
-      window.clearInterval(timer);
-      clearAlwaysOnPresence(sendMessage);
-    };
-  }, [projects, publishPresence, selectedProject, sendMessage, ws]);
 
   const applyAndLaunchCycle = useCallback(async (
     projectName: string,
@@ -256,6 +234,7 @@ function MainContent({
 
       const fallbackSession: ProjectSession = {
         ...existingSession,
+        isReadOnly: true,
         __projectName: lookupProjectName,
       };
 
@@ -355,7 +334,7 @@ function MainContent({
           alwaysOnSubTab={alwaysOnSubTab}
           onAlwaysOnSubTabChange={onAlwaysOnSubTabChange}
           ws={ws}
-          sendMessage={trackedSendMessage}
+          sendMessage={sendMessage}
           latestMessage={latestMessage}
           handleFileOpen={handleFileOpen}
           onInputFocusChange={onInputFocusChange}
@@ -393,6 +372,10 @@ function MainContent({
             onResizeStart={handleResizeStart}
             onCloseEditor={handleCloseEditor}
             onToggleEditorExpand={handleToggleEditorExpand}
+            onPreviewFileOpen={handlePreviewFileOpen}
+            canGoBack={canGoBack}
+            parentFile={parentFile}
+            onGoBack={handleFileGoBack}
             projectPath={selectedProject.path}
             fillSpace={activeTab === 'files'}
           />

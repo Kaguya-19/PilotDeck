@@ -64,6 +64,7 @@ export type DiscoveryPlanStatus =
   | 'queued'
   | 'running'
   | 'completed'
+  | 'completed_no_report'
   | 'failed'
   | 'archived';
 
@@ -209,6 +210,12 @@ export function isBackgroundTaskSession(
   );
 }
 
+export function isReadOnlySession(
+  session: ProjectSession | null | undefined,
+): boolean {
+  return session?.isReadOnly === true || isBackgroundTaskSession(session);
+}
+
 export function getSessionRequestParams(
   session: ProjectSession | null | undefined,
 ): SessionRequestParams {
@@ -236,14 +243,6 @@ export interface ProjectTaskmasterInfo {
   [key: string]: unknown;
 }
 
-export interface ProjectAlwaysOnInfo {
-  discovery?: {
-    triggerEnabled?: boolean;
-    [key: string]: unknown;
-  };
-  [key: string]: unknown;
-}
-
 export interface Project {
   name: string;
   displayName: string;
@@ -252,7 +251,6 @@ export interface Project {
   sessions?: ProjectSession[];
   sessionMeta?: ProjectSessionMeta;
   taskmaster?: ProjectTaskmasterInfo;
-  alwaysOn?: ProjectAlwaysOnInfo;
   [key: string]: unknown;
 }
 

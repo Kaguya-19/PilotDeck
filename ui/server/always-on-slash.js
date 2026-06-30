@@ -7,6 +7,7 @@ import {
   rerunDiscoveryPlan,
 } from './discovery-plans.js';
 import { getPilotDeckGateway } from './pilotdeck-bridge.js';
+import { sortCronJobsByCreatedAt } from './utils/cronJobSort.js';
 
 const TARGET_ALIASES = new Map([
   ['cron', 'cron'],
@@ -312,10 +313,6 @@ function buildErrorMarkdown(message) {
   ].join('\n');
 }
 
-function sortCronJobs(jobs) {
-  return [...jobs].sort((left, right) => right.createdAt - left.createdAt);
-}
-
 export async function executeAlwaysOnSlashCommand(args = [], context = {}) {
   const project = getProjectContext(context);
   if (!project) {
@@ -337,7 +334,7 @@ export async function executeAlwaysOnSlashCommand(args = [], context = {}) {
       if (parsed.target === 'cron') {
         const overview = await getProjectCronJobsOverview(project.projectName);
         return buildResponse(
-          buildCronListMarkdown(project.projectPath, sortCronJobs(overview.jobs || [])),
+          buildCronListMarkdown(project.projectPath, sortCronJobsByCreatedAt(overview.jobs || [])),
         );
       }
 
@@ -355,7 +352,7 @@ export async function executeAlwaysOnSlashCommand(args = [], context = {}) {
 
       return buildResponse(
         buildCombinedListMarkdown(project.projectPath, {
-          jobs: sortCronJobs(cronOverview.jobs || []),
+          jobs: sortCronJobsByCreatedAt(cronOverview.jobs || []),
           plans: planOverview.plans || [],
         }),
       );

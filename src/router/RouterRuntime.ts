@@ -2,9 +2,11 @@ import type {
   CanonicalModelEvent,
   CanonicalModelRequest,
   ModelRuntime,
+  ModelProtocol,
 } from "../model/index.js";
+import { ModelRequestError } from "../model/index.js";
+import type { InputModality } from "../model/index.js";
 import {
-  DEFAULT_SUBAGENT_MAX_TOKENS,
   DEFAULT_SUBAGENT_POLICY,
   type RouterConfig,
   type RouterModelRef,
@@ -37,6 +39,10 @@ import {
 import { TokenStatsCollector } from "./stats/TokenStatsCollector.js";
 import { classifyAndRoute } from "./tokenSaver/classifyAndRoute.js";
 import { countMessagesTokens, countResponseTokens, dispose as disposeTokenizer } from "./utils/countTokens.js";
+import {
+  collectRequiredInputModalities,
+  missingInputModalities,
+} from "./utils/mediaRequirements.js";
 import type { TelemetryClient } from "../telemetry/index.js";
 
 export type RouterRuntimeDeps = {
@@ -87,9 +93,10 @@ export function createRouterRuntime(
   config: RouterConfig,
   deps: RouterRuntimeDeps,
 ): RouterRuntime {
+  const enabled = config.enabled !== false;
   const stats = new TokenStatsCollector({
     ...config.stats,
-    enabled: config.stats?.enabled ?? false,
+    enabled: enabled && (config.stats?.enabled ?? false),
     baselineModel: config.scenarios?.default
       ? { provider: config.scenarios.default.provider, model: config.scenarios.default.model }
       : config.stats?.baselineModel,
@@ -111,6 +118,90 @@ export function createRouterRuntime(
       healthTrackers.set(sessionId, tracker);
     }
     return tracker;
+  }
+
+  function missingForModel(
+    ref: RouterModelRef,
+    required: readonly InputModality[],
+  ): InputModality[] {
+    if (required.length === 0) {
+      return [];
+    }
+    try {
+      return missingInputModalities(
+        deps.modelRuntime.getMultimodal(ref.provider, ref.model),
+        required,
+      );
+    } catch {
+      return [...required];
+    }
+  }
+
+  function supportsMediaRequirements(
+    ref: RouterModelRef,
+    required: readonly InputModality[],
+  ): boolean {
+    return missingForModel(ref, required).length === 0;
+  }
+
+  function fallbackCandidatesFor(scenarioType: RouterScenarioType): RouterModelRef[] {
+    const candidates: RouterModelRef[] = [];
+    const add = (refs: RouterModelRef[] | undefined) => {
+      for (const ref of refs ?? []) {
+        const id = ref.id || `${ref.provider}/${ref.model}`;
+        if (!candidates.some((candidate) => candidate.provider === ref.provider && candidate.model === ref.model)) {
+          candidates.push({ ...ref, id });
+        }
+      }
+    };
+    add((config.fallback as Record<string, RouterModelRef[] | undefined> | undefined)?.[scenarioType]);
+    add(config.fallback?.default);
+    return candidates;
+  }
+
+  function findCompatibleFallback(
+    scenarioType: RouterScenarioType,
+    required: readonly InputModality[],
+  ): RouterModelRef | undefined {
+    return fallbackCandidatesFor(scenarioType)
+      .find((ref) => supportsMediaRequirements(ref, required));
+  }
+
+  function rerouteDecisionForMedia(
+    decision: RouterDecision,
+    messages: CanonicalModelRequest["messages"],
+    mutations: RouterMutationsLog,
+  ): RouterMutationsLog {
+    const required = collectRequiredInputModalities(messages);
+    if (required.length === 0) {
+      return mutations;
+    }
+
+    const selected: RouterModelRef = {
+      id: `${decision.provider}/${decision.model}`,
+      provider: decision.provider,
+      model: decision.model,
+    };
+    if (supportsMediaRequirements(selected, required)) {
+      return mutations;
+    }
+
+    const replacement = findCompatibleFallback(decision.scenarioType, required);
+    if (!replacement) {
+      return mutations;
+    }
+
+    decision.provider = replacement.provider;
+    decision.model = replacement.model;
+    decision.resolvedFrom = "fallback";
+    return {
+      ...mutations,
+      mediaCapabilityRerouted: {
+        required: [...required],
+        from: selected.id,
+        to: replacement.id || `${replacement.provider}/${replacement.model}`,
+      },
+    };
   }
 
   async function resolveCustom(
@@ -146,6 +237,18 @@ export function createRouterRuntime(
   }
 
   async function decide(input: RouterDecisionInput): Promise<RouterDecision> {
+    if (!enabled) {
+      return {
+        provider: input.request.provider,
+        model: input.request.model,
+        scenarioType: "default",
+        isSubagent: !input.isMainAgent,
+        orchestrating: false,
+        resolvedFrom: "scenario",
+        mutations: {},
+      };
+    }
+
     const sticky = sessionStore.get(input.sessionId, !input.isMainAgent);
     const baseUsage = usageCache.get(input.sessionId);
     const inputWithUsage: RouterDecisionInput = {
@@ -279,38 +382,16 @@ export function createRouterRuntime(
       `[router] decision: tier=${tokenSaverTier}, model=${selection.provider}/${selection.model}, orchGate=${orchGate}, alreadyOrch=${alreadyOrchestrating}, resolvedFrom=${resolvedFrom}`,
     );
 
-    let skillPrompt: string | undefined;
-    if (
-      config.autoOrchestrate?.enabled &&
-      orchGate &&
-      input.isMainAgent &&
-      config.autoOrchestrate.skillExtensionId &&
-      deps.loadSkillPrompt
-    ) {
-      try {
-        skillPrompt = await deps.loadSkillPrompt(config.autoOrchestrate.skillExtensionId);
-      } catch {
-        skillPrompt = undefined;
-      }
-    }
-
     let mutations: RouterMutationsLog = {};
     if (config.autoOrchestrate?.enabled && orchGate) {
       const orchestrated = applyOrchestration({
-        request: input.request,
         config: config.autoOrchestrate,
         isMainAgent: input.isMainAgent,
         tier: tokenSaverTier,
         alreadyOrchestrating,
-        skillPrompt,
       });
       if (orchestrated.applied) {
         mutations = { ...mutations, ...orchestrated.mutations };
-        decision.requestPatch = {
-          messages: orchestrated.request.messages,
-          tools: orchestrated.request.tools,
-          systemPrompt: orchestrated.request.systemPrompt,
-        };
         decision.orchestrating = true;
         if (config.autoOrchestrate.mainAgentModel) {
           decision.provider = config.autoOrchestrate.mainAgentModel.provider;
@@ -328,6 +409,9 @@ export function createRouterRuntime(
     if (scenarioOutcome.subagentModelHint || decision.isSubagent) {
       mutations = { ...mutations, subagentTagStripped: true };
     }
+
+    const mediaMessages = decision.requestPatch?.messages ?? input.request.messages;
+    mutations = rerouteDecisionForMedia(decision, mediaMessages, mutations);
 
     decision.mutations = mutations;
 
@@ -373,12 +457,45 @@ export function createRouterRuntime(
     request: CanonicalModelRequest,
     ctx: RouterExecuteContext,
   ): AsyncIterable<CanonicalModelEvent> {
+    if (!enabled) {
+      const passthroughRequest: CanonicalModelRequest = {
+        ...request,
+        provider: decision.provider,
+        model: decision.model,
+      };
+      let sawErrorEvent = false;
+      for await (const item of streamAttempt(passthroughRequest, deps.modelRuntime, ctx.abortSignal)) {
+        if (item.kind === "event") {
+          if (item.event.type === "error") {
+            sawErrorEvent = true;
+          }
+          yield item.event;
+          continue;
+        }
+        if (item.outcome.error && !sawErrorEvent) {
+          yield { type: "error", error: item.outcome.error };
+        }
+      }
+      return;
+    }
+
     const startedAt = (deps.now?.() ?? new Date()).toISOString();
     const fallbackPlan = planFallback(config.fallback, decision.scenarioType);
+    const baseRequest = applyDecisionToRequest(decision, request);
+    const requiredModalities = collectRequiredInputModalities(baseRequest.messages);
+    const requestedAttempt: RouterModelRef = {
+      id: `${decision.provider}/${decision.model}`,
+      provider: decision.provider,
+      model: decision.model,
+    };
     const attempts: RouterModelRef[] = [
-      { id: `${decision.provider}/${decision.model}`, provider: decision.provider, model: decision.model },
+      requestedAttempt,
       ...fallbackPlan.attempts,
-    ];
+    ].filter((attempt, index, all) =>
+      all.findIndex((candidate) =>
+        candidate.provider === attempt.provider && candidate.model === attempt.model
+      ) === index
+    ).filter((attempt) => supportsMediaRequirements(attempt, requiredModalities));
     const zeroUsageMax = Math.max(1, config.zeroUsageRetry?.maxAttempts ?? 5);
     const zeroUsageEnabled = config.zeroUsageRetry?.enabled ?? true;
     const transientRetryEnabled = config.transientRetry?.enabled ?? true;
@@ -392,6 +509,27 @@ export function createRouterRuntime(
     let lastAttempt: RouterModelRef | undefined;
     let lastDecision: RouterDecision = decision;
     let lastHasYieldedContent = false;
+
+    if (attempts.length === 0) {
+      const missing = missingForModel(requestedAttempt, requiredModalities);
+      const error = createUnsupportedMediaError(
+        requestedAttempt,
+        requiredModalities,
+        missing,
+        protocolForProvider(deps.modelRuntime, requestedAttempt.provider),
+      );
+      events.emit({
+        type: "pilotdeck_router_execute_failed",
+        sessionId: ctx.sessionId,
+        turnId: ctx.turnId,
+        scenarioType: decision.scenarioType,
+        provider: requestedAttempt.provider,
+        model: requestedAttempt.model,
+        error,
+      });
+      yield { type: "error", error };
+      return;
+    }
 
     outer: for (let attemptIndex = 0; attemptIndex < attempts.length; attemptIndex += 1) {
       if (ctx.abortSignal?.aborted) {
@@ -746,6 +884,10 @@ export function createRouterRuntime(
   }
 
   function invalidateSticky(sessionId: string): InvalidateStickyResult {
+    if (!enabled) {
+      return { orchestrating: false };
+    }
+
     const current = sessionStore.get(sessionId, false);
     const previousTier = current?.tokenSaverTier;
     const orchestrating = current?.orchestrating ?? false;
@@ -778,6 +920,7 @@ export function createRouterRuntime(
     stream,
     invalidateSticky,
     observeUsage(sessionId, usage) {
+      if (!enabled) return;
       usageCache.observe(sessionId, usage);
     },
     stats,
@@ -856,9 +999,10 @@ async function* streamAttempt(
       throw error;
     }
     const fromError = (error as { error?: import("../model/index.js").CanonicalModelError })?.error;
-    providerError = fromError ?? {
+    const protocol = protocolForProvider(modelRuntime, request.provider);
+    providerError = fromError ?? canonicalizeModelRequestError(error, request, protocol) ?? {
       provider: request.provider,
-      protocol: "anthropic",
+      protocol,
       code: classifyNetworkErrorCode(error),
       message: error instanceof Error ? error.message : String(error),
       retryable: isNetworkTransient(error),
@@ -874,6 +1018,33 @@ async function* streamAttempt(
       shouldRetryZeroUsage: shouldRetryZeroUsage(state),
     },
   };
+}
+
+function canonicalizeModelRequestError(
+  error: unknown,
+  request: CanonicalModelRequest,
+  protocol: ModelProtocol,
+): import("../model/index.js").CanonicalModelError | undefined {
+  if (!(error instanceof ModelRequestError)) {
+    return undefined;
+  }
+
+  return {
+    provider: request.provider,
+    protocol,
+    code: error.code,
+    message: error.message,
+    retryable: false,
+    raw: error.details,
+  };
+}
+
+function protocolForProvider(modelRuntime: ModelRuntime, providerId: string): ModelProtocol {
+  try {
+    return modelRuntime.getProviderProtocol(providerId) ?? "openai";
+  } catch {
+    return "openai";
+  }
 }
 
 function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
@@ -942,6 +1113,25 @@ function classifyRetryReason(errorCode: string): "rate_limit" | "server_error" |
   if (errorCode === "server_error") return "server_error";
   if (errorCode === "network_error" || errorCode === "timeout") return "network_error";
   return "server_error";
+}
+
+function createUnsupportedMediaError(
+  attempt: RouterModelRef,
+  required: readonly InputModality[],
+  missing: readonly InputModality[],
+  protocol: ModelProtocol,
+): import("../model/index.js").CanonicalModelError {
+  const missingText = (missing.length > 0 ? missing : required).join(", ");
+  const requiredText = required.join(", ");
+  return {
+    provider: attempt.provider,
+    protocol,
+    code: "unsupported_modality",
+    message:
+      `Router could not find a configured fallback model for ${attempt.provider}/${attempt.model} ` +
+      `that supports required input modalities: ${requiredText}. Missing: ${missingText}.`,
+    retryable: false,
+  };
 }
 
 function extractPartialText(buffered: CanonicalModelEvent[]): string {

@@ -3,6 +3,8 @@ import type { ChatMessage } from '../chat/types/types';
 import {
   buildRenderableMessageItems,
   getLiveProcessGroups,
+  hasPendingWebFetchInRunningGroup,
+  shouldShowWebFetchWaitingHint,
   type RenderableMessageItem,
 } from './processGrouping';
 
@@ -330,5 +332,72 @@ describe('processGrouping', () => {
     expect(attachments).toHaveLength(1);
     expect(attachments[0].processDetailMessages.map((message) => message.id)).toEqual(['plan-deny-1']);
     expect(attachments[0].processSummary.toolErrorCount).toBe(1);
+  });
+
+  it('detects a pending web_fetch in a running plan-mode process group', () => {
+    const messages = [
+      user('u1'),
+      assistant('a1', 'Let me fetch that page.', 100),
+      {
+        ...tool('fetch-1', 'web_fetch', { url: 'https://example.com' }, 200),
+        toolResult: undefined,
+      },
+    ];
+    const groups = getLiveProcessGroups(messages, { isAssistantWorking: true });
+
+    expect(shouldShowWebFetchWaitingHint(groups[0], true)).toBe(true);
+    expect(hasPendingWebFetchInRunningGroup(groups, true)).toBe(true);
+    expect(hasPendingWebFetchInRunningGroup(groups, false)).toBe(false);
+  });
+
+  it('detects pending web_fetch across multiple live process groups', () => {
+    const messages = [
+      user('u1'),
+      assistant('a1', 'Search first.', 100),
+      tool('search-1', 'web_search', { query: 'antd' }, 200),
+      tool('grep-1', 'Grep', { pattern: 'antd' }, 300),
+      assistant('a2', 'Now fetch docs.', 400),
+      {
+        ...tool('fetch-1', 'web_fetch', { url: 'https://example.com' }, 500),
+        toolResult: undefined,
+      },
+    ];
+    const groups = getLiveProcessGroups(messages, { isAssistantWorking: true });
+
+    expect(groups).toHaveLength(2);
+    expect(shouldShowWebFetchWaitingHint(groups[0], true)).toBe(false);
+    expect(shouldShowWebFetchWaitingHint(groups[1], true)).toBe(true);
+    expect(hasPendingWebFetchInRunningGroup(groups, true)).toBe(true);
+  });
+
+  it('does not treat a completed web_fetch as pending', () => {
+    const messages = [
+      user('u1'),
+      assistant('a1', 'Let me fetch that page.', 100),
+      tool('fetch-1', 'web_fetch', { url: 'https://example.com' }, 200),
+    ];
+    const groups = getLiveProcessGroups(messages, { isAssistantWorking: true });
+
+    expect(shouldShowWebFetchWaitingHint(groups[0], true)).toBe(false);
+    expect(hasPendingWebFetchInRunningGroup(groups, true)).toBe(false);
+  });
+
+  it('drops empty assistant shells and keeps live process groups anchored to prose', () => {
+    const messages = [
+      user('u1'),
+      assistant('a1', 'Starting work.', 100),
+      tool('read-1', 'Read', { file_path: '/repo/src/App.tsx' }, 200),
+      assistant('a-empty-1', '', 250),
+      tool('grep-1', 'Grep', { pattern: 'MessagesPaneV2' }, 300),
+      assistant('a-empty-2', '', 350),
+      assistant('a-final', 'Here is the result.', 400),
+    ];
+
+    const items = buildRenderableMessageItems(messages, { isAssistantWorking: true });
+    const groups = getLiveProcessGroups(messages, { isAssistantWorking: true });
+
+    expect(items.map((item) => item.message.id)).toEqual(['u1', 'a1', 'a-final']);
+    expect(groups).toHaveLength(2);
+    expect(groups.every((group) => group.afterOriginalIndex === 1)).toBe(true);
   });
 });

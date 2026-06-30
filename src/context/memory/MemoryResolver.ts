@@ -38,8 +38,19 @@ export type MemoryResolver = {
   captureTurn(input: MemoryCaptureTurnInput): Promise<void>;
 };
 
-export function canonicalMessagesToMemoryMessages(messages: CanonicalMessage[]): ContextMemoryMessage[] {
+export type CanonicalMessagesToMemoryMessagesOptions = {
+  includeForkCarryover?: boolean;
+};
+
+export function canonicalMessagesToMemoryMessages(
+  messages: CanonicalMessage[],
+  options: CanonicalMessagesToMemoryMessagesOptions = {},
+): ContextMemoryMessage[] {
   return messages.flatMap((message, index) => {
+    if (options.includeForkCarryover === false && message.metadata?.forkCarryover) {
+      return [];
+    }
+
     const entries: Array<Omit<ContextMemoryMessage, "msgId">> = [];
     const pushEntry = (role: string, text: string) => {
       const content = text.trim();

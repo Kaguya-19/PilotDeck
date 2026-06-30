@@ -65,8 +65,33 @@ export function toCanonicalToolResultBlock(result: PilotDeckToolResult): Canonic
     toolCallId: result.toolCallId,
     isError: result.type === "error" || undefined,
     content: contentBlocks.length > 0 ? contentBlocks : [{ type: "text", text: EMPTY_TOOL_OUTPUT }],
-    raw: result,
+    raw: sanitizeToolResultRaw(result),
   };
+}
+
+function sanitizeToolResultRaw(result: PilotDeckToolResult): unknown {
+  return {
+    ...result,
+    content: result.content.map(sanitizeRawContent),
+    ...(result.supplementalMessages
+      ? {
+          supplementalMessages: result.supplementalMessages.map((message) => ({
+            ...message,
+            content: message.content.map(sanitizeRawContent),
+          })),
+        }
+      : {}),
+  };
+}
+
+function sanitizeRawContent(content: PilotDeckToolResultContent): unknown {
+  const kind = (content as { type?: unknown }).type;
+  if (kind === "image" || kind === "pdf" || kind === "audio") {
+    const { data: _omitted, ...rest } = content as Record<string, unknown>;
+    return rest;
+  }
+
+  return content;
 }
 
 function toCanonicalToolResultContentBlock(

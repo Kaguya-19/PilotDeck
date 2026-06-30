@@ -2,6 +2,7 @@ import { stat } from "node:fs/promises";
 import type { PilotDeckToolDefinition } from "../protocol/types.js";
 import { PilotDeckToolRuntimeError } from "../protocol/errors.js";
 import { resolvePilotDeckWorkspacePath } from "./filesystem/pathSafety.js";
+import { checkFilesystemWritePermission } from "./filesystem/writePermissions.js";
 import { writeTextFile } from "./filesystem/writeTextFile.js";
 import {
   buildStructuredPatch,
@@ -37,7 +38,7 @@ export function createWriteFileTool(): PilotDeckToolDefinition<WriteFileInput, W
     name: "write_file",
     aliases: ["Write"],
     description:
-      "Writes a UTF-8 text file inside the workspace.\n\nUsage:\n- The file_path parameter may be relative to the current workspace or an absolute path, but it must resolve inside the workspace.\n- This tool will overwrite the existing file if there is one at the provided path.\n- You must read an existing file with read_file before writing to it. This tool will fail if you did not read the file first.\n- If the target file changed after the last read, this tool will fail and you must read it again before writing.\n- Prefer the edit_file tool for modifying existing files. Only use this tool to create new files or for complete rewrites.\n- The returned filePath is always the resolved absolute path.\n- Do not create documentation files (*.md) or README files unless explicitly requested by the User.\n- Only use emojis if the user explicitly requests it. Avoid writing emojis to files unless asked.",
+      "Writes a UTF-8 text file inside the workspace, or outside the workspace after explicit host permission.\n\nUsage:\n- The file_path parameter may be relative to the current workspace or an absolute path. Paths outside the workspace require explicit user permission before execution.\n- This tool will overwrite the existing file if there is one at the provided path.\n- You must read an existing file with read_file before writing to it. This tool will fail if you did not read the file first.\n- If the target file changed after the last read, this tool will fail and you must read it again before writing.\n- Prefer the edit_file tool for modifying existing files. Only use this tool to create new files or for complete rewrites.\n- The returned filePath is always the resolved absolute path.\n- Do not create documentation files (*.md) or README files unless explicitly requested by the User.\n- Only use emojis if the user explicitly requests it. Avoid writing emojis to files unless asked.",
     kind: "filesystem",
     inputSchema: {
       type: "object",
@@ -47,7 +48,7 @@ export function createWriteFileTool(): PilotDeckToolDefinition<WriteFileInput, W
         file_path: {
           type: "string",
           description:
-            "The path to the file to write. It may be relative to the current workspace or absolute, but it must resolve inside the workspace.",
+            "The path to the file to write. It may be relative to the current workspace or absolute. Paths outside the workspace require explicit user permission.",
         },
         content: {
           type: "string",
@@ -104,8 +105,13 @@ export function createWriteFileTool(): PilotDeckToolDefinition<WriteFileInput, W
     isReadOnly: () => false,
     isConcurrencySafe: () => false,
     isDestructive: () => true,
+    checkPermissions: async (input, context) =>
+      checkFilesystemWritePermission("write_file", input.file_path, context),
     validateInput: async (input, context) => {
-      const resolved = resolvePilotDeckWorkspacePath(input.file_path, context, { forWrite: true });
+      const resolved = resolvePilotDeckWorkspacePath(input.file_path, context, {
+        forWrite: true,
+        allowOutsideWorkspace: true,
+      });
       if (!resolved.ok) {
         return {
           ok: false,
@@ -138,7 +144,10 @@ export function createWriteFileTool(): PilotDeckToolDefinition<WriteFileInput, W
       return { ok: true, input };
     },
     execute: async (input, context) => {
-      const resolved = resolvePilotDeckWorkspacePath(input.file_path, context, { forWrite: true });
+      const resolved = resolvePilotDeckWorkspacePath(input.file_path, context, {
+        forWrite: true,
+        allowOutsideWorkspace: context.currentPermissionDecision?.type === "allow",
+      });
       if (!resolved.ok) {
         throw new PilotDeckToolRuntimeError(resolved.error.code, resolved.error.message, resolved.error.details);
       }

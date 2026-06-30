@@ -298,7 +298,7 @@ We provide a one-line installer for macOS / Linux, plus a source-based workflow 
 curl -fsSL https://raw.githubusercontent.com/OpenBMB/PilotDeck/main/install.sh | bash
 ```
 
-The script auto-installs Node.js 22, clones the repo, installs dependencies, and builds the frontend. Once it finishes:
+The script auto-installs Node.js 22.13+ (required for the built-in SQLite runtime), clones the repo, installs dependencies, and builds the frontend. Once it finishes:
 
 ```bash
 pilotdeck            # starts the server at http://localhost:3001
@@ -316,6 +316,7 @@ pilotdeck status     # check runtime status
 git clone https://github.com/OpenBMB/PilotDeck.git
 cd PilotDeck
 
+node --version          # must be v22.13.0 or newer
 npm install              # root deps (Gateway runtime)
 cd ui && npm install     # UI deps
 cd ..
@@ -324,7 +325,7 @@ cd ..
 **2. Configure a model provider**
 
 PilotDeck reads `~/.pilotdeck/pilotdeck.yaml`. You can create it manually, let the bootstrap script generate one, **or just open the Web UI and configure providers visually in the settings panel.**
-Supported protocols include OpenAI, Anthropic, DeepSeek, Qwen, Kimi, MiniMax and other OpenAI-compatible endpoints.
+Supported protocols include OpenAI, Anthropic, native Google Gemini, DeepSeek, Qwen, Kimi, MiniMax and other OpenAI-compatible endpoints.
 
 ```yaml
 schemaVersion: 1
@@ -336,6 +337,22 @@ model:
       protocol: openai
       url: https://api.deepseek.com/v1
       apiKey: sk-your-api-key
+```
+
+Native Gemini can be configured with `protocol: google`:
+
+```yaml
+schemaVersion: 1
+agent:
+  model: google/gemini-3.1-pro-preview
+model:
+  providers:
+    google:
+      protocol: google
+      url: https://generativelanguage.googleapis.com
+      apiKey: ${GEMINI_API_KEY}
+      models:
+        gemini-3.1-pro-preview: {}
 ```
 
 **3. Start the services**

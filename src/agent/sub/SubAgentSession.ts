@@ -87,7 +87,12 @@ export type SubAgentSessionOptions = {
  * (the parent constructs the writer and passes it in).
  */
 export type SidechainTranscriptWriter = {
-  recordAcceptedInput(sessionId: string, turnId: string, messages: CanonicalMessage[]): Promise<void>;
+  recordAcceptedInput(
+    sessionId: string,
+    turnId: string,
+    messages: CanonicalMessage[],
+    metadata?: Record<string, unknown>,
+  ): Promise<void>;
   recordDurableMessage(sessionId: string, turnId: string, message: CanonicalMessage): Promise<void>;
 };
 

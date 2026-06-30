@@ -246,7 +246,7 @@ const ToolRendererInner: React.FC<ToolRendererProps> = ({
         break;
 
       case 'markdown':
-        contentComponent = <MarkdownContent content={contentProps.content || ''} />;
+        contentComponent = <MarkdownContent content={contentProps.content || ''} onFileOpen={onFileOpen} />;
         break;
 
       case 'file-list':

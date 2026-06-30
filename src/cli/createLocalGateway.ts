@@ -35,6 +35,9 @@ import {
   InProcessGateway,
   type InProcessGatewayOptions,
   SessionRouter,
+  isGatewayMemoryDiagnosticsEnabled,
+  logGatewayMemoryDiagnostic,
+  summarizeCanonicalMessages,
   type Gateway,
   type GatewayCronController,
   type GatewayProjectStorageOptions,
@@ -63,10 +66,11 @@ import {
 } from "../pilot/index.js";
 import { createPilotConfigStoreSync, type PilotConfigStore } from "../pilot/config/PilotConfigStore.js";
 import type { PilotAgentModelSelection, PilotConfigSnapshot } from "../pilot/config/types.js";
-import { DEFAULT_JUDGE_TIMEOUT_MS, DEFAULT_SUBAGENT_MAX_TOKENS, DEFAULT_ALLOWED_TOOLS, DEFAULT_TRIGGER_TIERS, type RouterConfig } from "../router/config/schema.js";
+import { DEFAULT_JUDGE_TIMEOUT_MS, DEFAULT_ALLOWED_TOOLS, DEFAULT_TRIGGER_TIERS, type RouterConfig } from "../router/config/schema.js";
 import { createAgentProjectSessionStorage, listProjectSessions, resumeAgentSession } from "../session/index.js";
 import { sanitizeSessionIdForPath } from "../session/storage/ProjectSessionStorage.js";
 import { readWebSessionMessages, readSubagentWebMessages } from "../web/server/readSessionMessages.js";
+import { forkWebSession } from "../web/server/forkSession.js";
 import { describeWebProject, listWebProjects } from "../web/server/listProjects.js";
 import { BackgroundTaskRuntime } from "../task/runtime/BackgroundTaskRuntime.js";
 import { createBuiltinRegistry, createPlanFileManager } from "../tool/index.js";
@@ -208,6 +212,10 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
     onProjectActivated: (activeProjectRoot) => extensionWatchManager.watchProject(activeProjectRoot),
   });
   const defaultRuntime = registry.resolve();
+  const memoryDiagnosticsEnabled = isGatewayMemoryDiagnosticsEnabled(
+    env,
+    defaultRuntime.snapshot.config.gateway?.memoryDiagnostics,
+  );
 
   const configStore = createPilotConfigStoreSync({ projectRoot, env });
   const stopConfigWatching = configStore.startWatching();
@@ -229,6 +237,14 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
     // eslint-disable-next-line no-console
     console.log("[pilotdeck] Config reloaded, invalidating runtimes:", changedPaths.join(", "));
     registry.invalidate();
+    if (memoryDiagnosticsEnabled) {
+      logGatewayMemoryDiagnostic({
+        event: "runtime_invalidated",
+        sessionCount: router?.cachedSessionCount(),
+        projectKey: projectRoot,
+        reason: "config_changed",
+      });
+    }
     router?.markAllDirty("config_changed");
     configChangeLifecycle.dispatch({
       event: "ConfigChange",
@@ -245,8 +261,23 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
     listSessions: (input) => registry.listSessions(input),
     idleSessionTimeoutMs:
       (defaultRuntime.snapshot.config.gateway?.idleSessionTimeoutMinutes ?? 30) * 60_000,
+    idleSweepIntervalMs:
+      Math.max(0, defaultRuntime.snapshot.config.gateway?.idleSweepIntervalSeconds ?? 60) * 1_000,
     now,
     onSessionEvict: (sessionKey) => registry.evictSessionMcp(sessionKey),
+    onSessionIdleEvict: memoryDiagnosticsEnabled
+      ? (_sessionKey, snapshot) => {
+          logGatewayMemoryDiagnostic({
+            event: "session_idle_evicted",
+            sessionCount: router?.cachedSessionCount(),
+            session: {
+              sessionKey: snapshot.sessionKey,
+              projectKey: snapshot.context.projectKey,
+              messageCount: snapshot.messageCount,
+            },
+          });
+        }
+      : undefined,
   });
   const skillManager = new SkillManager({ pilotHome, env });
   const gateway = new InProcessGateway(router, {
@@ -265,6 +296,12 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
       }),
     readSubagentMessages: (input) =>
       readSubagentWebMessages(input, {
+        projectRoot: input.projectKey ? input.projectKey : projectRoot,
+        pilotHome,
+        now,
+      }),
+    forkSession: (input) =>
+      forkWebSession(input, {
         projectRoot: input.projectKey ? input.projectKey : projectRoot,
         pilotHome,
         now,
@@ -316,7 +353,20 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
     async refreshConfigBeforeTurn() {
       await configStore.reload("turn-start");
     },
-    afterTurnCompleted: ({ projectKey }) => {
+    afterTurnCompleted: ({ sessionKey, projectKey, runId }) => {
+      if (memoryDiagnosticsEnabled) {
+        const snapshot = router?.snapshotSession(sessionKey);
+        logGatewayMemoryDiagnostic({
+          event: "turn_completed",
+          sessionCount: router?.cachedSessionCount(),
+          session: {
+            sessionKey,
+            projectKey,
+            runId,
+            ...(snapshot ? summarizeCanonicalMessages(snapshot.messages) : {}),
+          },
+        });
+      }
       registry.scheduleMemoryMaintenance(projectKey ?? projectRoot);
     },
   });
@@ -330,6 +380,7 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
     registry,
     dispose: () => {
       registry.invalidate();
+      router?.shutdown();
       stopConfigWatching();
       stopExtensionWatching();
       if (ownsTelemetry) {
@@ -1130,7 +1181,7 @@ class ProjectRuntimeRegistry {
       permissionContext: createDefaultPermissionContext({
         cwd,
         mode: permissionMode,
-        canPrompt: override?.canPrompt ?? false,
+        canPrompt: override?.canPrompt ?? true,
         bypassAvailable: override?.bypassAvailable ?? true,
         additionalWorkingDirectories: this.options.additionalWorkingDirectories,
         rules: {
@@ -1214,6 +1265,9 @@ function ensureRouterConfig(
   defaultSelection: PilotAgentModelSelection,
 ): RouterConfig {
   const defaultRef = { id: defaultSelection.id, provider: defaultSelection.provider, model: defaultSelection.model };
+  if (router?.enabled === false) {
+    return { enabled: false };
+  }
   if (router) {
     // Scenarios is optional at the parse boundary (see schema.ts) — the UI
     // can persist a partial `router:` block, e.g. user toggled `enabled`
@@ -1221,6 +1275,7 @@ function ensureRouterConfig(
     // Fill `scenarios.default` from `agent.model` so RouterRuntime always
     // sees a valid map.
     return {
+      enabled: true,
       ...router,
       scenarios: router.scenarios ?? { default: defaultRef },
       fallback: router.fallback ?? { default: [defaultRef] },
@@ -1230,6 +1285,7 @@ function ensureRouterConfig(
     };
   }
   return {
+    enabled: true,
     scenarios: { default: defaultRef },
     fallback: { default: [defaultRef] },
     zeroUsageRetry: { enabled: true, maxAttempts: 2 },
@@ -1260,6 +1316,5 @@ function buildDefaultAutoOrchestrate() {
     triggerTiers: [...DEFAULT_TRIGGER_TIERS],
     slimSystemPrompt: true,
     allowedTools: [...DEFAULT_ALLOWED_TOOLS],
-    subagentMaxTokens: DEFAULT_SUBAGENT_MAX_TOKENS,
   };
 }

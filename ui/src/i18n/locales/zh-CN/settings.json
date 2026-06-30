@@ -557,7 +557,9 @@
 	    "actions": {
 	      "opening": "正在打开...",
 	      "revealFile": "在访达中显示",
-	      "revealFileWindows": "在文件资源管理器中显示",
+	      "revealFileMac": "在访达中显示",
+	      "revealFileWindows": "在资源管理器中显示",
+	      "revealFileGeneric": "在文件管理器中显示",
 	      "refresh": "刷新",
 	      "reloadCurrent": "重新加载当前配置",
 	      "saving": "保存中...",
@@ -688,10 +690,11 @@
         "protocol": "协议",
         "protocolOptions": {
           "openai": "openai（聊天补全）",
-          "anthropic": "anthropic（消息 API）"
+          "anthropic": "anthropic（消息 API）",
+          "google": "google（Gemini API）"
         },
         "baseUrl": "接口地址",
-        "baseUrlHint": "OpenAI 兼容接口请填到 /v1，例如 https://api.example.com/v1。",
+        "baseUrlHint": "原生 Google Gemini 使用 https://generativelanguage.googleapis.com。OpenAI 兼容接口请填到 /v1。",
         "defaultsTo": "默认使用目录中的",
         "fromCatalog": "。",
         "effective": "实际地址：",

@@ -18,6 +18,11 @@ const router = express.Router();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
+function spawnCli(command, args, options = {}) {
+  const prepared = prepareCliSpawn(command, args, options);
+  return spawn(prepared.command, prepared.args, prepared.options);
+}
+
 router.get('/config', async (req, res) => {
   try {
     const projectPath = typeof req.query.projectPath === 'string' ? req.query.projectPath : undefined;
@@ -85,22 +90,21 @@ router.get('/cli/list', async (req, res) => {
   try {
     console.log('📋 Listing MCP servers using Claude CLI');
 
-    const cliSpawn = prepareCliSpawn('claude', ['mcp', 'list'], {
-      stdio: ['pipe', 'pipe', 'pipe'],
+    const process = spawnCli('claude', ['mcp', 'list'], {
+      stdio: ['pipe', 'pipe', 'pipe']
     });
-    const process = spawn(cliSpawn.command, cliSpawn.args, cliSpawn.options);
-    
+
     let stdout = '';
     let stderr = '';
-    
+
     process.stdout.on('data', (data) => {
       stdout += data.toString();
     });
-    
+
     process.stderr.on('data', (data) => {
       stderr += data.toString();
     });
-    
+
     process.on('close', (code) => {
       if (res.headersSent) return;
       if (code === 0) {
@@ -110,7 +114,7 @@ router.get('/cli/list', async (req, res) => {
         res.status(500).json({ error: 'Claude CLI command failed', details: stderr });
       }
     });
-    
+
     process.on('error', (error) => {
       if (res.headersSent) return;
       console.error('Error running Claude CLI:', error);
@@ -169,8 +173,7 @@ router.post('/cli/add', async (req, res) => {
       console.log('📁 Running in project directory:', projectPath);
     }
     
-    const cliSpawn = prepareCliSpawn('claude', cliArgs, spawnOptions);
-    const process = spawn(cliSpawn.command, cliSpawn.args, cliSpawn.options);
+    const process = spawnCli('claude', cliArgs, spawnOptions);
     
     let stdout = '';
     let stderr = '';
@@ -262,8 +265,7 @@ router.post('/cli/add-json', async (req, res) => {
       console.log('📁 Running in project directory:', projectPath);
     }
     
-    const cliSpawn = prepareCliSpawn('claude', cliArgs, spawnOptions);
-    const process = spawn(cliSpawn.command, cliSpawn.args, cliSpawn.options);
+    const process = spawnCli('claude', cliArgs, spawnOptions);
     
     let stdout = '';
     let stderr = '';
@@ -329,23 +331,22 @@ router.delete('/cli/remove/:name', async (req, res) => {
     cliArgs.push(actualName);
     
     console.log('🔧 Running Claude CLI command:', 'claude', cliArgs.join(' '));
-    
-    const cliSpawn = prepareCliSpawn('claude', cliArgs, {
-      stdio: ['pipe', 'pipe', 'pipe'],
+
+    const process = spawnCli('claude', cliArgs, {
+      stdio: ['pipe', 'pipe', 'pipe']
     });
-    const process = spawn(cliSpawn.command, cliSpawn.args, cliSpawn.options);
-    
+
     let stdout = '';
     let stderr = '';
-    
+
     process.stdout.on('data', (data) => {
       stdout += data.toString();
     });
-    
+
     process.stderr.on('data', (data) => {
       stderr += data.toString();
     });
-    
+
     process.on('close', (code) => {
       if (res.headersSent) return;
       if (code === 0) {
@@ -355,7 +356,7 @@ router.delete('/cli/remove/:name', async (req, res) => {
         res.status(400).json({ error: 'Claude CLI command failed', details: stderr });
       }
     });
-    
+
     process.on('error', (error) => {
       if (res.headersSent) return;
       console.error('Error running Claude CLI:', error);
@@ -370,25 +371,24 @@ router.delete('/cli/remove/:name', async (req, res) => {
 router.get('/cli/get/:name', async (req, res) => {
   try {
     const { name } = req.params;
-    
+
     console.log('📄 Getting MCP server details using Claude CLI:', name);
-    
-    const cliSpawn = prepareCliSpawn('claude', ['mcp', 'get', name], {
-      stdio: ['pipe', 'pipe', 'pipe'],
+
+    const process = spawnCli('claude', ['mcp', 'get', name], {
+      stdio: ['pipe', 'pipe', 'pipe']
     });
-    const process = spawn(cliSpawn.command, cliSpawn.args, cliSpawn.options);
-    
+
     let stdout = '';
     let stderr = '';
-    
+
     process.stdout.on('data', (data) => {
       stdout += data.toString();
     });
-    
+
     process.stderr.on('data', (data) => {
       stderr += data.toString();
     });
-    
+
     process.on('close', (code) => {
       if (res.headersSent) return;
       if (code === 0) {
@@ -398,7 +398,7 @@ router.get('/cli/get/:name', async (req, res) => {
         res.status(404).json({ error: 'Claude CLI command failed', details: stderr });
       }
     });
-    
+
     process.on('error', (error) => {
       if (res.headersSent) return;
       console.error('Error running Claude CLI:', error);

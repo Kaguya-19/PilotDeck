@@ -140,8 +140,16 @@ function toAnthropicContentBlock(block: CanonicalContentBlock): unknown {
   switch (block.type) {
     case "text":
       return { type: "text", text: block.text };
-    case "thinking":
-      return { type: "thinking", thinking: block.text };
+    case "thinking": {
+      const thinking: { type: "thinking"; thinking: string; signature?: string } = {
+        type: "thinking",
+        thinking: block.text,
+      };
+      if (block.signature) {
+        thinking.signature = block.signature;
+      }
+      return thinking;
+    }
     case "image":
       return block.source === "url"
         ? { type: "image", source: { type: "url", url: block.data } }

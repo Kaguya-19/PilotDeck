@@ -4,6 +4,7 @@ import { Markdown } from '../../../view/subcomponents/Markdown';
 interface MarkdownContentProps {
   content: unknown;
   className?: string;
+  onFileOpen?: (filePath: string) => void;
 }
 
 function stringifyMarkdown(content: unknown): string {
@@ -22,10 +23,11 @@ function stringifyMarkdown(content: unknown): string {
  */
 export const MarkdownContent: React.FC<MarkdownContentProps> = ({
   content,
-  className = 'mt-1 prose prose-sm max-w-none dark:prose-invert'
+  className = 'mt-1 prose prose-sm max-w-none dark:prose-invert',
+  onFileOpen,
 }) => {
   return (
-    <Markdown className={className}>
+    <Markdown className={className} onFileOpen={onFileOpen}>
       {stringifyMarkdown(content)}
     </Markdown>
   );

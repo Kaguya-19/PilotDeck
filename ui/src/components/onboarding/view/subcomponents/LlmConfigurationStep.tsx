@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Check, ChevronDown, Loader2, Plus } from 'lucide-react';
 import { authenticatedFetch } from '../../../../utils/api';
-import { CATALOG_PROVIDERS, findCatalogProviderByUrl, type CatalogProvider } from '../../../../shared/catalogProviders';
+import {
+  CATALOG_PROVIDERS,
+  findCatalogProviderByUrl,
+  type CatalogProvider,
+  type CatalogProviderProtocol,
+} from '../../../../shared/catalogProviders';
 
 type LlmConfigurationStepProps = {
   onSaved: () => void | Promise<void>;
@@ -54,7 +59,7 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
 
   // Inputs that are only relevant when the user picks the "+" (custom) tile.
   const [customProviderId, setCustomProviderId] = useState('');
-  const [customProtocol, setCustomProtocol] = useState<'openai' | 'anthropic'>('openai');
+  const [customProtocol, setCustomProtocol] = useState<CatalogProviderProtocol>('openai');
 
   const isCustomMode = selectedProvider?.id === CUSTOM_PROVIDER_ID;
   const selectedModels = selectedProvider?.models ?? [];
@@ -85,7 +90,7 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
 
   const effectiveUrl = customUrl.trim() || selectedProvider?.defaultUrl || '';
   const effectiveModelId = customModelId.trim() || selectedModelId;
-  const effectiveProtocol: 'openai' | 'anthropic' = isCustomMode
+  const effectiveProtocol: CatalogProviderProtocol = isCustomMode
     ? customProtocol
     : (selectedProvider?.protocol ?? 'openai');
   const effectiveProviderId = isCustomMode ? customProviderId.trim() : (selectedProvider?.id ?? '');
@@ -271,7 +276,7 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
             <Plus className="h-4 w-4" />
             <div>
               <div className="font-medium">Custom</div>
-              <div className="mt-0.5 text-[11px] opacity-60">Any OpenAI / Anthropic endpoint</div>
+              <div className="mt-0.5 text-[11px] opacity-60">OpenAI / Anthropic / Google</div>
             </div>
             {isCustomMode && (
               <Check className="absolute right-2 top-2 h-4 w-4 text-foreground" strokeWidth={2.5} />
@@ -309,11 +314,12 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
                     <select
                       id="custom-protocol"
                       value={customProtocol}
-                      onChange={(e) => { setCustomProtocol(e.target.value as 'openai' | 'anthropic'); setTestStatus('idle'); setTestMessage(''); }}
+                      onChange={(e) => { setCustomProtocol(e.target.value as CatalogProviderProtocol); setTestStatus('idle'); setTestMessage(''); }}
                       className="w-full appearance-none rounded-lg border border-border bg-background px-3 py-2.5 pr-8 text-sm text-foreground focus:border-foreground/40 focus:outline-none"
                     >
                       <option value="openai">openai</option>
                       <option value="anthropic">anthropic</option>
+                      <option value="google">google</option>
                     </select>
                     <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                   </div>
@@ -335,6 +341,11 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
                 {customProtocol === 'openai' && (
                   <p className="mt-1 text-[11px] text-muted-foreground">
                     OpenAI-compatible base URLs should include the API version path, for example ending in <span className="font-mono">/v1</span>.
+                  </p>
+                )}
+                {customProtocol === 'google' && (
+                  <p className="mt-1 text-[11px] text-muted-foreground">
+                    Native Google Gemini uses <span className="font-mono">https://generativelanguage.googleapis.com</span> unless you need a custom endpoint.
                   </p>
                 )}
                 </div>
@@ -434,6 +445,11 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
                   {(selectedProvider?.protocol ?? customProtocol) === 'openai' && (
                     <p className="mt-1 text-[11px] text-muted-foreground">
                       OpenAI-compatible base URLs should include the API version path, for example ending in <span className="font-mono">/v1</span>.
+                    </p>
+                  )}
+                  {(selectedProvider?.protocol ?? customProtocol) === 'google' && (
+                    <p className="mt-1 text-[11px] text-muted-foreground">
+                      Native Google Gemini uses <span className="font-mono">https://generativelanguage.googleapis.com</span>.
                     </p>
                   )}
                 </div>

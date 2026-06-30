@@ -1,25 +1,70 @@
 import React, { useMemo, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
+import type { Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import { normalizeInlineCodeFences } from '../../utils/chatFormatting';
+import { resolveMarkdownFileHref } from '../../utils/resolveMarkdownFileHref';
 
 type MarkdownProps = {
   children: React.ReactNode;
   className?: string;
   projectName?: string;
   isStreaming?: boolean;
+  onFileOpen?: (filePath: string) => void;
 };
 
 const streamingPlugins = [remarkGfm];
 const fullRemarkPlugins = [remarkGfm, remarkMath];
 const fullRehypePlugins = [rehypeKatex];
 
-export function Markdown({ children, className, isStreaming }: MarkdownProps) {
+const linkClassName = 'text-blue-600 hover:underline dark:text-blue-400';
+
+function createMarkdownComponents(onFileOpen?: (filePath: string) => void): Components {
+  return {
+    a: ({ href, children, ...props }) => {
+      const filePath = resolveMarkdownFileHref(href);
+      if (filePath && onFileOpen) {
+        return (
+          <a
+            href={href}
+            className={`${linkClassName} cursor-pointer`}
+            onClick={(event) => {
+              event.preventDefault();
+              onFileOpen(filePath);
+            }}
+            {...props}
+          >
+            {children}
+          </a>
+        );
+      }
+
+      const isExternal = Boolean(href && /^https?:\/\//i.test(href));
+      return (
+        <a
+          href={href}
+          className={linkClassName}
+          {...(isExternal ? { target: '_blank', rel: 'noopener noreferrer' } : {})}
+          {...props}
+        >
+          {children}
+        </a>
+      );
+    },
+  };
+}
+
+export function Markdown({ children, className, isStreaming, onFileOpen }: MarkdownProps) {
   const content = useMemo(
     () => normalizeInlineCodeFences(String(children ?? '')),
     [children],
+  );
+
+  const components = useMemo(
+    () => (onFileOpen ? createMarkdownComponents(onFileOpen) : undefined),
+    [onFileOpen],
   );
 
   // Only apply streaming-fade-in on the initial mount while streaming.
@@ -34,6 +79,7 @@ export function Markdown({ children, className, isStreaming }: MarkdownProps) {
       <ReactMarkdown
         remarkPlugins={isStreaming ? streamingPlugins : fullRemarkPlugins}
         rehypePlugins={isStreaming ? undefined : fullRehypePlugins}
+        components={components}
       >
         {content}
       </ReactMarkdown>

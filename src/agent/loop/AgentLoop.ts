@@ -5,7 +5,6 @@ import {
   cloneMessages,
   createModelMessageAssemblerState,
   type CanonicalToolCall,
-  type CanonicalToolSchema,
   PROMPT_TOO_LONG_ANTHROPIC_PATTERN,
   PROMPT_TOO_LONG_OPENAI_PATTERN,
   REQUEST_TOO_LARGE_PATTERN,
@@ -26,8 +25,6 @@ import {
   SUBAGENT_DEFINITIONS,
   getSubagentDefinition,
 } from "../sub/builtinSubagentTypes.js";
-import { buildPlanModeAgentToolSchema } from "../../tool/builtin/agent.js";
-import { PLAN_MODE_ALLOWED_TOOLS, PLAN_MODE_DESCRIPTION_SUFFIX } from "../../tool/planModeConstraints.js";
 import { agentError } from "../protocol/errors.js";
 import type { AgentEvent } from "../protocol/events.js";
 import type { AgentPermissionDenial, AgentTurnResult } from "../protocol/result.js";
@@ -43,9 +40,16 @@ import { collectToolCalls } from "./collectToolCalls.js";
 import { createMissingToolResult, ensureToolResultPairing } from "./ensureToolResultPairing.js";
 import { LargeFileRepair, type LargeFileRepairDecision } from "./LargeFileRepair.js";
 import { projectToolResults } from "./projectToolResults.js";
+import { requiresPromptCapability } from "../../tool/userInteractionConstraints.js";
 
 const TOOL_EVENT_PUMP_INTERVAL_MS = 500;
 const SUBAGENT_STATUS_HEARTBEAT_MS = 2_000;
+const PLAN_MODE_REMINDER_MESSAGE = [
+  "Plan mode is active.",
+  "Read first using read-only tools, then write or refine plan markdown only under `.pilotdeck/plans/`.",
+  "Do not make implementation changes while planning.",
+  "When the plan is ready for user review, call `exit_plan_mode` with the plan file path.",
+].join("\n");
 
 type ActiveSubagentStatus = {
   subagentId: string;
@@ -66,6 +70,7 @@ export type AgentLoopInput = {
   basePermissionMode?: PermissionMode;
   /** Allow model-visible plan mode tools for this turn. */
   allowPlanModeTools?: boolean;
+  canPrompt?: boolean;
   permissionRules?: Partial<PermissionRuleSet>;
   abortSignal?: AbortSignal;
   onDurableMessage?: (message: CanonicalMessage) => void | Promise<void>;
@@ -1066,14 +1071,21 @@ export class AgentLoop {
   ): Promise<CanonicalModelRequest> {
     const contextRuntime = this.dependencies.context ?? new NullContextRuntime();
     const planTodo = this.dependencies.planTodoManager?.forSession(input.sessionId);
-    let tools = this.dependencies.tools.registry.toCanonicalSchemas();
+    const canPrompt = input.canPrompt ?? this.config.permissionContext.canPrompt;
+    const promptBlockedToolNames = canPrompt
+      ? new Set<string>()
+      : new Set(
+          this.dependencies.tools.registry.list()
+            .filter((tool) => requiresPromptCapability(tool, {}))
+            .map((tool) => tool.name),
+        );
+    let tools = this.dependencies.tools.registry.toCanonicalSchemas()
+      .filter((tool) => !promptBlockedToolNames.has(tool.name));
     if (input.allowPlanModeTools !== true) {
-      tools = tools.filter((tool) => tool.name !== "enter_plan_mode" && tool.name !== "exit_plan_mode");
+      tools = tools.filter(
+        (tool) => tool.name !== "enter_plan_mode" && tool.name !== "exit_plan_mode",
+      );
     }
-    if (this.config.permissionMode === "plan") {
-      tools = filterPlanModeTools(tools);
-    }
-
     const prepared = await contextRuntime.prepareForModel({
       sessionId: input.sessionId,
       turnId: input.turnId,
@@ -1111,7 +1123,9 @@ export class AgentLoop {
     return {
       provider: this.config.provider,
       model: this.config.model,
-      messages: materialized.messages,
+      messages: this.config.permissionMode === "plan"
+        ? appendPlanModeReminder(materialized.messages)
+        : materialized.messages,
       systemPrompt: prepared.systemPrompt ?? this.config.systemPrompt,
       tools: prepared.tools,
       toolChoice: this.config.toolChoice,
@@ -1130,9 +1144,11 @@ export class AgentLoop {
   ): PilotDeckToolRuntimeContext {
     const planDirectoryPath = this.dependencies.planFileManager?.getPlanDirectoryPath();
     const planTodo = this.dependencies.planTodoManager?.forSession(input.sessionId);
+    const canPrompt = input.canPrompt ?? this.config.permissionContext.canPrompt;
     const permissionContext = {
       ...this.config.permissionContext,
       cwd: this.config.cwd,
+      canPrompt,
       ...(planDirectoryPath ? { planDirectoryPath } : {}),
     };
     return {
@@ -1538,22 +1554,6 @@ export class AgentLoop {
   private readonly now = (): Date => this.dependencies.now?.() ?? new Date();
 }
 
-function filterPlanModeTools(tools: CanonicalToolSchema[]): CanonicalToolSchema[] {
-  const agentOverride = buildPlanModeAgentToolSchema();
-  return tools
-    .filter((tool) => PLAN_MODE_ALLOWED_TOOLS.has(tool.name))
-    .map((tool) => {
-      if (tool.name === "agent") {
-        return { ...tool, description: agentOverride.description, inputSchema: agentOverride.inputSchema };
-      }
-      const suffix = PLAN_MODE_DESCRIPTION_SUFFIX[tool.name];
-      if (suffix) {
-        return { ...tool, description: tool.description + suffix };
-      }
-      return tool;
-    });
-}
-
 function mergeUserRules(target: PermissionRule[], userRules: PermissionRule[] | undefined): void {
   const nonUserRules = target.filter((rule) => rule.source !== "user");
   target.splice(0, target.length, ...nonUserRules, ...(userRules ?? []));
@@ -1583,6 +1583,17 @@ function textFromMessage(message: CanonicalMessage): string {
     .filter((block) => block.type === "text")
     .map((block) => block.text)
     .join("\n");
+}
+
+function appendPlanModeReminder(messages: CanonicalMessage[]): CanonicalMessage[] {
+  return [
+    ...messages,
+    {
+      role: "user",
+      content: [{ type: "text", text: PLAN_MODE_REMINDER_MESSAGE }],
+      metadata: { synthetic: true, purpose: "plan_mode_reminder" },
+    },
+  ];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -13,6 +13,10 @@ type EditorSidebarProps = {
   onResizeStart: (event: MouseEvent<HTMLDivElement>) => void;
   onCloseEditor: () => void;
   onToggleEditorExpand: () => void;
+  onPreviewFileOpen?: (filePath: string) => void;
+  canGoBack?: boolean;
+  parentFile?: CodeEditorFile | null;
+  onGoBack?: () => void;
   projectPath?: string;
   fillSpace?: boolean;
 };
@@ -34,6 +38,10 @@ export default function EditorSidebar({
   onResizeStart,
   onCloseEditor,
   onToggleEditorExpand,
+  onPreviewFileOpen,
+  canGoBack = false,
+  parentFile = null,
+  onGoBack,
   projectPath,
   fillSpace,
 }: EditorSidebarProps) {
@@ -89,15 +97,23 @@ export default function EditorSidebar({
     return null;
   }
 
+  const editorProps = {
+    file: editingFile,
+    projectPath,
+    onPreviewFileOpen,
+    canGoBack,
+    parentFileName: parentFile?.name ?? null,
+    onGoBack,
+  };
+
   if (isMobile || poppedOut) {
     return (
       <CodeEditor
-        file={editingFile}
+        {...editorProps}
         onClose={() => {
           setPoppedOut(false);
           onCloseEditor();
         }}
-        projectPath={projectPath}
         isSidebar={false}
       />
     );
@@ -134,9 +150,8 @@ export default function EditorSidebar({
         className="h-full min-w-0 flex-1 overflow-hidden border-l border-neutral-200 dark:border-neutral-800"
       >
         <CodeEditor
-          file={editingFile}
+          {...editorProps}
           onClose={onCloseEditor}
-          projectPath={projectPath}
           isSidebar
           isExpanded={editorExpanded}
           onToggleExpand={onToggleEditorExpand}

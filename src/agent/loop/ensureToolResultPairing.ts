@@ -7,11 +7,20 @@ export function ensureToolResultPairing(
   now: () => Date = () => new Date(),
   message = "Tool execution did not produce a result.",
 ): PilotDeckToolResult[] {
-  const resultsByCallId = new Map(results.map((result) => [result.toolCallId, result]));
+  const resultsByCallId = new Map<string, PilotDeckToolResult[]>();
+  for (const result of results) {
+    const queue = resultsByCallId.get(result.toolCallId);
+    if (queue) {
+      queue.push(result);
+    } else {
+      resultsByCallId.set(result.toolCallId, [result]);
+    }
+  }
+
   const paired: PilotDeckToolResult[] = [];
 
   for (const call of calls) {
-    paired.push(resultsByCallId.get(call.id) ?? createMissingToolResult(call, now, message));
+    paired.push(resultsByCallId.get(call.id)?.shift() ?? createMissingToolResult(call, now, message));
   }
 
   return paired;

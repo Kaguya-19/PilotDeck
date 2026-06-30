@@ -1,6 +1,7 @@
 import type { Gateway, GatewayChannelKey } from "../../../gateway/index.js";
 import type { ChannelAdapter, ChannelHandle, ChannelLogger, ChannelStartDeps } from "../protocol/ChannelAdapter.js";
 import { ImElicitationHelper } from "../protocol/ImElicitationHelper.js";
+import { ImPermissionHelper } from "../protocol/ImPermissionHelper.js";
 import { DiscordSessionMapper } from "./DiscordSessionMapper.js";
 import { renderDiscordEvent } from "./discord-render.js";
 
@@ -31,6 +32,7 @@ export class DiscordChannel implements ChannelAdapter {
   private botUserId: string | null = null;
   private activeChats = new Set<string>();
   private readonly elicitation = new ImElicitationHelper();
+  private readonly permissions = new ImPermissionHelper();
 
   constructor(options: DiscordChannelOptions = {}) {
     this.mapper = options.mapper ?? new DiscordSessionMapper();
@@ -117,6 +119,16 @@ export class DiscordChannel implements ChannelAdapter {
       return;
     }
 
+    if (this.permissions.hasPending(chatId) && this.gateway) {
+      try {
+        const confirmation = await this.permissions.answer(chatId, text, this.gateway);
+        if (confirmation) await this.sendReply(chatId, confirmation);
+      } catch (e) {
+        this.logger?.error?.(`discord: permission answer error: ${e}`);
+      }
+      return;
+    }
+
     if (this.activeChats.has(chatId)) {
       this.logger?.info?.(`discord: chat ${chatId} already active, skipping`);
       return;
@@ -154,6 +166,11 @@ export class DiscordChannel implements ChannelAdapter {
           await this.sendReply(chatId, questionText);
           continue;
         }
+        if (event.type === "permission_request") {
+          const questionText = this.permissions.capture(chatId, sessionKey, event);
+          await this.sendReply(chatId, questionText);
+          continue;
+        }
         const fragment = renderDiscordEvent(event);
         if (fragment != null) replyText += fragment;
       }
@@ -163,6 +180,7 @@ export class DiscordChannel implements ChannelAdapter {
     }
 
     this.elicitation.clear(chatId);
+    this.permissions.clear(chatId);
     const finalText = replyText.trim();
     if (finalText) {
       await this.sendReply(chatId, finalText);

@@ -97,8 +97,6 @@ import { createNormalizedMessage } from './pilotdeck-message.js';
 import { startEnabledPluginServers, stopAllPlugins, getPluginPort } from './utils/plugin-process-manager.js';
 import { initializeDatabase, sessionNamesDb, applyCustomSessionNames, userDb } from './database/db.js';
 import { configureWebPush } from './services/vapid-keys.js';
-import { sendCronDaemonRequest } from './services/cron-daemon-owner.js';
-import { createAlwaysOnHeartbeatManager } from './always-on-heartbeat.js';
 
 import { runServerStartupBeforeListen, startServerAfterStartup } from './services/server-startup.js';
 import { validateApiKey, authenticateToken, authenticateWebSocket } from './middleware/auth.js';
@@ -135,11 +133,6 @@ const WATCHER_DEBOUNCE_MS = 300;
 let projectsWatchers = [];
 let projectsWatcherDebounceTimer = null;
 const connectedClients = new Set();
-const alwaysOnHeartbeat = createAlwaysOnHeartbeatManager({
-    // Legacy four-provider session details have been removed; PilotDeck
-    // gateway sessions are tracked by `pilotdeck-bridge.js` instead.
-    getActivePilotDeckSessions: () => []
-});
 registerAlwaysOnNotificationForwarding(connectedClients);
 let isGetProjectsRunning = false; // Flag to prevent reentrant calls
 
@@ -1842,11 +1835,7 @@ function handleChatConnection(ws, request) {
 
             if (data.type === 'ping') return;
 
-            if (data.type === 'always-on-presence') {
-                await alwaysOnHeartbeat.handlePresence(ws, data);
-            } else if (data.type === 'always-on-presence-clear') {
-                await alwaysOnHeartbeat.clearPresence(ws);
-            } else if (
+            if (
                 data.type === 'pilotdeck-command' ||
                 // Deprecated: legacy per-provider frame types kept for back-compat.
                 data.type === 'claude-command' ||
@@ -1928,7 +1917,6 @@ function handleChatConnection(ws, request) {
         cleanedUp = true;
         // Remove from connected clients
         connectedClients.delete(ws);
-        void alwaysOnHeartbeat.clearPresence(ws);
     };
 
     ws.on('close', (code, reason) => {
@@ -2372,8 +2360,8 @@ async function moveUploadedAttachment(file, attachmentDir, index) {
 }
 
 // Mixed chat attachment upload endpoint. Images are returned as data URLs for
-// multimodal input and previews; other files are staged under the project so
-// the gateway can resolve them by path.
+// multimodal input/previews and are also staged under the project so the agent
+// can operate on the same bytes by path; other files are staged by path only.
 app.post('/api/projects/:projectName/upload-attachments', authenticateToken, async (req, res) => {
     let multerUpload;
     try {
@@ -2432,14 +2420,14 @@ app.post('/api/projects/:projectName/upload-attachments', authenticateToken, asy
 
             for (const [index, file] of req.files.entries()) {
                 if (CHAT_ATTACHMENT_IMAGE_MIMES.has(file.mimetype)) {
-                    const originalName = normalizeUploadedFilename(file.originalname);
                     const buffer = await fsPromises.readFile(file.path);
-                    await fsPromises.unlink(file.path).catch(() => { });
+                    const storedFile = await moveUploadedAttachment(file, attachmentDir, index);
                     images.push({
-                        name: originalName,
+                        name: storedFile.name,
                         data: `data:${file.mimetype};base64,${buffer.toString('base64')}`,
-                        size: file.size,
-                        mimeType: file.mimetype,
+                        path: storedFile.path,
+                        size: storedFile.size,
+                        mimeType: storedFile.mimeType,
                     });
                     continue;
                 }
@@ -2447,7 +2435,7 @@ app.post('/api/projects/:projectName/upload-attachments', authenticateToken, asy
                 files.push(await moveUploadedAttachment(file, attachmentDir, index));
             }
 
-            if (files.length === 0 && attachmentDir) {
+            if (files.length === 0 && images.length === 0 && attachmentDir) {
                 await fsPromises.rm(attachmentDir, { recursive: true, force: true }).catch(() => { });
             }
 

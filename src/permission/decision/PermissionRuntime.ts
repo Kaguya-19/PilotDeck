@@ -23,9 +23,10 @@ export class PermissionRuntime {
       permissionContext.rules.allow.filter((rule) => rule.source === "session"),
       tool.name,
       input,
+      permissionContext,
     );
 
-    const denyRule = findMatchingRule(permissionContext.rules.deny, tool.name, input);
+    const denyRule = findMatchingRule(permissionContext.rules.deny, tool.name, input, permissionContext);
     if (denyRule) {
       if (sessionAllowRule && denyRule.source === "user") {
         return this.allowSessionRule(tool, input, context, toolCallId, sessionAllowRule);
@@ -33,7 +34,7 @@ export class PermissionRuntime {
       return denyFromRule(denyRule);
     }
 
-    const askRule = findMatchingRule(permissionContext.rules.ask, tool.name, input);
+    const askRule = findMatchingRule(permissionContext.rules.ask, tool.name, input, permissionContext);
     if (askRule) {
       return finalizeAsk(askFromRule(tool, input, toolCallId, askRule), permissionContext);
     }
@@ -49,7 +50,7 @@ export class PermissionRuntime {
     // tool.checkPermissions returns ask → runtime surfaces another
     // permission prompt → next call repeats → infinite prompts.
     // Deny rules (checked above) still win over allow rules.
-    const allowRule = findMatchingRule(permissionContext.rules.allow, tool.name, input);
+    const allowRule = findMatchingRule(permissionContext.rules.allow, tool.name, input, permissionContext);
     if (allowRule) {
       // Plan mode deny takes precedence over user allow rules for
       // non-readonly tools (except plan-directory markdown writes). Without this guard,
@@ -220,8 +221,13 @@ function decideByMode(
   });
 }
 
-function findMatchingRule(rules: PermissionRule[], toolName: string, input: unknown): PermissionRule | undefined {
-  return rules.find((rule) => matchPermissionRule(rule, toolName, input));
+function findMatchingRule(
+  rules: PermissionRule[],
+  toolName: string,
+  input: unknown,
+  context: PermissionContext,
+): PermissionRule | undefined {
+  return rules.find((rule) => matchPermissionRule(rule, toolName, input, context));
 }
 
 function allow(reason: PermissionDecisionReason): PermissionDecision {
@@ -300,6 +306,17 @@ function finalizeAsk(decision: PermissionDecision, context: PermissionContext): 
         mode: "bypassPermissions",
         message: "bypassPermissions mode skips permission prompts.",
       },
+    };
+  }
+
+  if (context.canPrompt === false) {
+    return {
+      type: "deny",
+      reason: {
+        type: "runtime",
+        message: "Permission prompt denied because prompts are disabled for this session.",
+      },
+      message: "Permission prompt denied because prompts are disabled for this session.",
     };
   }
 

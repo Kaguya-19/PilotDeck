@@ -26,6 +26,8 @@ export {
   type WebProjectSummary,
   type WebReadSessionMessagesInput,
   type WebReadSessionMessagesResult,
+  type WebReadSubagentMessagesInput,
+  type WebReadSubagentMessagesResult,
   type WebRequestFrame,
   type WebResponseFrame,
   type WebSessionInfo,

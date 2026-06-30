@@ -101,6 +101,8 @@ function toLegacySession(session, projectName) {
         aiTitle: session.aiTitle,
         firstPrompt: session.firstPrompt,
         tag: presentation.tag,
+        parentSessionId: session.parentSessionId,
+        forkedFromTurnId: session.forkedFromTurnId,
         __projectName: projectName,
     };
 }
@@ -221,7 +223,6 @@ async function getProjects(progressCallback = null) {
                 hasMore: (project.sessionCount ?? sessions.length) > sessions.length,
             },
             taskmaster,
-            alwaysOn: { enabled: false },
         });
     }
 
@@ -281,7 +282,6 @@ async function getProjects(progressCallback = null) {
             hasMore: generalTotal > generalSessions.length,
         },
         taskmaster: { hasTaskmaster: false },
-        alwaysOn: { enabled: false },
     });
 
     return result;

@@ -25,6 +25,7 @@ export type AgentTranscriptEntryBase = {
 export type AgentAcceptedInputTranscriptEntry = AgentTranscriptEntryBase & {
   type: "accepted_input";
   messages: CanonicalMessage[];
+  metadata?: Record<string, unknown>;
 };
 
 export type AgentMessageTranscriptEntry = AgentTranscriptEntryBase & {
@@ -97,6 +98,10 @@ export type SessionMetadataValue = {
     url: string;
     repository: string;
   };
+  /** Parent session when this transcript was created via history fork. */
+  parentSessionId?: string;
+  /** Turn id of the fork point in the parent session. */
+  forkedFromTurnId?: string;
   updatedAt?: string;
 };
 

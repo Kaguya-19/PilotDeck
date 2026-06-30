@@ -69,7 +69,12 @@ export type AgentSubagentTranscriptHooks = {
     errored?: boolean;
   }): Promise<void>;
   subagentTranscriptResolver?(subagentId: string): {
-    recordAcceptedInput(sessionId: string, turnId: string, messages: CanonicalMessage[]): Promise<void>;
+    recordAcceptedInput(
+      sessionId: string,
+      turnId: string,
+      messages: CanonicalMessage[],
+      metadata?: Record<string, unknown>,
+    ): Promise<void>;
     recordDurableMessage(sessionId: string, turnId: string, message: CanonicalMessage): Promise<void>;
     transcriptRelativePath: string;
   };
