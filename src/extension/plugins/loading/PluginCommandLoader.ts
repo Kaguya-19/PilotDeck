@@ -1,4 +1,5 @@
 import { basename, dirname, relative } from "node:path";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
 
 export type LoadedPluginCommand = {
@@ -19,7 +20,7 @@ export async function loadPluginCommands(options: {
       const raw = await readFile(filePath, "utf8");
       const parsed = parseMarkdownFrontmatter(raw);
       return {
-        name: getPluginCommandName(options.pluginName, filePath, options.baseDir),
+        name: getParsedCommandName(options.pluginName, filePath, options.baseDir, parsed.frontmatter),
         path: filePath,
         content: parsed.content,
         frontmatter: parsed.frontmatter,
@@ -27,6 +28,24 @@ export async function loadPluginCommands(options: {
       };
     }),
   );
+}
+
+export function loadPluginCommandsSync(options: {
+  pluginName: string;
+  baseDir: string;
+}): LoadedPluginCommand[] {
+  const files = collectMarkdownFilesSync(options.baseDir);
+  return files.map((filePath) => {
+    const raw = readFileSync(filePath, "utf8");
+    const parsed = parseMarkdownFrontmatter(raw);
+    return {
+      name: getParsedCommandName(options.pluginName, filePath, options.baseDir, parsed.frontmatter),
+      path: filePath,
+      content: parsed.content,
+      frontmatter: parsed.frontmatter,
+      isSkill: isSkillFile(filePath),
+    };
+  });
 }
 
 export function getPluginCommandName(pluginName: string, filePath: string, baseDir: string): string {
@@ -38,6 +57,19 @@ export function getPluginCommandName(pluginName: string, filePath: string, baseD
     .join(":");
 
   return namespace ? `${pluginName}:${namespace}:${baseName}` : `${pluginName}:${baseName}`;
+}
+
+function getParsedCommandName(
+  pluginName: string,
+  filePath: string,
+  baseDir: string,
+  frontmatter: Record<string, unknown>,
+): string {
+  const frontmatterName = typeof frontmatter.name === "string" ? frontmatter.name.trim() : "";
+  if (isSkillFile(filePath) && frontmatterName.length > 0) {
+    return frontmatterName;
+  }
+  return getPluginCommandName(pluginName, filePath, baseDir);
 }
 
 function isSkillFile(filePath: string): boolean {
@@ -63,6 +95,32 @@ async function collectMarkdownFiles(directory: string): Promise<string[]> {
     }
     if (entryStat.isDirectory()) {
       output.push(...await collectMarkdownFiles(fullPath));
+    } else if (/\.md$/iu.test(entry)) {
+      output.push(fullPath);
+    }
+  }
+  return output;
+}
+
+function collectMarkdownFilesSync(directory: string): string[] {
+  const output: string[] = [];
+  let entries: string[];
+  try {
+    entries = readdirSync(directory);
+  } catch {
+    return output;
+  }
+
+  for (const entry of entries) {
+    const fullPath = `${directory}/${entry}`;
+    let entryStat;
+    try {
+      entryStat = statSync(fullPath);
+    } catch {
+      continue;
+    }
+    if (entryStat.isDirectory()) {
+      output.push(...collectMarkdownFilesSync(fullPath));
     } else if (/\.md$/iu.test(entry)) {
       output.push(fullPath);
     }
