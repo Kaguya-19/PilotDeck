@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { TextDecoder } from "node:util";
+import { resolveCommandShell } from "../../../platform/commandShell.js";
 
 export type PilotDeckCommandOptions = {
   cwd: string;
@@ -36,7 +37,7 @@ export class NodeShellCommandRunner implements PilotDeckCommandRunner {
       const child = this.spawnShell(command, {
         cwd: options.cwd,
         env: options.env,
-        shell: true,
+        shell: resolveCommandShell(options.env),
         detached: !isWindows,
         windowsHide: isWindows,
         stdio: ["ignore", "pipe", "pipe"],

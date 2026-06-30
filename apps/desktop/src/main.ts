@@ -17,6 +17,13 @@ type RuntimeInfo = {
   logPath: string;
 };
 
+type BundledGitPaths = {
+  root: string;
+  bash: string;
+  git: string;
+  pathEntries: string[];
+};
+
 type RuntimeStatus = {
   phase: "starting" | "config" | "gateway" | "server" | "ready" | "error" | "stopped";
   message: string;
@@ -164,8 +171,13 @@ class RuntimeManager {
 
     const serverPort = await findFreePort(3001);
     const gatewayPort = await findFreePort(18789);
+    const bundledGit = resolveBundledGitPaths();
+    if (bundledGit) {
+      this.log(`Bundled Git Bash ready: ${bundledGit.bash}`);
+    }
     const commonEnv = withRuntimeCommandPath({
       ...process.env,
+      HOME: process.env.HOME || os.homedir(),
       HOST: "127.0.0.1",
       PILOT_HOME: config.pilotHome,
       PILOTDECK_CONFIG_DIR: config.pilotHome,
@@ -176,7 +188,7 @@ class RuntimeManager {
       PILOTDECK_SKIP_BROWSER_OPEN: "1",
       PILOTDECK_SKIP_DEFAULT_PROJECT: "1",
       PLAYWRIGHT_BROWSERS_PATH: "0",
-    }, this.runtimeRoot, this.nodeBinary);
+    }, this.runtimeRoot, this.nodeBinary, bundledGit);
 
     publishRuntimeStatus({
       phase: "gateway",
@@ -628,6 +640,41 @@ function resolveNodeBinary(): string {
   return binary;
 }
 
+function resolveBundledGitPaths(): BundledGitPaths | undefined {
+  if (process.platform !== "win32") {
+    return undefined;
+  }
+
+  const configuredRoot = process.env.PILOTDECK_DESKTOP_GIT_ROOT
+    ? path.resolve(process.env.PILOTDECK_DESKTOP_GIT_ROOT)
+    : undefined;
+  const root = configuredRoot
+    ?? (app.isPackaged
+      ? path.join(process.resourcesPath, "git")
+      : path.resolve(__dirname, "..", "resources", "git"));
+  const bash = path.join(root, "bin", "bash.exe");
+  const git = path.join(root, "cmd", "git.exe");
+
+  if (!fs.existsSync(bash) || !fs.existsSync(git)) {
+    if (configuredRoot || app.isPackaged) {
+      throw new Error(`Bundled Git Bash not found under ${root}`);
+    }
+    return undefined;
+  }
+
+  return {
+    root,
+    bash,
+    git,
+    pathEntries: [
+      path.join(root, "cmd"),
+      path.join(root, "bin"),
+      path.join(root, "usr", "bin"),
+      path.join(root, "mingw64", "bin"),
+    ],
+  };
+}
+
 function resolveAppIcon(): string | undefined {
   const fileName = process.platform === "win32" ? "icon.ico" : "icon.png";
   const iconPath = app.isPackaged
@@ -645,18 +692,27 @@ function withRuntimeCommandPath(
   env: NodeJS.ProcessEnv,
   runtimeRoot: string,
   nodeBinary: string,
+  bundledGit?: BundledGitPaths,
 ): NodeJS.ProcessEnv {
   const pathKey = getPathEnvKey(env);
   const currentPath = env[pathKey] || "";
   const entries = [
     path.dirname(nodeBinary),
+    ...(bundledGit?.pathEntries ?? []),
     currentPath,
     path.join(runtimeRoot, "node_modules", ".bin"),
   ].filter(Boolean);
-  return {
+  const nextEnv: NodeJS.ProcessEnv = {
     ...env,
     [pathKey]: entries.join(path.delimiter),
   };
+  if (bundledGit) {
+    nextEnv.PILOTDECK_BASH_PATH = bundledGit.bash;
+    nextEnv.PILOTDECK_GIT_PATH = bundledGit.git;
+    nextEnv.CHERE_INVOKING = nextEnv.CHERE_INVOKING || "1";
+    nextEnv.MSYSTEM = nextEnv.MSYSTEM || "MINGW64";
+  }
+  return nextEnv;
 }
 
 function ensurePilotConfig(log: (message: string) => void): { pilotHome: string; configPath: string } {

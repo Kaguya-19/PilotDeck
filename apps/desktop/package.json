@@ -12,6 +12,7 @@
     "pack": "node scripts/build-runtime.mjs && tsc -p tsconfig.json && electron-builder --dir",
     "dist:mac": "node scripts/build-runtime.mjs && tsc -p tsconfig.json && electron-builder --mac",
     "dist:win": "node scripts/build-runtime.mjs && tsc -p tsconfig.json && electron-builder --win",
+    "download-git-bash": "node scripts/download-git-bash.mjs",
     "download-node": "node scripts/download-node.mjs"
   },
   "dependencies": {},
@@ -54,6 +55,14 @@
       {
         "from": "resources/icons",
         "to": "icons"
+      },
+      {
+        "from": "resources/git",
+        "to": "git",
+        "filter": [
+          "**/*",
+          "!.gitkeep"
+        ]
       },
       {
         "from": ".runtime/app",

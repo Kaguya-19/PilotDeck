@@ -4,7 +4,8 @@
  * LocalShellTask behaviour (T1-T11).
  *
  * Process model:
- *   - `start(spec)` spawns a child via `spawn(command, { shell: true })`.
+ *   - `start(spec)` spawns a child via the platform shell. On Windows
+ *     desktop builds, the bundled Git Bash is preferred when available.
  *     On macOS/Linux it is detached so `stop` can target the process group;
  *     on Windows it is not detached because detached console processes create
  *     visible console windows in GUI apps.
@@ -23,6 +24,7 @@
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { resolveCommandShell } from "../../platform/commandShell.js";
 import { TaskOutputStore } from "../storage/TaskOutputStore.js";
 import type {
   PilotDeckBackgroundBashTask,
@@ -144,7 +146,7 @@ export class BackgroundTaskRuntime {
       child = this.options.spawn(spec.command, {
         cwd: spec.cwd,
         env: spec.env,
-        shell: true,
+        shell: resolveCommandShell(spec.env),
         stdio: ["ignore", "pipe", "pipe"],
         detached: process.platform !== "win32",
         windowsHide: process.platform === "win32",

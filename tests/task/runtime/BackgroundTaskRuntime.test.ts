@@ -8,9 +8,9 @@ test("BackgroundTaskRuntime does not detach Windows background tasks", async () 
   const originalPlatform = process.platform;
   Object.defineProperty(process, "platform", { value: "win32" });
   try {
-    const calls: Array<{ options: { detached?: boolean; windowsHide?: boolean } }> = [];
+    const calls: Array<{ options: { detached?: boolean; windowsHide?: boolean; shell?: boolean | string } }> = [];
     const runtime = new BackgroundTaskRuntime({
-      spawn: ((command: string, options: { detached?: boolean; windowsHide?: boolean }) => {
+      spawn: ((command: string, options: { detached?: boolean; windowsHide?: boolean; shell?: boolean | string }) => {
         void command;
         calls.push({ options });
         return createFakeChild();
@@ -23,6 +23,32 @@ test("BackgroundTaskRuntime does not detach Windows background tasks", async () 
     assert.equal(calls.length, 1);
     assert.equal(calls[0]?.options.detached, false);
     assert.equal(calls[0]?.options.windowsHide, true);
+    assert.equal(calls[0]?.options.shell, true);
+  } finally {
+    Object.defineProperty(process, "platform", { value: originalPlatform });
+  }
+});
+
+test("BackgroundTaskRuntime uses configured Windows Git Bash", async () => {
+  const originalPlatform = process.platform;
+  Object.defineProperty(process, "platform", { value: "win32" });
+  try {
+    const calls: Array<{ options: { shell?: boolean | string } }> = [];
+    const runtime = new BackgroundTaskRuntime({
+      spawn: ((command: string, options: { shell?: boolean | string }) => {
+        void command;
+        calls.push({ options });
+        return createFakeChild();
+      }) as never,
+    });
+
+    await runtime.start({
+      command: "pwd",
+      cwd: "C:\\repo",
+      env: { PILOTDECK_BASH_PATH: "C:\\PilotDeck\\git\\bin\\bash.exe" },
+    });
+
+    assert.equal(calls[0]?.options.shell, "C:\\PilotDeck\\git\\bin\\bash.exe");
   } finally {
     Object.defineProperty(process, "platform", { value: originalPlatform });
   }

@@ -321,6 +321,9 @@ function rewriteUiServerSourceImports(serverRoot) {
 }
 
 run(process.execPath, [resolve(desktopRoot, "scripts", "download-node.mjs")], desktopRoot);
+if (process.platform === "win32") {
+  run(process.execPath, [resolve(desktopRoot, "scripts", "download-git-bash.mjs")], desktopRoot);
+}
 
 if (process.env.PILOTDECK_DESKTOP_SKIP_RUNTIME_BUILD !== "1") {
   runPnpm(["--dir", repoRoot, "run", "build"]);
