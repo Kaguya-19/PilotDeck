@@ -191,6 +191,15 @@ function normalizeRealtimeText(value?: string): string {
   return typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '';
 }
 
+function normalizeMessageIdForComparison(value?: string): string {
+  return typeof value === 'string' ? value.replace(/^web:s_/, 'web-s_') : '';
+}
+
+function sameMessageId(left?: string, right?: string): boolean {
+  if (!left || !right) return false;
+  return normalizeMessageIdForComparison(left) === normalizeMessageIdForComparison(right);
+}
+
 function parseTimestampMs(value?: string): number | null {
   if (!value) return null;
   const parsed = Date.parse(value);
@@ -282,10 +291,22 @@ function hasEquivalentServerMessage(
   let candidates = serverMessages;
   if (realtimeMessage.serverTailIdAtStart) {
     const tailIndex = serverMessages.findIndex((message) =>
-      message.id === realtimeMessage.serverTailIdAtStart
+      sameMessageId(message.id, realtimeMessage.serverTailIdAtStart)
     );
-    if (tailIndex < 0) return false;
-    candidates = serverMessages.slice(tailIndex + 1);
+    if (tailIndex >= 0) {
+      candidates = serverMessages.slice(tailIndex + 1);
+    } else {
+      let lastUserIndex = -1;
+      for (let index = serverMessages.length - 1; index >= 0; index -= 1) {
+        const message = serverMessages[index];
+        if (message.kind === 'text' && message.role === 'user') {
+          lastUserIndex = index;
+          break;
+        }
+      }
+      if (lastUserIndex < 0) return false;
+      candidates = serverMessages.slice(lastUserIndex + 1);
+    }
   } else {
     let lastUserIndex = -1;
     for (let index = serverMessages.length - 1; index >= 0; index -= 1) {
@@ -343,6 +364,13 @@ function computeMerged(server: NormalizedMessage[], realtime: NormalizedMessage[
     if (serverIds.has(message.id)) return false;
     if (isConfirmedUserMessageDuplicate(message, server)) return false;
     if (isLocalInterruptDuplicate(message, server)) return false;
+    if (
+      message.isFinal === true
+      && (message.kind === 'text' || message.kind === 'thinking')
+      && hasEquivalentServerMessage(message, server)
+    ) {
+      return false;
+    }
     // Dedup tool_use by toolId (invocation ID) — the message envelope ID
     // may differ between WebSocket replay and server-persisted copy, but
     // the underlying tool invocation is the same.
