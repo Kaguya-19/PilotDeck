@@ -952,6 +952,35 @@ function getSafeZipFilename(projectName) {
     return `${safeName}.zip`;
 }
 
+const WINDOWS_DRIVES_PATH = '__pilotdeck_windows_drives__';
+
+async function listWindowsDriveRoots() {
+    if (process.platform !== 'win32') {
+        return [];
+    }
+
+    const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
+    const drives = [];
+    await Promise.all(letters.map(async (letter) => {
+        const drivePath = `${letter}:\\`;
+        try {
+            await fs.promises.access(drivePath);
+            const stats = await fs.promises.stat(drivePath);
+            if (!stats.isDirectory()) {
+                return;
+            }
+            drives.push({
+                path: drivePath,
+                name: drivePath,
+                type: 'drive'
+            });
+        } catch {
+            // Drive letter is absent or inaccessible.
+        }
+    }));
+    return drives.sort((a, b) => a.name.localeCompare(b.name));
+}
+
 // Browse filesystem endpoint for project suggestions - uses existing getFileTree
 app.get('/api/browse-filesystem', authenticateToken, async (req, res) => {
     try {
@@ -959,6 +988,14 @@ app.get('/api/browse-filesystem', authenticateToken, async (req, res) => {
 
         console.log('[API] Browse filesystem request for path:', dirPath);
         console.log('[API] WORKSPACES_ROOT is:', WORKSPACES_ROOT);
+        if (process.platform === 'win32' && dirPath === WINDOWS_DRIVES_PATH) {
+            return res.json({
+                path: WINDOWS_DRIVES_PATH,
+                suggestions: await listWindowsDriveRoots(),
+                rootsPath: WINDOWS_DRIVES_PATH
+            });
+        }
+
         // Default to home directory if no path provided
         const defaultRoot = WORKSPACES_ROOT;
         let targetPath = dirPath ? expandWorkspacePath(dirPath) : defaultRoot;
@@ -1024,7 +1061,8 @@ app.get('/api/browse-filesystem', authenticateToken, async (req, res) => {
 
         res.json({
             path: resolvedPath,
-            suggestions: suggestions
+            suggestions: suggestions,
+            rootsPath: process.platform === 'win32' ? WINDOWS_DRIVES_PATH : undefined
         });
 
     } catch (error) {
