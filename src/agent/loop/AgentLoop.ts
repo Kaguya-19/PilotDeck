@@ -13,10 +13,12 @@ import {
   type CanonicalModelRequest,
   type CanonicalUsage,
   materializeMediaReferences,
+  type PartialTextToolCallInfo,
 } from "../../model/index.js";
 import type {
   PilotDeckReadFileStateMap,
   PilotDeckSubagentForkApi,
+  PilotDeckToolErrorResult,
   PilotDeckToolResult,
   PilotDeckToolRuntimeContext,
   PilotDeckWriteSnapshotMap,
@@ -173,11 +175,39 @@ export class AgentLoop {
      */
     const MAX_CONSECUTIVE_ALL_INVALID_TURNS = 3;
     let consecutiveAllInvalidTurns = 0;
+    let lastToolFailureFingerprint: string | undefined;
+    let transientPromptCounter = 0;
+    const activeTransientPromptIds = new Set<string>();
+
+    const pushTransientSyntheticPrompt = (prompt: string, purpose: string): void => {
+      const transientId = this.dependencies.uuid?.() ?? `transient-${++transientPromptCounter}`;
+      messages.push({
+        role: "user",
+        content: [{ type: "text", text: prompt }],
+        metadata: { synthetic: true, transient: true, transientId, purpose },
+      });
+      activeTransientPromptIds.add(transientId);
+    };
+
+    const expireConsumedTransientPrompts = (): void => {
+      if (activeTransientPromptIds.size === 0) {
+        return;
+      }
+      messages = removeTransientPromptsById(messages, activeTransientPromptIds);
+      activeTransientPromptIds.clear();
+    };
+    const missingToolResultRecoveryContext = () => ({
+      cwd: this.config.cwd,
+      permissionMode: this.config.permissionMode,
+    });
 
     const stickyInfo = this.dependencies.router.invalidateSticky?.(input.sessionId);
     let previousTier: string | undefined = stickyInfo?.previousTier;
 
-    const continueWithSyntheticPrompt = async (decision: LargeFileRepairDecision): Promise<{
+    const continueWithSyntheticPrompt = async (
+      decision: LargeFileRepairDecision,
+      options: { stripCurrentAssistant?: boolean } = {},
+    ): Promise<{
       type: "continue";
       event: AgentEvent;
     } | {
@@ -198,19 +228,17 @@ export class AgentLoop {
         });
         return { type: "completed", result };
       }
-      if (decision.strip === "error_pair") {
-        messages = stripTrailingErrorPair(messages);
-      } else if (decision.strip === "assistant") {
-        const last = messages[messages.length - 1];
-        if (last?.role === "assistant") {
-          messages = messages.slice(0, -1);
+      if (options.stripCurrentAssistant !== false) {
+        if (decision.strip === "error_pair") {
+          messages = stripTrailingErrorPair(messages);
+        } else if (decision.strip === "assistant") {
+          const last = messages[messages.length - 1];
+          if (last?.role === "assistant") {
+            messages = messages.slice(0, -1);
+          }
         }
       }
-      messages.push({
-        role: "user",
-        content: [{ type: "text", text: decision.prompt }],
-        metadata: { synthetic: true, purpose: decision.purpose },
-      });
+      pushTransientSyntheticPrompt(decision.prompt, decision.purpose);
       if (this.config.maxOutputTokens !== undefined
         && this.config.maxOutputTokens < largeFileRepair.recommendedMaxOutputTokens) {
         this.config.maxOutputTokens = largeFileRepair.recommendedMaxOutputTokens;
@@ -370,6 +398,7 @@ export class AgentLoop {
           if (partialAssembled.message.content.length > 0) {
             finalMessage = partialAssembled.message;
             messages.push(partialAssembled.message);
+            expireConsumedTransientPrompts();
             usage = mergeUsage(usage, partialAssembled.usage);
             yield { type: "assistant_message", sessionId: input.sessionId, turnId: input.turnId, message: partialAssembled.message };
             await input.onDurableMessage?.(partialAssembled.message);
@@ -411,6 +440,7 @@ export class AgentLoop {
         if (partialAssembled.message.content.length > 0) {
           finalMessage = partialAssembled.message;
           messages.push(partialAssembled.message);
+          expireConsumedTransientPrompts();
           usage = mergeUsage(usage, partialAssembled.usage);
           yield { type: "assistant_message", sessionId: input.sessionId, turnId: input.turnId, message: partialAssembled.message };
           await input.onDurableMessage?.(partialAssembled.message);
@@ -432,15 +462,147 @@ export class AgentLoop {
       const assembled = assembleAssistantMessage(assembler);
       usage = mergeUsage(usage, assembled.usage);
       finalMessage = assembled.message;
+      const toolCalls = collectToolCalls(assembled.message);
+      expireConsumedTransientPrompts();
+
+      if (assembled.hasPartialTextToolCall) {
+        if (maxOutputRecoveryCount < MAX_OUTPUT_RECOVERY_LIMIT) {
+          maxOutputRecoveryCount++;
+          pushTransientSyntheticPrompt(
+            buildPartialTextToolCallRecoveryPrompt(assembled.partialTextToolCall),
+            "max_output_recovery",
+          );
+          yield {
+            type: "turn_continued",
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            reason: "model_error",
+          };
+          continue;
+        }
+
+        const detail = assembled.partialTextToolCall
+          ? `${assembled.partialTextToolCall.format}/${assembled.partialTextToolCall.reason}`
+          : "unknown partial text tool-call";
+        const result = this.createTurnResult(input, {
+          type: "error",
+          stopReason: "model_error",
+          usage,
+          permissionDenials,
+          turns: turnCount,
+          startedAt,
+          finalMessage,
+          structuredOutput,
+          errors: [agentError(
+            "agent_model_error",
+            `Partial text tool-call recovery exhausted after ${MAX_OUTPUT_RECOVERY_LIMIT} attempts (${detail}).`,
+          )],
+        });
+        yield { type: "turn_failed", sessionId: input.sessionId, turnId: input.turnId, error: result.errors![0]! };
+        await captureTurn(result.type === "error");
+        yield { type: "turn_completed", sessionId: input.sessionId, turnId: input.turnId, result };
+        return { result, messages };
+      }
+
+      // When jsonrepair silently "fixed" truncated JSON and the response
+      // was cut by max_tokens, the tool call arguments are likely incomplete
+      // (e.g. half-written file content). Apply the same recovery as
+      // max_output_reached: token doubling → continuation prompt → give up.
+      //
+      // This gate intentionally runs before durable assistant emission. The
+      // recovered response should replace the dirty repaired/truncated message,
+      // not leave an unmatched tool_call in the transcript.
+      if (assembled.hasRepairedToolCalls && (assembled.finishReason === "length" || assembled.finishReason === "tool_call" || assembled.finishReason === "stop")) {
+        console.warn(
+          `[AgentLoop] Blocking ${toolCalls.length} repaired-but-truncated tool call(s) — entering max_output recovery`,
+        );
+
+        const largeFileDecision = largeFileRepair.recoverFromRepairedTruncation(toolCalls);
+        if (largeFileDecision) {
+          const continued = await continueWithSyntheticPrompt(largeFileDecision, { stripCurrentAssistant: false });
+          if (continued.type === "completed") {
+            yield { type: "turn_failed", sessionId: input.sessionId, turnId: input.turnId, error: continued.result.errors![0]! };
+            await captureTurn(continued.result.type === "error");
+            yield { type: "turn_completed", sessionId: input.sessionId, turnId: input.turnId, result: continued.result };
+            return { result: continued.result, messages };
+          }
+          yield continued.event;
+          continue;
+        }
+
+        // Phase A: token doubling (if not yet attempted)
+        if (!hasAttemptedOutputRetry) {
+          hasAttemptedOutputRetry = true;
+          const nextMaxOutputTokens = resolveOutputTokenRetryBump({
+            currentMaxOutputTokens: this.config.maxOutputTokens,
+            modelMaxOutputTokens: routedMaxOutputTokens,
+          });
+          if (nextMaxOutputTokens !== undefined) {
+            this.config.maxOutputTokens = nextMaxOutputTokens;
+            yield {
+              type: "turn_continued",
+              sessionId: input.sessionId,
+              turnId: input.turnId,
+              reason: "model_error",
+            };
+            continue;
+          }
+        }
+
+        // Phase B: continuation recovery
+        if (maxOutputRecoveryCount < MAX_OUTPUT_RECOVERY_LIMIT) {
+          maxOutputRecoveryCount++;
+          pushTransientSyntheticPrompt(
+            "Output token limit hit. Resume directly - no apology, no recap of what you were doing. "
+              + "Pick up mid-thought if that is where the cut happened. Break remaining work into smaller pieces.",
+            "max_output_recovery",
+          );
+          yield {
+            type: "turn_continued",
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            reason: "model_error",
+          };
+          continue;
+        }
+
+        // Phase C: exhausted. Do not execute repaired/truncated calls; the
+        // arguments may be syntactically repaired while semantically partial.
+        const result = this.createTurnResult(input, {
+          type: "error",
+          stopReason: "model_error",
+          usage,
+          permissionDenials,
+          turns: turnCount,
+          startedAt,
+          finalMessage,
+          structuredOutput,
+          errors: [agentError(
+            "agent_model_error",
+            "Recovered tool call still looked repaired/truncated after max-output recovery was exhausted.",
+          )],
+        });
+        yield { type: "turn_failed", sessionId: input.sessionId, turnId: input.turnId, error: result.errors![0]! };
+        await captureTurn(result.type === "error");
+        yield { type: "turn_completed", sessionId: input.sessionId, turnId: input.turnId, result };
+        return { result, messages };
+      }
+
       messages.push(assembled.message);
       yield { type: "assistant_message", sessionId: input.sessionId, turnId: input.turnId, message: assembled.message };
       await input.onDurableMessage?.(assembled.message);
 
-      const toolCalls = collectToolCalls(assembled.message);
       if (assembled.error) {
         if (toolCalls.length > 0) {
           const projected = projectToolResults(
-            toolCalls.map((call) => createMissingToolResult(call, this.now, "Model error interrupted tool execution.")),
+            toolCalls.map((call) =>
+              createMissingToolResult(
+                call,
+                this.now,
+                "Model error interrupted tool execution.",
+                missingToolResultRecoveryContext(),
+              )
+            ),
           );
           messages.push(...projected);
           yield { type: "tool_results_projected", sessionId: input.sessionId, turnId: input.turnId, message: projected[0]! };
@@ -455,16 +617,12 @@ export class AgentLoop {
           jsonSelfCorrectCount < MAX_JSON_SELF_CORRECT_RETRIES
         ) {
           jsonSelfCorrectCount++;
-          messages.push({
-            role: "user",
-            content: [{
-              type: "text",
-              text: "Your previous tool call contained invalid JSON in the arguments and could not be parsed. "
-                + "Please retry with valid JSON. Common issues: missing quotes around keys/values, "
-                + "trailing commas, unescaped special characters in strings.",
-            }],
-            metadata: { synthetic: true, purpose: "json_self_correct" },
-          });
+          pushTransientSyntheticPrompt(
+            "Your previous tool call contained invalid JSON in the arguments and could not be parsed. "
+              + "Please retry with valid JSON. Common issues: missing quotes around keys/values, "
+              + "trailing commas, unescaped special characters in strings.",
+            "json_self_correct",
+          );
           yield {
             type: "turn_continued",
             sessionId: input.sessionId,
@@ -538,15 +696,11 @@ export class AgentLoop {
           // Phase B
           if (maxOutputRecoveryCount < MAX_OUTPUT_RECOVERY_LIMIT) {
             maxOutputRecoveryCount++;
-            messages.push({
-              role: "user",
-              content: [{
-                type: "text",
-                text: "Output token limit hit. Resume directly — no apology, no recap of what you were doing. "
-                  + "Pick up mid-thought if that is where the cut happened. Break remaining work into smaller pieces.",
-              }],
-              metadata: { synthetic: true, purpose: "max_output_recovery" },
-            });
+            pushTransientSyntheticPrompt(
+              "Output token limit hit. Resume directly - no apology, no recap of what you were doing. "
+                + "Pick up mid-thought if that is where the cut happened. Break remaining work into smaller pieces.",
+              "max_output_recovery",
+            );
             yield {
               type: "turn_continued",
               sessionId: input.sessionId,
@@ -594,15 +748,11 @@ export class AgentLoop {
             if (consecutiveEmptyCount < MAX_CONSECUTIVE_EMPTY
               && maxOutputRecoveryCount < MAX_OUTPUT_RECOVERY_LIMIT) {
               maxOutputRecoveryCount++;
-              messages.push({
-                role: "user",
-                content: [{
-                  type: "text",
-                  text: "Output token limit hit. Resume directly — no apology, no recap of what you were doing. "
-                    + "Pick up mid-sentence if that is where the cut happened.",
-                }],
-                metadata: { synthetic: true, purpose: "max_output_recovery" },
-              });
+              pushTransientSyntheticPrompt(
+                "Output token limit hit. Resume directly - no apology, no recap of what you were doing. "
+                  + "Pick up mid-sentence if that is where the cut happened.",
+                "max_output_recovery",
+              );
               yield {
                 type: "turn_continued",
                 sessionId: input.sessionId,
@@ -635,15 +785,11 @@ export class AgentLoop {
           } else if (!hasAttemptedEmptyRetry) {
             // First occurrence: prompt the model to produce visible output.
             hasAttemptedEmptyRetry = true;
-            messages.push({
-              role: "user",
-              content: [{
-                type: "text",
-                text: "Your previous response was empty (thinking only, no visible text). "
-                  + "Please provide your answer as visible text output.",
-              }],
-              metadata: { synthetic: true, purpose: "empty_response_retry" },
-            });
+            pushTransientSyntheticPrompt(
+              "Your previous response was empty (thinking only, no visible text). "
+                + "Please provide your answer as visible text output.",
+              "empty_response_retry",
+            );
             yield {
               type: "turn_continued",
               sessionId: input.sessionId,
@@ -681,15 +827,11 @@ export class AgentLoop {
           consecutiveEmptyCount = 0;
           if (maxOutputRecoveryCount < MAX_OUTPUT_RECOVERY_LIMIT) {
             maxOutputRecoveryCount++;
-            messages.push({
-              role: "user",
-              content: [{
-                type: "text",
-                text: "Output token limit hit. Resume directly — no apology, no recap of what you were doing. "
-                  + "Pick up mid-sentence if that is where the cut happened.",
-              }],
-              metadata: { synthetic: true, purpose: "max_output_recovery" },
-            });
+            pushTransientSyntheticPrompt(
+              "Output token limit hit. Resume directly - no apology, no recap of what you were doing. "
+                + "Pick up mid-sentence if that is where the cut happened.",
+              "max_output_recovery",
+            );
             yield {
               type: "turn_continued",
               sessionId: input.sessionId,
@@ -769,72 +911,6 @@ export class AgentLoop {
         yield { type: "turn_completed", sessionId: input.sessionId, turnId: input.turnId, result };
         return { result, messages };
       }
-      // When jsonrepair silently "fixed" truncated JSON and the response
-      // was cut by max_tokens, the tool call arguments are likely incomplete
-      // (e.g. half-written file content). Apply the same recovery as
-      // max_output_reached: token doubling → continuation prompt → give up.
-      if (assembled.hasRepairedToolCalls && (assembled.finishReason === "length" || assembled.finishReason === "tool_call" || assembled.finishReason === "stop")) {
-        console.warn(
-          `[AgentLoop] Blocking ${toolCalls.length} repaired-but-truncated tool call(s) — entering max_output recovery`,
-        );
-
-        const largeFileDecision = largeFileRepair.recoverFromRepairedTruncation(toolCalls);
-        if (largeFileDecision) {
-          const continued = await continueWithSyntheticPrompt(largeFileDecision);
-          if (continued.type === "completed") {
-            yield { type: "turn_failed", sessionId: input.sessionId, turnId: input.turnId, error: continued.result.errors![0]! };
-            await captureTurn(continued.result.type === "error");
-            yield { type: "turn_completed", sessionId: input.sessionId, turnId: input.turnId, result: continued.result };
-            return { result: continued.result, messages };
-          }
-          yield continued.event;
-          continue;
-        }
-
-        // Phase A: token doubling (if not yet attempted)
-        if (!hasAttemptedOutputRetry) {
-          hasAttemptedOutputRetry = true;
-          const nextMaxOutputTokens = resolveOutputTokenRetryBump({
-            currentMaxOutputTokens: this.config.maxOutputTokens,
-            modelMaxOutputTokens: routedMaxOutputTokens,
-          });
-          if (nextMaxOutputTokens !== undefined) {
-            messages = stripTrailingErrorPair(messages);
-            this.config.maxOutputTokens = nextMaxOutputTokens;
-            yield {
-              type: "turn_continued",
-              sessionId: input.sessionId,
-              turnId: input.turnId,
-              reason: "model_error",
-            };
-            continue;
-          }
-        }
-
-        // Phase B: continuation recovery
-        if (maxOutputRecoveryCount < MAX_OUTPUT_RECOVERY_LIMIT) {
-          maxOutputRecoveryCount++;
-          messages.push({
-            role: "user",
-            content: [{
-              type: "text",
-              text: "Output token limit hit. Resume directly — no apology, no recap of what you were doing. "
-                + "Pick up mid-thought if that is where the cut happened. Break remaining work into smaller pieces.",
-            }],
-            metadata: { synthetic: true, purpose: "max_output_recovery" },
-          });
-          yield {
-            type: "turn_continued",
-            sessionId: input.sessionId,
-            turnId: input.turnId,
-            reason: "model_error",
-          };
-          continue;
-        }
-
-        // Phase C: exhausted — let tool execution proceed with
-        // outputTruncated=true so formatValidationError can provide hints.
-      }
 
       let results: PilotDeckToolResult[];
       try {
@@ -849,7 +925,12 @@ export class AgentLoop {
         );
       } catch (error) {
         results = toolCalls.map((call) =>
-          createMissingToolResult(call, this.now, error instanceof Error ? error.message : String(error)),
+          createMissingToolResult(
+            call,
+            this.now,
+            error instanceof Error ? error.message : String(error),
+            missingToolResultRecoveryContext(),
+          ),
         );
       }
       if (input.abortSignal?.aborted) {
@@ -868,7 +949,19 @@ export class AgentLoop {
       }
       yield* this.drainEventBuffer();
 
-      const pairedResults = ensureToolResultPairing(toolCalls, results, this.now);
+      let pairedResults = ensureToolResultPairing(
+        toolCalls,
+        results,
+        this.now,
+        "Tool execution did not produce a result.",
+        missingToolResultRecoveryContext(),
+      );
+      const repeatedFailure = detectRepeatedToolFailure(
+        pairedResults,
+        lastToolFailureFingerprint,
+      );
+      pairedResults = annotateRepeatedToolFailures(pairedResults, repeatedFailure.repeatedKeys);
+      lastToolFailureFingerprint = repeatedFailure.currentFingerprint;
       const toolResultRepair = largeFileRepair.analyzeToolResults(pairedResults, {
         outputTruncated: assembled.finishReason === "length" || assembled.hasRepairedToolCalls === true,
         repairedToolCalls: assembled.hasRepairedToolCalls === true,
@@ -1009,6 +1102,9 @@ export class AgentLoop {
         }
       } else {
         consecutiveAllInvalidTurns = 0;
+        if (!pairedResults.some((r) => r.type === "error")) {
+          lastToolFailureFingerprint = undefined;
+        }
         maxOutputRecoveryCount = 0;
         consecutiveEmptyCount = 0;
         hasAttemptedOutputRetry = false;
@@ -1104,6 +1200,7 @@ export class AgentLoop {
         (tool) => tool.name !== "enter_plan_mode" && tool.name !== "exit_plan_mode",
       );
     }
+    const requestMessages = normalizeMessagesForModelRequest(messages);
     const prepared = await contextRuntime.prepareForModel({
       sessionId: input.sessionId,
       turnId: input.turnId,
@@ -1112,7 +1209,7 @@ export class AgentLoop {
       model: this.config.model,
       permissionMode: this.config.permissionMode,
       additionalWorkingDirectories: this.config.permissionContext.additionalWorkingDirectories,
-      messages: cloneMessages(messages),
+      messages: cloneMessages(requestMessages),
       tools,
       maxMessages: this.config.maxContextMessages,
       customSystemPrompt: this.config.systemPrompt,
@@ -1180,6 +1277,7 @@ export class AgentLoop {
       cwd: this.config.cwd,
       abortSignal: input.abortSignal,
       subagentTimeoutMs: this.config.subagentTimeoutMs,
+      toolAliases: this.config.toolAliases,
       permissionMode: this.config.permissionMode,
       permissionContext,
       auditRecorder: this.dependencies.auditRecorder,
@@ -1648,6 +1746,20 @@ function subagentIdFromSessionId(sessionId: string): string | undefined {
   return subagentId.length > 0 ? subagentId : undefined;
 }
 
+function buildPartialTextToolCallRecoveryPrompt(
+  partial: PartialTextToolCallInfo | undefined,
+): string {
+  const evidence = partial
+    ? `Detected partial text tool-call syntax (${partial.format}/${partial.reason}). Preview: ${partial.preview}`
+    : "Detected partial text tool-call syntax.";
+  return [
+    "The previous response contained partial tool-call XML/text and could not be safely executed.",
+    evidence,
+    "Resend the complete intended tool call with all required parameters, or continue in visible text if no tool is needed.",
+    "Do not repeat dangling XML/tool-call fragments.",
+  ].join("\n");
+}
+
 /** Keep only the trailing `keepRatio` portion of the message history. */
 function truncateHeadKeepRatio(messages: CanonicalMessage[], keepRatio: number): CanonicalMessage[] {
   const ratio = Math.max(0.05, Math.min(1, keepRatio));
@@ -1702,6 +1814,178 @@ function stripImagesFromMessages(messages: CanonicalMessage[]): CanonicalMessage
     });
     return { ...msg, content: newContent };
   });
+}
+
+function removeTransientPromptsById(
+  messages: CanonicalMessage[],
+  transientIds: Set<string>,
+): CanonicalMessage[] {
+  return messages.filter((message) => {
+    const transientId = message.metadata?.transientId;
+    return !(
+      message.role === "user" &&
+      message.metadata?.transient === true &&
+      typeof transientId === "string" &&
+      transientIds.has(transientId)
+    );
+  });
+}
+
+function normalizeMessagesForModelRequest(messages: CanonicalMessage[]): CanonicalMessage[] {
+  const out: CanonicalMessage[] = [];
+  for (const message of messages) {
+    const last = out[out.length - 1];
+    if (
+      last?.role === "assistant" &&
+      message.role === "assistant" &&
+      canMergeAssistantMessages(last, message)
+    ) {
+      out[out.length - 1] = {
+        role: "assistant",
+        content: [...last.content, ...message.content],
+        metadata: mergeMessageMetadata(last.metadata, message.metadata),
+      };
+      continue;
+    }
+    out.push(message);
+  }
+  return out;
+}
+
+function canMergeAssistantMessages(first: CanonicalMessage, second: CanonicalMessage): boolean {
+  return !hasToolCallBlock(first) && !hasToolCallBlock(second);
+}
+
+function hasToolCallBlock(message: CanonicalMessage): boolean {
+  return message.content.some((block) => block.type === "tool_call");
+}
+
+function mergeMessageMetadata(
+  first: CanonicalMessage["metadata"],
+  second: CanonicalMessage["metadata"],
+): CanonicalMessage["metadata"] {
+  if (!first && !second) {
+    return undefined;
+  }
+  return {
+    ...(first ?? {}),
+    ...(second ?? {}),
+  };
+}
+
+function detectRepeatedToolFailure(
+  results: PilotDeckToolResult[],
+  lastFingerprint: string | undefined,
+): {
+  currentFingerprint?: string;
+  repeatedKeys: Set<string>;
+} {
+  const keys = buildToolFailureKeys(results);
+  const fingerprint = keys.length > 0 ? keys.join("\n") : undefined;
+  const repeatedKeys = findRepeatedValues(keys);
+  if (fingerprint && fingerprint === lastFingerprint) {
+    for (const key of keys) {
+      repeatedKeys.add(key);
+    }
+  }
+  if (!fingerprint) {
+    return { repeatedKeys };
+  }
+  return {
+    currentFingerprint: fingerprint,
+    repeatedKeys,
+  };
+}
+
+function buildToolFailureKeys(results: PilotDeckToolResult[]): string[] {
+  return results
+    .filter((result): result is PilotDeckToolErrorResult => result.type === "error")
+    .map((result) => {
+      const recovery = readRecoveryMetadata(result);
+      return toolFailureKey(result, recovery);
+    })
+    .sort();
+}
+
+function annotateRepeatedToolFailures(
+  results: PilotDeckToolResult[],
+  repeatedKeys: Set<string>,
+): PilotDeckToolResult[] {
+  if (repeatedKeys.size === 0) {
+    return results;
+  }
+
+  return results.map((result) => {
+    if (result.type !== "error") {
+      return result;
+    }
+    const recovery = readRecoveryMetadata(result);
+    if (!repeatedKeys.has(toolFailureKey(result, recovery))) {
+      return result;
+    }
+    const avoidRetryReason = typeof recovery?.avoidRetryReason === "string"
+      ? recovery.avoidRetryReason
+      : "The same tool, error code, and recovery class repeated. Retrying unchanged is likely to fail again.";
+    const repeatedText =
+      `\n\nRepeated failure: ${avoidRetryReason}\n` +
+      "Change at least one of the tool, parameters, path, scope, permission path, or explain the blocker in text.";
+    return {
+      ...result,
+      content: appendTextToFirstContent(result.content, repeatedText),
+      metadata: {
+        ...(result.metadata ?? {}),
+        recovery: recovery
+          ? {
+              ...recovery,
+              avoidRetryReason,
+              repeatedFailure: true,
+            }
+          : {
+              avoidRetryReason,
+              repeatedFailure: true,
+            },
+      },
+    };
+  });
+}
+
+function toolFailureKey(
+  result: PilotDeckToolErrorResult,
+  recovery: Record<string, unknown> | undefined,
+): string {
+  return `${result.toolName}::${result.error.code}::${recovery?.failureClass ?? "unknown"}`;
+}
+
+function findRepeatedValues(values: string[]): Set<string> {
+  const seen = new Set<string>();
+  const repeated = new Set<string>();
+  for (const value of values) {
+    if (seen.has(value)) {
+      repeated.add(value);
+    } else {
+      seen.add(value);
+    }
+  }
+  return repeated;
+}
+
+function appendTextToFirstContent(
+  content: PilotDeckToolErrorResult["content"],
+  suffix: string,
+): PilotDeckToolErrorResult["content"] {
+  const [first, ...rest] = content;
+  if (!first) {
+    return [{ type: "text", text: suffix.trimStart() }];
+  }
+  if (first.type !== "text") {
+    return [{ type: "text", text: suffix.trimStart() }, first, ...rest];
+  }
+  return [{ ...first, text: `${first.text}${suffix}` }, ...rest];
+}
+
+function readRecoveryMetadata(result: PilotDeckToolErrorResult): Record<string, unknown> | undefined {
+  const recovery = result.metadata?.recovery;
+  return isRecord(recovery) ? recovery : undefined;
 }
 
 function collectPermissionDenials(results: PilotDeckToolResult[]): AgentPermissionDenial[] {

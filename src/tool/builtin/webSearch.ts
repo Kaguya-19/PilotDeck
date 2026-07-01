@@ -87,6 +87,7 @@ export function createWebSearchTool(
 - Takes a search query and optional country code (\`gl\`) as input
 - Returns structured search data including organic results and, when available, answer box content
 - Use this tool for current events, recent documentation, and information beyond the model's knowledge cutoff
+- Use this tool when API/SDK/framework usage is unknown, version-sensitive, or likely changed since training. Search with package/service name, version, framework, and the specific method/option/error.
 
 Usage notes:
   - Configure \`tools.webSearch.provider\` as \`glm\`, \`tavily\`, or \`custom\` in \`pilotdeck.yaml\`

@@ -22,6 +22,8 @@ import { formatValidationError } from "./formatValidationError.js";
 import { normalizeToolError } from "../protocol/errors.js";
 import type { AgentEventEmitter } from "../../agent/protocol/events.js";
 import { requiresPromptCapability } from "../userInteractionConstraints.js";
+import { buildToolErrorRecovery } from "./errorRecovery.js";
+import { repairToolName } from "./repairToolName.js";
 
 export class ToolRuntime {
   constructor(
@@ -35,7 +37,13 @@ export class ToolRuntime {
     context = withPlanDirectoryWorkspaceRoot(context);
     const startedAtDate = now(context);
     const startedAt = startedAtDate.toISOString();
-    const tool = this.registry.get(call.name);
+    let tool = this.registry.get(call.name);
+    if (!tool) {
+      const repaired = repairToolName(call.name, this.registry.list(), context.toolAliases);
+      if (repaired) {
+        tool = this.registry.get(repaired.name);
+      }
+    }
     const toolName = tool?.name ?? call.name;
 
     if (context.abortSignal?.aborted) {
@@ -271,9 +279,7 @@ export class ToolRuntime {
         isInterrupt: normalized.code === "tool_aborted",
       });
       this.eventEmitter?.({ type: "post_tool_execute", sessionId: context.sessionId, turnId: context.turnId, toolCallId: call.id, toolName: tool.name, success: false });
-      const result = this.createErrorResult(call.id, tool.name, normalized.code, normalized.message, startedAt, context, {
-        details: normalized.details,
-      });
+      const result = this.createErrorResult(call.id, tool.name, normalized.code, normalized.message, startedAt, context, normalized.details);
       await this.recordToolAudit(result, context, startedAtDate);
       return result;
     }
@@ -304,12 +310,23 @@ export class ToolRuntime {
     details?: Record<string, unknown>,
   ): PilotDeckToolErrorResult {
     const completedAt = now(context).toISOString();
+    const recovery = buildToolErrorRecovery({
+      code,
+      toolName,
+      message,
+      cwd: context.cwd,
+      permissionMode: context.permissionMode,
+      details,
+    });
     return {
       type: "error",
       toolCallId,
       toolName,
       error: toolError(code, message, details),
-      content: [{ type: "text", text: message }],
+      content: [{ type: "text", text: recovery.message }],
+      metadata: {
+        recovery: recovery.advice,
+      },
       startedAt,
       completedAt,
     };

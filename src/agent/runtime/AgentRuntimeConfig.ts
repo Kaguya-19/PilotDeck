@@ -12,6 +12,8 @@ export type AgentRuntimeConfig = {
   temperature?: number;
   thinking?: CanonicalThinkingConfig;
   toolChoice?: CanonicalToolChoice;
+  /** Optional model/provider-specific aliases for emitted tool names. */
+  toolAliases?: Record<string, string>;
   maxContextMessages?: number;
   stopOnStructuredOutput?: boolean;
   permissionMode: PermissionMode;

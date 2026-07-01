@@ -19,6 +19,7 @@ import {
   upgradeHttpToHttps,
   validateURL,
 } from "./urlValidation.js";
+import { parseRetryAfterHeader } from "../../../model/index.js";
 
 export const MAX_HTTP_CONTENT_LENGTH = 10 * 1024 * 1024;
 export const FETCH_TIMEOUT_MS = 60_000;
@@ -33,6 +34,38 @@ export type RedirectInfo = {
   redirectUrl: string;
   statusCode: number;
 };
+
+export type WebFetchHttpErrorOptions = {
+  url: string;
+  status: number;
+  statusText: string;
+  contentType?: string;
+  retryAfterMs?: number;
+  bodyPreview?: string;
+};
+
+export class WebFetchHttpError extends Error {
+  readonly url: string;
+  readonly status: number;
+  readonly statusText: string;
+  readonly contentType?: string;
+  readonly retryAfterMs?: number;
+  readonly bodyPreview?: string;
+
+  constructor(options: WebFetchHttpErrorOptions) {
+    const statusLabel = options.statusText
+      ? `${options.status} ${options.statusText}`
+      : String(options.status);
+    super(`HTTP ${statusLabel} while fetching ${options.url}.`);
+    this.name = "WebFetchHttpError";
+    this.url = options.url;
+    this.status = options.status;
+    this.statusText = options.statusText;
+    this.contentType = options.contentType;
+    this.retryAfterMs = options.retryAfterMs;
+    this.bodyPreview = options.bodyPreview;
+  }
+}
 
 type FetchedHttpRaw = {
   status: number;
@@ -187,6 +220,34 @@ function isBinaryContentType(contentType: string): boolean {
   );
 }
 
+function readHeader(headers: Record<string, string>, name: string): string | undefined {
+  const lowerName = name.toLowerCase();
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() === lowerName) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function buildBodyPreview(buffer: Buffer, contentType: string): string | undefined {
+  if (buffer.length === 0) {
+    return undefined;
+  }
+  if (isBinaryContentType(contentType)) {
+    return `[Binary ${contentType || "application/octet-stream"} response body (${buffer.length} bytes) omitted]`;
+  }
+  const preview = buffer
+    .toString("utf-8")
+    .replace(/\u0000/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (preview.length === 0) {
+    return undefined;
+  }
+  return preview.length > 500 ? `${preview.slice(0, 497).trimEnd()}...` : preview;
+}
+
 export async function getURLMarkdownContent(
   url: string,
   signal: AbortSignal,
@@ -209,6 +270,17 @@ export async function getURLMarkdownContent(
   const { status, statusText, headers, buffer } = result;
   const contentType = headers["content-type"] ?? "";
   const bytes = buffer.length;
+
+  if (status < 200 || status >= 300) {
+    throw new WebFetchHttpError({
+      url: upgraded,
+      status,
+      statusText,
+      contentType,
+      retryAfterMs: parseRetryAfterHeader(readHeader(headers, "retry-after")),
+      bodyPreview: buildBodyPreview(buffer, contentType),
+    });
+  }
 
   let content: string;
   let contentBytes: number;

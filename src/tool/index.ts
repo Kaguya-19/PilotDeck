@@ -78,6 +78,9 @@ export {
 export { createWriteFileTool, type WriteFileInput, type WriteFileOutput } from "./builtin/writeFile.js";
 export {
   createBashTool,
+  type BashOutput,
+  type BashOutputAssertions,
+  type BashOutputState,
   type BashInput,
   type CreateBashToolOptions,
   type PilotDeckCommandOptions,
@@ -128,9 +131,11 @@ export {
   MAX_MARKDOWN_LENGTH,
   MAX_REDIRECTS,
   truncateMarkdown,
+  WebFetchHttpError,
   WEB_FETCH_USER_AGENT,
   type FetchHook,
   type RedirectInfo,
+  type WebFetchHttpErrorOptions,
   type WebFetchHttpResult,
 } from "./builtin/web/urlFetcher.js";
 export {

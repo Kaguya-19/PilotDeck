@@ -19,6 +19,7 @@ const MAX_TRUNCATION_RECOVERIES = 10;
 const LARGE_FILE_OUTPUT_RETRY_TOKENS = 16_384;
 const FILE_WRITE_TOOLS = new Set(["write_file", "edit_file"]);
 const FILE_READ_TOOLS = new Set(["read_file", "grep", "glob"]);
+const INTERNAL_RECOVERY_HINT = "INTERNAL RECOVERY HINT - not a user request. Continue the original task.";
 
 export class LargeFileRepair {
   private preDraftAttempts = 0;
@@ -167,49 +168,47 @@ function preDraftPrompt(attempt: number): string {
   const lastAttempt = attempt >= MAX_PRE_DRAFT_REPAIR_ATTEMPTS;
   const maxLines = attempt <= 2 ? 80 : attempt <= 4 ? 40 : 20;
   return [
-    `[CRITICAL] Your previous ${attempt} attempt(s) to write a file FAILED because your output was too long and got truncated.`,
-    `You MUST write a VERY SHORT file this time — absolutely no more than ${maxLines} lines of code.`,
+    INTERNAL_RECOVERY_HINT,
     "",
-    "MANDATORY RULES:",
-    `1. The write_file content MUST be under ${maxLines} lines. This is a hard limit.`,
-    "2. You MUST provide BOTH required parameters: file_path (string) and content (string).",
-    "3. Write a minimal but structurally valid skeleton:",
-    "   - For HTML: doctype + head + minimal style + body with ONE section + closing tags.",
-    "   - For code: imports + ONE class/function stub + exports.",
-    "   - For prose: title + first paragraph + a <!-- CONTINUE HERE --> marker.",
-    "4. After the file is created, you will extend it incrementally in later turns using edit_file.",
-    "5. Do NOT try to write the complete content. Write only a skeleton/stub now.",
+    `The previous file write/edit attempt appears incomplete or invalid, likely because the model output was truncated. Recovery attempt ${attempt}/${MAX_PRE_DRAFT_REPAIR_ATTEMPTS}.`,
+    `Use one small direct file tool call. Keep write_file content under ${maxLines} lines.`,
     "",
-    "EXACT TOOL CALL FORMAT — follow this precisely:",
-    'write_file({ "file_path": "output.html", "content": "<!DOCTYPE html>\\n<html>\\n<head><title>Draft</title></head>\\n<body>\\n<h1>Draft</h1>\\n<!-- CONTINUE HERE -->\\n</body>\\n</html>" })',
+    "Recovery guidance:",
+    "1. Continue the original task; do not treat this hint as a new user request.",
+    "2. Provide the required tool parameters such as file_path and content.",
+    "3. Create a minimal structurally valid skeleton first:",
+    "   - HTML: doctype, head, minimal style, body with one section, closing tags.",
+    "   - Code: imports, one function/class stub, exports if needed.",
+    "   - Prose/report: title, first paragraph, and a clear continuation marker.",
+    "4. After a file exists, extend it incrementally with focused edit_file calls.",
+    "5. Do not attempt to generate the complete artifact in one oversized call.",
     "",
-    "Do not use shell commands, heredocs, or echo. Call write_file directly with a short content string.",
-    lastAttempt ? "⚠️ FINAL ATTEMPT: Write the absolute minimum viable file — even just 10 lines is fine. Any valid file is better than no file." : "",
+    "Prefer write_file for the initial skeleton. Avoid shell heredocs or echo for this recovery step.",
+    lastAttempt ? "Final recovery attempt: write the smallest viable skeleton, even if it only establishes the file structure." : "",
   ].filter(Boolean).join("\n");
 }
 
 function postDraftPrompt(filePaths: string[], attempt: number): string {
   const fileText = filePaths.length > 0
-    ? `Known written file(s): ${filePaths.join(", ")}.`
-    : "A workspace file has already been written.";
+    ? `Recent file path context for orientation only: ${filePaths.join(", ")}.`
+    : "A workspace draft already exists.";
   const lastAttempt = attempt >= MAX_POST_DRAFT_REPAIR_ATTEMPTS;
   return [
+    INTERNAL_RECOVERY_HINT,
+    "",
     fileText,
     "",
-    `[IMPORTANT] This is post-draft repair attempt ${attempt}/${MAX_POST_DRAFT_REPAIR_ATTEMPTS}. Add ONE small section at a time (under 60 lines per call).`,
+    `Post-draft recovery attempt ${attempt}/${MAX_POST_DRAFT_REPAIR_ATTEMPTS}: continue the original task from the current workspace state.`,
     "",
-    "Steps:",
-    "1. First call read_file to see the current file content.",
-    "2. Then use edit_file to insert or append ONE section (e.g. one component, one function, one CSS block).",
-    "3. Do NOT rewrite the entire file. Only add the next missing piece.",
-    "4. Keep each edit under 60 lines of new content.",
-    "5. When the file meets the requirements, stop and report the file path.",
+    "Recovery guidance:",
+    "1. If current content matters, inspect the file first with read_file.",
+    "2. Add or replace one small section at a time with edit_file; keep new content under 60 lines.",
+    "3. Do not rewrite the whole file or regenerate from scratch.",
+    "4. If you just wrote a script or generator, run it and verify the produced output before asking for clarification.",
+    "5. Ask the user only for a real blocker that cannot be resolved from the workspace or the original task.",
     "",
-    "EXACT edit_file CALL FORMAT — follow this precisely:",
-    'edit_file({ "file_path": "<path>", "old_string": "<!-- CONTINUE HERE -->", "new_string": "<nav>...</nav>\\n<!-- CONTINUE HERE -->" })',
-    "",
-    "Do not regenerate from scratch. Do not overwrite existing content unless you have just read it.",
-    lastAttempt ? "⚠️ FINAL ATTEMPT: Make one focused edit or report the current file path and what remains to be done." : "",
+    "Use a focused edit_file replacement or insertion point such as a continuation marker when available.",
+    lastAttempt ? "Final recovery attempt: make one focused edit, run/verify if applicable, or explain the concrete blocker." : "",
   ].filter(Boolean).join("\n");
 }
 

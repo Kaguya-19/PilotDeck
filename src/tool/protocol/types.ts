@@ -185,6 +185,11 @@ export type PilotDeckToolRuntimeContext = {
   subagentTimeoutMs?: number;
   /** The tool call ID assigned by the model for the current invocation. */
   currentToolCallId?: string;
+  /**
+   * Optional model/provider-specific aliases for emitted tool names. These are
+   * used only when the emitted name is not already registered.
+   */
+  toolAliases?: Record<string, string>;
   permissionMode: PermissionMode;
   permissionContext: PermissionContext;
   auditRecorder?: PilotDeckToolAuditRecorder;

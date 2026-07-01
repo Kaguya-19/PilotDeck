@@ -229,6 +229,7 @@ function buildAgentToolDescription(): string {
     "The subagent returns one structured report with these sections: `Scope`, `Result`, `Key files`, `Files changed`, and `Issues`.",
     "",
     "Runtime behavior:",
+    "- Multiple independent agent calls in one assistant message may run concurrently; batch sibling investigations when their scopes do not depend on each other.",
     "- Inside the AgentLoop, this runs a real forked subagent with its own scoped tool loop.",
     "- In stand-alone runtimes and some tests, it falls back to a single model call that preserves the same high-level subagent intent.",
   ].join("\n");

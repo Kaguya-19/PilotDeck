@@ -164,6 +164,17 @@ string. Therefore:
 - Ask the sub-agent to echo back key facts in its final reply (file paths, byte counts,
   section headings) so you can verify without re-reading.
 
+## Optional parallel delegation
+
+Parallelism is useful but not mandatory. When two or more sub-tasks are independent
+siblings — for example inspecting separate files/modules, checking several artifacts,
+researching unrelated APIs, or comparing alternatives — you may launch multiple
+\`agent\` calls in the same assistant reply so they can run concurrently. Keep steps
+serial when one sub-task depends on another sub-agent's output, writes could conflict,
+ordering matters, or user approval is needed between steps. If you parallelize, give
+each sub-agent a distinct scope and self-contained prompt, then synthesize all sibling
+reports yourself before deciding the next step.
+
 ## Workflow
 
 1. **Check for relevant skills first.** If the system prompt contains \`<available-skills>\`,
@@ -171,10 +182,11 @@ string. Therefore:
    in the name — they contain ready-to-use sub-agent prompt templates. Use these
    templates **verbatim** instead of writing your own prompts from scratch.
 2. **Plan in 1-4 atomic steps.** Prefer FEWER, larger steps — each \`agent\` call has
-   overhead. One capable sub-agent doing five things beats five sub-agents doing one
-   thing each.
-3. **Spawn the first execution sub-agent in the SAME reply as your plan.** A plan-only
-   reply with no tool call wastes a turn.
+   overhead. One capable sub-agent doing cohesive work beats five sub-agents doing one
+   tiny thing each. Split into sibling sub-agents only when their scopes are independent.
+3. **Spawn execution sub-agent(s) in the SAME reply as your plan.** A plan-only
+   reply with no tool call wastes a turn. If independent sibling steps are ready, batch
+   those \`agent\` calls together; otherwise start only the first dependent step.
 4. **Inspect** the sub-agent's returned report. Decide: accept / re-spawn with stricter
    instructions / move to the next step.
 5. **Final reply**: short summary pointing to deliverable file paths.

@@ -9,7 +9,11 @@ import type {
   CanonicalUsage,
 } from "../protocol/canonical.js";
 import type { CanonicalModelError } from "../protocol/errors.js";
-import { extractTextToolCalls } from "./parseTextToolCalls.js";
+import {
+  extractTextToolCalls,
+  hasTextToolCallSyntax,
+  type PartialTextToolCallInfo,
+} from "./parseTextToolCalls.js";
 
 export type ModelMessageAssemblerState = {
   content: CanonicalContentBlock[];
@@ -21,6 +25,9 @@ export type ModelMessageAssemblerState = {
   error?: CanonicalModelError;
   toolCalls: CanonicalToolCall[];
   hasRepairedToolCalls?: boolean;
+  hasPartialTextToolCall?: boolean;
+  partialTextToolCall?: PartialTextToolCallInfo;
+  hasTextFallbackToolCalls?: boolean;
 };
 
 export type AssembledAssistantMessage = {
@@ -30,6 +37,9 @@ export type AssembledAssistantMessage = {
   toolCalls: CanonicalToolCall[];
   error?: CanonicalModelError;
   hasRepairedToolCalls?: boolean;
+  hasPartialTextToolCall?: boolean;
+  partialTextToolCall?: PartialTextToolCallInfo;
+  hasTextFallbackToolCalls?: boolean;
 };
 
 export function createModelMessageAssemblerState(): ModelMessageAssemblerState {
@@ -92,13 +102,18 @@ export function assembleAssistantMessage(state: ModelMessageAssemblerState): Ass
 
   if (state.toolCalls.length === 0) {
     const textIdx = state.content.findIndex(
-      (b): b is CanonicalTextBlock => b.type === "text" && hasTextToolCallMarker(b.text),
+      (b): b is CanonicalTextBlock => b.type === "text" && hasTextToolCallSyntax(b.text),
     );
     if (textIdx >= 0) {
       const textBlock = state.content[textIdx] as CanonicalTextBlock;
-      const { toolCalls, remainingText } = extractTextToolCalls(textBlock.text);
+      const { toolCalls, remainingText, partialToolCall } = extractTextToolCalls(textBlock.text);
+      if (partialToolCall) {
+        state.hasPartialTextToolCall = true;
+        state.partialTextToolCall = partialToolCall;
+      }
       if (toolCalls.length > 0) {
         console.log(`[text-tool-call-fallback] Extracted ${toolCalls.length} tool call(s) from assistant text`);
+        state.hasTextFallbackToolCalls = true;
         if (remainingText.length > 0) {
           (state.content[textIdx] as CanonicalTextBlock).text = remainingText;
         } else {
@@ -124,6 +139,9 @@ export function assembleAssistantMessage(state: ModelMessageAssemblerState): Ass
     toolCalls: [...state.toolCalls],
     error: state.error,
     hasRepairedToolCalls: state.hasRepairedToolCalls,
+    hasPartialTextToolCall: state.hasPartialTextToolCall,
+    partialTextToolCall: state.partialTextToolCall,
+    hasTextFallbackToolCalls: state.hasTextFallbackToolCalls,
   };
 }
 
@@ -154,18 +172,6 @@ function nextToolCallId(rawId: string | undefined, index: number, used: Set<stri
     const candidate = `${base}_${suffix}`;
     if (!used.has(candidate)) return candidate;
   }
-}
-
-const TEXT_TOOL_CALL_MARKERS = [
-  "<function=",
-  "<tool_call>",
-  "\uff5cDSML\uff5c",
-  "[TOOL_CALLS]",
-  "<|python_tag|>",
-];
-
-function hasTextToolCallMarker(text: string): boolean {
-  return TEXT_TOOL_CALL_MARKERS.some((m) => text.includes(m));
 }
 
 function flushTextBuffers(state: ModelMessageAssemblerState): void {

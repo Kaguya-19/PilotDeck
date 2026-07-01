@@ -3,6 +3,14 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { spawn, exec, execFile } from 'child_process';
 import { promisify } from 'util';
+import {
+  cancelDesktopUpdateDownload,
+  getDesktopDownloadStatus,
+  getDesktopUpdateStatus,
+  launchDownloadedDesktopUpdate,
+  listDesktopReleases,
+  startDesktopUpdateDownload,
+} from '../services/desktopUpdateService.js';
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -63,6 +71,12 @@ function unavailableUpdateCheck(res, {
  * Check if there are updates available (git fetch + compare HEAD)
  */
 router.post('/check', async (req, res) => {
+  if (req.body?.scope === 'desktop' || req.query.scope === 'desktop') {
+    const force = req.body?.force === true || req.query.force === '1';
+    const status = await getDesktopUpdateStatus({ force });
+    return res.json(toLegacyCompatibleDesktopStatus(status));
+  }
+
   try {
     let currentBranch = 'unknown';
     let localHead = '';
@@ -169,6 +183,99 @@ router.post('/check', async (req, res) => {
   } catch (error) {
     return unavailableUpdateCheck(res, {
       message: `Failed to check for updates: ${error.message}`,
+    });
+  }
+});
+
+/**
+ * GET /api/update/desktop/status
+ * Return desktop-app version status backed by GitHub Releases.
+ */
+router.get('/desktop/status', async (req, res) => {
+  const force = req.query.force === '1' || req.query.force === 'true';
+  const status = await getDesktopUpdateStatus({ force });
+  res.json(status);
+});
+
+/**
+ * POST /api/update/desktop/check
+ * Force-check the latest desktop release.
+ */
+router.post('/desktop/check', async (_req, res) => {
+  const status = await getDesktopUpdateStatus({ force: true });
+  res.json(status);
+});
+
+/**
+ * GET /api/update/desktop/releases
+ * Return recent GitHub Release notes for the desktop About page.
+ */
+router.get('/desktop/releases', async (req, res) => {
+  try {
+    const limit = req.query.limit;
+    const includePrerelease = req.query.includePrerelease === undefined
+      ? undefined
+      : req.query.includePrerelease === '1' || req.query.includePrerelease === 'true';
+    const payload = await listDesktopReleases({ limit, includePrerelease });
+    res.json(payload);
+  } catch (error) {
+    res.status(502).json({
+      error: 'Failed to fetch desktop releases',
+      message: error.message,
+    });
+  }
+});
+
+/**
+ * POST /api/update/desktop/download
+ * Start downloading the selected desktop installer asset.
+ */
+router.post('/desktop/download', async (req, res) => {
+  try {
+    const download = await startDesktopUpdateDownload({
+      force: req.body?.force === true,
+      assetId: req.body?.assetId,
+      assetName: req.body?.assetName,
+      platform: req.body?.platform,
+      arch: req.body?.arch,
+    });
+    res.status(202).json({ success: true, download });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      error: 'Failed to start desktop update download',
+      message: error.message,
+    });
+  }
+});
+
+/**
+ * GET /api/update/desktop/download/status
+ * Poll desktop installer download progress.
+ */
+router.get('/desktop/download/status', (_req, res) => {
+  res.json({ download: getDesktopDownloadStatus() });
+});
+
+/**
+ * POST /api/update/desktop/download/cancel
+ * Cancel an in-flight desktop installer download.
+ */
+router.post('/desktop/download/cancel', (_req, res) => {
+  res.json(cancelDesktopUpdateDownload());
+});
+
+/**
+ * POST /api/update/desktop/install
+ * Launch the downloaded installer through the OS shell.
+ */
+router.post('/desktop/install', (req, res) => {
+  try {
+    const result = launchDownloadedDesktopUpdate({ filePath: req.body?.filePath });
+    res.json({ success: true, ...result });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      error: 'Failed to launch desktop update installer',
+      message: error.message,
     });
   }
 });
@@ -308,7 +415,24 @@ router.get('/status', (req, res) => {
   res.json({
     updateInProgress,
     lastUpdateResult,
+    desktopDownload: getDesktopDownloadStatus(),
   });
 });
+
+function toLegacyCompatibleDesktopStatus(status) {
+  const releaseSummary = status.latest
+    ? [status.latest.tagName, status.latest.name].filter(Boolean).join(' ')
+    : '';
+  return {
+    ...status,
+    currentBranch: 'desktop',
+    localHead: status.current?.version || 'unknown',
+    remoteHead: status.latest?.version || '',
+    behindCount: status.hasUpdate ? 1 : 0,
+    newCommits: releaseSummary ? [releaseSummary] : [],
+    currentCommit: status.current?.commit || '',
+    hasUpdate: status.hasUpdate,
+  };
+}
 
 export default router;

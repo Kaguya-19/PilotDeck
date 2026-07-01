@@ -18,6 +18,13 @@ export {
   type StreamNormalizerState,
 } from "./streaming/normalizeStreamEvent.js";
 export {
+  extractTextToolCalls,
+  hasTextToolCallSyntax,
+  type PartialTextToolCallFormat,
+  type PartialTextToolCallInfo,
+  type TextToolCallParseResult,
+} from "./streaming/parseTextToolCalls.js";
+export {
   applyModelEventToAssembler,
   assembleAssistantMessage,
   createModelMessageAssemblerState,

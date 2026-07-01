@@ -11,4 +11,26 @@ describe('catalogProviders maxOutputTokens', () => {
     expect(openai?.models.find((model) => model.id === 'gpt-4.1-mini')?.maxOutputTokens).toBe(32_768);
     expect(openai?.models.find((model) => model.id === 'o3-mini')?.maxOutputTokens).toBe(100_000);
   });
+
+  it('exposes DashScope and Zhipu providers for settings', () => {
+    const dashscope = findCatalogProviderById('dashscope');
+    const zhipu = findCatalogProviderById('zhipu');
+
+    expect(dashscope?.protocol).toBe('openai');
+    expect(dashscope?.defaultUrl).toBe('https://dashscope.aliyuncs.com/compatible-mode/v1');
+    expect(dashscope?.models.find((model) => model.id === 'qwen3.7-plus')?.supportsImage).toBe(true);
+    expect(dashscope?.models.find((model) => model.id === 'qwen3.7-max')?.maxContextTokens).toBe(1_000_000);
+    expect(dashscope?.models.find((model) => model.id === 'qwen3.6-flash')?.maxOutputTokens).toBe(65_536);
+    expect(dashscope?.models.find((model) => model.id === 'qwen-max')?.maxOutputTokens).toBe(2_000);
+    expect(dashscope?.models.find((model) => model.id === 'qwen-plus')?.maxContextTokens).toBe(131_072);
+    expect(dashscope?.models.find((model) => model.id === 'qwen-turbo')?.maxOutputTokens).toBe(1_500);
+
+    expect(zhipu?.protocol).toBe('openai');
+    expect(zhipu?.defaultUrl).toBe('https://api.z.ai/api/paas/v4');
+    expect(zhipu?.models.find((model) => model.id === 'glm-5.2')?.maxOutputTokens).toBe(131_072);
+    expect(zhipu?.models.find((model) => model.id === 'glm-4.6')?.maxContextTokens).toBe(131_072);
+    expect(zhipu?.models.find((model) => model.id === 'glm-4.7')?.maxContextTokens).toBe(200_000);
+    expect(zhipu?.models.find((model) => model.id === 'glm-4-plus')?.maxOutputTokens).toBe(8_192);
+    expect(zhipu?.models.find((model) => model.id === 'glm-4-flash-250414')?.maxContextTokens).toBe(128_000);
+  });
 });
