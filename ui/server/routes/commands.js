@@ -11,8 +11,14 @@ import { readPilotDeckConfigFile, resolveModel } from '../services/pilotdeckConf
 import { isVirtualProjectPath, resolvePilotHome } from '../utils/pilotPaths.js';
 import { executeTurnkeySlashCommand } from '../turnkey-slash.js';
 import { getRegisteredCommands } from '../../../src/adapters/channel/protocol/ChannelCommandRegistry.js';
+import { prepareCliSpawn } from '../utils/processSpawn.js';
 
 const execFileAsync = promisify(execFile);
+
+function runClawHub(args, options) {
+  const prepared = prepareCliSpawn('clawhub', args, options);
+  return execFileAsync(prepared.command, prepared.args, prepared.options);
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -769,7 +775,7 @@ Custom commands can be created in:
     let stderr = '';
     let runError = null;
     try {
-      const result = await execFileAsync('clawhub', clawArgs, {
+      const result = await runClawHub(clawArgs, {
         timeout: 120_000,
         maxBuffer: 10 * 1024 * 1024,
       });

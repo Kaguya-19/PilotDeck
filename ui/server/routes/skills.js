@@ -35,9 +35,15 @@ import multer from 'multer';
 import { getPilotDeckGateway } from '../pilotdeck-bridge.js';
 import { isVirtualProjectPath, resolvePilotHome } from '../utils/pilotPaths.js';
 import { moveDirectoryAcrossDevicesSafe } from '../utils/fileMoves.js';
+import { prepareCliSpawn } from '../utils/processSpawn.js';
 
 const execFileAsync = promisify(execFile);
 const router = express.Router();
+
+function runClawHub(args, options) {
+  const prepared = prepareCliSpawn('clawhub', args, options);
+  return execFileAsync(prepared.command, prepared.args, prepared.options);
+}
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -488,7 +494,7 @@ router.post('/clawhub/search', async (req, res) => {
 
     let stdout = '';
     try {
-      const r = await execFileAsync('clawhub', args, { timeout: 30_000, maxBuffer: 4 * 1024 * 1024 });
+      const r = await runClawHub(args, { timeout: 30_000, maxBuffer: 4 * 1024 * 1024 });
       stdout = r.stdout || '';
     } catch (e) {
       if (e.code === 'ENOENT') {
@@ -558,7 +564,7 @@ router.post('/clawhub/install', async (req, res) => {
     let stderr = '';
     let runError = null;
     try {
-      const r = await execFileAsync('clawhub', args, { timeout: 120_000, maxBuffer: 10 * 1024 * 1024 });
+      const r = await runClawHub(args, { timeout: 120_000, maxBuffer: 10 * 1024 * 1024 });
       stdout = r.stdout || '';
       stderr = r.stderr || '';
     } catch (e) {
