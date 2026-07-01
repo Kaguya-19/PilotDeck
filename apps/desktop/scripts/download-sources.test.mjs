@@ -19,6 +19,7 @@ import {
   buildPlaywrightBrowserPlan,
   installMirroredPlaywrightBrowsers,
   resolvePlaywrightBrowserSet,
+  resolvePlaywrightInstallMode,
   resolvePlaywrightMirrorMode,
 } from "./download-playwright-browsers.mjs";
 
@@ -119,13 +120,35 @@ test("resolvePlaywrightBrowserSet defaults to browser-only and accepts full", ()
   );
 });
 
-test("buildPlaywrightBrowserPlan maps default mac arm64 browser-only archive", () => {
+test("resolvePlaywrightInstallMode defaults to lazy and accepts preinstall", () => {
+  assert.equal(resolvePlaywrightInstallMode({}), "lazy");
+  assert.equal(resolvePlaywrightInstallMode({ PILOTDECK_DESKTOP_PLAYWRIGHT_INSTALL_MODE: "lazy" }), "lazy");
+  assert.equal(resolvePlaywrightInstallMode({ PILOTDECK_DESKTOP_PLAYWRIGHT_INSTALL_MODE: "preinstall" }), "preinstall");
+  assert.throws(
+    () => resolvePlaywrightInstallMode({ PILOTDECK_DESKTOP_PLAYWRIGHT_INSTALL_MODE: "always" }),
+    /Unsupported desktop Playwright install mode/,
+  );
+});
+
+test("buildPlaywrightBrowserPlan defaults to lazy with no browser archives", () => {
   const plan = buildPlaywrightBrowserPlan({
     browsersJson: fakeBrowsersJson,
     platform: "darwin",
     arch: "arm64",
     macMajor: 15,
     env: {},
+  });
+
+  assert.deepEqual(plan, []);
+});
+
+test("buildPlaywrightBrowserPlan maps preinstall mac arm64 browser-only archive", () => {
+  const plan = buildPlaywrightBrowserPlan({
+    browsersJson: fakeBrowsersJson,
+    platform: "darwin",
+    arch: "arm64",
+    macMajor: 15,
+    env: { PILOTDECK_DESKTOP_PLAYWRIGHT_INSTALL_MODE: "preinstall" },
   });
 
   assert.deepEqual(plan.map((item) => item.directoryName), [
@@ -143,7 +166,10 @@ test("buildPlaywrightBrowserPlan maps full mac arm64 npmmirror archives", () => 
     platform: "darwin",
     arch: "arm64",
     macMajor: 15,
-    env: { PILOTDECK_DESKTOP_PLAYWRIGHT_BROWSER_SET: "full" },
+    env: {
+      PILOTDECK_DESKTOP_PLAYWRIGHT_INSTALL_MODE: "preinstall",
+      PILOTDECK_DESKTOP_PLAYWRIGHT_BROWSER_SET: "full",
+    },
   });
 
   assert.deepEqual(plan.map((item) => item.directoryName), [
@@ -161,12 +187,12 @@ test("buildPlaywrightBrowserPlan maps full mac arm64 npmmirror archives", () => 
   );
 });
 
-test("buildPlaywrightBrowserPlan maps default Windows x64 browser-only archive", () => {
+test("buildPlaywrightBrowserPlan maps preinstall Windows x64 browser-only archive", () => {
   const plan = buildPlaywrightBrowserPlan({
     browsersJson: fakeBrowsersJson,
     platform: "win32",
     arch: "x64",
-    env: {},
+    env: { PILOTDECK_DESKTOP_PLAYWRIGHT_INSTALL_MODE: "preinstall" },
   });
 
   assert.equal(
@@ -193,7 +219,7 @@ test("installMirroredPlaywrightBrowsers installs from local archive dir", async 
       browsersJson: fakeBrowsersJson,
       platform: process.platform,
       arch: process.arch,
-      env: {},
+      env: { PILOTDECK_DESKTOP_PLAYWRIGHT_INSTALL_MODE: "preinstall" },
     });
     for (const item of plan) {
       createZipArchive(resolve(archiveDir, item.archiveName), item.name);
@@ -202,6 +228,7 @@ test("installMirroredPlaywrightBrowsers installs from local archive dir", async 
     await installMirroredPlaywrightBrowsers(runtimeRoot, {
       PILOTDECK_DESKTOP_PLAYWRIGHT_MIRROR: "npmmirror",
       PILOTDECK_DESKTOP_PLAYWRIGHT_ARCHIVE_DIR: archiveDir,
+      PILOTDECK_DESKTOP_PLAYWRIGHT_INSTALL_MODE: "preinstall",
     });
 
     for (const item of plan) {
@@ -233,7 +260,7 @@ test("installMirroredPlaywrightBrowsers skips already installed browsers", async
       browsersJson: fakeBrowsersJson,
       platform: process.platform,
       arch: process.arch,
-      env: {},
+      env: { PILOTDECK_DESKTOP_PLAYWRIGHT_INSTALL_MODE: "preinstall" },
     });
     for (const item of plan) {
       const browserDir = resolve(browsersRoot, item.directoryName);
@@ -244,6 +271,7 @@ test("installMirroredPlaywrightBrowsers skips already installed browsers", async
     await installMirroredPlaywrightBrowsers(runtimeRoot, {
       PILOTDECK_DESKTOP_PLAYWRIGHT_MIRROR: "npmmirror",
       PILOTDECK_DESKTOP_PLAYWRIGHT_ARCHIVE_DIR: archiveDir,
+      PILOTDECK_DESKTOP_PLAYWRIGHT_INSTALL_MODE: "preinstall",
     });
 
     for (const item of plan) {

@@ -2,6 +2,7 @@
   "name": "browser-use",
   "version": "1.0.0",
   "description": "Browser automation powered by @playwright/mcp (Microsoft)",
+  "skills": "skills",
   "mcpServers": {
     "browser-use": {
       "command": "npx",

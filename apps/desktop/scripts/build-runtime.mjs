@@ -15,6 +15,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
   resolvePlaywrightBrowserSet,
+  resolvePlaywrightInstallMode,
   resolvePlaywrightMirrorMode,
 } from "./download-playwright-browsers.mjs";
 
@@ -185,6 +186,15 @@ function installRuntimePlaywrightBrowser() {
   if (!existsSync(cli)) {
     throw new Error(`Desktop runtime Playwright MCP CLI missing: ${cli}`);
   }
+  const installMode = resolvePlaywrightInstallMode(process.env);
+  if (installMode === "lazy") {
+    removeRuntimePlaywrightBrowsers();
+    console.log("[desktop] skipping Playwright browser preinstall (lazy mode)");
+    return;
+  }
+  if (installMode !== "preinstall") {
+    throw new Error(`Unsupported desktop Playwright install mode: ${installMode}`);
+  }
   const browserSet = resolvePlaywrightBrowserSet(process.env);
   const mirrorMode = resolvePlaywrightMirrorMode(process.env);
   if (mirrorMode === "npmmirror") {
@@ -210,6 +220,21 @@ function installRuntimePlaywrightBrowser() {
     withBundledPlaywrightEnv(),
   );
   pruneRuntimePlaywrightBrowsers(browserSet);
+}
+
+function removeRuntimePlaywrightBrowsers() {
+  rmSync(resolve(runtimeRoot, "node_modules", "playwright-core", ".local-browsers"), {
+    recursive: true,
+    force: true,
+  });
+}
+
+function hasRuntimePlaywrightBrowser() {
+  const browsersRoot = resolve(runtimeRoot, "node_modules", "playwright-core", ".local-browsers");
+  return cpSafeReadDir(browsersRoot).some((entry) =>
+    /^chromium(?:-|_)/u.test(entry) &&
+    existsSync(resolve(browsersRoot, entry, "INSTALLATION_COMPLETE")),
+  );
 }
 
 function pruneRuntimePlaywrightBrowsers(browserSet) {
@@ -398,7 +423,6 @@ const runtimeRequired = [
   resolve(runtimeRoot, "ui", "server", "index.js"),
   resolve(runtimeRoot, "node_modules", "express"),
   resolve(runtimeRoot, "node_modules", "@playwright", "mcp", "cli.js"),
-  resolve(runtimeRoot, "node_modules", "playwright-core", ".local-browsers"),
   resolve(runtimeRoot, "node_modules", "edgeclaw-memory-core", "lib", "index.js"),
   resolve(runtimeRoot, "node_modules", "edgeclaw-memory-core", "ui-source", "index.html"),
 ];
@@ -407,6 +431,10 @@ for (const file of runtimeRequired) {
   if (!existsSync(file)) {
     throw new Error(`Desktop runtime staged prerequisite missing: ${file}`);
   }
+}
+
+if (resolvePlaywrightInstallMode(process.env) === "preinstall" && !hasRuntimePlaywrightBrowser()) {
+  throw new Error("Desktop runtime preinstall mode did not stage a Playwright Chromium browser.");
 }
 
 if (existsSync(resolve(runtimeRoot, "src"))) {

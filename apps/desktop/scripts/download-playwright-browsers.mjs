@@ -16,6 +16,7 @@ const desktopRoot = resolve(__dirname, "..");
 const DEFAULT_CHROME_BASE_URL = "https://cdn.npmmirror.com/binaries/chrome-for-testing";
 const DEFAULT_FFMPEG_BASE_URL = "https://cdn.npmmirror.com/binaries/playwright";
 const DEFAULT_BROWSER_SET = "browser-only";
+const DEFAULT_INSTALL_MODE = "lazy";
 
 export function resolvePlaywrightMirrorMode(env = process.env) {
   if (env.PILOTDECK_DESKTOP_PLAYWRIGHT_ARCHIVE_DIR?.trim()) return "npmmirror";
@@ -30,6 +31,13 @@ export function resolvePlaywrightBrowserSet(env = process.env) {
   if (explicit === "minimal" || explicit === "browser") return "browser-only";
   if (explicit === "browser-only" || explicit === "full") return explicit;
   throw new Error(`Unsupported desktop Playwright browser set: ${explicit}`);
+}
+
+export function resolvePlaywrightInstallMode(env = process.env) {
+  const explicit = env.PILOTDECK_DESKTOP_PLAYWRIGHT_INSTALL_MODE?.trim().toLowerCase();
+  if (!explicit) return DEFAULT_INSTALL_MODE;
+  if (explicit === "lazy" || explicit === "preinstall") return explicit;
+  throw new Error(`Unsupported desktop Playwright install mode: ${explicit}`);
 }
 
 export function resolvePlaywrightHostPlatform({
@@ -53,6 +61,8 @@ export function buildPlaywrightBrowserPlan({
   arch = process.arch,
   macMajor = readMacMajorVersion(),
 }) {
+  if (resolvePlaywrightInstallMode(env) === "lazy") return [];
+
   const hostPlatform = resolvePlaywrightHostPlatform({ platform, arch, macMajor });
   const chromePlatform = resolveChromeForTestingPlatform(hostPlatform);
   const chromium = getBrowserDescriptor(browsersJson, "chromium", hostPlatform);
@@ -112,6 +122,10 @@ export async function installMirroredPlaywrightBrowsers(runtimeRoot, env = proce
   }
   const browsersJson = JSON.parse(readFileSync(browsersJsonPath, "utf8"));
   const plan = buildPlaywrightBrowserPlan({ browsersJson, env });
+  if (plan.length === 0) {
+    console.log("[desktop] skipping Playwright browser install (lazy mode)");
+    return;
+  }
   const browsersRoot = resolve(playwrightCoreRoot, ".local-browsers");
   const tmpDir = resolve(runtimeRoot, ".playwright-download");
   const archiveDir = env.PILOTDECK_DESKTOP_PLAYWRIGHT_ARCHIVE_DIR?.trim();
