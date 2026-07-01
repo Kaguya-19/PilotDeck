@@ -6,6 +6,7 @@ allowBuilds:
   '@google/genai': true
   bcrypt: true
   better-sqlite3: true
+  electron-winstaller: true
   esbuild: true
   node-pty: true
   protobufjs: true
@@ -20,6 +21,7 @@ onlyBuiltDependencies:
   - '@google/genai'
   - bcrypt
   - better-sqlite3
+  - electron-winstaller
   - esbuild
   - node-pty
   - protobufjs

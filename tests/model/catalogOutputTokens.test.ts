@@ -34,7 +34,7 @@ describe("provider catalog output token caps", () => {
     assert.equal(dashscope?.models["qwen3.6-flash"]?.multimodal.input.includes("image"), false);
     assert.equal(dashscope?.models["qwen-max"]?.capabilities.maxOutputTokens, 2_000);
     assert.equal(dashscope?.models["qwen-plus"]?.capabilities.maxContextTokens, 131_072);
-    assert.equal(dashscope?.models["qwen-turbo"]?.aliases.includes("qwen-turbo-latest"), true);
+    assert.equal(dashscope?.models["qwen-turbo"]?.aliases?.includes("qwen-turbo-latest"), true);
 
     const zhipu = PROVIDER_CATALOG.zhipu;
     assert.equal(zhipu?.protocol, "openai");
@@ -44,7 +44,7 @@ describe("provider catalog output token caps", () => {
     assert.equal(zhipu?.models["glm-4.6"]?.capabilities.maxOutputTokens, 131_072);
     assert.equal(zhipu?.models["glm-4.7"]?.capabilities.maxContextTokens, 200_000);
     assert.equal(zhipu?.models["glm-4-plus"]?.capabilities.maxOutputTokens, 8_192);
-    assert.equal(zhipu?.models["glm-4-flash-250414"]?.aliases.includes("GLM-4-Flash-250414"), true);
+    assert.equal(zhipu?.models["glm-4-flash-250414"]?.aliases?.includes("GLM-4-Flash-250414"), true);
   });
 
   it("infers DashScope and Zhipu protocol and URLs from the catalog", () => {
