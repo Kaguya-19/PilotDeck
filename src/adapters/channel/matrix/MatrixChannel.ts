@@ -1,7 +1,9 @@
 import { join } from "node:path";
 import { resolvePilotHome } from "../../../pilot/index.js";
 import type { Gateway, GatewayChannelKey } from "../../../gateway/index.js";
+import type { CronResultDelivery } from "../../../cron/index.js";
 import type { ChannelAdapter, ChannelHandle, ChannelLogger, ChannelStartDeps } from "../protocol/ChannelAdapter.js";
+import { deliverChatCronResult } from "../protocol/ImCronDelivery.js";
 import { MatrixSessionMapper } from "./MatrixSessionMapper.js";
 import { renderMatrixEvent } from "./matrix-render.js";
 import { ImElicitationHelper } from "../protocol/ImElicitationHelper.js";
@@ -114,6 +116,10 @@ export class MatrixChannel implements ChannelAdapter {
     };
   }
 
+  async deliverCronResult(delivery: CronResultDelivery): Promise<boolean> {
+    return deliverChatCronResult(delivery, this.channelKey, (chatId, text) => this.sendReply(chatId, text));
+  }
+
   private async handleRoomMessage(roomId: string, raw: any): Promise<void> {
     const sender = raw?.sender as string | undefined;
     if (!sender) return;
@@ -207,9 +213,10 @@ export class MatrixChannel implements ChannelAdapter {
     }
   }
 
-  private async sendReply(roomId: string, text: string): Promise<void> {
-    if (!this.client) return;
+  private async sendReply(roomId: string, text: string): Promise<boolean> {
+    if (!this.client) return false;
     const chunks = chunkText(text, MAX_MESSAGE_LENGTH);
+    let ok = true;
     for (const chunk of chunks) {
       try {
         await this.client.sendMessage(roomId, {
@@ -218,8 +225,10 @@ export class MatrixChannel implements ChannelAdapter {
         });
       } catch (e) {
         this.logger?.error?.(`matrix: sendMessage failed: ${e}`);
+        ok = false;
       }
     }
+    return ok;
   }
 }
 

@@ -1,5 +1,6 @@
 import type { CanonicalThinkingConfig, CanonicalToolChoice, MultimodalConstraints } from "../../model/index.js";
 import type { PermissionContext, PermissionMode } from "../../permission/index.js";
+import type { AgentRunMode } from "../protocol/input.js";
 
 export type AgentRuntimeConfig = {
   provider: string;
@@ -16,6 +17,7 @@ export type AgentRuntimeConfig = {
   toolAliases?: Record<string, string>;
   maxContextMessages?: number;
   stopOnStructuredOutput?: boolean;
+  runMode?: AgentRunMode;
   permissionMode: PermissionMode;
   /** Who last set the current mode: "user" (UI/CLI) or "tool" (enter_plan_mode). */
   permissionModeOrigin?: "user" | "tool";

@@ -505,6 +505,10 @@ function buildEndpoint(provider: ProviderConfig, _stream: boolean): string {
     return joinUrl(provider.url, "v1/messages");
   }
 
+  if (provider.protocol === "openai-responses") {
+    return joinUrl(provider.url, "responses");
+  }
+
   return joinUrl(provider.url, "chat/completions");
 }
 

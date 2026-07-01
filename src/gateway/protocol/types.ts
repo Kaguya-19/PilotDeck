@@ -1,4 +1,5 @@
 import type { AgentTurnResult } from "../../agent/index.js";
+import type { AgentRunMode } from "../../agent/protocol/input.js";
 import type {
   CronCreateInput,
   CronCreateResult,
@@ -78,6 +79,7 @@ export type GatewaySubmitTurnInput = {
   /** Override the agent session's working directory for this session. */
   workspaceCwd?: string;
   attachments?: ChannelAttachment[];
+  runMode?: AgentRunMode;
   mode?: GatewayMode;
   /** The user's actual permission preference before plan-mode override. */
   basePermissionMode?: GatewayMode;

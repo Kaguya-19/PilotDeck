@@ -19,7 +19,7 @@ export type CatalogModel = {
   maxOutputTokens?: number;
 };
 
-export type CatalogProviderProtocol = 'anthropic' | 'openai' | 'google';
+export type CatalogProviderProtocol = 'anthropic' | 'openai' | 'openai-responses' | 'google';
 
 export type CatalogProvider = {
   id: string;
@@ -47,6 +47,20 @@ export const CATALOG_PROVIDERS: CatalogProvider[] = [
     id: 'openai',
     displayName: 'OpenAI',
     protocol: 'openai',
+    defaultUrl: 'https://api.openai.com/v1',
+    models: [
+      { id: 'gpt-4.1', displayName: 'GPT-4.1', supportsImage: true, maxContextTokens: 1047576, maxOutputTokens: 32768 },
+      { id: 'gpt-4.1-mini', displayName: 'GPT-4.1 Mini', supportsImage: true, maxContextTokens: 1047576, maxOutputTokens: 32768 },
+      { id: 'gpt-4o', displayName: 'GPT-4o', supportsImage: true, maxContextTokens: 128000, maxOutputTokens: 16384 },
+      { id: 'gpt-4o-mini', displayName: 'GPT-4o Mini', supportsImage: true, maxContextTokens: 128000, maxOutputTokens: 16384 },
+      { id: 'o3', displayName: 'o3', supportsImage: true, maxContextTokens: 200000, maxOutputTokens: 100000 },
+      { id: 'o3-mini', displayName: 'o3 Mini', maxContextTokens: 200000, maxOutputTokens: 100000 },
+    ],
+  },
+  {
+    id: 'openai-responses',
+    displayName: 'OpenAI (Responses API)',
+    protocol: 'openai-responses',
     defaultUrl: 'https://api.openai.com/v1',
     models: [
       { id: 'gpt-4.1', displayName: 'GPT-4.1', supportsImage: true, maxContextTokens: 1047576, maxOutputTokens: 32768 },

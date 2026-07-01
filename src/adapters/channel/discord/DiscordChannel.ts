@@ -1,5 +1,7 @@
 import type { Gateway, GatewayChannelKey } from "../../../gateway/index.js";
+import type { CronResultDelivery } from "../../../cron/index.js";
 import type { ChannelAdapter, ChannelHandle, ChannelLogger, ChannelStartDeps } from "../protocol/ChannelAdapter.js";
+import { deliverChatCronResult } from "../protocol/ImCronDelivery.js";
 import { ImElicitationHelper } from "../protocol/ImElicitationHelper.js";
 import { ImPermissionHelper } from "../protocol/ImPermissionHelper.js";
 import { DiscordSessionMapper } from "./DiscordSessionMapper.js";
@@ -98,6 +100,10 @@ export class DiscordChannel implements ChannelAdapter {
     };
   }
 
+  async deliverCronResult(delivery: CronResultDelivery): Promise<boolean> {
+    return deliverChatCronResult(delivery, this.channelKey, (chatId, text) => this.sendReply(chatId, text));
+  }
+
   private async handleMessageCreate(message: any): Promise<void> {
     if (!message?.author || message.author.bot) return;
     if (message.system) return;
@@ -187,27 +193,30 @@ export class DiscordChannel implements ChannelAdapter {
     }
   }
 
-  private async sendReply(chatId: string, text: string): Promise<void> {
-    if (!this.client) return;
+  private async sendReply(chatId: string, text: string): Promise<boolean> {
+    if (!this.client) return false;
     let channel: any;
     try {
       channel = await this.client.channels.fetch(chatId);
     } catch (e) {
       this.logger?.error?.(`discord: fetch channel failed: ${e}`);
-      return;
+      return false;
     }
     if (!channel || typeof channel.send !== "function") {
       this.logger?.warn?.(`discord: channel ${chatId} not sendable`);
-      return;
+      return false;
     }
     const chunks = chunkText(text, MAX_MESSAGE_LENGTH);
+    let ok = true;
     for (const chunk of chunks) {
       try {
         await channel.send({ content: chunk });
       } catch (e) {
         this.logger?.error?.(`discord: send failed: ${e}`);
+        ok = false;
       }
     }
+    return ok;
   }
 
   private async sendTyping(chatId: string): Promise<void> {

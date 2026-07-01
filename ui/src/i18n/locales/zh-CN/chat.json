@@ -246,9 +246,11 @@
     "runModes": {
       "agent": "智能体",
       "plan": "计划",
+      "ask": "询问",
       "change": "选择运行模式",
       "agentDescription": "直接处理并执行任务",
-      "planDescription": "先产出计划，确认后再执行"
+      "planDescription": "先产出计划，确认后再执行",
+      "askDescription": "只读分析，可使用只读子智能体"
     }
   },
   "commandMenu": {

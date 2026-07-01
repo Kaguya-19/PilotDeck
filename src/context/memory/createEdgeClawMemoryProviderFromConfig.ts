@@ -105,6 +105,7 @@ function resolveMemoryLlm(
 
 function memoryApiTypeForProtocol(protocol: ModelProtocol | undefined): PilotMemoryConfig["apiType"] | "openai-completions" | undefined {
   if (protocol === "anthropic" || protocol === "google") return protocol;
+  if (protocol === "openai-responses") return "openai-responses";
   if (protocol === "openai") return "openai-completions";
   return undefined;
 }

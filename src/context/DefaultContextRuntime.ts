@@ -160,6 +160,7 @@ export class DefaultContextRuntime implements ContextRuntime {
       provider: input.provider,
       model: input.model,
       permissionMode: input.permissionMode,
+      runMode: input.runMode,
       additionalWorkingDirectories: input.additionalWorkingDirectories,
       tools: input.tools,
       customSystemPrompt: input.customSystemPrompt,

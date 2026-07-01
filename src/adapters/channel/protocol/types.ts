@@ -1,4 +1,5 @@
 import type { ChannelAttachment, Gateway, GatewayChannelKey } from "../../../gateway/index.js";
+import type { CronResultDelivery } from "../../../cron/index.js";
 import type { PilotConfig } from "../../../pilot/index.js";
 
 export type ChannelLogger = {
@@ -20,6 +21,7 @@ export type ChannelHandle = {
 export interface ChannelAdapter {
   readonly channelKey: GatewayChannelKey;
   start(deps: ChannelStartDeps): Promise<ChannelHandle>;
+  deliverCronResult?(delivery: CronResultDelivery): Promise<boolean> | boolean;
 }
 
 export type ChannelMessage = {

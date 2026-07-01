@@ -10,6 +10,7 @@
  */
 export const PLAN_MODE_ALLOWED_TOOLS = new Set([
   "read_file",
+  "get_current_time",
   "grep",
   "glob",
   "web_search",

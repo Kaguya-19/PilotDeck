@@ -47,6 +47,13 @@ type ParsedTodoItem = {
   status: 'pending' | 'in_progress' | 'completed';
 };
 
+type SearchToolResultData = {
+  files?: unknown;
+  filenames?: unknown;
+  count?: unknown;
+  numFiles?: unknown;
+};
+
 const TODO_LINE_PATTERN = /^\s*[-*]\s+\[( |x|X)\]\s+(.*?)\s*$/u;
 
 function parseTodoMarkdown(markdown: unknown): ParsedTodoItem[] {
@@ -83,6 +90,26 @@ function parseTodoMarkdown(markdown: unknown): ParsedTodoItem[] {
       status,
     };
   });
+}
+
+export function getSearchToolResultFiles(result: unknown): unknown[] {
+  const toolData = ((result as { toolUseResult?: SearchToolResultData } | undefined)?.toolUseResult || {}) as SearchToolResultData;
+  if (Array.isArray(toolData.files)) return toolData.files;
+  if (Array.isArray(toolData.filenames)) return toolData.filenames;
+  return [];
+}
+
+export function getSearchToolResultCount(result: unknown): number {
+  const toolData = ((result as { toolUseResult?: SearchToolResultData } | undefined)?.toolUseResult || {}) as SearchToolResultData;
+  if (typeof toolData.count === 'number') return toolData.count;
+  if (typeof toolData.numFiles === 'number') return toolData.numFiles;
+  return getSearchToolResultFiles(result).length;
+}
+
+export function getSearchToolResultFileCount(result: unknown): number {
+  const toolData = ((result as { toolUseResult?: SearchToolResultData } | undefined)?.toolUseResult || {}) as SearchToolResultData;
+  if (typeof toolData.numFiles === 'number') return toolData.numFiles;
+  return getSearchToolResultFiles(result).length;
 }
 
 export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
@@ -238,15 +265,13 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
       type: 'collapsible',
       defaultOpen: false,
       title: (result) => {
-        const toolData = result.toolUseResult || {};
-        const count = toolData.numFiles || toolData.filenames?.length || 0;
+        const count = getSearchToolResultFileCount(result);
         return `Found ${count} ${count === 1 ? 'file' : 'files'}`;
       },
       contentType: 'file-list',
       getContentProps: (result) => {
-        const toolData = result.toolUseResult || {};
         return {
-          files: toolData.filenames || []
+          files: getSearchToolResultFiles(result)
         };
       }
     }
@@ -271,15 +296,13 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
       type: 'collapsible',
       defaultOpen: false,
       title: (result) => {
-        const toolData = result.toolUseResult || {};
-        const count = toolData.numFiles || toolData.filenames?.length || 0;
+        const count = getSearchToolResultCount(result);
         return `Found ${count} ${count === 1 ? 'file' : 'files'}`;
       },
       contentType: 'file-list',
       getContentProps: (result) => {
-        const toolData = result.toolUseResult || {};
         return {
-          files: toolData.filenames || []
+          files: getSearchToolResultFiles(result)
         };
       }
     }

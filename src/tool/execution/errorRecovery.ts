@@ -99,6 +99,9 @@ function summarizeError(
   if (code === "plan_mode_violation") {
     return `The ${toolName} call is not allowed while the agent is in plan mode.`;
   }
+  if (code === "ask_mode_violation") {
+    return `The ${toolName} call is not allowed while the agent is in ask mode.`;
+  }
   if (evidence.length > 0) {
     return trimSentence(evidence[0]);
   }
@@ -124,7 +127,12 @@ function classifyError(
   if (code === "result_too_large") {
     return "reduce_scope";
   }
-  if (code === "tool_not_found" || code === "unsupported_tool" || code === "plan_mode_violation") {
+  if (
+    code === "tool_not_found" ||
+    code === "unsupported_tool" ||
+    code === "plan_mode_violation" ||
+    code === "ask_mode_violation"
+  ) {
     return "switch_tool";
   }
   if (
@@ -221,6 +229,11 @@ function baseNextActions(
         "Do not retry this write/action tool while in plan mode.",
         "Use read-only tools or respond with a plan; request a mode change only if the user wants execution.",
       ];
+    case "ask_mode_violation":
+      return [
+        "Do not retry this write/action tool while in ask mode.",
+        "Use read-only tools or ask the user to change mode if they want execution.",
+      ];
     case "permission_required":
       return ["Pause tool execution and ask the user for approval with a concise reason."];
     case "permission_denied":
@@ -305,6 +318,8 @@ function defaultAvoidRetryReason(code: PilotDeckToolErrorCode): string | undefin
       return "The missing setup must be completed outside this tool call.";
     case "plan_mode_violation":
       return "Plan mode blocks this class of tool until execution mode is restored.";
+    case "ask_mode_violation":
+      return "Ask mode blocks this class of tool until execution mode is restored.";
     default:
       return undefined;
   }

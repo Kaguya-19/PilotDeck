@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import type { Gateway, GatewayChannelKey } from "../../../gateway/index.js";
+import type { CronResultDelivery } from "../../../cron/index.js";
 import type { ChannelAdapter, ChannelHandle, ChannelLogger, ChannelStartDeps } from "../protocol/ChannelAdapter.js";
+import { deliverChatCronResult } from "../protocol/ImCronDelivery.js";
 import { ImElicitationHelper } from "../protocol/ImElicitationHelper.js";
 import { ImPermissionHelper } from "../protocol/ImPermissionHelper.js";
 import { DingTalkSessionMapper } from "./DingTalkSessionMapper.js";
@@ -92,6 +94,10 @@ export class DingTalkChannel implements ChannelAdapter {
         this.seenIds.clear();
       },
     };
+  }
+
+  async deliverCronResult(delivery: CronResultDelivery): Promise<boolean> {
+    return deliverChatCronResult(delivery, this.channelKey, (chatId, text) => this.sendReply(chatId, text));
   }
 
   private async onDownstream(msg: any): Promise<void> {
@@ -228,15 +234,15 @@ export class DingTalkChannel implements ChannelAdapter {
     }
   }
 
-  private async sendReply(chatId: string, text: string): Promise<void> {
+  private async sendReply(chatId: string, text: string): Promise<boolean> {
     const sessionWebhook = this.sessionWebhooks.get(chatId);
     if (!sessionWebhook) {
       this.logger?.warn?.(`dingtalk: no sessionWebhook for chat ${chatId}, cannot send`);
-      return;
+      return false;
     }
     if (!WEBHOOK_RE.test(sessionWebhook)) {
       this.logger?.warn?.(`dingtalk: sessionWebhook for ${chatId} failed origin check`);
-      return;
+      return false;
     }
 
     const payload = {
@@ -256,9 +262,12 @@ export class DingTalkChannel implements ChannelAdapter {
       if (!res.ok) {
         const body = await res.text();
         this.logger?.error?.(`dingtalk: sendReply HTTP ${res.status}: ${body.slice(0, 200)}`);
+        return false;
       }
+      return true;
     } catch (e) {
       this.logger?.error?.(`dingtalk: sendReply failed: ${e}`);
+      return false;
     }
   }
 }

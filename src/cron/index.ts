@@ -22,6 +22,8 @@ export type {
   CronDeleteResult,
   CronListInput,
   CronListResult,
+  CronResultDelivery,
+  CronResultDeliveryHandler,
   CronRunOutcome,
   CronRunRecord,
   CronRunNowInput,

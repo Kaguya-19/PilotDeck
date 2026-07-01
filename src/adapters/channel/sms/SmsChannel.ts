@@ -1,7 +1,9 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Gateway, GatewayChannelKey } from "../../../gateway/index.js";
+import type { CronResultDelivery } from "../../../cron/index.js";
 import type { ChannelAdapter, ChannelHandle, ChannelLogger, ChannelStartDeps } from "../protocol/ChannelAdapter.js";
+import { deliverChatCronResult } from "../protocol/ImCronDelivery.js";
 import { SmsSessionMapper } from "./SmsSessionMapper.js";
 import { renderSmsEvent } from "./sms-render.js";
 import { ImElicitationHelper } from "../protocol/ImElicitationHelper.js";
@@ -116,6 +118,10 @@ export class SmsChannel implements ChannelAdapter {
         this.client = null;
       },
     };
+  }
+
+  async deliverCronResult(delivery: CronResultDelivery): Promise<boolean> {
+    return deliverChatCronResult(delivery, this.channelKey, (chatId, text) => this.sendReply(chatId, text));
   }
 
   private async handleHttp(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -275,16 +281,18 @@ export class SmsChannel implements ChannelAdapter {
     }
   }
 
-  private async sendReply(chatId: string, text: string): Promise<void> {
-    if (!this.client) return;
+  private async sendReply(chatId: string, text: string): Promise<boolean> {
+    if (!this.client) return false;
     try {
       await this.client.messages.create({
         body: text,
         from: this.fromNumber,
         to: chatId,
       });
+      return true;
     } catch (e) {
       this.logger?.error?.(`sms: sendMessage failed: ${e}`);
+      return false;
     }
   }
 }

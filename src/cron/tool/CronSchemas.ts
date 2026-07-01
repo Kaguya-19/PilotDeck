@@ -19,5 +19,15 @@ export const CRON_SCHEDULE_SCHEMA = {
         timezone: { type: "string" },
       },
     },
+    {
+      type: "object",
+      required: ["type", "amount", "unit"],
+      additionalProperties: false,
+      properties: {
+        type: { const: "delay" },
+        amount: { type: "number", exclusiveMinimum: 0 },
+        unit: { enum: ["second", "minute", "hour", "day"] },
+      },
+    },
   ],
 } as const;

@@ -465,7 +465,9 @@ function flushBlock(
       flushText();
       const resultText = flattenToolResultBlockText(block);
       const errorCode = readToolResultErrorCode(block.raw);
+      const toolName = readToolResultToolName(block.raw);
       const planData = readPlanData(block.raw);
+      const searchData = readSearchToolData(block.raw);
       const resultImages: NonNullable<WebMessage["images"]> = [];
       for (const sub of block.content) {
         if (sub.type === "image") {
@@ -481,10 +483,11 @@ function flushBlock(
         role: "tool",
         kind: "tool_result",
         toolCallId: block.toolCallId,
+        ...(toolName ? { toolName } : {}),
         ok: !block.isError,
         text: resultText,
         ...(errorCode ? { errorCode } : {}),
-        ...(planData ? { payload: planData } : {}),
+        ...(planData || searchData ? { payload: planData ?? searchData } : {}),
         ...(resultImages.length > 0 ? { images: resultImages } : {}),
         source: "history",
       });
@@ -821,6 +824,12 @@ function readToolResultErrorCode(raw: unknown): string | undefined {
   return typeof code === "string" && code.length > 0 ? code : undefined;
 }
 
+function readToolResultToolName(raw: unknown): string | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const toolName = (raw as { toolName?: unknown }).toolName;
+  return typeof toolName === "string" && toolName.length > 0 ? toolName : undefined;
+}
+
 function readPlanData(raw: unknown): Record<string, unknown> | undefined {
   if (!raw || typeof raw !== "object") return undefined;
   const data = (raw as { data?: unknown }).data;
@@ -832,4 +841,18 @@ function readPlanData(raw: unknown): Record<string, unknown> | undefined {
     planTitle: d.planTitle,
     planSummary: d.planSummary,
   };
+}
+
+function readSearchToolData(raw: unknown): Record<string, unknown> | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const record = raw as { toolName?: unknown; data?: unknown };
+  if (!isSearchToolName(record.toolName)) return undefined;
+  return record.data && typeof record.data === "object"
+    ? record.data as Record<string, unknown>
+    : undefined;
+}
+
+function isSearchToolName(name: unknown): boolean {
+  const normalized = typeof name === "string" ? name.toLowerCase() : "";
+  return normalized === "grep" || normalized === "glob";
 }

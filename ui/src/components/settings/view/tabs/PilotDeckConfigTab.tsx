@@ -805,6 +805,7 @@ function ProviderCard({
             onChange={(v) => update({ protocol: v as CatalogProviderProtocol })}
             options={[
               { value: 'openai',    label: t('pilotDeckConfig.panels.models.protocolOptions.openai') },
+              { value: 'openai-responses', label: t('pilotDeckConfig.panels.models.protocolOptions.openaiResponses') },
               { value: 'anthropic', label: t('pilotDeckConfig.panels.models.protocolOptions.anthropic') },
               { value: 'google',    label: t('pilotDeckConfig.panels.models.protocolOptions.google') },
             ]}

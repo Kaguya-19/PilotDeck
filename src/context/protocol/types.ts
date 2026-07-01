@@ -48,6 +48,8 @@ export type ContextPrepareInput = {
   model: string;
   /** Permission mode label for prompt assembly. */
   permissionMode: string;
+  /** Run mode label for prompt assembly. */
+  runMode?: string;
   /** Additional working directories from PermissionContext. */
   additionalWorkingDirectories: string[];
   messages: CanonicalMessage[];

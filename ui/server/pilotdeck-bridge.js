@@ -93,15 +93,26 @@ function normalizeToolDisplayName(name) {
     return name;
 }
 
-function isPlanModeToolDenyText(text) {
-    if (typeof text !== 'string') return false;
-    return /\[PLAN_MODE_VIOLATION\]/i.test(text) || /plan mode denies side-effecting tool\b/i.test(text);
+function readOnlyModeToolDenyCode(text) {
+    if (typeof text !== 'string') return undefined;
+    if (/\[PLAN_MODE_VIOLATION\]/i.test(text) || /plan mode denies side-effecting tool\b/i.test(text)) {
+        return 'plan_mode_denied';
+    }
+    if (/\[ASK_MODE_VIOLATION\]/i.test(text) || /ask mode denies side-effecting tool\b/i.test(text)) {
+        return 'ask_mode_denied';
+    }
+    return undefined;
+}
+
+function isSearchToolName(name) {
+    const normalized = String(name || '').toLowerCase();
+    return normalized === 'grep' || normalized === 'glob';
 }
 
 function normalizeToolErrorCode(errorCode, resultPreview) {
     if (errorCode === 'plan_mode_violation') return 'plan_mode_denied';
-    if (isPlanModeToolDenyText(resultPreview)) return 'plan_mode_denied';
-    return errorCode;
+    if (errorCode === 'ask_mode_violation') return 'ask_mode_denied';
+    return readOnlyModeToolDenyCode(resultPreview) || errorCode;
 }
 
 /**
@@ -313,6 +324,12 @@ function normalizePermissionMode(value) {
     return 'default';
 }
 
+function normalizeRunMode(value) {
+    if (value === undefined || value === null || value === '') return undefined;
+    if (value === 'agent' || value === 'plan' || value === 'ask') return value;
+    return 'agent';
+}
+
 function resolvePermissionMode(options) {
     const explicit = normalizePermissionMode(options?.permissionMode || options?.mode);
     // A literal "default" from the chat composer is the implicit
@@ -425,6 +442,9 @@ export function gatewayEventToFrames(event, sessionId, provider) {
                           }
                         : {}),
                     ...(event.toolName === 'ask_user_question' && event.data
+                        ? { toolUseResult: event.data }
+                        : {}),
+                    ...(isSearchToolName(event.toolName) && event.data
                         ? { toolUseResult: event.data }
                         : {}),
                 }),
@@ -889,7 +909,8 @@ export async function runChatViaGateway(
     ];
     const resolvedMode = resolvePermissionMode(options);
     const basePermissionMode = normalizePermissionMode(options?.basePermissionMode);
-    console.log(`[pilotdeck-bridge] submitTurn mode=${resolvedMode} (options.permissionMode=${options?.permissionMode}, options.mode=${options?.mode})`);
+    const runMode = normalizeRunMode(options?.runMode) || (resolvedMode === 'plan' ? 'plan' : 'agent');
+    console.log(`[pilotdeck-bridge] submitTurn runMode=${runMode} mode=${resolvedMode} (options.permissionMode=${options?.permissionMode}, options.mode=${options?.mode})`);
 
     try {
         const stream = gw.submitTurn({
@@ -897,6 +918,7 @@ export async function runChatViaGateway(
             channelKey,
             projectKey,
             message: command ?? '',
+            runMode,
             mode: resolvedMode,
             runId,
             canPrompt: true,

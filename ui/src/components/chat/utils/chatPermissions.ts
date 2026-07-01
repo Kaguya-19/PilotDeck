@@ -85,19 +85,31 @@ const PERMISSION_ERROR_CODES = new Set<string>([
   'permission_cancelled',
 ]);
 
-export function isPlanModeToolDeny(message: ChatMessage | null | undefined): boolean {
+export function isReadOnlyModeToolDeny(message: ChatMessage | null | undefined): boolean {
   if (!message?.toolResult?.isError) return false;
   const errorCode = typeof message.toolResult.errorCode === 'string'
     ? message.toolResult.errorCode
     : '';
-  if (errorCode === 'plan_mode_violation' || errorCode === 'plan_mode_denied') {
+  if (
+    errorCode === 'plan_mode_violation' ||
+    errorCode === 'plan_mode_denied' ||
+    errorCode === 'ask_mode_violation' ||
+    errorCode === 'ask_mode_denied'
+  ) {
     return true;
   }
   const content = typeof message.toolResult.content === 'string'
     ? message.toolResult.content
     : '';
-  return /\[PLAN_MODE_VIOLATION\]/i.test(content) || /plan mode denies side-effecting tool\b/i.test(content);
+  return (
+    /\[PLAN_MODE_VIOLATION\]/i.test(content) ||
+    /plan mode denies side-effecting tool\b/i.test(content) ||
+    /\[ASK_MODE_VIOLATION\]/i.test(content) ||
+    /ask mode denies side-effecting tool\b/i.test(content)
+  );
 }
+
+export const isPlanModeToolDeny = isReadOnlyModeToolDeny;
 
 export function getPilotDeckPermissionSuggestion(
   message: ChatMessage | null | undefined,
@@ -107,7 +119,7 @@ export function getPilotDeckPermissionSuggestion(
   // PermissionContext, so the "Permission added" affordance is useful
   // regardless of which model is selected.
   if (!message?.toolResult?.isError) return null;
-  if (isPlanModeToolDeny(message)) return null;
+  if (isReadOnlyModeToolDeny(message)) return null;
 
   // Only offer the rule-grant affordance for genuine permission failures.
   // For historical / replayed messages without an `errorCode` we fall back to

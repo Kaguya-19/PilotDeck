@@ -1,11 +1,17 @@
-import type { CronSchedule } from "../protocol/types.js";
+import type { CronCreateSchedule } from "../protocol/types.js";
 import { isValidCronTimezone } from "../CronTimezone.js";
 
 const MINUTE_MS = 60_000;
 const MAX_SEARCH_MINUTES = 366 * 24 * 60;
+const DELAY_UNIT_MS: Record<"second" | "minute" | "hour" | "day", number> = {
+  second: 1_000,
+  minute: MINUTE_MS,
+  hour: 60 * MINUTE_MS,
+  day: 24 * 60 * MINUTE_MS,
+};
 
 export function computeNextRunAt(
-  schedule: CronSchedule,
+  schedule: CronCreateSchedule,
   after: Date,
   fallbackTimezone = "UTC",
 ): Date | undefined {
@@ -13,7 +19,19 @@ export function computeNextRunAt(
     const runAt = new Date(schedule.runAt);
     return Number.isNaN(runAt.getTime()) ? undefined : runAt;
   }
+  if (schedule.type === "delay") {
+    const delayMs = delayToMilliseconds(schedule.amount, schedule.unit);
+    return delayMs === undefined ? undefined : new Date(after.getTime() + delayMs);
+  }
   return computeNextCronRunAt(schedule.expression, after, schedule.timezone ?? fallbackTimezone);
+}
+
+export function delayToMilliseconds(
+  amount: number,
+  unit: "second" | "minute" | "hour" | "day",
+): number | undefined {
+  if (!Number.isFinite(amount) || amount <= 0) return undefined;
+  return amount * DELAY_UNIT_MS[unit];
 }
 
 export function computeNextCronRunAt(

@@ -6,6 +6,7 @@ import { createEditFileTool } from "../builtin/editFile.js";
 import { createEditNotebookTool } from "../builtin/editNotebook.js";
 import { createGlobTool } from "../builtin/glob.js";
 import { createGrepTool } from "../builtin/grep.js";
+import { createGetCurrentTimeTool } from "../builtin/getCurrentTime.js";
 import { createReadFileTool } from "../builtin/readFile.js";
 import { createEnterPlanModeTool, createExitPlanModeTool } from "../builtin/planMode.js";
 import { createStructuredOutputTool } from "../builtin/structuredOutput.js";
@@ -86,6 +87,7 @@ export type CreateBuiltinRegistryOptions = {
 
 export function createBuiltinRegistry(options?: CreateBuiltinRegistryOptions): ToolRegistry {
   const registry = new ToolRegistry();
+  registry.register(createGetCurrentTimeTool());
   registry.register(createReadFileTool());
   registry.register(createGlobTool());
   registry.register(createGrepTool());

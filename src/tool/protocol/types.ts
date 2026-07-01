@@ -11,6 +11,7 @@ import type {
   PermissionMode,
   PermissionResult,
 } from "../../permission/index.js";
+import type { AgentRunMode } from "../../agent/protocol/input.js";
 import type { PilotDeckToolAuditRecorder } from "../audit/ToolAuditRecorder.js";
 import type { PilotDeckElicitationChannel } from "../elicitation/PilotDeckElicitationChannel.js";
 import type { PilotDeckToolInputSchema, PilotDeckToolValidationResult } from "./schema.js";
@@ -202,6 +203,7 @@ export type PilotDeckToolRuntimeContext = {
   now?: () => Date;
   env?: NodeJS.ProcessEnv;
   maxResultBytes?: number;
+  runMode?: AgentRunMode;
   /**
    * Optional streaming progress sink. Tools that produce incremental output
    * (e.g. `bash` stdout/stderr chunks) can call this to emit progress events

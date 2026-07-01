@@ -22,7 +22,7 @@ import type {
   AgentSessionMetadataTranscriptEntry,
   AgentTranscriptEntry,
 } from "../../session/transcript/TranscriptEntry.js";
-import type { WebGatewayMode, WebForkSessionInput, WebForkSessionResult } from "../client/protocol.js";
+import type { WebAgentRunMode, WebGatewayMode, WebForkSessionInput, WebForkSessionResult } from "../client/protocol.js";
 
 export type ForkWebSessionOptions = {
   projectRoot: string;
@@ -55,6 +55,11 @@ function hasUnsupportedPrefillContent(entry: AgentAcceptedInputTranscriptEntry):
 
 function getForkMode(entry: AgentAcceptedInputTranscriptEntry): WebGatewayMode | undefined {
   return entry.metadata?.permissionMode === "plan" ? "plan" : undefined;
+}
+
+function getForkRunMode(entry: AgentAcceptedInputTranscriptEntry): WebAgentRunMode | undefined {
+  const value = entry.metadata?.runMode;
+  return value === "agent" || value === "plan" || value === "ask" ? value : undefined;
 }
 
 function buildForkTitle(
@@ -463,6 +468,7 @@ export async function forkWebSession(
     );
   }
   const forkMode = getForkMode(forkAcceptedInput);
+  const forkRunMode = getForkRunMode(forkAcceptedInput);
   const preservedSourceEntries = entries.filter((entry) => shouldPreserveSourceEntry(entry, forkPoint));
   const forkInputText = extractAcceptedInputText(forkAcceptedInput);
   const prefillText = forkPoint.preserveTarget ? "" : forkInputText;
@@ -526,6 +532,7 @@ export async function forkWebSession(
     newSessionKey,
     prefillText,
     carriedMessageCount,
+    ...(forkRunMode ? { runMode: forkRunMode } : {}),
     ...(forkMode ? { mode: forkMode } : {}),
   };
 }

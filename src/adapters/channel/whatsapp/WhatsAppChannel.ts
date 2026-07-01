@@ -1,6 +1,8 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import type { Gateway, GatewayChannelKey } from "../../../gateway/index.js";
+import type { CronResultDelivery } from "../../../cron/index.js";
 import type { ChannelAdapter, ChannelHandle, ChannelLogger, ChannelStartDeps } from "../protocol/ChannelAdapter.js";
+import { deliverChatCronResult } from "../protocol/ImCronDelivery.js";
 import { ImElicitationHelper } from "../protocol/ImElicitationHelper.js";
 import { ImPermissionHelper } from "../protocol/ImPermissionHelper.js";
 import { WhatsAppSessionMapper } from "./WhatsAppSessionMapper.js";
@@ -128,6 +130,10 @@ export class WhatsAppChannel implements ChannelAdapter {
     } catch {
       return null;
     }
+  }
+
+  async deliverCronResult(delivery: CronResultDelivery): Promise<boolean> {
+    return deliverChatCronResult(delivery, this.channelKey, (chatId, text) => this.sendReply(chatId, text));
   }
 
   private async waitForBridgeReady(timeoutMs: number): Promise<boolean> {
@@ -268,8 +274,8 @@ export class WhatsAppChannel implements ChannelAdapter {
     }
   }
 
-  private async sendReply(chatId: string, text: string): Promise<void> {
-    if (!this.running) return;
+  private async sendReply(chatId: string, text: string): Promise<boolean> {
+    if (!this.running) return false;
     try {
       const res = await fetch(`${this.bridgeUrl}/send`, {
         method: "POST",
@@ -281,9 +287,12 @@ export class WhatsAppChannel implements ChannelAdapter {
         const raw: any = await res.json().catch(() => ({}));
         const err = raw?.error ?? res.statusText;
         this.logger?.error?.(`whatsapp: send HTTP ${res.status}: ${err}`);
+        return false;
       }
+      return true;
     } catch (e) {
       this.logger?.error?.(`whatsapp: send failed: ${e}`);
+      return false;
     }
   }
 

@@ -1,4 +1,5 @@
 import type { ChannelAdapter, ChannelHandle } from "../adapters/index.js";
+import type { CronResultDelivery } from "../cron/index.js";
 import { FeishuChannel } from "../adapters/index.js";
 import { WeixinChannel } from "../adapters/index.js";
 import { QQChannel } from "../adapters/index.js";
@@ -32,6 +33,7 @@ export type PilotDeckServer = GatewayServer & {
    * Stops any previously running instance of the same channelKey first.
    */
   hotStartChannel(channel: ChannelAdapter): Promise<void>;
+  deliverCronResult(delivery: CronResultDelivery): Promise<boolean>;
 };
 
 export async function startPilotDeckServer(options: StartPilotDeckServerOptions): Promise<PilotDeckServer> {
@@ -42,16 +44,19 @@ export async function startPilotDeckServer(options: StartPilotDeckServerOptions)
   };
   const baseDeps = { gateway: options.gateway, config: options.config, logger: consoleLogger };
 
-  const runningChannels = new Map<string, ChannelHandle>();
+  const runningHandles = new Map<string, ChannelHandle>();
+  const runningChannels = new Map<string, ChannelAdapter>();
 
   async function startAndTrack(ch: ChannelAdapter): Promise<void> {
-    const existing = runningChannels.get(ch.channelKey);
+    const existing = runningHandles.get(ch.channelKey);
     if (existing) {
       await existing.stop("hot-reload").catch(() => {});
+      runningHandles.delete(ch.channelKey);
       runningChannels.delete(ch.channelKey);
     }
     const handle = await ch.start(baseDeps);
-    runningChannels.set(ch.channelKey, handle);
+    runningHandles.set(ch.channelKey, handle);
+    runningChannels.set(ch.channelKey, ch);
   }
 
   if (options.feishu) await startAndTrack(options.feishu);
@@ -81,6 +86,11 @@ export async function startPilotDeckServer(options: StartPilotDeckServerOptions)
   return Object.assign(gwServer, {
     async hotStartChannel(channel: ChannelAdapter) {
       await startAndTrack(channel);
+    },
+    async deliverCronResult(delivery: CronResultDelivery) {
+      const channel = runningChannels.get(delivery.originChannelKey ?? delivery.channelKey);
+      if (!channel?.deliverCronResult) return false;
+      return channel.deliverCronResult(delivery);
     },
   });
 }

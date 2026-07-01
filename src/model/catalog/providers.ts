@@ -250,6 +250,138 @@ export const PROVIDER_CATALOG: ProviderCatalog = {
     },
   },
 
+  // ── OpenAI Responses API ──────────────────────────────────────────────
+
+  "openai-responses": {
+    displayName: "OpenAI (Responses API)",
+    protocol: "openai-responses",
+    defaultUrl: "https://api.openai.com/v1",
+    apiKeyEnvVar: "OPENAI_API_KEY",
+    models: {
+      "gpt-4o": {
+        displayName: "GPT-4o",
+        capabilities: {
+          supportsToolUse: true,
+          supportsStreaming: true,
+          supportsParallelToolCalls: true,
+          supportsThinking: false,
+          supportsJsonSchema: true,
+          supportsSystemPrompt: true,
+          supportsPromptCache: false,
+          maxContextTokens: 128000,
+          maxOutputTokens: 16384,
+        },
+        multimodal: {
+          input: ["text", "image"],
+          maxImagesPerRequest: 20,
+          supportedImageMimeTypes: ["image/jpeg", "image/png", "image/gif", "image/webp"],
+          imageDetail: "auto",
+        },
+        aliases: ["gpt-4o-2024-11-20"],
+      },
+      "gpt-4o-mini": {
+        displayName: "GPT-4o Mini",
+        capabilities: {
+          supportsToolUse: true,
+          supportsStreaming: true,
+          supportsParallelToolCalls: true,
+          supportsThinking: false,
+          supportsJsonSchema: true,
+          supportsSystemPrompt: true,
+          supportsPromptCache: false,
+          maxContextTokens: 128000,
+          maxOutputTokens: 16384,
+        },
+        multimodal: {
+          input: ["text", "image"],
+          maxImagesPerRequest: 20,
+          supportedImageMimeTypes: ["image/jpeg", "image/png", "image/gif", "image/webp"],
+          imageDetail: "auto",
+        },
+        aliases: [],
+      },
+      "gpt-4.1": {
+        displayName: "GPT-4.1",
+        capabilities: {
+          supportsToolUse: true,
+          supportsStreaming: true,
+          supportsParallelToolCalls: true,
+          supportsThinking: false,
+          supportsJsonSchema: true,
+          supportsSystemPrompt: true,
+          supportsPromptCache: false,
+          maxContextTokens: 1047576,
+          maxOutputTokens: 32768,
+        },
+        multimodal: {
+          input: ["text", "image"],
+          maxImagesPerRequest: 20,
+          supportedImageMimeTypes: ["image/jpeg", "image/png", "image/gif", "image/webp"],
+          imageDetail: "auto",
+        },
+        aliases: [],
+      },
+      "gpt-4.1-mini": {
+        displayName: "GPT-4.1 Mini",
+        capabilities: {
+          supportsToolUse: true,
+          supportsStreaming: true,
+          supportsParallelToolCalls: true,
+          supportsThinking: false,
+          supportsJsonSchema: true,
+          supportsSystemPrompt: true,
+          supportsPromptCache: false,
+          maxContextTokens: 1047576,
+          maxOutputTokens: 32768,
+        },
+        multimodal: {
+          input: ["text", "image"],
+          maxImagesPerRequest: 20,
+          supportedImageMimeTypes: ["image/jpeg", "image/png", "image/gif", "image/webp"],
+          imageDetail: "auto",
+        },
+        aliases: [],
+      },
+      "o3": {
+        displayName: "o3",
+        capabilities: {
+          supportsToolUse: true,
+          supportsStreaming: true,
+          supportsParallelToolCalls: false,
+          supportsThinking: true,
+          supportsJsonSchema: true,
+          supportsSystemPrompt: true,
+          supportsPromptCache: false,
+          maxContextTokens: 200000,
+          maxOutputTokens: 100000,
+        },
+        multimodal: {
+          input: ["text", "image"],
+          maxImagesPerRequest: 20,
+          supportedImageMimeTypes: ["image/jpeg", "image/png", "image/gif", "image/webp"],
+          imageDetail: "auto",
+        },
+        aliases: [],
+      },
+      "o3-mini": {
+        displayName: "o3 Mini",
+        capabilities: {
+          supportsToolUse: true,
+          supportsStreaming: true,
+          supportsParallelToolCalls: false,
+          supportsThinking: true,
+          supportsJsonSchema: true,
+          supportsSystemPrompt: true,
+          supportsPromptCache: false,
+          maxContextTokens: 200000,
+          maxOutputTokens: 100000,
+        },
+        multimodal: { input: ["text"] },
+        aliases: [],
+      },
+    },
+  },
+
   // ── Alibaba Cloud Model Studio / DashScope ────────────────────────────
 
   dashscope: {

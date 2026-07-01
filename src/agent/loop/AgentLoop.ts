@@ -11,11 +11,13 @@ import {
   type CanonicalMessage,
   type CanonicalModelError,
   type CanonicalModelRequest,
+  type CanonicalToolSchema,
   type CanonicalUsage,
   materializeMediaReferences,
   type PartialTextToolCallInfo,
 } from "../../model/index.js";
 import type {
+  PilotDeckToolDefinition,
   PilotDeckReadFileStateMap,
   PilotDeckSubagentForkApi,
   PilotDeckToolErrorResult,
@@ -44,6 +46,12 @@ import { LargeFileRepair, type LargeFileRepairDecision } from "./LargeFileRepair
 import { resolveOutputTokenRetryBump } from "./outputTokenRetry.js";
 import { projectToolResults } from "./projectToolResults.js";
 import { requiresPromptCapability } from "../../tool/userInteractionConstraints.js";
+import type { AgentRunMode } from "../protocol/input.js";
+import {
+  ASK_MODE_DESCRIPTION_SUFFIX,
+  isAskModeAllowedTool,
+} from "../../tool/askModeConstraints.js";
+import { buildAskModeAgentToolSchema } from "../../tool/builtin/agent.js";
 
 const TOOL_EVENT_PUMP_INTERVAL_MS = 500;
 const SUBAGENT_STATUS_HEARTBEAT_MS = 2_000;
@@ -68,6 +76,7 @@ export type AgentLoopInput = {
   turnId: string;
   messages: CanonicalMessage[];
   maxTurns?: number;
+  runMode?: AgentRunMode;
   permissionMode?: PermissionMode;
   /** The user's actual permission preference before plan-mode override. */
   basePermissionMode?: PermissionMode;
@@ -110,6 +119,7 @@ export class AgentLoop {
   }
 
   async *run(input: AgentLoopInput): AsyncGenerator<AgentEvent, AgentLoopRunResult, unknown> {
+    this.applyRunModeOverride(input.runMode);
     this.applyPermissionOverrides(input.permissionMode, input.permissionRules, input.basePermissionMode);
     const startedAt = this.now().toISOString();
     let messages = [...input.messages];
@@ -1193,14 +1203,18 @@ export class AgentLoop {
             .filter((tool) => requiresPromptCapability(tool, {}))
             .map((tool) => tool.name),
         );
-    let tools = this.dependencies.tools.registry.toCanonicalSchemas()
+    let toolDefinitions = this.dependencies.tools.registry.list()
       .filter((tool) => !promptBlockedToolNames.has(tool.name));
     if (input.allowPlanModeTools !== true) {
-      tools = tools.filter(
+      toolDefinitions = toolDefinitions.filter(
         (tool) => tool.name !== "enter_plan_mode" && tool.name !== "exit_plan_mode",
       );
     }
     const requestMessages = normalizeMessagesForModelRequest(messages);
+    let tools = toolDefinitions.map(toolToCanonicalSchema);
+    if (this.config.runMode === "ask") {
+      tools = filterAskModeTools(toolDefinitions);
+    }
     const prepared = await contextRuntime.prepareForModel({
       sessionId: input.sessionId,
       turnId: input.turnId,
@@ -1208,6 +1222,7 @@ export class AgentLoop {
       provider: this.config.provider,
       model: this.config.model,
       permissionMode: this.config.permissionMode,
+      runMode: this.config.runMode ?? "agent",
       additionalWorkingDirectories: this.config.permissionContext.additionalWorkingDirectories,
       messages: cloneMessages(requestMessages),
       tools,
@@ -1278,6 +1293,7 @@ export class AgentLoop {
       abortSignal: input.abortSignal,
       subagentTimeoutMs: this.config.subagentTimeoutMs,
       toolAliases: this.config.toolAliases,
+      runMode: this.config.runMode ?? "agent",
       permissionMode: this.config.permissionMode,
       permissionContext,
       auditRecorder: this.dependencies.auditRecorder,
@@ -1667,12 +1683,42 @@ export class AgentLoop {
     mergeUserRules(this.config.permissionContext.rules.ask, permissionRules.ask);
   }
 
+  private applyRunModeOverride(runMode?: AgentRunMode): void {
+    if (runMode) {
+      this.config.runMode = runMode;
+    } else {
+      this.config.runMode ??= "agent";
+    }
+  }
+
   private readonly now = (): Date => this.dependencies.now?.() ?? new Date();
 }
 
 function mergeUserRules(target: PermissionRule[], userRules: PermissionRule[] | undefined): void {
   const nonUserRules = target.filter((rule) => rule.source !== "user");
   target.splice(0, target.length, ...nonUserRules, ...(userRules ?? []));
+}
+
+function filterAskModeTools(tools: PilotDeckToolDefinition[]): CanonicalToolSchema[] {
+  const agentOverride = buildAskModeAgentToolSchema();
+  return tools
+    .filter(isAskModeAllowedTool)
+    .map((tool) => {
+      if (tool.name === "agent") {
+        return { ...toolToCanonicalSchema(tool), description: agentOverride.description, inputSchema: agentOverride.inputSchema };
+      }
+      const suffix = ASK_MODE_DESCRIPTION_SUFFIX[tool.name];
+      const schema = toolToCanonicalSchema(tool);
+      return suffix ? { ...schema, description: schema.description + suffix } : schema;
+    });
+}
+
+function toolToCanonicalSchema(tool: PilotDeckToolDefinition): CanonicalToolSchema {
+  return {
+    name: tool.name,
+    description: tool.description,
+    inputSchema: tool.inputSchema,
+  };
 }
 
 function findLifecycleBlock(result: LifecycleDispatchResult): { reason: string; stopReason?: string } | undefined {

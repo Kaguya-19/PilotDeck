@@ -7,7 +7,7 @@ import type {
 export type Provider = SessionProvider;
 
 export type PermissionMode = 'default' | 'bypassPermissions' | 'plan';
-export type ChatRunMode = 'agent' | 'plan';
+export type ChatRunMode = 'agent' | 'plan' | 'ask';
 
 export interface ChatImage {
   data: string;

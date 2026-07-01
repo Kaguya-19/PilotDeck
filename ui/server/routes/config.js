@@ -246,11 +246,12 @@ router.post('/test-connection', async (req, res) => {
     return res.status(400).json({ ok: false, error: 'baseUrl, apiKey, and model are required' });
   }
 
-  // Accept V2 protocols ('openai' | 'anthropic' | 'google') as well as the legacy
-  // onboarding values ('openai-chat' | 'anthropic') for compatibility.
+  // Accept V2 protocols ('openai' | 'openai-responses' | 'anthropic' | 'google')
+  // as well as legacy onboarding values for compatibility.
   const normalizedType = String(providerType || '').toLowerCase();
   const isAnthropic = normalizedType === 'anthropic';
   const isGoogle = normalizedType === 'google';
+  const isOpenAIResponses = normalizedType === 'openai-responses' || normalizedType === 'responses';
   const normalizedBaseUrl = String(baseUrl).trim().replace(/\/+$/, '');
   const timeout = 10_000;
   const controller = new AbortController();
@@ -290,6 +291,22 @@ router.post('/test-connection', async (req, res) => {
         }),
         signal: controller.signal,
       };
+    } else if (isOpenAIResponses) {
+      url = `${normalizedBaseUrl}/responses`;
+      fetchOptions = {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          model,
+          max_output_tokens: 16,
+          input: 'Hi',
+          store: false,
+        }),
+        signal: controller.signal,
+      };
     } else {
       url = `${normalizedBaseUrl}/chat/completions`;
       fetchOptions = {
@@ -314,10 +331,12 @@ router.post('/test-connection', async (req, res) => {
       ? 'Anthropic message'
       : isGoogle
         ? 'Google Gemini generateContent response'
-        : 'OpenAI chat completion';
+        : isOpenAIResponses
+          ? 'OpenAI Responses response'
+          : 'OpenAI chat completion';
     const baseUrlHint = isGoogle
       ? 'For native Google Gemini, the base URL is usually https://generativelanguage.googleapis.com.'
-      : 'For OpenAI-compatible endpoints, the base URL usually ends with /v1.';
+      : 'For OpenAI-compatible and Responses API endpoints, the base URL usually ends with /v1.';
 
     if (response.ok) {
       let body;
@@ -334,7 +353,9 @@ router.post('/test-connection', async (req, res) => {
         ? Array.isArray(body?.content) || body?.type === 'message'
         : isGoogle
           ? Array.isArray(body?.candidates)
-        : Array.isArray(body?.choices);
+          : isOpenAIResponses
+            ? body?.object === 'response' || Array.isArray(body?.output) || typeof body?.output_text === 'string'
+            : Array.isArray(body?.choices);
       if (!hasCompletionShape) {
         return res.json({
           ok: false,

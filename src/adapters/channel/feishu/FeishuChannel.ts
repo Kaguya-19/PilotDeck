@@ -1,8 +1,10 @@
 import { createDecipheriv, createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import type { CronResultDelivery } from "../../../cron/index.js";
 import type { Gateway } from "../../../gateway/index.js";
 import type { ChannelAdapter, ChannelHandle, ChannelLogger, ChannelStartDeps } from "../protocol/ChannelAdapter.js";
 import { executeChannelCommand, resolveCommand } from "../protocol/ChannelCommandRegistry.js";
+import { deliverChatCronResult } from "../protocol/ImCronDelivery.js";
 import { ImElicitationHelper } from "../protocol/ImElicitationHelper.js";
 import { ImPermissionHelper } from "../protocol/ImPermissionHelper.js";
 import {
@@ -390,6 +392,12 @@ export class FeishuChannel implements ChannelAdapter {
       }
       this.activeChats.delete(chatId);
     }
+  }
+
+  async deliverCronResult(delivery: CronResultDelivery): Promise<boolean> {
+    return deliverChatCronResult(delivery, this.channelKey, (chatId, text) =>
+      this.sendTextMessage({ chatId, text }),
+    );
   }
 
   private createLiveReplyTransport(chatId: string): ImLiveReplyTransport<FeishuLiveMessageHandle> {

@@ -45,6 +45,7 @@ interface UseChatComposerStateArgs {
   model: string;
   permissionMode: PermissionMode | string;
   basePermissionMode?: PermissionMode | string;
+  runMode?: string;
   cycleRunMode: () => void;
   isLoading: boolean;
   canAbortSession: boolean;
@@ -105,6 +106,7 @@ const createFakeSubmitEvent = () => {
 
 const MAX_ATTACHMENT_SIZE_BYTES = 20 * 1024 * 1024;
 const MAX_ATTACHMENTS = 10;
+export const MAX_ATTACHMENTS_ERROR_KEY = '__max_attachments__';
 
 type UploadedAttachmentFile = {
   name: string;
@@ -135,6 +137,24 @@ function buildAttachmentPathNote(files: UploadedAttachmentFile[]): string {
   return `\n\n[Files attached by user and available for reading in the project:]\n${lines.join('\n')}`;
 }
 
+export type AttachmentAddResult = {
+  files: File[];
+  droppedCount: number;
+};
+
+export function addAttachmentFiles(
+  currentFiles: File[],
+  incomingFiles: File[],
+  maxAttachments = MAX_ATTACHMENTS,
+): AttachmentAddResult {
+  const mergedFiles = [...currentFiles, ...incomingFiles];
+
+  return {
+    files: mergedFiles.slice(0, maxAttachments),
+    droppedCount: Math.max(0, mergedFiles.length - maxAttachments),
+  };
+}
+
 export function useChatComposerState({
   selectedProject,
   selectedSession,
@@ -142,6 +162,7 @@ export function useChatComposerState({
   model,
   permissionMode,
   basePermissionMode,
+  runMode,
   cycleRunMode,
   isLoading,
   canAbortSession,
@@ -572,8 +593,25 @@ export function useChatComposerState({
       }
     });
 
+    setImageErrors((previous) => {
+      if (!previous.has(MAX_ATTACHMENTS_ERROR_KEY)) return previous;
+      const next = new Map(previous);
+      next.delete(MAX_ATTACHMENTS_ERROR_KEY);
+      return next;
+    });
+
     if (validFiles.length > 0) {
-      setAttachedImages((previous) => [...previous, ...validFiles].slice(0, MAX_ATTACHMENTS));
+      setAttachedImages((previous) => {
+        const result = addAttachmentFiles(previous, validFiles);
+        if (result.droppedCount > 0) {
+          setImageErrors((previousErrors) => {
+            const next = new Map(previousErrors);
+            next.set(MAX_ATTACHMENTS_ERROR_KEY, `Only the first ${MAX_ATTACHMENTS} attachments were added; ${result.droppedCount} file${result.droppedCount === 1 ? '' : 's'} skipped.`);
+            return next;
+          });
+        }
+        return result.files;
+      });
     }
   }, []);
 
@@ -610,7 +648,7 @@ export function useChatComposerState({
 
   const { getRootProps, getInputProps, isDragActive, open } = useDropzone({
     maxSize: MAX_ATTACHMENT_SIZE_BYTES,
-    maxFiles: MAX_ATTACHMENTS,
+    multiple: true,
     onDrop: handleImageFiles,
     noClick: true,
     noKeyboard: true,
@@ -791,6 +829,7 @@ export function useChatComposerState({
         sessionId: effectiveSessionId,
         temporarySessionId: sessionToActivate,
         toolsSettings,
+        runMode,
         permissionMode,
         basePermissionMode,
         model,
@@ -824,6 +863,7 @@ export function useChatComposerState({
       onSessionActivityBump,
       onSessionProcessing,
       pendingViewSessionRef,
+      runMode,
       permissionMode,
       basePermissionMode,
       resetCommandMenuState,

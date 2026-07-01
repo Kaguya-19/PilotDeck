@@ -18,6 +18,7 @@ export {
   type WebGatewayFrame,
   type WebGatewayMethod,
   type WebGatewayMode,
+  type WebAgentRunMode,
   type WebHelloOk,
   type WebListProjectsResult,
   type WebListSessionsInput,

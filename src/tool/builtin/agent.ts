@@ -169,7 +169,7 @@ export function createAgentTool(
       // Full fork path (C2): preferred when AgentLoop wired the fork API.
       if (context.subagent) {
         let requestedType = explicit ?? "general-purpose";
-        if (context.permissionContext?.mode === "plan" && requestedType === "general-purpose") {
+        if ((context.permissionContext?.mode === "plan" || context.runMode === "ask") && requestedType === "general-purpose") {
           requestedType = "explore";
         }
         return runFullFork({
@@ -181,7 +181,7 @@ export function createAgentTool(
         });
       }
       let requestedType = explicit ?? "general-purpose";
-      if (context.permissionContext?.mode === "plan" && requestedType === "general-purpose") {
+      if ((context.permissionContext?.mode === "plan" || context.runMode === "ask") && requestedType === "general-purpose") {
         requestedType = "explore";
       }
 
@@ -233,6 +233,64 @@ function buildAgentToolDescription(): string {
     "- Inside the AgentLoop, this runs a real forked subagent with its own scoped tool loop.",
     "- In stand-alone runtimes and some tests, it falls back to a single model call that preserves the same high-level subagent intent.",
   ].join("\n");
+}
+
+const ASK_MODE_SUBAGENT_TYPES = ["explore", "plan", "verify"] as const;
+
+export function buildAskModeAgentToolSchema(): {
+  description: string;
+  inputSchema: Record<string, unknown>;
+} {
+  const typeLines = ASK_MODE_SUBAGENT_TYPES
+    .map((id) => {
+      const definition = SUBAGENT_DEFINITIONS[id];
+      return `- ${id}: ${definition.description} Tools: ${definition.allowedTools.join(", ")}.`;
+    })
+    .join("\n");
+
+  const description = [
+    "Launch a read-only subagent for investigation, planning, or verification.",
+    "",
+    "In ask mode, subagents inherit ask mode and the same permission setting. Only read-only subagent types are available; 'general-purpose' is treated as 'explore'.",
+    "",
+    "Provide:",
+    "- `description`: a short 3-5 word label for the task.",
+    "- `prompt`: the full directive for the subagent. Include goal, context, constraints, and what good output looks like. The subagent can only read and search; it cannot modify files.",
+    "- `subagent_type` (optional): 'explore', 'plan', or 'verify'. Defaults to 'explore'.",
+    "",
+    "Available subagent types:",
+    typeLines,
+    "",
+    "The subagent returns one structured report with these sections: `Scope`, `Result`, `Key files`, `Files changed`, and `Issues`.",
+  ].join("\n");
+
+  const inputSchema: Record<string, unknown> = {
+    type: "object",
+    required: ["description", "prompt"],
+    additionalProperties: false,
+    properties: {
+      description: {
+        type: "string",
+        description: "Short 3-5 word task summary used to label the subagent run.",
+      },
+      prompt: {
+        type: "string",
+        description:
+          "Detailed directive for the subagent. Include the goal, relevant context, constraints, and desired output. The subagent can only read and search; it cannot modify files.",
+      },
+      subagent_type: {
+        type: "string",
+        description:
+          "Subagent preset. In ask mode only 'explore', 'plan', and 'verify' are available. Defaults to 'explore'.",
+      },
+      subagentType: {
+        type: "string",
+        description: "Deprecated legacy alias for subagent_type. Prefer subagent_type.",
+      },
+    },
+  };
+
+  return { description, inputSchema };
 }
 
 function normalizeRequestedSubagentType(value: string | undefined): string | undefined {

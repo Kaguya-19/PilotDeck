@@ -1,5 +1,5 @@
 import type { Gateway, GatewayEvent } from "../../gateway/index.js";
-import type { CronRunRecord, CronRunOutcome, CronTask } from "../protocol/types.js";
+import type { CronResultDeliveryHandler, CronRunRecord, CronRunOutcome, CronTask } from "../protocol/types.js";
 import type { CronTaskStore } from "../storage/CronTaskStore.js";
 import { resolveCronTimezone } from "../CronTimezone.js";
 import { computeNextRunAt } from "./CronSchedule.js";
@@ -32,6 +32,7 @@ export type CronFireDependencies = {
   runTimeoutMs: number;
   defaultTimezone: string;
   releaseTaskSession: (task: CronTask) => Promise<void>;
+  onResultDelivery?: CronResultDeliveryHandler;
   logger?: {
     warn: (message: string, data?: Record<string, unknown>) => void;
   };
@@ -56,6 +57,7 @@ export class CronFire {
     let error: CronRunRecord["error"];
     let forcedFailure = false;
     let abortRequested = false;
+    let assistantText = "";
     try {
       await this.deps.store.putTask({
         ...task,
@@ -81,6 +83,9 @@ export class CronFire {
         timeoutMs: this.deps.runTimeoutMs,
       })) {
         await this.deps.store.appendRunEvent(runId, event);
+        if (event.type === "assistant_text_delta") {
+          assistantText += event.text;
+        }
         if (event.type === "elicitation_request" || event.type === "permission_request") {
           outcome = "failed";
           forcedFailure = true;
@@ -156,6 +161,13 @@ export class CronFire {
         title: task.message.trimStart().split(/\r?\n/, 1)[0]?.trim().slice(0, 120),
         error,
       });
+      await this.deliverResult(task, runId, outcome, assistantText, error).catch((deliveryError: unknown) => {
+        this.deps.logger?.warn("cron result delivery failed", {
+          taskId: task.taskId,
+          runId,
+          error: deliveryError instanceof Error ? deliveryError.message : String(deliveryError),
+        });
+      });
       await this.updateTaskAfterRun(task, finishedAt, outcome).catch((updateError: unknown) => {
         this.deps.logger?.warn("cron task post-run update failed", {
           taskId: task.taskId,
@@ -164,6 +176,31 @@ export class CronFire {
         });
       });
     }
+  }
+
+  private async deliverResult(
+    task: CronTask,
+    runId: string,
+    outcome: CronRunOutcome,
+    assistantText: string,
+    error: CronRunRecord["error"],
+  ): Promise<void> {
+    const text = outcome === "completed"
+      ? assistantText.trim()
+      : error?.message?.trim() || "Cron task failed.";
+    const deliveryText = text || "定时任务已完成，但没有返回内容。";
+    await this.deps.onResultDelivery?.({
+      taskId: task.taskId,
+      runId,
+      sessionKey: task.sessionKey,
+      channelKey: task.channelKey,
+      originSessionKey: task.originSessionKey,
+      originChannelKey: task.originChannelKey,
+      projectKey: task.projectKey,
+      outcome,
+      text: deliveryText,
+      error,
+    });
   }
 
   private async updateTaskAfterRun(task: CronTask, finishedAt: Date, outcome: CronRunOutcome): Promise<void> {

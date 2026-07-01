@@ -1,5 +1,7 @@
 import type { Gateway, GatewayChannelKey } from "../../../gateway/index.js";
+import type { CronResultDelivery } from "../../../cron/index.js";
 import type { ChannelAdapter, ChannelHandle, ChannelLogger, ChannelStartDeps } from "../protocol/ChannelAdapter.js";
+import { deliverChatCronResult } from "../protocol/ImCronDelivery.js";
 import { ImElicitationHelper } from "../protocol/ImElicitationHelper.js";
 import { ImPermissionHelper } from "../protocol/ImPermissionHelper.js";
 import { TelegramSessionMapper } from "./TelegramSessionMapper.js";
@@ -88,6 +90,10 @@ export class TelegramChannel implements ChannelAdapter {
     };
   }
 
+  async deliverCronResult(delivery: CronResultDelivery): Promise<boolean> {
+    return deliverChatCronResult(delivery, this.channelKey, (chatId, text) => this.sendReply(chatId, text));
+  }
+
   private async handleTextMessage(ctx: any): Promise<void> {
     const msg = ctx.message;
     if (!msg?.text) return;
@@ -171,16 +177,19 @@ export class TelegramChannel implements ChannelAdapter {
     }
   }
 
-  private async sendReply(chatId: string, text: string): Promise<void> {
-    if (!this.bot) return;
+  private async sendReply(chatId: string, text: string): Promise<boolean> {
+    if (!this.bot) return false;
     const chunks = chunkText(text, MAX_MESSAGE_LENGTH);
+    let ok = true;
     for (const chunk of chunks) {
       try {
         await this.bot.api.sendMessage(chatId, chunk);
       } catch (e) {
         this.logger?.error?.(`telegram: sendMessage failed: ${e}`);
+        ok = false;
       }
     }
+    return ok;
   }
 
   private async sendTyping(chatId: string): Promise<void> {

@@ -10,12 +10,18 @@ import {
   normalizeOpenAIStreamEvent,
   type OpenAIStreamState,
 } from "../providers/openai/stream.js";
+import {
+  createOpenAIResponsesStreamState,
+  normalizeOpenAIResponsesStreamEvent,
+  type OpenAIResponsesStreamState,
+} from "../providers/openai-responses/stream.js";
 import type { CanonicalModelEvent, ModelProtocol } from "../protocol/canonical.js";
 
 export type StreamNormalizerState = {
   anthropic?: AnthropicStreamState;
   google?: GoogleStreamState;
   openai?: OpenAIStreamState;
+  openaiResponses?: OpenAIResponsesStreamState;
 };
 
 export function createStreamNormalizerState(protocol: ModelProtocol): StreamNormalizerState {
@@ -24,6 +30,9 @@ export function createStreamNormalizerState(protocol: ModelProtocol): StreamNorm
   }
   if (protocol === "google") {
     return { google: createGoogleStreamState() };
+  }
+  if (protocol === "openai-responses") {
+    return { openaiResponses: createOpenAIResponsesStreamState() };
   }
   return { openai: createOpenAIStreamState() };
 }
@@ -41,6 +50,11 @@ export function normalizeStreamEvent(
   if (protocol === "google") {
     state.google ??= createGoogleStreamState();
     return normalizeGoogleStreamEvent(raw, state.google);
+  }
+
+  if (protocol === "openai-responses") {
+    state.openaiResponses ??= createOpenAIResponsesStreamState();
+    return normalizeOpenAIResponsesStreamEvent(raw, state.openaiResponses);
   }
 
   state.openai ??= createOpenAIStreamState();

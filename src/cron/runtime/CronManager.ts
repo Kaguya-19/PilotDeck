@@ -16,6 +16,7 @@ import type {
   CronRunNowInput,
   CronRunNowResult,
   CronRunRecord,
+  CronResultDeliveryHandler,
   CronStopInput,
   CronStopResult,
   CronTask,
@@ -36,6 +37,7 @@ export type CreateCronManagerOptions = {
   uuid?: () => string;
   logger?: CronRuntimeLogger;
   telemetry?: TelemetryClient;
+  onResultDelivery?: CronResultDeliveryHandler;
 };
 
 export class CronManager {
@@ -177,6 +179,7 @@ export class CronManager {
       uuid: this.options.uuid,
       logger: this.options.logger,
       telemetry: this.options.telemetry,
+      onResultDelivery: this.options.onResultDelivery,
       activeRunCount: () => this.activeRunCount(),
       skipToolCreation: true,
     });

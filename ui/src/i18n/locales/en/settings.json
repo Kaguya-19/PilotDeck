@@ -690,11 +690,12 @@
         "protocol": "Protocol",
         "protocolOptions": {
           "openai": "openai (chat-completions)",
+          "openaiResponses": "openai-responses (Responses API)",
           "anthropic": "anthropic (messages API)",
           "google": "google (Gemini API)"
         },
         "baseUrl": "Base URL",
-        "baseUrlHint": "For native Google Gemini, use https://generativelanguage.googleapis.com. For OpenAI-compatible providers, include the /v1 suffix.",
+        "baseUrlHint": "For native Google Gemini, use https://generativelanguage.googleapis.com. For OpenAI-compatible and Responses API providers, include the /v1 suffix.",
         "defaultsTo": "Defaults to",
         "fromCatalog": "from catalog.",
         "effective": "Effective:",

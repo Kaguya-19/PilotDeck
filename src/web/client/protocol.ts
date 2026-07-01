@@ -16,6 +16,11 @@ export type WebGatewayMode =
   | "plan"
   | "bypassPermissions";
 
+export type WebAgentRunMode =
+  | "agent"
+  | "plan"
+  | "ask";
+
 export type WebGatewayChannelKey =
   | "cli"
   | "tui"
@@ -132,6 +137,7 @@ export type WebSubmitTurnInput = {
   message: string;
   projectKey?: string;
   attachments?: WebChannelAttachment[];
+  runMode?: WebAgentRunMode;
   mode?: WebGatewayMode;
   basePermissionMode?: WebGatewayMode;
   /** Allow model-visible plan mode tools. Defaults to true only for explicit plan-mode turns. */
@@ -275,6 +281,7 @@ export type WebForkSessionResult = {
   newSessionKey: string;
   prefillText: string;
   carriedMessageCount: number;
+  runMode?: WebAgentRunMode;
   mode?: WebGatewayMode;
 };
 

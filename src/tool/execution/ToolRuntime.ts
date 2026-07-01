@@ -8,6 +8,7 @@ import {
   buildPlanModeBashViolationMessage,
   buildPlanModeViolationMessage,
 } from "../planModeConstraints.js";
+import { getAskModeViolation } from "../askModeConstraints.js";
 import { isReadOnlyShellCommand } from "../builtin/bash/permissions.js";
 import {
   applyResultSizeLimit,
@@ -68,6 +69,20 @@ export class ToolRuntime {
         tool.name,
         "plan_mode_violation",
         planModeViolation,
+        startedAt,
+        context,
+      );
+    }
+
+    const askModeViolation = context.runMode === "ask"
+      ? getAskModeViolation(tool, call.input)
+      : undefined;
+    if (askModeViolation) {
+      return this.errorResult(
+        call.id,
+        tool.name,
+        "ask_mode_violation",
+        askModeViolation,
         startedAt,
         context,
       );

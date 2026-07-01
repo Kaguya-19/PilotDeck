@@ -21,6 +21,11 @@ import { createNormalizedMessage } from '../pilotdeck-message.js';
 const router = express.Router();
 const REPO_ROOT = process.cwd();
 
+function isSearchToolName(name) {
+  const normalized = String(name || '').toLowerCase();
+  return normalized === 'grep' || normalized === 'glob';
+}
+
 router.get('/:sessionId/messages', async (req, res) => {
   try {
     const { sessionId } = req.params;
@@ -184,6 +189,9 @@ function mapWebMessageToNormalized(message, sessionId) {
       const planPayload = message.payload && typeof message.payload === 'object'
           ? message.payload
           : {};
+      const searchPayload = isSearchToolName(message.toolName) && message.payload && typeof message.payload === 'object'
+          ? message.payload
+          : null;
       return createNormalizedMessage({
         ...base,
         kind: 'tool_result',
@@ -206,6 +214,7 @@ function mapWebMessageToNormalized(message, sessionId) {
             planTitle: planPayload.planTitle,
             planSummary: planPayload.planSummary,
         } : {}),
+        ...(searchPayload ? { toolUseResult: searchPayload } : {}),
       });
     }
     case 'permission_request':

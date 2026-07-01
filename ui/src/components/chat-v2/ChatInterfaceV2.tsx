@@ -96,7 +96,11 @@ function ChatInterfaceV2({
   } = useChatProviderState({ selectedSession });
 
   const cycleRunMode = useCallback(() => {
-    setRunMode((currentMode) => (currentMode === 'plan' ? 'agent' : 'plan'));
+    setRunMode((currentMode) => {
+      if (currentMode === 'agent') return 'plan';
+      if (currentMode === 'plan') return 'ask';
+      return 'agent';
+    });
   }, []);
 
   const selectPermissionMode = useCallback((mode: typeof permissionMode) => {
@@ -211,6 +215,7 @@ function ChatInterfaceV2({
     selectedSession,
     currentSessionId,
     model,
+    runMode,
     permissionMode: effectivePermissionMode,
     basePermissionMode: permissionMode,
     cycleRunMode,
@@ -333,7 +338,7 @@ function ChatInterfaceV2({
     setIsForkPending(true);
     try {
       const response = await api.forkSession(sessionId, { projectPath, fromEntryId });
-      let result: { newSessionId?: string; prefillText?: string; mode?: string; error?: string } = {};
+      let result: { newSessionId?: string; prefillText?: string; runMode?: string; mode?: string; error?: string } = {};
       try {
         result = await response.json();
       } catch {
@@ -346,7 +351,7 @@ function ChatInterfaceV2({
       if (!newSessionId) {
         throw new Error('Fork did not return a new session id');
       }
-      setRunMode(result.mode === 'plan' ? 'plan' : 'agent');
+      setRunMode(result.runMode === 'ask' ? 'ask' : result.mode === 'plan' || result.runMode === 'plan' ? 'plan' : 'agent');
 
       if (typeof window.refreshProjects === 'function') {
         try {

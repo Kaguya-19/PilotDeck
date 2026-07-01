@@ -690,11 +690,12 @@
         "protocol": "协议",
         "protocolOptions": {
           "openai": "openai（聊天补全）",
+          "openaiResponses": "openai-responses（Responses API）",
           "anthropic": "anthropic（消息 API）",
           "google": "google（Gemini API）"
         },
         "baseUrl": "接口地址",
-        "baseUrlHint": "原生 Google Gemini 使用 https://generativelanguage.googleapis.com。OpenAI 兼容接口请填到 /v1。",
+        "baseUrlHint": "原生 Google Gemini 使用 https://generativelanguage.googleapis.com。OpenAI 兼容接口与 Responses API 请填到 /v1。",
         "defaultsTo": "默认使用目录中的",
         "fromCatalog": "。",
         "effective": "实际地址：",

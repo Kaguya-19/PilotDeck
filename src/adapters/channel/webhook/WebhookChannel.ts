@@ -1,7 +1,9 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import type { CronResultDelivery } from "../../../cron/index.js";
 import type { Gateway, GatewayChannelKey } from "../../../gateway/index.js";
 import type { ChannelAdapter, ChannelHandle, ChannelLogger, ChannelStartDeps } from "../protocol/ChannelAdapter.js";
+import { deliverChatCronResult } from "../protocol/ImCronDelivery.js";
 import { WebhookSessionMapper } from "./WebhookSessionMapper.js";
 import { renderWebhookEvent } from "./webhook-render.js";
 
@@ -103,6 +105,10 @@ export class WebhookChannel implements ChannelAdapter {
         }
       },
     };
+  }
+
+  async deliverCronResult(delivery: CronResultDelivery): Promise<boolean> {
+    return deliverChatCronResult(delivery, this.channelKey, (chatId, text) => this.deliverReply(chatId, text));
   }
 
   private async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -241,16 +247,17 @@ export class WebhookChannel implements ChannelAdapter {
     }
   }
 
-  private async deliverReply(chatId: string, text: string): Promise<void> {
+  private async deliverReply(chatId: string, text: string): Promise<boolean> {
     const delivery = this.deliveryInfo.get(chatId);
     const deliverType = (delivery?.deliver as string | undefined) ?? "log";
 
     if (deliverType === "log") {
       this.logger?.info?.(`webhook: response for ${chatId}: ${text.slice(0, 200)}`);
-      return;
+      return true;
     }
 
     this.logger?.info?.(`webhook: deliver type '${deliverType}' for ${chatId}: ${text.slice(0, 100)}`);
+    return false;
   }
 
   private verifyHmac(body: string, secret: string, signature: string): boolean {

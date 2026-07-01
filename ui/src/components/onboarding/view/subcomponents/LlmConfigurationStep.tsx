@@ -318,6 +318,7 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
                       className="w-full appearance-none rounded-lg border border-border bg-background px-3 py-2.5 pr-8 text-sm text-foreground focus:border-foreground/40 focus:outline-none"
                     >
                       <option value="openai">openai</option>
+                      <option value="openai-responses">openai-responses</option>
                       <option value="anthropic">anthropic</option>
                       <option value="google">google</option>
                     </select>
@@ -341,6 +342,11 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
                 {customProtocol === 'openai' && (
                   <p className="mt-1 text-[11px] text-muted-foreground">
                     OpenAI-compatible base URLs should include the API version path, for example ending in <span className="font-mono">/v1</span>.
+                  </p>
+                )}
+                {customProtocol === 'openai-responses' && (
+                  <p className="mt-1 text-[11px] text-muted-foreground">
+                    OpenAI Responses API base URLs should include the API version path, for example ending in <span className="font-mono">/v1</span>.
                   </p>
                 )}
                 {customProtocol === 'google' && (
@@ -445,6 +451,11 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
                   {(selectedProvider?.protocol ?? customProtocol) === 'openai' && (
                     <p className="mt-1 text-[11px] text-muted-foreground">
                       OpenAI-compatible base URLs should include the API version path, for example ending in <span className="font-mono">/v1</span>.
+                    </p>
+                  )}
+                  {(selectedProvider?.protocol ?? customProtocol) === 'openai-responses' && (
+                    <p className="mt-1 text-[11px] text-muted-foreground">
+                      OpenAI Responses API base URLs should include the API version path, for example ending in <span className="font-mono">/v1</span>.
                     </p>
                   )}
                   {(selectedProvider?.protocol ?? customProtocol) === 'google' && (

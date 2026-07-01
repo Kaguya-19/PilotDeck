@@ -11,6 +11,7 @@ export type PromptAssemblerInput = {
   provider: string;
   model: string;
   permissionMode: string;
+  runMode?: string;
   additionalWorkingDirectories: string[];
   tools: CanonicalToolSchema[];
   /** Custom system prompt (replaces sections 1 + 3). */
@@ -104,6 +105,10 @@ export class PromptAssembler {
       lines.push("");
       lines.push(permissionLine);
     }
+    const runModeLine = formatRunMode(input.runMode);
+    if (runModeLine) {
+      lines.push(runModeLine);
+    }
 
     if (input.additionalWorkingDirectories.length > 0) {
       lines.push("");
@@ -131,6 +136,9 @@ export class PromptAssembler {
     lines.push("IMPORTANT: When the user does not specify an explicit file path, all file paths in tool calls MUST be relative to the cwd above — use \"foo.html\", not an absolute path like \"/home/user/foo.html\". If the user explicitly provides a path, respect their choice.");
     lines.push(`model: ${input.provider}/${input.model}`);
     lines.push(`permission_mode: ${input.permissionMode}`);
+    if (input.runMode) {
+      lines.push(`run_mode: ${input.runMode}`);
+    }
     lines.push(`platform: ${process.platform}`);
     lines.push(`node: ${process.version}`);
     lines.push("</user-context>");
@@ -170,6 +178,17 @@ function formatPermissionMode(mode: string): string {
       return "Permission mode: bypassPermissions — all tools are auto-approved; act conservatively.";
     default:
       return `Permission mode: ${mode}`;
+  }
+}
+
+function formatRunMode(mode: string | undefined): string | undefined {
+  switch (mode) {
+    case "ask":
+      return "Run mode: ask — read-only analysis mode; write/action tools are blocked at tool runtime even when permission mode is bypassPermissions.";
+    case "plan":
+      return "Run mode: plan — planning mode is active.";
+    default:
+      return undefined;
   }
 }
 

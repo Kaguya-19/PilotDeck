@@ -263,9 +263,11 @@
     "runModes": {
       "agent": "Agent",
       "plan": "Plan",
+      "ask": "Ask",
       "change": "Select run mode",
       "agentDescription": "Directly process and execute the task",
-      "planDescription": "Generate a plan first, then execute after confirmation"
+      "planDescription": "Generate a plan first, then execute after confirmation",
+      "askDescription": "Read-only analysis with optional subagents"
     }
   },
   "commandMenu": {

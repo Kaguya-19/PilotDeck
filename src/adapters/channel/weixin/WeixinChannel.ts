@@ -3,9 +3,11 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { ILinkClient, loginWithQR, MessageItemType } from "weixin-ilink";
 import type { ClientOptions, GetUpdatesResp, WeixinMessage, LoginResult } from "weixin-ilink";
+import type { CronResultDelivery } from "../../../cron/index.js";
 import type { Gateway, GatewayChannelKey } from "../../../gateway/index.js";
 import type { ChannelAdapter, ChannelHandle, ChannelLogger, ChannelStartDeps } from "../protocol/ChannelAdapter.js";
 import { executeChannelCommand } from "../protocol/ChannelCommandRegistry.js";
+import { deliverChatCronResult } from "../protocol/ImCronDelivery.js";
 import { ImElicitationHelper } from "../protocol/ImElicitationHelper.js";
 import { ImPermissionHelper } from "../protocol/ImPermissionHelper.js";
 import {
@@ -17,9 +19,17 @@ import { WeixinSessionMapper } from "./WeixinSessionMapper.js";
 
 const CREDENTIALS_PATH = join(homedir(), ".pilotdeck", "weixin-credentials.json");
 const POLL_RETRY_DELAY_MS = 3000;
-const WEIXIN_ACTIVITY_DELAY_MS = 300;
-const WEIXIN_ACTIVITY_UPDATE_THROTTLE_MS = 3000;
-const WEIXIN_ACTIVITY_MAX_UPDATES = 120;
+const WEIXIN_ACTIVITY_DELAY_MS = 10 * 60 * 1000;
+const WEIXIN_ACTIVITY_UPDATE_THROTTLE_MS = 10 * 60 * 1000;
+const WEIXIN_DEFAULT_TURN_TIMEOUT_MS = 0;
+const WEIXIN_TIMEOUT_FINAL_TEXT = "处理时间已超过上限，任务已停止。你可以调整需求后重新发送。";
+const WEIXIN_ACTIVITY_TTL_MS = Number.MAX_SAFE_INTEGER;
+const WEIXIN_ACTIVITY_MAX_UPDATES = Number.MAX_SAFE_INTEGER;
+const WEIXIN_CONNECTION_LOST_TEXT = "微信连接暂时中断，正在尝试恢复。当前任务仍会继续处理，恢复后我会继续回复。";
+const WEIXIN_CONNECTION_RECOVERED_TEXT = "微信连接已恢复，我会继续处理当前任务。";
+const WEIXIN_CONNECTION_RECOVERED_AFTER_LOSS_TEXT = "微信连接刚刚中断过，现在已恢复。我会继续处理当前任务。";
+const WEIXIN_SESSION_EXPIRED_TEXT = "微信登录状态已失效，当前任务无法继续通过微信回复。请重新扫码登录后再试。";
+const WEIXIN_MAX_PENDING_REPLIES_PER_CHAT = 20;
 let ilinkFetchCompatibilityInstalled = false;
 
 export type WeixinChannelOptions = {
@@ -64,6 +74,10 @@ export class WeixinChannel implements ChannelAdapter {
   private readonly permissions = new ImPermissionHelper();
   private contextTokens = new Map<string, string>();
   private consecutivePollErrors = 0;
+  private connectionIssueNotified = false;
+  private connectionIssueChats = new Set<string>();
+  private connectionLostNoticeDeliveredChats = new Set<string>();
+  private pendingReplies = new Map<string, string[]>();
 
   constructor(options: WeixinChannelOptions = {}) {
     this.credentialsPath = options.credentialsPath ?? CREDENTIALS_PATH;
@@ -98,6 +112,12 @@ export class WeixinChannel implements ChannelAdapter {
         this.pollPromise = null;
       },
     };
+  }
+
+  async deliverCronResult(delivery: CronResultDelivery): Promise<boolean> {
+    return deliverChatCronResult(delivery, this.channelKey, (userId, text) =>
+      this.sendReply(userId, text, { queueOnFailure: true }),
+    );
   }
 
   private async ensureLoggedIn(): Promise<SavedCredentials | null> {
@@ -150,23 +170,27 @@ export class WeixinChannel implements ChannelAdapter {
     while (!this.loopAbort.signal.aborted) {
       try {
         const resp = await this.client.poll();
-        if (this.consecutivePollErrors > 0) {
-          this.logger?.info?.(`weixin: poll recovered after ${this.consecutivePollErrors} error(s)`);
-          this.consecutivePollErrors = 0;
-        }
-
         if (resp.errcode === -14) {
           this.logger?.error?.("weixin: session expired (errcode -14), need re-login");
           console.error("[weixin] Session 过期，请删除凭证文件并重启以重新扫码登录:");
           console.error(`[weixin]   rm ${this.credentialsPath}`);
+          await this.notifyActiveChats(WEIXIN_SESSION_EXPIRED_TEXT);
           break;
         }
 
         if (resp.ret !== 0 && resp.ret !== undefined) {
           this.logger?.warn?.(`weixin: poll ret=${resp.ret} errmsg=${resp.errmsg}`);
+          await this.notifyConnectionLost();
           await this.sleep(POLL_RETRY_DELAY_MS);
           continue;
         }
+
+        if (this.consecutivePollErrors > 0) {
+          this.logger?.info?.(`weixin: poll recovered after ${this.consecutivePollErrors} error(s)`);
+          this.consecutivePollErrors = 0;
+        }
+        await this.notifyConnectionRecovered();
+        await this.flushPendingReplies();
 
         const messages = resp.msgs ?? [];
         if (messages.length > 0) {
@@ -186,6 +210,7 @@ export class WeixinChannel implements ChannelAdapter {
         this.logger?.error?.(
           `weixin: poll error #${this.consecutivePollErrors}: ${formatWeixinError(e)}`,
         );
+        await this.notifyConnectionLost();
         this.rebuildClientAfterPollError(e);
         await this.sleep(POLL_RETRY_DELAY_MS);
       }
@@ -222,7 +247,7 @@ export class WeixinChannel implements ChannelAdapter {
         const confirmation = await this.permissions.answer(fromUser, text, this.gateway);
         if (confirmation) await this.sendReply(fromUser, confirmation);
         if (trimmed === "1" || trimmed === "2") {
-          await this.activeLiveReplies.get(fromUser)?.resumeActivity("tool");
+          await this.activeLiveReplies.get(fromUser)?.resumeActivity("tool", { immediate: false });
         }
       } catch (e) {
         this.logger?.error?.(`weixin: permission answer error: ${e}`);
@@ -241,7 +266,9 @@ export class WeixinChannel implements ChannelAdapter {
         gateway: this.gateway,
         chatId: fromUser,
         channelKey: "weixin",
-        reply: (msg) => this.sendReply(fromUser, msg),
+        reply: async (msg) => {
+          await this.sendReply(fromUser, msg);
+        },
         bindProject: (projectKey) => this.mapper.bindProject(fromUser, projectKey),
         getProject: () => this.mapper.getProject(fromUser),
         logger: this.logger as any,
@@ -272,14 +299,17 @@ export class WeixinChannel implements ChannelAdapter {
   ): Promise<void> {
     if (!this.gateway) return;
 
-    const turnTimeoutMs = this.liveReplyOptions?.turnTimeoutMs ?? 600_000;
+    const turnTimeoutMs = this.liveReplyOptions?.turnTimeoutMs ?? WEIXIN_DEFAULT_TURN_TIMEOUT_MS;
     const liveReply = new ImLiveReplyController<void>({
       ...this.liveReplyOptions,
+      turnTimeoutMs,
       activityDelayMs: this.liveReplyOptions?.activityDelayMs ?? WEIXIN_ACTIVITY_DELAY_MS,
       activityUpdateThrottleMs:
         this.liveReplyOptions?.activityUpdateThrottleMs ?? WEIXIN_ACTIVITY_UPDATE_THROTTLE_MS,
       activityMaxUpdates: this.liveReplyOptions?.activityMaxUpdates ?? WEIXIN_ACTIVITY_MAX_UPDATES,
-      activityTtlMs: this.liveReplyOptions?.activityTtlMs ?? turnTimeoutMs,
+      activityTtlMs: this.liveReplyOptions?.activityTtlMs ?? WEIXIN_ACTIVITY_TTL_MS,
+      formatActivity: this.liveReplyOptions?.formatActivity ?? formatWeixinActivity,
+      timeoutFinalText: this.liveReplyOptions?.timeoutFinalText ?? WEIXIN_TIMEOUT_FINAL_TEXT,
       transport: this.createLiveReplyTransport(userId),
       onTransportError: (error, phase) => {
         this.logger?.warn?.(`weixin: live reply ${phase} failed: ${formatWeixinError(error)}`);
@@ -288,15 +318,20 @@ export class WeixinChannel implements ChannelAdapter {
     this.activeLiveReplies.set(userId, liveReply);
     let activeRunId: string | undefined;
     let watchdogSettled = false;
+    let timeoutNotice: Promise<void> | undefined;
+    const notifyTimedOut = (): Promise<void> => {
+      timeoutNotice ??= liveReply.markTimedOut().catch((error: unknown) => {
+        this.logger?.warn?.(`weixin: mark timeout failed: ${formatWeixinError(error)}`);
+      });
+      return timeoutNotice;
+    };
     const watchdog = turnTimeoutMs > 0
       ? setTimeout(() => {
           if (watchdogSettled) return;
           watchdogSettled = true;
           this.logger?.warn?.(`weixin: live reply timed out for user ${userId}`);
-          void liveReply.markTimedOut().catch((error: unknown) => {
-            this.logger?.warn?.(`weixin: mark timeout failed: ${formatWeixinError(error)}`);
-          });
-          void this.gateway?.abortTurn({ sessionKey, ...(activeRunId ? { runId: activeRunId } : {}) })
+          void notifyTimedOut()
+            .then(() => this.gateway?.abortTurn({ sessionKey, ...(activeRunId ? { runId: activeRunId } : {}) }))
             .catch((error: unknown) => {
               this.logger?.warn?.(`weixin: abort timeout turn failed: ${formatWeixinError(error)}`);
             });
@@ -311,7 +346,7 @@ export class WeixinChannel implements ChannelAdapter {
         channelKey: "weixin",
         message,
         allowPlanModeTools: false,
-        timeoutMs: turnTimeoutMs,
+        ...(turnTimeoutMs > 0 ? { timeoutMs: turnTimeoutMs } : {}),
         ...(projectKey ? { projectKey } : {}),
       })) {
         if (event.type === "turn_started") {
@@ -330,11 +365,16 @@ export class WeixinChannel implements ChannelAdapter {
           continue;
         }
         if (event.type === "error" && event.code === "agent_aborted") {
+          if (timeoutNotice) {
+            await timeoutNotice;
+            continue;
+          }
           await liveReply.markAborted();
           continue;
         }
         if (event.type === "error" && event.code === "turn_timeout") {
-          await liveReply.markTimedOut();
+          watchdogSettled = true;
+          await notifyTimedOut();
           continue;
         }
         await liveReply.handleEvent(event);
@@ -349,6 +389,7 @@ export class WeixinChannel implements ChannelAdapter {
     } finally {
       watchdogSettled = true;
       if (watchdog) clearTimeout(watchdog);
+      await timeoutNotice;
       this.activeLiveReplies.delete(userId);
     }
 
@@ -360,10 +401,11 @@ export class WeixinChannel implements ChannelAdapter {
   private createLiveReplyTransport(userId: string): ImLiveReplyTransport<void> {
     return {
       send: async (text) => {
-        await this.sendReply(userId, text);
+        await this.sendReply(userId, text, { queueOnFailure: true });
         return undefined;
       },
-      pulseActivity: async () => {
+      pulseActivity: async (activity) => {
+        await this.sendReply(userId, activity.text);
         await this.sendTypingIfPossible(userId);
         return true;
       },
@@ -371,18 +413,25 @@ export class WeixinChannel implements ChannelAdapter {
     };
   }
 
-  private async sendReply(userId: string, text: string): Promise<void> {
-    if (!this.client) return;
+  private async sendReply(userId: string, text: string, options: { queueOnFailure?: boolean } = {}): Promise<boolean> {
+    if (!this.client) {
+      if (options.queueOnFailure) this.queuePendingReply(userId, text);
+      return false;
+    }
     const contextToken = this.contextTokens.get(userId);
     if (!contextToken) {
       this.logger?.warn?.(`weixin: no context_token for ${userId}, cannot send`);
-      return;
+      if (options.queueOnFailure) this.queuePendingReply(userId, text);
+      return false;
     }
     try {
       await this.client.sendTextChunked(userId, text, contextToken, 2000);
       this.logger?.info?.(`weixin: sent reply to ${userId}`);
+      return true;
     } catch (e) {
       this.logger?.error?.(`weixin: sendText failed: ${formatWeixinError(e)}`);
+      if (options.queueOnFailure) this.queuePendingReply(userId, text);
+      return false;
     }
   }
 
@@ -394,6 +443,65 @@ export class WeixinChannel implements ChannelAdapter {
       await this.client.sendTyping(userId, contextToken);
     } catch (e) {
       this.logger?.warn?.(`weixin: sendTyping failed: ${formatWeixinError(e)}`);
+    }
+  }
+
+  private async notifyConnectionLost(): Promise<void> {
+    if (this.connectionIssueNotified) return;
+    this.connectionIssueNotified = true;
+    this.connectionIssueChats = new Set(this.activeChats);
+    this.connectionLostNoticeDeliveredChats = await this.notifyActiveChats(WEIXIN_CONNECTION_LOST_TEXT);
+  }
+
+  private async notifyConnectionRecovered(): Promise<void> {
+    if (!this.connectionIssueNotified) return;
+    this.connectionIssueNotified = false;
+    const chatsToNotify = new Set([...this.connectionIssueChats, ...this.activeChats]);
+    await Promise.all([...chatsToNotify].map((userId) => {
+      const text = this.connectionLostNoticeDeliveredChats.has(userId)
+        ? WEIXIN_CONNECTION_RECOVERED_TEXT
+        : WEIXIN_CONNECTION_RECOVERED_AFTER_LOSS_TEXT;
+      return this.sendReply(userId, text);
+    }));
+    this.connectionIssueChats.clear();
+    this.connectionLostNoticeDeliveredChats.clear();
+  }
+
+  private async notifyActiveChats(text: string): Promise<Set<string>> {
+    const delivered = new Set<string>();
+    if (this.activeChats.size === 0) return delivered;
+    const results = await Promise.all(
+      [...this.activeChats].map(async (userId) => ({
+        userId,
+        ok: await this.sendReply(userId, text),
+      })),
+    );
+    for (const result of results) {
+      if (result.ok) delivered.add(result.userId);
+    }
+    return delivered;
+  }
+
+  private queuePendingReply(userId: string, text: string): void {
+    const pending = this.pendingReplies.get(userId) ?? [];
+    pending.push(text);
+    if (pending.length > WEIXIN_MAX_PENDING_REPLIES_PER_CHAT) {
+      pending.splice(0, pending.length - WEIXIN_MAX_PENDING_REPLIES_PER_CHAT);
+    }
+    this.pendingReplies.set(userId, pending);
+  }
+
+  private async flushPendingReplies(): Promise<void> {
+    if (this.pendingReplies.size === 0) return;
+    for (const [userId, replies] of [...this.pendingReplies]) {
+      while (replies.length > 0) {
+        const text = replies[0];
+        if (!(await this.sendReply(userId, text))) break;
+        replies.shift();
+      }
+      if (replies.length === 0) {
+        this.pendingReplies.delete(userId);
+      }
     }
   }
 
@@ -514,6 +622,31 @@ function readStringProperty(source: object, key: string): string | undefined {
   if (typeof value === "string" && value.length > 0) return value;
   if (typeof value === "number") return String(value);
   return undefined;
+}
+
+function formatWeixinActivity(activity: { kind: "thinking" | "tool" | "subagent"; elapsedMs: number }): string {
+  const elapsed = formatElapsed(activity.elapsedMs);
+  const suffix = elapsed ? `（已用时 ${elapsed}）` : "";
+  if (activity.kind === "tool") {
+    return `仍在处理：正在执行工具${suffix}`;
+  }
+  if (activity.kind === "subagent") {
+    return `仍在处理：正在处理子任务${suffix}`;
+  }
+  return `仍在处理：正在分析和生成回复${suffix}`;
+}
+
+function formatElapsed(elapsedMs: number): string {
+  if (elapsedMs < 60_000) {
+    return "";
+  }
+  const minutes = Math.floor(elapsedMs / 60_000);
+  if (minutes < 60) {
+    return `${minutes} 分钟`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest > 0 ? `${hours} 小时 ${rest} 分钟` : `${hours} 小时`;
 }
 
 function installIlinkFetchCompatibility(): void {

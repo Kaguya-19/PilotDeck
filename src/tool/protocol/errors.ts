@@ -13,7 +13,8 @@ export type PilotDeckToolErrorCode =
   | "file_conflict"
   | "unsupported_tool"
   | "setup_required"
-  | "plan_mode_violation";
+  | "plan_mode_violation"
+  | "ask_mode_violation";
 
 export type PilotDeckToolError = {
   code: PilotDeckToolErrorCode;

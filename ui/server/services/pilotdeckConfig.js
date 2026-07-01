@@ -173,8 +173,8 @@ function validateProvider(id, provider, errors) {
   }
   const protocol = normalizeString(provider.protocol).toLowerCase();
   if (!protocol) errors.push(`model.providers.${id}.protocol is required`);
-  else if (protocol !== 'openai' && protocol !== 'anthropic' && protocol !== 'google') {
-    errors.push(`model.providers.${id}.protocol must be "openai", "anthropic", or "google"`);
+  else if (protocol !== 'openai' && protocol !== 'openai-responses' && protocol !== 'anthropic' && protocol !== 'google') {
+    errors.push(`model.providers.${id}.protocol must be "openai", "openai-responses", "anthropic", or "google"`);
   }
   if (!normalizeString(provider.url)) errors.push(`model.providers.${id}.url is required`);
   if (!normalizeString(provider.apiKey)) errors.push(`model.providers.${id}.apiKey is required`);
@@ -299,6 +299,7 @@ export function preserveMaskedSecrets(nextValue, previousValue) {
 
 function providerProtocolToMemoryApi(protocol) {
   if (protocol === 'anthropic' || protocol === 'google') return protocol;
+  if (protocol === 'openai-responses') return 'openai-responses';
   return 'openai-completions';
 }
 
