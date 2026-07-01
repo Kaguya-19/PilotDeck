@@ -1,5 +1,6 @@
 import express from 'express';
 import { promises as fs } from 'fs';
+import { statSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { execFile } from 'child_process';
@@ -16,8 +17,24 @@ import { prepareCliSpawn } from '../utils/processSpawn.js';
 const execFileAsync = promisify(execFile);
 
 function runClawHub(args, options) {
-  const prepared = prepareCliSpawn('clawhub', args, options);
+  const command = resolveBundledClawHubCommand() || 'clawhub';
+  const prepared = prepareCliSpawn(command, args, options);
   return execFileAsync(prepared.command, prepared.args, prepared.options);
+}
+
+function resolveBundledClawHubCommand() {
+  if (!process.env.PILOTDECK_RUNTIME_ROOT) return null;
+  const shimName = process.platform === 'win32' ? 'clawhub.cmd' : 'clawhub';
+  const candidate = path.join(process.env.PILOTDECK_RUNTIME_ROOT, 'node_modules', '.bin', shimName);
+  return fsSyncExists(candidate) ? candidate : null;
+}
+
+function fsSyncExists(filePath) {
+  try {
+    return Boolean(filePath) && statSync(filePath).isFile();
+  } catch {
+    return false;
+  }
 }
 
 const __filename = fileURLToPath(import.meta.url);
