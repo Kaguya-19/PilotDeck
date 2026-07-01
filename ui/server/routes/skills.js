@@ -520,8 +520,19 @@ router.post('/clawhub/search', async (req, res) => {
           .json({ error: 'clawhub CLI not found in PATH. Install with `npm install -g clawhub`.' });
       }
       stdout = e.stdout || '';
+      const stderr = (e.stderr || '').trim();
       if (!stdout) {
-        return res.status(500).json({ error: 'clawhub search failed', message: e.message });
+        const message = stderr || e.message || 'clawhub search failed';
+        console.warn('[skills/clawhub/search] clawhub failed', {
+          message,
+          exitCode: e.code,
+          signal: e.signal,
+        });
+        return res.status(502).json({
+          error: `clawhub search failed: ${message}`,
+          message,
+          exitCode: typeof e.code === 'number' ? e.code : undefined,
+        });
       }
     }
 
