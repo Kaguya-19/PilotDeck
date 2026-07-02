@@ -149,6 +149,13 @@ function classifySkillPath(skillPath, projectPath = null) {
   if (typeof skillPath !== 'string' || !skillPath) {
     return { ok: false, reason: 'skillPath is required' };
   }
+  if (skillPath.startsWith('preset:')) {
+    const rawSlug = skillPath.slice('preset:'.length).replace(/\/SKILL\.md$/, '');
+    if (!rawSlug || rawSlug.includes('..')) {
+      return { ok: false, reason: 'Invalid preset skill path' };
+    }
+    return { ok: true, scope: 'preset', slug: rawSlug };
+  }
   const abs = path.resolve(skillPath);
   if (abs.includes('..')) {
     return { ok: false, reason: 'skillPath contains ".."' };
@@ -235,6 +242,7 @@ router.post('/list', async (req, res) => {
     res.json({
       user: data.user,
       project: data.project,
+      preset: data.preset || [],
       projectPath: data.projectPath,
       isGeneralCwd: generalCwd,
     });

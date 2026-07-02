@@ -121,6 +121,13 @@ export class SkillManager {
     return this.userSkillsRoot();
   }
 
+  private assertDiskScope(scope: SkillAddressInput["scope"]): SkillScope {
+    if (scope !== "user" && scope !== "project") {
+      throw new SkillManagerError("invalid_input", `Scope "${scope}" is not backed by the disk skill manager.`);
+    }
+    return scope;
+  }
+
   private resolveSkillDir(input: SkillAddressInput): string {
     if (!isValidSlug(input.slug)) {
       throw new SkillManagerError(
@@ -128,7 +135,8 @@ export class SkillManager {
         `Invalid slug "${input.slug}". Allowed: [a-zA-Z0-9][a-zA-Z0-9._-]{0,99}, no "..".`,
       );
     }
-    const root = this.resolveScopeRoot(input.scope, input.projectKey);
+    const scope = this.assertDiskScope(input.scope);
+    const root = this.resolveScopeRoot(scope, input.projectKey);
     return join(root, input.slug);
   }
 
@@ -164,8 +172,9 @@ export class SkillManager {
       }
       throw e;
     }
-    const skill = await readSkillMeta(skillDir, input.scope);
-    return { content, scope: input.scope, slug: input.slug, skill };
+    const scope = this.assertDiskScope(input.scope);
+    const skill = await readSkillMeta(skillDir, scope);
+    return { content, scope, slug: input.slug, skill };
   }
 
   async write(input: SkillWriteInput): Promise<SkillWriteResult> {
@@ -176,8 +185,9 @@ export class SkillManager {
     await fs.mkdir(skillDir, { recursive: true });
     const skillFile = join(skillDir, "SKILL.md");
     await fs.writeFile(skillFile, input.content, "utf8");
-    const skill = await readSkillMeta(skillDir, input.scope);
-    return { ok: true, scope: input.scope, slug: input.slug, skill };
+    const scope = this.assertDiskScope(input.scope);
+    const skill = await readSkillMeta(skillDir, scope);
+    return { ok: true, scope, slug: input.slug, skill };
   }
 
   async create(input: SkillCreateInput): Promise<SkillCreateResult> {
@@ -206,10 +216,11 @@ export class SkillManager {
           });
     const skillFile = join(skillDir, "SKILL.md");
     await fs.writeFile(skillFile, finalContent, "utf8");
-    const skill = await readSkillMeta(skillDir, input.scope);
+    const scope = this.assertDiskScope(input.scope);
+    const skill = await readSkillMeta(skillDir, scope);
     return {
       ok: true,
-      scope: input.scope,
+      scope,
       slug: input.slug,
       skillPath: skillDir,
       skill,
@@ -223,7 +234,7 @@ export class SkillManager {
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
     }
-    return { ok: true, scope: input.scope, slug: input.slug };
+    return { ok: true, scope: this.assertDiskScope(input.scope), slug: input.slug };
   }
 
   async validate(input: SkillValidateInput): Promise<SkillValidationResult> {

@@ -338,6 +338,10 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
     toolResultsDir: resolve(tmpdir(), "pilotdeck-tool-output", process.pid.toString()),
     cron: options.cron,
     skillManager,
+    pluginSkills: {
+      list: (input) => registry.resolve(input.projectKey ?? projectRoot).pluginRuntime.getAllSkills(),
+      read: (input) => registry.resolve(input.projectKey ?? projectRoot).pluginRuntime.loadSkillPrompt(input.slug),
+    },
     setSessionCwd: (sessionKey, cwd) => registry.setSessionCwd(sessionKey, cwd),
     readSessionMessages: (input) =>
       readWebSessionMessages(input, {

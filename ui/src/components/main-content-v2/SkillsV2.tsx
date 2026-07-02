@@ -35,6 +35,8 @@ type SkillsV2Props = {
   projects: Project[];
 };
 
+type SkillScope = 'user' | 'project' | 'preset';
+
 type Skill = {
   slug: string;
   name: string;
@@ -42,13 +44,15 @@ type Skill = {
   version: string | null;
   skillFile: string;
   skillDir: string;
-  scope: 'user' | 'project';
+  scope: SkillScope;
+  readonly?: boolean;
   mtime: number | null;
 };
 
 type SkillsListResponse = {
   user: Skill[];
   project: Skill[];
+  preset: Skill[];
   projectPath: string | null;
   isGeneralCwd: boolean;
 };
@@ -109,7 +113,7 @@ export default function SkillsV2({ selectedProject, projects }: SkillsV2Props) {
   const [serverGeneralCwdPath, setServerGeneralCwdPath] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [activeSlug, setActiveSlug] = useState<string | null>(null);
-  const [activeScope, setActiveScope] = useState<'user' | 'project' | null>(null);
+  const [activeScope, setActiveScope] = useState<SkillScope | null>(null);
   const [editorContent, setEditorContent] = useState<string>('');
   const [originalContent, setOriginalContent] = useState<string>('');
   const [editorLoading, setEditorLoading] = useState(false);
@@ -161,7 +165,7 @@ export default function SkillsV2({ selectedProject, projects }: SkillsV2Props) {
 
   const activeSkill = useMemo(() => {
     if (!skills || !activeSlug) return null;
-    const list = activeScope === 'project' ? skills.project : skills.user;
+    const list = activeScope === 'project' ? skills.project : activeScope === 'preset' ? skills.preset : skills.user;
     return list.find((s) => s.slug === activeSlug) ?? null;
   }, [skills, activeSlug, activeScope]);
 
@@ -201,6 +205,7 @@ export default function SkillsV2({ selectedProject, projects }: SkillsV2Props) {
 
   const handleSave = useCallback(async () => {
     if (!activeSkill) return;
+    if (activeSkill.readonly || activeSkill.scope === 'preset') return;
     setSaving(true);
     try {
       const result = await api<{ ok: boolean; skill: Skill }>('/api/skills/write', {
@@ -220,6 +225,7 @@ export default function SkillsV2({ selectedProject, projects }: SkillsV2Props) {
           ...prev,
           user: updateIn(prev.user),
           project: updateIn(prev.project),
+          preset: prev.preset,
         };
       });
       flashToast({ kind: 'success', text: t('skillsTab.savedSuccess', { defaultValue: 'Saved' }) });
@@ -232,6 +238,7 @@ export default function SkillsV2({ selectedProject, projects }: SkillsV2Props) {
 
   const handleDelete = useCallback(async () => {
     if (!activeSkill) return;
+    if (activeSkill.readonly || activeSkill.scope === 'preset') return;
     if (!window.confirm(t('skillsTab.confirmDelete', { defaultValue: 'Delete this skill? This will remove the entire folder.', name: activeSkill.name }) as string)) {
       return;
     }
@@ -431,10 +438,11 @@ function SkillsList({
   refresh: () => Promise<void>;
   flashToast: (t: ToastState, ms?: number) => void;
   setActiveSlug: (slug: string | null) => void;
-  setActiveScope: (scope: 'user' | 'project' | null) => void;
+  setActiveScope: (scope: SkillScope | null) => void;
   t: ReturnType<typeof useTranslation>['t'];
 }) {
   const handleDeleteSkill = useCallback(async (skill: Skill) => {
+    if (skill.readonly || skill.scope === 'preset') return;
     if (!window.confirm(t('skillsTab.confirmUninstall', { defaultValue: 'Uninstall "{{name}}"? This will remove the entire skill folder.', name: skill.name }) as string)) {
       return;
     }
@@ -455,6 +463,7 @@ function SkillsList({
   }, [effectiveProjectPath, selectedSkill, refresh, flashToast, setActiveSlug, setActiveScope, t]);
 
   const handleMoveSkill = useCallback(async (skill: Skill, target: MoveTarget) => {
+    if (skill.readonly || skill.scope === 'preset') return;
     try {
       await api('/api/skills/import', {
         sourcePath: skill.skillDir,
@@ -537,7 +546,20 @@ function SkillsList({
                 t={t}
               />
             ) : null}
-            {skills && skills.user.length === 0 && (generalCwd || skills.project.length === 0) ? (
+            {skills?.preset && skills.preset.length > 0 ? (
+              <ListSection
+                title={t('skillsTab.presetScope', { defaultValue: 'Preset Skills' })}
+                items={skills.preset}
+                activeSlug={activeScope === 'preset' ? activeSlug : null}
+                onSelect={onSelect}
+                onDelete={handleDeleteSkill}
+                onMove={handleMoveSkill}
+                moveTargets={moveTargets}
+                currentProjectPath={effectiveProjectPath}
+                t={t}
+              />
+            ) : null}
+            {skills && skills.user.length === 0 && (generalCwd || skills.project.length === 0) && skills.preset.length === 0 ? (
               <div className="px-4 py-6 text-center text-xxs text-neutral-500 dark:text-neutral-400">
                 {t('skillsTab.empty', { defaultValue: 'No skills yet. Click "New" to install or create one.' })}
               </div>
@@ -598,6 +620,7 @@ function ListSection({
   }, [ctxMenu]);
 
   const handleContextMenu = useCallback((e: React.MouseEvent, skill: Skill) => {
+    if (skill.readonly || skill.scope === 'preset') return;
     e.preventDefault();
     e.stopPropagation();
     setCtxMenu({ skill, x: e.clientX, y: e.clientY });
@@ -767,6 +790,8 @@ function SkillDetail({
   onRevert: () => void;
   t: ReturnType<typeof useTranslation>['t'];
 }) {
+  const isReadonly = Boolean(skill.readonly || skill.scope === 'preset');
+
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="shrink-0 border-b border-neutral-200 px-6 py-3 dark:border-neutral-800">
@@ -779,6 +804,8 @@ function SkillDetail({
               'rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wider',
               skill.scope === 'project'
                 ? 'bg-blue-100 text-blue-700 dark:bg-blue-950/60 dark:text-blue-300'
+                : skill.scope === 'preset'
+                  ? 'bg-violet-100 text-violet-700 dark:bg-violet-950/60 dark:text-violet-300'
                 : 'bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300',
             )}
           >
@@ -805,8 +832,8 @@ function SkillDetail({
         ) : (
           <CodeMirror
             value={content}
-            onChange={onChange}
-            extensions={[markdown(), EditorView.lineWrapping]}
+            onChange={isReadonly ? undefined : onChange}
+            extensions={[markdown(), EditorView.lineWrapping, ...(isReadonly ? [EditorView.editable.of(false)] : [])]}
             theme={isDarkMode ? zincDarkTheme : zincLightTheme}
             height="100%"
             style={{ height: '100%', fontSize: '13px' }}
@@ -823,16 +850,22 @@ function SkillDetail({
       </div>
 
       <div className="flex shrink-0 items-center justify-between gap-2 border-t border-neutral-200 px-6 py-2 dark:border-neutral-800">
-        <button
-          type="button"
-          onClick={onDelete}
-          className="inline-flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[12px] text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/40"
-        >
-          <Trash2 className="h-3.5 w-3.5" strokeWidth={1.75} />
-          <span>{t('skillsTab.delete', { defaultValue: 'Delete' })}</span>
-        </button>
+        {isReadonly ? (
+          <div className="text-[12px] text-neutral-500 dark:text-neutral-400">
+            {t('skillsTab.readonlyPreset', { defaultValue: 'Preset skill, managed by the desktop runtime.' })}
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={onDelete}
+            className="inline-flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[12px] text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/40"
+          >
+            <Trash2 className="h-3.5 w-3.5" strokeWidth={1.75} />
+            <span>{t('skillsTab.delete', { defaultValue: 'Delete' })}</span>
+          </button>
+        )}
         <div className="flex items-center gap-1.5">
-          {isDirty ? (
+          {!isReadonly && isDirty ? (
             <button
               type="button"
               onClick={onRevert}
@@ -841,15 +874,17 @@ function SkillDetail({
               {t('skillsTab.revert', { defaultValue: 'Revert' })}
             </button>
           ) : null}
-          <button
-            type="button"
-            onClick={onSave}
-            disabled={!isDirty || saving}
-            className="inline-flex h-7 items-center gap-1.5 rounded-md bg-neutral-900 px-2.5 text-[12px] font-medium text-white transition hover:bg-neutral-700 disabled:opacity-40 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-neutral-300"
-          >
-            {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={1.75} /> : <Save className="h-3.5 w-3.5" strokeWidth={1.75} />}
-            <span>{saving ? t('skillsTab.saving', { defaultValue: 'Saving…' }) : t('skillsTab.save', { defaultValue: 'Save' })}</span>
-          </button>
+          {!isReadonly ? (
+            <button
+              type="button"
+              onClick={onSave}
+              disabled={!isDirty || saving}
+              className="inline-flex h-7 items-center gap-1.5 rounded-md bg-neutral-900 px-2.5 text-[12px] font-medium text-white transition hover:bg-neutral-700 disabled:opacity-40 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-neutral-300"
+            >
+              {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={1.75} /> : <Save className="h-3.5 w-3.5" strokeWidth={1.75} />}
+              <span>{saving ? t('skillsTab.saving', { defaultValue: 'Saving…' }) : t('skillsTab.save', { defaultValue: 'Save' })}</span>
+            </button>
+          ) : null}
         </div>
       </div>
     </div>

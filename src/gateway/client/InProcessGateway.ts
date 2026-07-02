@@ -70,6 +70,7 @@ import type {
   SkillReadResult,
   SkillScanInput,
   SkillScanResult,
+  SkillSummary,
   SkillValidateInput,
   SkillValidationResult,
   SkillWriteInput,
@@ -77,10 +78,29 @@ import type {
   SkillsListInput,
   SkillsListResult,
 } from "../../extension/skills/types.js";
+import type { PluginSkillContribution } from "../../extension/plugins/runtime/PluginRuntime.js";
 import type { TelemetryClient } from "../../telemetry/index.js";
 import type { TelemetryExecutionKind, TelemetryModule } from "../../telemetry/index.js";
 
 const PLAN_COMMAND_USAGE = "用法：/plan <任务>\n例如：/plan 设计一个新功能";
+
+function pluginSkillToSummary(skill: PluginSkillContribution): SkillSummary {
+  const slug = skill.name;
+  const displayName = skill.namespace && skill.name.startsWith(`${skill.namespace}:`)
+    ? skill.name.slice(skill.namespace.length + 1)
+    : skill.name;
+  return {
+    slug,
+    name: displayName,
+    description: skill.description ?? "",
+    version: null,
+    skillFile: `preset:${slug}/SKILL.md`,
+    skillDir: `preset:${slug}`,
+    scope: "preset",
+    readonly: true,
+    mtime: null,
+  };
+}
 
 export type InProcessGatewayOptions = {
   now?: () => Date;
@@ -134,6 +154,10 @@ export type InProcessGatewayOptions = {
    * SDK) reads and writes the same skill directory the agent loads from.
    */
   skillManager?: SkillManager;
+  pluginSkills?: {
+    list(input: { projectKey?: string | null }): PluginSkillContribution[];
+    read(input: { projectKey?: string | null; slug: string }): Promise<string | undefined>;
+  };
   dispatchHookForSession?: (sessionKey: string, event: string, payload: Record<string, unknown>) => void;
   /** Directory to persist large tool outputs for TUI/Web viewing. */
   toolResultsDir?: string;
@@ -691,10 +715,20 @@ export class InProcessGateway implements Gateway {
   // -------------------------------------------------------------------
 
   async skillsList(input: SkillsListInput): Promise<SkillsListResult> {
-    return this.requireSkills().list(input);
+    const result = await this.requireSkills().list(input);
+    const preset = this.options.pluginSkills?.list(input).map(pluginSkillToSummary) ?? [];
+    return { ...result, preset };
   }
 
   async skillRead(input: SkillAddressInput): Promise<SkillReadResult> {
+    if (input.scope === "preset") {
+      const content = await this.options.pluginSkills?.read({ projectKey: input.projectKey, slug: input.slug });
+      if (content === undefined) {
+        throw new SkillManagerError("not_found", `Preset skill not found: ${input.slug}.`);
+      }
+      const skill = this.options.pluginSkills?.list(input).map(pluginSkillToSummary).find((entry) => entry.slug === input.slug) ?? null;
+      return { content, scope: input.scope, slug: input.slug, skill };
+    }
     return this.requireSkills().read(input);
   }
 

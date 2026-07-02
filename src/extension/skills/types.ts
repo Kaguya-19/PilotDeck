@@ -13,6 +13,7 @@
  * project the agent is running against.
  */
 export type SkillScope = "user" | "project";
+export type SkillListScope = SkillScope | "preset";
 
 /**
  * Lightweight summary used by `list` / `create` / `write` responses.
@@ -30,7 +31,9 @@ export type SkillSummary = {
   skillFile: string;
   /** Absolute path of the containing skill directory. */
   skillDir: string;
-  scope: SkillScope;
+  scope: SkillListScope;
+  /** Preset/plugin skills are shipped by the runtime and cannot be edited from the skills panel. */
+  readonly?: boolean;
   /** Last-modified time of SKILL.md in epoch ms, or null if unreadable. */
   mtime: number | null;
 };
@@ -47,12 +50,13 @@ export type SkillsListInput = {
 export type SkillsListResult = {
   user: SkillSummary[];
   project: SkillSummary[];
+  preset?: SkillSummary[];
   /** Echoed back so the UI can confirm which project the list came from. */
   projectPath: string | null;
 };
 
 export type SkillAddressInput = {
-  scope: SkillScope;
+  scope: SkillListScope;
   slug: string;
   /** Required when `scope === "project"`. */
   projectKey?: string | null;
@@ -60,7 +64,7 @@ export type SkillAddressInput = {
 
 export type SkillReadResult = {
   content: string;
-  scope: SkillScope;
+  scope: SkillListScope;
   slug: string;
   skill: SkillSummary | null;
 };
