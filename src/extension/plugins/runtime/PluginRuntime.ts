@@ -2,6 +2,7 @@ import { resolvePluginDirectories } from "../discovery/PluginDirectoryResolver.j
 import { discoverPluginPaths, discoverSkillPaths } from "../discovery/discoverLocalPlugins.js";
 import { loadPluginFromPath, loadSkillFromPath } from "../loading/PluginLoader.js";
 import { loadPluginHooks } from "../loading/PluginHookLoader.js";
+import { loadBundledSkills } from "../builtin/loadBundledSkills.js";
 import type { LoadedPluginCommand } from "../loading/PluginCommandLoader.js";
 import type { PilotDeckLoadedPlugin } from "../protocol/plugin.js";
 import { PluginRegistry } from "./PluginRegistry.js";
@@ -207,6 +208,7 @@ export class PluginRuntime {
     ]);
     const plugins = [
       ...enabledBuiltinPlugins(this.options.builtinPlugins ?? [], this.options.builtinPluginsEnabled ?? {}),
+      ...loadBundledSkills(),
       ...loaded.filter(isLoadedPlugin),
       ...loadedSkills.filter(isLoadedPlugin),
     ];
@@ -260,4 +262,3 @@ function toSkillContribution(
     namespace: plugin.name,
   };
 }
-

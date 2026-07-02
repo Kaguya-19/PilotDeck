@@ -147,6 +147,7 @@ function prepareRuntimeTree() {
     `${JSON.stringify(createRuntimePackageJson(rootPackage, uiPackage), null, 2)}\n`,
   );
   copyFiltered(resolve(repoRoot, "dist"), resolve(runtimeRoot, "dist"), skipBuildArtifact);
+  copyFiltered(resolve(repoRoot, "skills"), resolve(runtimeRoot, "skills"), skipBuildArtifact);
   copyFiltered(
     resolve(repoRoot, "src", "context", "memory", "edgeclaw-memory-core"),
     resolve(runtimeRoot, "src", "context", "memory", "edgeclaw-memory-core"),

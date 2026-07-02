@@ -38,12 +38,13 @@ import { isVirtualProjectPath, resolvePilotHome } from '../utils/pilotPaths.js';
 import { moveDirectoryAcrossDevicesSafe } from '../utils/fileMoves.js';
 import { prepareCliSpawn } from '../utils/processSpawn.js';
 import { loadBuiltinPlugins } from '../../../src/extension/plugins/builtin/loadBuiltinPlugins.js';
+import { loadBundledSkills } from '../../../src/extension/plugins/builtin/loadBundledSkills.js';
 
 const execFileAsync = promisify(execFile);
 const router = express.Router();
 
 function builtinPresetSkillSummaries() {
-  return loadBuiltinPlugins().flatMap((plugin) => (plugin.skills || []).map((skill) => ({
+  return [...loadBuiltinPlugins(), ...loadBundledSkills()].flatMap((plugin) => (plugin.skills || []).map((skill) => ({
     slug: skill.name,
     name: plugin.name && skill.name.startsWith(`${plugin.name}:`)
       ? skill.name.slice(plugin.name.length + 1)
@@ -59,7 +60,7 @@ function builtinPresetSkillSummaries() {
 }
 
 function loadBuiltinPresetSkill(slug) {
-  for (const plugin of loadBuiltinPlugins()) {
+  for (const plugin of [...loadBuiltinPlugins(), ...loadBundledSkills()]) {
     const skill = (plugin.skills || []).find((entry) => entry.name === slug || entry.name.endsWith(`:${slug}`));
     if (skill) {
       return {
