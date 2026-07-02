@@ -339,8 +339,16 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
     cron: options.cron,
     skillManager,
     pluginSkills: {
-      list: (input) => registry.resolve(input.projectKey ?? projectRoot).pluginRuntime.getAllSkills(),
-      read: (input) => registry.resolve(input.projectKey ?? projectRoot).pluginRuntime.loadSkillPrompt(input.slug),
+      list: async (input) => {
+        const runtime = registry.resolve(input.projectKey ?? projectRoot);
+        await runtime.pluginRuntime.refresh();
+        return runtime.pluginRuntime.getAllSkills();
+      },
+      read: async (input) => {
+        const runtime = registry.resolve(input.projectKey ?? projectRoot);
+        await runtime.pluginRuntime.refresh();
+        return runtime.pluginRuntime.loadSkillPrompt(input.slug);
+      },
     },
     setSessionCwd: (sessionKey, cwd) => registry.setSessionCwd(sessionKey, cwd),
     readSessionMessages: (input) =>

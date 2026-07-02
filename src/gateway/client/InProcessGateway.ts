@@ -155,7 +155,7 @@ export type InProcessGatewayOptions = {
    */
   skillManager?: SkillManager;
   pluginSkills?: {
-    list(input: { projectKey?: string | null }): PluginSkillContribution[];
+    list(input: { projectKey?: string | null }): Promise<PluginSkillContribution[]> | PluginSkillContribution[];
     read(input: { projectKey?: string | null; slug: string }): Promise<string | undefined>;
   };
   dispatchHookForSession?: (sessionKey: string, event: string, payload: Record<string, unknown>) => void;
@@ -716,7 +716,8 @@ export class InProcessGateway implements Gateway {
 
   async skillsList(input: SkillsListInput): Promise<SkillsListResult> {
     const result = await this.requireSkills().list(input);
-    const preset = this.options.pluginSkills?.list(input).map(pluginSkillToSummary) ?? [];
+    const presetSkills = await this.options.pluginSkills?.list(input);
+    const preset = presetSkills?.map(pluginSkillToSummary) ?? [];
     return { ...result, preset };
   }
 
@@ -726,7 +727,8 @@ export class InProcessGateway implements Gateway {
       if (content === undefined) {
         throw new SkillManagerError("not_found", `Preset skill not found: ${input.slug}.`);
       }
-      const skill = this.options.pluginSkills?.list(input).map(pluginSkillToSummary).find((entry) => entry.slug === input.slug) ?? null;
+      const presetSkills = await this.options.pluginSkills?.list(input);
+      const skill = presetSkills?.map(pluginSkillToSummary).find((entry) => entry.slug === input.slug) ?? null;
       return { content, scope: input.scope, slug: input.slug, skill };
     }
     return this.requireSkills().read(input);
