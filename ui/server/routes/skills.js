@@ -37,9 +37,41 @@ import { getPilotDeckGateway } from '../pilotdeck-bridge.js';
 import { isVirtualProjectPath, resolvePilotHome } from '../utils/pilotPaths.js';
 import { moveDirectoryAcrossDevicesSafe } from '../utils/fileMoves.js';
 import { prepareCliSpawn } from '../utils/processSpawn.js';
+import { loadBuiltinPlugins } from '../../../src/extension/plugins/builtin/loadBuiltinPlugins.js';
 
 const execFileAsync = promisify(execFile);
 const router = express.Router();
+
+function builtinPresetSkillSummaries() {
+  return loadBuiltinPlugins().flatMap((plugin) => (plugin.skills || []).map((skill) => ({
+    slug: skill.name,
+    name: plugin.name && skill.name.startsWith(`${plugin.name}:`)
+      ? skill.name.slice(plugin.name.length + 1)
+      : skill.name,
+    description: typeof skill.frontmatter?.description === 'string' ? skill.frontmatter.description : '',
+    version: null,
+    skillFile: `preset:${skill.name}/SKILL.md`,
+    skillDir: `preset:${skill.name}`,
+    scope: 'preset',
+    readonly: true,
+    mtime: null,
+  })));
+}
+
+function loadBuiltinPresetSkill(slug) {
+  for (const plugin of loadBuiltinPlugins()) {
+    const skill = (plugin.skills || []).find((entry) => entry.name === slug || entry.name.endsWith(`:${slug}`));
+    if (skill) {
+      return {
+        content: skill.content,
+        scope: 'preset',
+        slug,
+        skill: builtinPresetSkillSummaries().find((entry) => entry.slug === skill.name) || null,
+      };
+    }
+  }
+  return null;
+}
 
 function runClawHub(args, options) {
   const command = resolveBundledClawHubCommand() || 'clawhub';
@@ -239,10 +271,13 @@ router.post('/list', async (req, res) => {
     const generalCwd = isGeneralCwd(projectPath);
     const effectiveProjectPath = generalCwd ? null : projectPath || null;
     const data = await callGateway('skillsList', { projectKey: effectiveProjectPath });
+    const preset = Array.isArray(data.preset) && data.preset.length > 0
+      ? data.preset
+      : builtinPresetSkillSummaries();
     res.json({
       user: data.user,
       project: data.project,
-      preset: data.preset || [],
+      preset,
       projectPath: data.projectPath,
       isGeneralCwd: generalCwd,
     });
@@ -256,11 +291,18 @@ router.post('/read', async (req, res) => {
     const { skillPath, projectPath } = req.body || {};
     const cls = classifySkillPath(skillPath, projectPath);
     if (!cls.ok) return res.status(400).json({ error: cls.reason });
-    const result = await callGateway('skillRead', {
-      scope: cls.scope,
-      slug: cls.slug,
-      projectKey: cls.scope === 'project' ? projectPath : null,
-    });
+    let result;
+    try {
+      result = await callGateway('skillRead', {
+        scope: cls.scope,
+        slug: cls.slug,
+        projectKey: cls.scope === 'project' ? projectPath : null,
+      });
+    } catch (e) {
+      if (cls.scope !== 'preset') throw e;
+      result = loadBuiltinPresetSkill(cls.slug);
+      if (!result) throw e;
+    }
     res.json(result);
   } catch (e) {
     sendGatewayError(res, e);
