@@ -241,7 +241,7 @@ router.get('/provider', (_req, res) => {
 });
 
 router.post('/test-connection', async (req, res) => {
-  const { providerType, baseUrl, apiKey, model } = req.body || {};
+  const { providerType, baseUrl, apiKey, model, stream } = req.body || {};
   if (!baseUrl || !apiKey || !model) {
     return res.status(400).json({ ok: false, error: 'baseUrl, apiKey, and model are required' });
   }
@@ -318,6 +318,7 @@ router.post('/test-connection', async (req, res) => {
         body: JSON.stringify({
           model,
           max_tokens: 1,
+          ...(stream === true ? { stream: true } : {}),
           messages: [{ role: 'user', content: 'Hi' }],
         }),
         signal: controller.signal,
@@ -325,8 +326,15 @@ router.post('/test-connection', async (req, res) => {
     }
 
     const response = await fetch(url, fetchOptions);
-    clearTimeout(timer);
+
+    if (stream === true && !isAnthropic && !isGoogle && !isOpenAIResponses) {
+      const streamProbe = await probeOpenAICompatibleStream(response, url);
+      clearTimeout(timer);
+      return res.json(streamProbe);
+    }
+
     const responseText = await response.text();
+    clearTimeout(timer);
     const expectedShape = isAnthropic
       ? 'Anthropic message'
       : isGoogle
@@ -382,6 +390,103 @@ router.post('/test-connection', async (req, res) => {
     return res.json({ ok: false, error: err.message || String(err) });
   }
 });
+
+async function probeOpenAICompatibleStream(response, url) {
+  const contentType = response.headers.get('content-type') || '';
+  if (!response.ok) {
+    const detail = await readProbeError(response);
+    return { ok: false, error: detail };
+  }
+  if (!response.body) {
+    return { ok: false, error: `Expected a streaming response from ${url}, but the response body was missing.` };
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let chunks = 0;
+  let parsedChunks = 0;
+  let sawDone = false;
+  let sawTerminal = false;
+  let firstJsonError = null;
+
+  const consumeChunk = (chunk) => {
+    const dataLines = String(chunk)
+      .split(/\n/)
+      .filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice('data:'.length).trim())
+      .filter(Boolean);
+    for (const data of dataLines) {
+      chunks += 1;
+      if (data === '[DONE]') {
+        sawDone = true;
+        continue;
+      }
+      try {
+        const parsed = JSON.parse(data);
+        parsedChunks += 1;
+        const choices = Array.isArray(parsed?.choices) ? parsed.choices : [];
+        if (choices.some((choice) => choice?.finish_reason)) {
+          sawTerminal = true;
+        }
+      } catch (error) {
+        if (!firstJsonError) {
+          const prefix = data.replace(/\s+/g, ' ').slice(0, 120);
+          firstJsonError = `Malformed stream JSON frame from ${url}: ${error?.message || String(error)}. prefix=${JSON.stringify(prefix)}`;
+        }
+      }
+    }
+  };
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) {
+      buffer += decoder.decode();
+      break;
+    }
+    buffer += decoder.decode(value, { stream: true });
+    const parts = buffer.split(/\n\n/);
+    buffer = parts.pop() || '';
+    for (const part of parts) consumeChunk(part);
+  }
+  if (buffer.trim()) consumeChunk(buffer);
+
+  if (firstJsonError) {
+    return { ok: false, error: firstJsonError };
+  }
+  if (parsedChunks === 0) {
+    return {
+      ok: false,
+      error: `Expected OpenAI-compatible stream chunks from ${url}, but no parseable data frames were received. content-type=${contentType || 'unknown'}`,
+    };
+  }
+  if (!sawDone && !sawTerminal) {
+    return {
+      ok: true,
+      warning: 'Streaming request produced parseable chunks, but ended without [DONE] or a terminal finish_reason. PilotDeck can salvage simple text, but this provider may cause incomplete-stream warnings.',
+      message: `Connected with streaming warning — Model ${url ? 'endpoint' : ''} responded, but terminal stream sentinel was missing.`,
+      stream: { chunks, parsedChunks, sawDone, sawTerminal },
+    };
+  }
+  return {
+    ok: true,
+    message: 'Connected successfully — streaming endpoint produced valid chunks and a completion sentinel.',
+    stream: { chunks, parsedChunks, sawDone, sawTerminal },
+  };
+}
+
+async function readProbeError(response) {
+  const text = await response.text();
+  let detail = `${response.status} ${response.statusText}`;
+  try {
+    const body = JSON.parse(text);
+    if (body?.error?.message) detail = body.error.message;
+    else if (body?.error?.type) detail = `${body.error.type}: ${body.error.message || ''}`;
+  } catch {
+    if (text.trim()) detail = text.replace(/\s+/g, ' ').trim().slice(0, 300);
+  }
+  return detail;
+}
 
 /**
  * Probe the configured web-search provider. Mirrors

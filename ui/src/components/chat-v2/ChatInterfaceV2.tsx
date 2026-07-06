@@ -24,6 +24,13 @@ type PendingViewSession = {
   startedAt: number;
 };
 
+const SESSION_EVENT_STALE_WARNING_MS = 90_000;
+
+function getSocketSessionId(message: any): string | null {
+  const value = message?.sessionId ?? message?.session_id ?? message?.actualSessionId ?? message?.newSessionId;
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
 // V2 chat wrapper. Reuses all business-logic hooks from legacy
 // `ChatInterface` so streaming, file-mentions, slash commands, permissions,
 // ccr_output, task notifications, subagent containers, etc. all keep working
@@ -74,6 +81,8 @@ function ChatInterfaceV2({
   const streamBufferRef = useRef('');
   const streamTimerRef = useRef<number | null>(null);
   const accumulatedStreamRef = useRef('');
+  const lastSessionEventAtRef = useRef<number>(Date.now());
+  const staleStatusShownRef = useRef(false);
   const pendingViewSessionRef = useRef<PendingViewSession | null>(null);
   const [isAbortPending, setIsAbortPending] = useState(false);
   const [runMode, setRunMode] = useState<ChatRunMode>('agent');
@@ -318,6 +327,39 @@ function ChatInterfaceV2({
     onWebSocketReconnect: handleWebSocketReconnect,
     sessionStore,
   });
+
+  useEffect(() => {
+    const unsubscribe = subscribe((message: any) => {
+      if (!message || message.type === 'ping') return;
+      const messageSessionId = getSocketSessionId(message);
+      const activeSessionId = selectedSession?.id || currentSessionId || pendingViewSessionRef.current?.sessionId || null;
+      if (!messageSessionId || !activeSessionId || messageSessionId === activeSessionId || message.type === 'websocket-reconnected') {
+        lastSessionEventAtRef.current = Date.now();
+        staleStatusShownRef.current = false;
+      }
+    });
+    return unsubscribe;
+  }, [currentSessionId, selectedSession?.id, subscribe]);
+
+  useEffect(() => {
+    if (!isLoading) {
+      staleStatusShownRef.current = false;
+      return;
+    }
+    lastSessionEventAtRef.current = Date.now();
+    const timer = window.setInterval(() => {
+      if (!isLoading || staleStatusShownRef.current) return;
+      const idleMs = Date.now() - lastSessionEventAtRef.current;
+      if (idleMs < SESSION_EVENT_STALE_WARNING_MS) return;
+      staleStatusShownRef.current = true;
+      setPilotDeckStatus({
+        text: 'Connection may be stalled; waiting for backend recovery or retry…',
+        tokens: 0,
+        can_interrupt: canAbortSession,
+      });
+    }, 15_000);
+    return () => window.clearInterval(timer);
+  }, [canAbortSession, isLoading, setPilotDeckStatus]);
 
   useEffect(() => {
     if (!isLoading || !canAbortSession) {

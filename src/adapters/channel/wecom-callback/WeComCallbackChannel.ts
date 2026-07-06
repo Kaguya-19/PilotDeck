@@ -14,6 +14,8 @@ const QYAPI = "https://qyapi.weixin.qq.com/cgi-bin";
 const DEFAULT_PORT = 8780;
 const TOKEN_TTL_MS = 7000 * 1000;
 const MAX_MESSAGE_LENGTH = 2048;
+const IM_FETCH_MAX_ATTEMPTS = 3;
+const IM_FETCH_BASE_DELAY_MS = 500;
 
 function sha1Hex(s: string): string {
   return crypto.createHash("sha1").update(s).digest("hex");
@@ -63,6 +65,31 @@ function readBody(req: http.IncomingMessage): Promise<string> {
     req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
     req.on("error", reject);
   });
+}
+
+function isTransientFetchError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const msg = `${error.name} ${error.message}`.toLowerCase();
+  return (
+    msg.includes("timeout") ||
+    msg.includes("terminated") ||
+    msg.includes("fetch failed") ||
+    msg.includes("econnreset") ||
+    msg.includes("econnrefused") ||
+    msg.includes("etimedout") ||
+    msg.includes("epipe") ||
+    msg.includes("socket") ||
+    msg.includes("network")
+  );
+}
+
+function retryDelayMs(attempt: number): number {
+  const base = IM_FETCH_BASE_DELAY_MS * (2 ** Math.max(0, attempt - 1));
+  return base + Math.random() * base * 0.5;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export type WeComCallbackChannelOptions = {
@@ -300,12 +327,12 @@ export class WeComCallbackChannel implements ChannelAdapter {
         agentid: Number(this.agentId),
         text: { content: text.slice(0, MAX_MESSAGE_LENGTH) },
       };
-      const res = await fetch(url, {
+      const res = await this.fetchWithRetry(url, () => ({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(60_000),
-      });
+      }), "sendReply");
       const raw = (await res.json().catch(() => ({}))) as { errcode?: number; errmsg?: string };
       const errcode = raw.errcode;
       if (!res.ok || (errcode != null && errcode !== 0)) {
@@ -328,7 +355,7 @@ export class WeComCallbackChannel implements ChannelAdapter {
     if (this.accessToken && now < this.accessTokenExpires) return this.accessToken;
 
     const url = `${QYAPI}/gettoken?corpid=${encodeURIComponent(this.corpId)}&corpsecret=${encodeURIComponent(this.corpSecret)}`;
-    const res = await fetch(url, { signal: AbortSignal.timeout(20_000) });
+    const res = await this.fetchWithRetry(url, () => ({ signal: AbortSignal.timeout(20_000) }), "getAccessToken");
     const data = (await res.json()) as {
       access_token?: string;
       expires_in?: number;
@@ -343,5 +370,27 @@ export class WeComCallbackChannel implements ChannelAdapter {
     const sec = typeof data.expires_in === "number" ? data.expires_in : 7200;
     this.accessTokenExpires = Date.now() + Math.min(sec * 1000 - 60_000, TOKEN_TTL_MS);
     return this.accessToken;
+  }
+
+  private async fetchWithRetry(url: string, initFactory: () => RequestInit, label: string): Promise<Response> {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= IM_FETCH_MAX_ATTEMPTS; attempt++) {
+      try {
+        const response = await fetch(url, initFactory());
+        if (response.ok || response.status < 500 || attempt >= IM_FETCH_MAX_ATTEMPTS) {
+          return response;
+        }
+        lastError = new Error(`HTTP ${response.status} ${response.statusText}`);
+      } catch (error) {
+        lastError = error;
+        if (!isTransientFetchError(error) || attempt >= IM_FETCH_MAX_ATTEMPTS) {
+          throw error;
+        }
+      }
+      const waitMs = retryDelayMs(attempt);
+      this.logger?.warn?.(`wecom_callback: ${label} retry ${attempt}/${IM_FETCH_MAX_ATTEMPTS} after ${Math.round(waitMs)}ms: ${lastError}`);
+      await delay(waitMs);
+    }
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
   }
 }

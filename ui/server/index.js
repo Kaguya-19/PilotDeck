@@ -137,11 +137,27 @@ const connectedClients = new Set();
 const sessionWatchRegistry = createSessionWatchRegistry();
 registerAlwaysOnNotificationForwarding(connectedClients);
 let isGetProjectsRunning = false; // Flag to prevent reentrant calls
+const WS_HEARTBEAT_INTERVAL_MS = 30_000;
+const WS_HEARTBEAT_GRACE_MS = 75_000;
 
 function normalizeSessionId(value) {
     if (typeof value !== 'string') return null;
     const trimmed = value.trim();
     return trimmed ? trimmed : null;
+}
+
+function safeSendWebSocket(client, payload) {
+    if (!client || client.readyState !== WebSocket.OPEN) return false;
+    try {
+        client.send(payload);
+        return true;
+    } catch (error) {
+        console.warn('[ws] send failed, dropping client:', error?.message || error);
+        try { client.terminate?.(); } catch { /* ignore */ }
+        connectedClients.delete(client);
+        sessionWatchRegistry.removeClient(client);
+        return false;
+    }
 }
 
 function broadcastChatFrame(frame, originWs, userId) {
@@ -152,15 +168,12 @@ function broadcastChatFrame(frame, originWs, userId) {
     if (frameSessionId) {
         const watchers = sessionWatchRegistry.getWatchers(frameSessionId);
         watchers.forEach((client) => {
-            if (client.readyState !== WebSocket.OPEN) return;
             if ((client.__pilotdeckUserId ?? null) !== userId) return;
-            client.send(payload);
-            delivered.add(client);
+            if (safeSendWebSocket(client, payload)) delivered.add(client);
         });
     }
 
-    if (originWs.readyState === WebSocket.OPEN && !delivered.has(originWs)) {
-        originWs.send(payload);
+    if (!delivered.has(originWs) && safeSendWebSocket(originWs, payload)) {
         delivered.add(originWs);
     }
 
@@ -168,9 +181,8 @@ function broadcastChatFrame(frame, originWs, userId) {
     // received the frame yet, fan out to same-user sockets.
     if (delivered.size === 0) {
         connectedClients.forEach((client) => {
-            if (client.readyState !== WebSocket.OPEN) return;
             if ((client.__pilotdeckUserId ?? null) !== userId) return;
-            client.send(payload);
+            safeSendWebSocket(client, payload);
         });
     }
 }
@@ -182,9 +194,8 @@ function broadcastToSessionWatchers(sessionId, frame, userId, excludeWs = null) 
     const watchers = sessionWatchRegistry.getWatchers(normalizedSessionId);
     watchers.forEach((client) => {
         if (client === excludeWs) return;
-        if (client.readyState !== WebSocket.OPEN) return;
         if ((client.__pilotdeckUserId ?? null) !== userId) return;
-        client.send(payload);
+        safeSendWebSocket(client, payload);
     });
 }
 
@@ -195,9 +206,7 @@ function broadcastProgress(progress) {
         ...progress
     });
     connectedClients.forEach(client => {
-        if (client.readyState === WebSocket.OPEN) {
-            client.send(message);
-        }
+        safeSendWebSocket(client, message);
     });
 }
 
@@ -206,9 +215,7 @@ function broadcastProgress(progress) {
 function broadcastConfigReloaded(payload) {
     const message = JSON.stringify({ type: 'config:reloaded', ...payload });
     connectedClients.forEach((client) => {
-        if (client.readyState === WebSocket.OPEN) {
-            client.send(message);
-        }
+        safeSendWebSocket(client, message);
     });
 }
 process.on('pilotdeck:config-broadcast', broadcastConfigReloaded);
@@ -1873,10 +1880,12 @@ function handleChatConnection(ws, request) {
     // Add to connected clients for project updates
     const userId = request?.user?.id ?? request?.user?.userId ?? null;
     ws.__pilotdeckUserId = userId;
+    ws.__pilotdeckLastPongAt = Date.now();
     connectedClients.add(ws);
     // PilotDeck's cron manager lives inside `pilotdeck server`;
     // no legacy daemon lease is needed.
     let cleanedUp = false;
+    let heartbeatTimer = null;
 
     // Wrap WebSocket with writer for consistent interface with SSEStreamWriter
     const writer = new WebSocketWriter(ws, userId);
@@ -1888,7 +1897,11 @@ function handleChatConnection(ws, request) {
         try {
             const data = JSON.parse(message);
 
-            if (data.type === 'ping') return;
+            if (data.type === 'ping') {
+                ws.__pilotdeckLastPongAt = Date.now();
+                safeSendWebSocket(ws, JSON.stringify({ type: 'pong', timestamp: Date.now() }));
+                return;
+            }
             const requestSessionId = normalizeSessionId(data.sessionId);
 
             if (data.type === 'watch-session') {
@@ -2056,10 +2069,40 @@ function handleChatConnection(ws, request) {
     const cleanup = () => {
         if (cleanedUp) return;
         cleanedUp = true;
+        if (heartbeatTimer) {
+            clearInterval(heartbeatTimer);
+        }
         // Remove from connected clients
         connectedClients.delete(ws);
         sessionWatchRegistry.removeClient(ws);
     };
+
+    ws.on('pong', () => {
+        ws.__pilotdeckLastPongAt = Date.now();
+    });
+
+    heartbeatTimer = setInterval(() => {
+        if (cleanedUp) return;
+        if (ws.readyState !== WebSocket.OPEN) {
+            cleanup();
+            return;
+        }
+        const idleMs = Date.now() - (ws.__pilotdeckLastPongAt || 0);
+        if (idleMs > WS_HEARTBEAT_GRACE_MS) {
+            console.warn(`[ws] terminating stale chat websocket idleMs=${idleMs}`);
+            try { ws.terminate(); } catch { /* ignore */ }
+            cleanup();
+            return;
+        }
+        try {
+            ws.ping();
+        } catch (error) {
+            console.warn('[ws] ping failed:', error?.message || error);
+            try { ws.terminate(); } catch { /* ignore */ }
+            cleanup();
+        }
+    }, WS_HEARTBEAT_INTERVAL_MS);
+    heartbeatTimer.unref?.();
 
     ws.on('close', (code, reason) => {
         const reasonText = reason?.toString?.() || '';

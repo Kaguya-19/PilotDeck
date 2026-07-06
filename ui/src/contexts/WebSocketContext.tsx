@@ -45,6 +45,8 @@ const buildWebSocketUrl = (token: string | null) => {
 const INITIAL_RECONNECT_MS = 1000;
 const MAX_RECONNECT_MS = 30000;
 const BACKOFF_FACTOR = 2;
+const CLIENT_PING_INTERVAL_MS = 30_000;
+const CLIENT_PONG_TIMEOUT_MS = 75_000;
 
 const useWebSocketProviderState = (): WebSocketContextType => {
   const wsRef = useRef<WebSocket | null>(null);
@@ -86,12 +88,17 @@ const useWebSocketProviderState = (): WebSocketContextType => {
           reconnectAttemptRef.current = 0;
           setReconnectInfo({ attempt: 0, nextRetryMs: 0, status: 'connected' });
           wsRef.current = websocket;
+          let lastPongAt = Date.now();
 
           const pingInterval = setInterval(() => {
             if (websocket.readyState === WebSocket.OPEN) {
               websocket.send(JSON.stringify({ type: 'ping' }));
+              if (Date.now() - lastPongAt > CLIENT_PONG_TIMEOUT_MS) {
+                console.warn('WebSocket heartbeat timed out; reconnecting');
+                websocket.close(4000, 'heartbeat_timeout');
+              }
             }
-          }, 30_000);
+          }, CLIENT_PING_INTERVAL_MS);
           websocket.addEventListener('close', () => clearInterval(pingInterval));
 
           if (hasConnectedRef.current) {
@@ -111,6 +118,10 @@ const useWebSocketProviderState = (): WebSocketContextType => {
           if (connectIdRef.current !== id) return;
           try {
             const data = JSON.parse(event.data);
+            if (data?.type === 'pong') {
+              lastPongAt = Date.now();
+              return;
+            }
             const subs = subscribersRef.current;
             if (subs.size > 0) {
               subs.forEach((sub) => {

@@ -36,7 +36,6 @@ export async function complete(
   const nonStreamingRequest = { ...request, stream: false };
   const { provider } = validateModelRequest(nonStreamingRequest, config);
   const maxRetries = provider.retry?.requestMaxRetries ?? DEFAULT_REQUEST_MAX_RETRIES;
-  const retryBaseDelay = provider.retry?.baseDelayMs ?? DEFAULT_RETRY_BASE_DELAY_MS;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     throwIfAborted(options.signal);
@@ -50,10 +49,10 @@ export async function complete(
         return parseGoogleResponse(raw, provider.id);
       } catch (error) {
         if (attempt < maxRetries && isRetryableRequestError(error)) {
-          const delayMs = retryBaseDelay * (attempt + 1);
+          const delayMs = computeRetryDelayMs(provider, attempt);
           console.warn(
             `[PilotDeck] complete() retry: ${(error as Error).message} ` +
-            `(attempt ${attempt + 1}/${maxRetries}, delay=${delayMs}ms)`,
+            `(attempt ${attempt + 1}/${maxRetries}, delay=${Math.round(delayMs)}ms)`,
           );
           await delay(delayMs, options.signal);
           continue;
@@ -68,10 +67,10 @@ export async function complete(
       response = await sendProviderRequest(provider, body, false, options.fetch ?? fetch, options.signal);
     } catch (error) {
       if (attempt < maxRetries && isRetryableRequestError(error)) {
-        const delayMs = retryBaseDelay * (attempt + 1);
+        const delayMs = computeRetryDelayMs(provider, attempt);
         console.warn(
           `[PilotDeck] complete() retry: ${(error as Error).message} ` +
-          `(attempt ${attempt + 1}/${maxRetries}, delay=${delayMs}ms)`,
+          `(attempt ${attempt + 1}/${maxRetries}, delay=${Math.round(delayMs)}ms)`,
         );
         await delay(delayMs, options.signal);
         continue;
@@ -95,6 +94,7 @@ export async function complete(
 
 const DEFAULT_STREAM_MAX_RETRIES = 2;
 const DEFAULT_RETRY_BASE_DELAY_MS = 1000;
+const DEFAULT_RETRY_MAX_DELAY_MS = 30_000;
 
 export async function* streamModel(
   request: CanonicalModelRequest,
@@ -104,7 +104,6 @@ export async function* streamModel(
   const streamingRequest = { ...request, stream: true };
   const { provider } = validateModelRequest(streamingRequest, config);
   const maxRetries = provider.retry?.streamMaxRetries ?? DEFAULT_STREAM_MAX_RETRIES;
-  const retryBaseDelay = provider.retry?.baseDelayMs ?? DEFAULT_RETRY_BASE_DELAY_MS;
 
   yield {
     type: "request_started",
@@ -122,7 +121,6 @@ export async function* streamModel(
       request: currentRequest,
       provider,
       maxRetries,
-      retryBaseDelay,
       checkpoint,
       options,
     });
@@ -131,6 +129,7 @@ export async function* streamModel(
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     throwIfAborted(options.signal);
+    const diagnostics = createStreamDiagnostics(provider, streamingRequest.model, attempt + 1);
     const body = buildModelRequest(currentRequest, config);
     if (process.env.PILOTDECK_DUMP_REQUEST === "1") {
       const fs = await import("node:fs");
@@ -143,9 +142,15 @@ export async function* streamModel(
     let response: Response;
     try {
       response = await sendProviderRequest(provider, body, true, options.fetch ?? fetch, options.signal);
+      diagnostics.captureResponse(response);
     } catch (error) {
       if (attempt < maxRetries && isRetryableStreamError(error)) {
-        await delay(retryBaseDelay * (attempt + 1));
+        const delayMs = computeRetryDelayMs(provider, attempt);
+        console.warn(
+          `[model-stream] open retry: ${formatStreamDiagnostics(diagnostics)} ` +
+          `error=${formatErrorForLog(error)} delay=${Math.round(delayMs)}ms`,
+        );
+        await delay(delayMs, options.signal);
         continue;
       }
       throw error;
@@ -179,7 +184,7 @@ export async function* streamModel(
     const streamIdleTimeoutMs = resolveStreamIdleTimeout(provider);
 
     try {
-      for await (const sseEvent of readServerSentEvents(response.body, options.signal, streamIdleTimeoutMs)) {
+      for await (const sseEvent of readServerSentEvents(response.body, options.signal, streamIdleTimeoutMs, diagnostics)) {
         if (sseEvent.type === "done") {
           sawCompletionSentinel = true;
           continue;
@@ -193,7 +198,18 @@ export async function* streamModel(
         }
       }
       if (!sawCompletionSentinel) {
-        throw new IncompleteStreamError();
+        const syntheticEnd = checkpoint.syntheticEndDecision();
+        if (!syntheticEnd.ok) {
+          throw new IncompleteStreamError();
+        }
+        const checkpointState = checkpoint.get();
+        console.warn(
+          `[model-stream] missing completion sentinel salvaged: finishReason=${syntheticEnd.finishReason}, reason=${syntheticEnd.reason}, ` +
+          `tokens=${checkpointState.tokensReceived}, textChars=${checkpointState.partialText.length}, ` +
+          `toolCalls=${checkpointState.toolCallsEnded}/${checkpointState.toolCallsStarted}, ` +
+          formatStreamDiagnostics(diagnostics),
+        );
+        yield { type: "message_end", finishReason: syntheticEnd.finishReason, raw: undefined };
       }
       streamCompleted = true;
     } catch (error) {
@@ -204,15 +220,28 @@ export async function* streamModel(
       ) {
         currentRequest = buildContinuationRequest(currentRequest, checkpoint.get().partialText);
         checkpoint.reset();
-        await delay(retryBaseDelay * (attempt + 1), options.signal);
+        const delayMs = computeRetryDelayMs(provider, attempt);
+        console.warn(
+          `[model-stream] continuation retry: ${formatStreamDiagnostics(diagnostics)} ` +
+          `error=${formatErrorForLog(error)} delay=${Math.round(delayMs)}ms`,
+        );
+        await delay(delayMs, options.signal);
         continue;
       }
 
       if (isRetryableStreamError(error) && attempt < maxRetries) {
-        await delay(retryBaseDelay * (attempt + 1), options.signal);
+        const delayMs = computeRetryDelayMs(provider, attempt);
+        console.warn(
+          `[model-stream] retry: ${formatStreamDiagnostics(diagnostics)} ` +
+          `error=${formatErrorForLog(error)} delay=${Math.round(delayMs)}ms`,
+        );
+        await delay(delayMs, options.signal);
         continue;
       }
 
+      console.warn(
+        `[model-stream] failed: ${formatStreamDiagnostics(diagnostics)} error=${formatErrorForLog(error)}`,
+      );
       throw error;
     }
 
@@ -243,7 +272,6 @@ async function* streamGoogleProviderRequest(params: {
   request: CanonicalModelRequest & { stream: boolean };
   provider: ProviderConfig;
   maxRetries: number;
-  retryBaseDelay: number;
   checkpoint: StreamingCheckpointManager;
   options: ModelRuntimeOptions;
 }): AsyncIterable<CanonicalModelEvent> {
@@ -251,6 +279,7 @@ async function* streamGoogleProviderRequest(params: {
 
   for (let attempt = 0; attempt <= params.maxRetries; attempt++) {
     throwIfAborted(params.options.signal);
+    const startedAt = Date.now();
     try {
       const body = withGoogleAbortSignal(buildModelRequest(currentRequest, {
         providers: { [params.provider.id]: params.provider },
@@ -294,15 +323,32 @@ async function* streamGoogleProviderRequest(params: {
       ) {
         currentRequest = buildContinuationRequest(currentRequest, params.checkpoint.get().partialText);
         params.checkpoint.reset();
-        await delay(params.retryBaseDelay * (attempt + 1), params.options.signal);
+        const delayMs = computeRetryDelayMs(params.provider, attempt);
+        console.warn(
+          `[model-stream] google continuation retry: provider=${params.provider.id}, model=${params.request.model}, ` +
+          `protocol=${params.provider.protocol}, attempt=${attempt + 1}, elapsedMs=${Date.now() - startedAt}, ` +
+          `error=${formatErrorForLog(error)} delay=${Math.round(delayMs)}ms`,
+        );
+        await delay(delayMs, params.options.signal);
         continue;
       }
 
       if (isRetryableGoogleStreamError(providerError, error) && attempt < params.maxRetries) {
-        await delay(params.retryBaseDelay * (attempt + 1), params.options.signal);
+        const delayMs = computeRetryDelayMs(params.provider, attempt);
+        console.warn(
+          `[model-stream] google retry: provider=${params.provider.id}, model=${params.request.model}, ` +
+          `protocol=${params.provider.protocol}, attempt=${attempt + 1}, elapsedMs=${Date.now() - startedAt}, ` +
+          `error=${formatErrorForLog(error)} delay=${Math.round(delayMs)}ms`,
+        );
+        await delay(delayMs, params.options.signal);
         continue;
       }
 
+      console.warn(
+        `[model-stream] google failed: provider=${params.provider.id}, model=${params.request.model}, ` +
+        `protocol=${params.provider.protocol}, attempt=${attempt + 1}, elapsedMs=${Date.now() - startedAt}, ` +
+        `error=${formatErrorForLog(error)}`,
+      );
       yield { type: "error", error: providerError.error };
       return;
     }
@@ -366,17 +412,7 @@ function isRetryableRequestError(error: unknown): boolean {
     return error.error.retryable;
   }
   if (error instanceof Error) {
-    const msg = error.message.toLowerCase();
-    return (
-      msg.includes("network") ||
-      msg.includes("econnreset") ||
-      msg.includes("socket hang up") ||
-      msg.includes("fetch failed") ||
-      msg.includes("timeout") ||
-      msg.includes("etimedout") ||
-      msg.includes("epipe") ||
-      msg.includes("econnrefused")
-    );
+    return isTransientNetworkMessage(error);
   }
   return false;
 }
@@ -394,20 +430,46 @@ function isRetryableStreamError(error: unknown): boolean {
   if (error instanceof IncompleteStreamError) {
     return true;
   }
+  if (error instanceof StreamParseError) {
+    return true;
+  }
   if (error instanceof Error) {
-    const msg = error.message.toLowerCase();
-    return (
-      msg.includes("network") ||
-      msg.includes("econnreset") ||
-      msg.includes("socket hang up") ||
-      msg.includes("fetch failed") ||
-      msg.includes("aborted") ||
-      msg.includes("timeout") ||
-      msg.includes("epipe") ||
-      msg.includes("econnrefused")
-    );
+    return isTransientNetworkMessage(error);
   }
   return false;
+}
+
+function isTransientNetworkMessage(error: Error): boolean {
+  const msg = `${error.name} ${error.message}`.toLowerCase();
+  return (
+    msg.includes("network") ||
+    msg.includes("econnreset") ||
+    msg.includes("socket hang up") ||
+    msg.includes("fetch failed") ||
+    msg.includes("timeout") ||
+    msg.includes("etimedout") ||
+    msg.includes("epipe") ||
+    msg.includes("econnrefused") ||
+    msg.includes("und_err_") ||
+    msg.includes("terminated") ||
+    msg.includes("other side closed") ||
+    msg.includes("remoteprotocolerror") ||
+    msg.includes("premature close") ||
+    msg.includes("socket closed") ||
+    msg.includes("connection closed")
+  );
+}
+
+function computeRetryDelayMs(provider: ProviderConfig, attempt: number, retryAfterMs?: number): number {
+  const maxDelayMs = provider.retry?.maxDelayMs ?? DEFAULT_RETRY_MAX_DELAY_MS;
+  if (retryAfterMs !== undefined && Number.isFinite(retryAfterMs) && retryAfterMs >= 0) {
+    return Math.min(retryAfterMs, maxDelayMs);
+  }
+  const baseDelayMs = provider.retry?.baseDelayMs ?? DEFAULT_RETRY_BASE_DELAY_MS;
+  const exponent = Math.max(0, attempt);
+  const exponential = Math.min(baseDelayMs * (2 ** exponent), maxDelayMs);
+  const jitter = Math.random() * exponential * 0.5;
+  return Math.min(exponential + jitter, maxDelayMs);
 }
 
 function buildContinuationRequest(
@@ -559,6 +621,94 @@ class IncompleteStreamError extends Error {
   }
 }
 
+class StreamParseError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "StreamParseError";
+  }
+}
+
+const STREAM_DIAGNOSTIC_HEADERS = [
+  "cf-ray",
+  "x-request-id",
+  "x-openrouter-provider",
+  "x-openrouter-model",
+  "x-openrouter-id",
+  "server",
+  "via",
+] as const;
+
+type StreamDiagnostics = {
+  provider: string;
+  model: string;
+  protocol: ModelProtocol;
+  baseUrl: string;
+  attempt: number;
+  startedAt: number;
+  firstChunkAt?: number;
+  bytes: number;
+  chunks: number;
+  httpStatus?: number;
+  headers: Record<string, string>;
+  captureResponse(response: Response): void;
+  observeChunk(bytes: number): void;
+};
+
+function createStreamDiagnostics(provider: ProviderConfig, model: string, attempt: number): StreamDiagnostics {
+  return {
+    provider: provider.id,
+    model,
+    protocol: provider.protocol,
+    baseUrl: normalizeProviderBaseUrl(provider.url) ?? "unknown",
+    attempt,
+    startedAt: Date.now(),
+    bytes: 0,
+    chunks: 0,
+    headers: {},
+    captureResponse(response: Response) {
+      this.httpStatus = response.status;
+      for (const header of STREAM_DIAGNOSTIC_HEADERS) {
+        const value = response.headers.get(header);
+        if (value) {
+          this.headers[header] = truncateForLog(value, 120);
+        }
+      }
+    },
+    observeChunk(bytes: number) {
+      if (this.firstChunkAt === undefined) {
+        this.firstChunkAt = Date.now();
+      }
+      this.bytes += bytes;
+      this.chunks += 1;
+    },
+  };
+}
+
+function formatStreamDiagnostics(diagnostics: StreamDiagnostics): string {
+  const now = Date.now();
+  const elapsedMs = now - diagnostics.startedAt;
+  const ttfbMs = diagnostics.firstChunkAt === undefined ? "-" : String(diagnostics.firstChunkAt - diagnostics.startedAt);
+  const headers = Object.entries(diagnostics.headers)
+    .map(([key, value]) => `${key}=${value}`)
+    .join(",");
+  return `provider=${diagnostics.provider}, model=${diagnostics.model}, protocol=${diagnostics.protocol}, ` +
+    `baseUrl=${diagnostics.baseUrl}, attempt=${diagnostics.attempt}, httpStatus=${diagnostics.httpStatus ?? "-"}, ` +
+    `ttfbMs=${ttfbMs}, elapsedMs=${elapsedMs}, bytes=${diagnostics.bytes}, chunks=${diagnostics.chunks}, ` +
+    `upstream=${headers || "-"}`;
+}
+
+function formatErrorForLog(error: unknown): string {
+  if (error instanceof Error) {
+    return `${error.name}(${truncateForLog(error.message, 220)})`;
+  }
+  return truncateForLog(String(error), 220);
+}
+
+function truncateForLog(value: string, maxLength: number): string {
+  const oneLine = value.replace(/\s+/g, " ").trim();
+  return oneLine.length > maxLength ? `${oneLine.slice(0, maxLength - 1)}…` : oneLine;
+}
+
 type ServerSentEvent =
   | { type: "data"; data: unknown }
   | { type: "done" };
@@ -567,6 +717,7 @@ async function* readServerSentEvents(
   body: ReadableStream<Uint8Array>,
   signal?: AbortSignal,
   idleTimeoutMs?: number,
+  diagnostics?: StreamDiagnostics,
 ): AsyncIterable<ServerSentEvent> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
@@ -593,17 +744,18 @@ async function* readServerSentEvents(
         break;
       }
 
+      diagnostics?.observeChunk(value.byteLength);
       buffer += decoder.decode(value, { stream: true });
       const chunks = buffer.split(/\n\n/);
       buffer = chunks.pop() ?? "";
 
       for (const chunk of chunks) {
-        yield* parseServerSentEventChunk(chunk);
+        yield* parseServerSentEventChunk(chunk, diagnostics);
       }
     }
 
     if (buffer.trim().length > 0) {
-      for (const event of parseServerSentEventChunk(buffer)) {
+      for (const event of parseServerSentEventChunk(buffer, diagnostics)) {
         yield event;
       }
     }
@@ -612,7 +764,7 @@ async function* readServerSentEvents(
   }
 }
 
-function* parseServerSentEventChunk(chunk: string): Iterable<ServerSentEvent> {
+function* parseServerSentEventChunk(chunk: string, diagnostics?: StreamDiagnostics): Iterable<ServerSentEvent> {
   const dataLines = chunk
     .split(/\n/)
     .filter((line) => line.startsWith("data:"))
@@ -626,7 +778,17 @@ function* parseServerSentEventChunk(chunk: string): Iterable<ServerSentEvent> {
       yield { type: "done" };
       continue;
     }
-    yield { type: "data", data: JSON.parse(data) };
+    try {
+      yield { type: "data", data: JSON.parse(data) };
+    } catch (error) {
+      const prefix = truncateForLog(data, 120);
+      throw new StreamParseError(
+        `Malformed provider SSE JSON: provider=${diagnostics?.provider ?? "unknown"}, ` +
+        `model=${diagnostics?.model ?? "unknown"}, protocol=${diagnostics?.protocol ?? "unknown"}, ` +
+        `frameLength=${data.length}, bytes=${diagnostics?.bytes ?? 0}, chunks=${diagnostics?.chunks ?? 0}, ` +
+        `prefix=${JSON.stringify(prefix)}, cause=${formatErrorForLog(error)}`,
+      );
+    }
   }
 }
 
