@@ -209,4 +209,14 @@ describe("todo_write", () => {
     assert.equal(done.data?.diagnostics?.completedWithoutActiveCount, 1);
     assert.equal(done.data?.diagnostics?.lastWrite?.allCompleted, true);
   });
+
+  it("describes file checkpoints as lightweight support for complex work", () => {
+    const tool = createTodoWriteTool();
+
+    assert.match(tool.description, /intermediate checkpoints/u);
+    assert.match(tool.description, /ordinary workspace files/u);
+    assert.match(tool.description, /session-level progress/u);
+    assert.match(tool.description, /auditable intermediate state/u);
+    assert.match(tool.description, /avoid creating extra files for simple tasks/u);
+  });
 });
