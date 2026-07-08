@@ -307,10 +307,16 @@ pilotdeck status     # 查看运行状态
 
 ### 方式二：源码启动 (适合开发者)
 
+**环境要求**
+
+- Node.js v22.13.0 或更新版本。PilotDeck 依赖内置的 `node:sqlite` 运行时。
+- Git 和 Git LFS。Git LFS 仅用于大型演示媒体文件；如果不需要这些视频/GIF，可在 clone 前加上 `GIT_LFS_SKIP_SMUDGE=1` 跳过下载。
+- npm 原生依赖（如 `node-pty`、`better-sqlite3`、`bcrypt`、`sharp`）所需的编译工具：Python 3、`make` 和 C/C++ 编译器。macOS 可通过 `xcode-select --install` 安装 Xcode Command Line Tools；Debian/Ubuntu 可安装 `build-essential python3`。
+- 建议安装 `ripgrep` (`rg`)，内置文件/搜索工具会用到；Docker 镜像中已内置。
+
 **1. 克隆代码与安装依赖**
 
-> 本仓库使用 [Git LFS](https://git-lfs.com/) 管理大型媒体文件。克隆前请确保已安装 `git lfs`。
-> 如果不需要演示视频/GIF，可在 clone 前加上 `GIT_LFS_SKIP_SMUDGE=1` 跳过下载。
+> 本仓库使用 [Git LFS](https://git-lfs.com/) 管理大型媒体文件。如果不需要演示视频/GIF，可在 clone 前加上 `GIT_LFS_SKIP_SMUDGE=1` 跳过下载。
 
 ```bash
 git clone https://github.com/OpenBMB/PilotDeck.git

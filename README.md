@@ -307,10 +307,16 @@ pilotdeck status     # check runtime status
 
 ### Option B: From source (for developers)
 
+**Prerequisites**
+
+- Node.js v22.13.0 or newer. PilotDeck uses the built-in `node:sqlite` runtime.
+- Git and Git LFS. LFS is only required for large demo media assets; use `GIT_LFS_SKIP_SMUDGE=1` to skip downloading them.
+- Native build tools for npm packages such as `node-pty`, `better-sqlite3`, `bcrypt`, and `sharp`: Python 3, `make`, and a C/C++ compiler. On macOS, install Xcode Command Line Tools with `xcode-select --install`; on Debian/Ubuntu, install `build-essential python3`.
+- `ripgrep` (`rg`) is recommended for the built-in file/search tools and is included in the Docker image.
+
 **1. Clone and install dependencies**
 
-> This repo uses [Git LFS](https://git-lfs.com/) for large media assets. Make sure `git lfs` is installed before cloning.
-> If you don't need the demo videos/GIFs, add `GIT_LFS_SKIP_SMUDGE=1` before `git clone` to skip downloading them.
+> This repo uses [Git LFS](https://git-lfs.com/) for large media assets. If you don't need the demo videos/GIFs, add `GIT_LFS_SKIP_SMUDGE=1` before `git clone` to skip downloading them.
 
 ```bash
 git clone https://github.com/OpenBMB/PilotDeck.git
