@@ -1,4 +1,4 @@
-﻿# PilotDeck Windows Deployment Guide
+# PilotDeck Windows Deployment Guide
 
 This guide covers source-based deployment on Windows. The one-line installer in the main README targets macOS/Linux only; on Windows, choose one of the paths below.
 
@@ -388,7 +388,29 @@ git lfs install
 
 ### PowerShell blocks `npm.ps1`
 
-Call `npm.cmd` instead of `npm`, or adjust your PowerShell execution policy.
+On a first PowerShell run, `npm run dev` may fail with an error like:
+
+```text
+npm : Cannot load file C:\Users\<you>\AppData\Local\...\node\npm.ps1 because running scripts is disabled on this system.
+PSSecurityException: UnauthorizedAccess
+```
+
+This happens because PowerShell resolves `npm` to `npm.ps1`, and the current execution policy blocks local scripts.
+
+Use one of these fixes:
+
+```powershell
+npm.cmd run dev
+```
+
+Or allow locally created scripts for the current Windows user:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+npm run dev
+```
+
+If PowerShell asks for confirmation, choose `Y`. You only need to do this once per Windows user profile.
 
 ### Port already in use
 
