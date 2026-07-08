@@ -292,6 +292,8 @@ https://github.com/user-attachments/assets/a7245467-ee3c-4939-a055-c56576ac56d1
 
 我们提供了 macOS/Linux 下的一键安装脚本，以及适合开发者的源码启动方式。
 
+Windows users: see [Windows 部署指南](README_WINDOWS.md) for WSL2, Docker Desktop, native PowerShell setup, and a verified portable Node path.
+
 ### 方式一：一键安装 (推荐, macOS/Linux)
 
 ```bash

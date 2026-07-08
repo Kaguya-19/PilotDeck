@@ -290,7 +290,7 @@ https://github.com/user-attachments/assets/a7245467-ee3c-4939-a055-c56576ac56d1
 
 ## 📦 Installation & Quick Start
 
-We provide a one-line installer for macOS / Linux, plus a source-based workflow for developers.
+We provide a one-line installer for macOS / Linux, plus a source-based workflow for developers. For Windows, see the dedicated [Windows deployment guide](README_WINDOWS.md) covering WSL2, Docker Desktop, native PowerShell setup, and a verified portable Node path.
 
 ### Option A: One-line install (recommended, macOS / Linux)
 
