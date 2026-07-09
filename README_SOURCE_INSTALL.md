@@ -36,6 +36,15 @@ node --version
 
 If your Homebrew Node.js is older than v22.13.0, install a newer Node.js with your preferred Node version manager.
 
+On Intel Macs, make sure your Node.js runtime is the Intel/x64 build, not an Apple Silicon arm64 build launched through Rosetta or copied from another machine. Check both the Node version and architecture before installing dependencies:
+
+```bash
+node --version          # must be v22.13.0 or newer, and below v23
+node -p "process.arch" # should print x64 on Intel Macs
+```
+
+If `process.arch` does not match the Mac you are deploying on, reinstall Node.js 22 for the correct architecture, remove the old dependency folders, and rerun the pnpm install step below. Native packages such as `better-sqlite3`, `node-pty`, `bcrypt`, and `sharp` are architecture-specific, so copying `node_modules` between Apple Silicon and Intel Macs is not supported.
+
 Some Python distributions, especially Python 3.12 installed through package managers, may not include `distutils`, which older `node-gyp` versions still need when native packages compile from source. The one-line installer tries to auto-select a Python that provides `distutils`. If you run npm commands manually and see `ModuleNotFoundError: No module named 'distutils'`, use a Python that provides it, for example:
 
 ```bash
@@ -131,7 +140,7 @@ docker --version
 docker compose version
 ```
 
-Use the Docker instructions in `README_DOCKER.md` if you choose this path.
+Use the Docker instructions in `README_DOCKER.md` if you choose this path. Docker builds use Node.js 22 and the committed pnpm lockfile inside the container, so they do not depend on the host Node.js architecture.
 
 #### Native Windows PowerShell
 
@@ -153,12 +162,15 @@ Then open a new PowerShell window and run:
 ```powershell
 git lfs install
 node --version   # must be v22.13.0 or newer, and below v23
+node -p "process.arch" # native Windows source installs should print x64
 npm --version
 python --version
 rg --version
 ```
 
 `OpenJS.NodeJS.LTS` may move to a newer major Node.js release over time. If `node --version` is not `v22.x`, switch to Portable Node or a Node version manager before installing dependencies.
+
+Native Windows source installs are tested on x64 Node.js. If `node -p "process.arch"` does not print `x64`, switch to the official x64 Node.js 22 zip or another x64 Node.js runtime before installing dependencies.
 
 Use separate PowerShell lines instead of Bash-style chained commands when following the prerequisite commands above. For PilotDeck's in-app terminal, Git Bash is preferred automatically after Git for Windows is installed. If PowerShell blocks `npm.ps1`, call `npm.cmd` instead of `npm`.
 
@@ -211,6 +223,8 @@ corepack pnpm install --frozen-lockfile
 ```
 
 Use the committed `pnpm-lock.yaml` for source installs. Do not replace this step with `npm install`; the lockfile and workspace build settings are maintained for pnpm, and pnpm is the path tested by the one-line installer.
+
+The app uses `better-sqlite3` and Node.js 22's built-in `node:sqlite`. It does not require the legacy `sqlite` or `sqlite3` npm packages.
 
 ClawHub CLI is optional, but recommended for skill marketplace features:
 

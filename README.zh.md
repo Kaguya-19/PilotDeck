@@ -369,7 +369,7 @@ npm.cmd run dev
 
 **原生依赖构建失败（提示 `node-gyp`、`MSBuild` 或 Python 缺失）**
 
-安装脚本通常会使用 `node-pty`、`sqlite3`、`better-sqlite3`、`sharp` 等原生依赖的预编译包。全新的 Windows 机器上，如果 npm 无法下载匹配的预编译包并回退到源码编译，请先安装带 C++ 工作负载的 Visual Studio Build Tools 和 Python，然后重新运行安装脚本。
+安装脚本通常会使用 `node-pty`、`better-sqlite3`、`bcrypt`、`sharp` 等原生依赖的预编译包。全新的 Windows 机器上，如果 npm 无法下载匹配的预编译包并回退到源码编译，请先安装带 C++ 工作负载的 Visual Studio Build Tools 和 Python，然后重新运行安装脚本。
 
 ### 方式二：源码启动 (适合开发者)
 

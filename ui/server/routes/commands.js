@@ -42,10 +42,9 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const router = express.Router();
-const PILOT_HOME = resolvePilotHome(process.env);
 
 function isRealProjectPath(projectPath) {
-  return Boolean(projectPath) && !isVirtualProjectPath(projectPath, PILOT_HOME);
+  return Boolean(projectPath) && !isVirtualProjectPath(projectPath, resolvePilotHome(process.env));
 }
 
 function isUnderPath(base, candidate) {
@@ -66,9 +65,10 @@ function projectRootFromPilotDeckCommandPath(commandPath) {
 }
 
 function commandAccessBases(projectPath) {
+  const pilotHome = resolvePilotHome(process.env);
   const bases = [
-    path.join(PILOT_HOME, 'commands'),
-    path.join(PILOT_HOME, 'skills'),
+    path.join(pilotHome, 'commands'),
+    path.join(pilotHome, 'skills'),
   ];
   if (isRealProjectPath(projectPath)) {
     bases.push(
@@ -792,7 +792,7 @@ Custom commands can be created in:
     // PilotDeck's virtual "general" workspace roots at ~/.pilotdeck. It looks
     // like a real projectPath but the user's mental model is general chat →
     // user/global scope. Force user scope with --global when needed.
-    const isGeneralCwd = isVirtualProjectPath(projectPath, PILOT_HOME);
+    const isGeneralCwd = isVirtualProjectPath(projectPath, resolvePilotHome(process.env));
     const effectiveProjectPath = isGeneralCwd ? null : projectPath;
 
     const scope = scopeOverride || (effectiveProjectPath ? 'project' : 'user');
@@ -815,7 +815,7 @@ Custom commands can be created in:
       workdir = effectiveProjectPath;
       dir = path.join('.pilotdeck', 'skills');
     } else {
-      workdir = PILOT_HOME;
+      workdir = resolvePilotHome(process.env);
       dir = 'skills';
     }
     const installPath = path.join(workdir, dir, slug);
@@ -941,6 +941,8 @@ Custom commands can be created in:
 router.post('/list', async (req, res) => {
   try {
     const { projectPath } = req.body;
+    const pilotHome = resolvePilotHome(process.env);
+
     const customCommandSources = [];
 
     if (isRealProjectPath(projectPath)) {
@@ -953,8 +955,8 @@ router.post('/list', async (req, res) => {
       customCommandSources.push(...projectCommands, ...projectSkills);
     }
 
-    const userCommandsDir = path.join(PILOT_HOME, 'commands');
-    const userSkillsDir = path.join(PILOT_HOME, 'skills');
+    const userCommandsDir = path.join(pilotHome, 'commands');
+    const userSkillsDir = path.join(pilotHome, 'skills');
     const [userCommands, userSkills] = await Promise.all([
       scanCommandsDirectory(userCommandsDir, userCommandsDir, 'user'),
       scanSkillsDirectory(userSkillsDir, 'user'),

@@ -330,6 +330,22 @@ node_major() {
   printf "%s" "${version%%.*}"
 }
 
+expected_node_arch() {
+  case "$(uname -m)" in
+    x86_64|amd64) printf "x64" ;;
+    arm64|aarch64) printf "arm64" ;;
+    *) return 1 ;;
+  esac
+}
+
+node_arch_matches_host() {
+  local expected actual
+  expected="$(expected_node_arch 2>/dev/null || true)"
+  [[ -n "$expected" ]] || return 0
+  actual="$(node -p "process.arch" 2>/dev/null || true)"
+  [[ "$actual" == "$expected" ]]
+}
+
 node_tarball_platform() {
   local os
   local arch
@@ -432,19 +448,19 @@ ensure_node_runtime() {
 
   if command -v node >/dev/null 2>&1; then
     node_version="$(node --version)"
-    if version_at_least "$node_version" "$MIN_NODE_VERSION" && [[ "$(node_major "$node_version")" == "$MAX_NODE_MAJOR" ]] && node_supports_sqlite; then
+    if version_at_least "$node_version" "$MIN_NODE_VERSION" && [[ "$(node_major "$node_version")" == "$MAX_NODE_MAJOR" ]] && node_supports_sqlite && node_arch_matches_host; then
       ok "$(L "Node.js ${node_version} found" "已找到 Node.js ${node_version}")"
       return
     fi
-    warn "$(L "Node.js ${node_version} is not the supported Node.js 22 runtime (need >=${MIN_NODE_VERSION} and <23). Installing/using Node.js ${NODE_INSTALL_VERSION}..." "Node.js ${node_version} 不是受支持的 Node.js 22 运行时(需要 >=${MIN_NODE_VERSION} 且 <23)。正在安装/使用 Node.js ${NODE_INSTALL_VERSION}...")"
+    warn "$(L "Node.js ${node_version} is not the supported Node.js 22 runtime for this machine (need >=${MIN_NODE_VERSION}, <23, node:sqlite, and matching CPU architecture). Installing/using Node.js ${NODE_INSTALL_VERSION}..." "Node.js ${node_version} 不是当前机器支持的 Node.js 22 运行时(需要 >=${MIN_NODE_VERSION} 且 <23、支持 node:sqlite,并匹配 CPU 架构)。正在安装/使用 Node.js ${NODE_INSTALL_VERSION}...")"
   else
     warn "$(L "Node.js not found. Installing Node.js ${NODE_FALLBACK_VERSION}..." "未找到 Node.js,正在安装 Node.js ${NODE_FALLBACK_VERSION}...")"
   fi
 
   install_node_runtime
   node_version="$(node --version 2>/dev/null || true)"
-  if [[ -z "$node_version" ]] || ! version_at_least "$node_version" "$MIN_NODE_VERSION" || [[ "$(node_major "$node_version")" != "$MAX_NODE_MAJOR" ]] || ! node_supports_sqlite; then
-    fail "$(L "Node.js >=${MIN_NODE_VERSION} and <23 with node:sqlite is required. Current: ${node_version:-not found}." "需要带 node:sqlite 的 Node.js >=${MIN_NODE_VERSION} 且 <23。当前:${node_version:-未找到}。")"
+  if [[ -z "$node_version" ]] || ! version_at_least "$node_version" "$MIN_NODE_VERSION" || [[ "$(node_major "$node_version")" != "$MAX_NODE_MAJOR" ]] || ! node_supports_sqlite || ! node_arch_matches_host; then
+    fail "$(L "Node.js >=${MIN_NODE_VERSION} and <23 with node:sqlite and matching CPU architecture is required. Current: ${node_version:-not found}, arch $(node -p "process.arch" 2>/dev/null || printf unknown), host $(uname -m)." "需要带 node:sqlite、且匹配当前 CPU 架构的 Node.js >=${MIN_NODE_VERSION} 且 <23。当前:${node_version:-未找到}, 架构 $(node -p "process.arch" 2>/dev/null || printf unknown), 主机 $(uname -m)。")"
   fi
   ok "$(L "Node.js ${node_version} installed" "已安装 Node.js ${node_version}")"
 }
@@ -1228,6 +1244,22 @@ node_tarball_platform() {
   printf "%s-%s" "$os" "$arch"
 }
 
+expected_node_arch() {
+  case "$(uname -m)" in
+    x86_64|amd64) printf "x64" ;;
+    arm64|aarch64) printf "arm64" ;;
+    *) return 1 ;;
+  esac
+}
+
+node_arch_matches_host() {
+  local expected actual
+  expected="$(expected_node_arch 2>/dev/null || true)"
+  [[ -n "$expected" ]] || return 0
+  actual="$(node -p "process.arch" 2>/dev/null || true)"
+  [[ "$actual" == "$expected" ]]
+}
+
 load_direct_node_runtime() {
   local platform
   local node_dir
@@ -1275,6 +1307,9 @@ ensure_node_runtime() {
   fi
   if ! node -e "import('node:sqlite').then(() => {}, () => process.exit(1))" >/dev/null 2>&1; then
     fail "Current Node.js (${node_version}) does not provide node:sqlite. Re-run install.sh or switch to Node.js 22.13+."
+  fi
+  if ! node_arch_matches_host; then
+    fail "Node.js architecture must match this machine before native dependencies are used. Current Node arch: $(node -p "process.arch" 2>/dev/null || printf unknown); host: $(uname -m). Re-run install.sh or reinstall Node.js 22 for this Mac."
   fi
 }
 

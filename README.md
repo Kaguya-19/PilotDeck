@@ -369,7 +369,7 @@ npm.cmd run dev
 
 **Native dependency build errors (`node-gyp`, `MSBuild`, or Python not found)**
 
-The installer normally uses prebuilt packages for native dependencies such as `node-pty`, `sqlite3`, `better-sqlite3`, and `sharp`. On a fresh Windows machine, if npm cannot download a matching prebuild and falls back to compiling from source, install Visual Studio Build Tools with the C++ workload and Python, then rerun the installer.
+The installer normally uses prebuilt packages for native dependencies such as `node-pty`, `better-sqlite3`, `bcrypt`, and `sharp`. On a fresh Windows machine, if npm cannot download a matching prebuild and falls back to compiling from source, install Visual Studio Build Tools with the C++ workload and Python, then rerun the installer.
 
 ### Option B: From source (for developers)
 

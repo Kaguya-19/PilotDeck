@@ -58,6 +58,15 @@ node --version
 
 如果 Homebrew 安装的 Node.js 低于 v22.13.0，请使用你偏好的 Node 版本管理器安装更新版本。
 
+在 Intel Mac 上，请确认 Node.js 是 Intel/x64 架构版本，而不是从 Apple Silicon 机器复制来的 arm64 版本，或在 Rosetta 环境里混用的版本。安装依赖前同时检查 Node 版本和架构：
+
+```bash
+node --version          # 必须为 v22.13.0 或更新版本，且低于 v23
+node -p "process.arch" # Intel Mac 上应输出 x64
+```
+
+如果 `process.arch` 和当前 Mac 架构不一致，请重新安装对应架构的 Node.js 22，删除旧的依赖目录，然后重新执行下面的 pnpm 安装步骤。`better-sqlite3`、`node-pty`、`bcrypt`、`sharp` 等原生依赖都和 CPU 架构相关，不支持在 Apple Silicon 和 Intel Mac 之间直接复制 `node_modules`。
+
 某些 Python 发行版（尤其是通过包管理器安装的 Python 3.12）可能不包含 `distutils`，而旧版 `node-gyp` 在源码编译原生包时仍会用到它。一键安装脚本会尝试自动选择带 `distutils` 的 Python。如果你手动运行 npm 命令并看到 `ModuleNotFoundError: No module named 'distutils'`，请使用带 `distutils` 的 Python，例如：
 
 ```bash
@@ -151,7 +160,7 @@ docker --version
 docker compose version
 ```
 
-如果选择 Docker 路径，请按 `README_DOCKER.md` 中的 Docker 说明操作。
+如果选择 Docker 路径，请按 `README_DOCKER.md` 中的 Docker 说明操作。Docker 构建会在容器内使用 Node.js 22 和仓库提交的 pnpm lockfile，因此不依赖宿主机 Node.js 架构。
 
 #### 原生 Windows PowerShell
 
@@ -173,12 +182,15 @@ winget install Microsoft.VisualStudio.2022.BuildTools --override "--wait --add M
 ```powershell
 git lfs install
 node --version   # 必须为 v22.13.0 或更新版本，且低于 v23
+node -p "process.arch" # 原生 Windows 源码安装应输出 x64
 npm --version
 python --version
 rg --version
 ```
 
 `OpenJS.NodeJS.LTS` 可能会随时间切换到更新的 Node.js 大版本。如果 `node --version` 不是 `v22.x`，请先切换到 Portable Node 或 Node 版本管理器，再安装依赖。
+
+原生 Windows 源码安装按 x64 Node.js 验证。如果 `node -p "process.arch"` 不是 `x64`，请先切换到官方 x64 Node.js 22 zip，或其他 x64 Node.js 运行时，再安装依赖。
 
 执行上面的前置依赖检查命令时，请使用分开的 PowerShell 命令行，不要使用 Bash 风格的链式命令。安装 Git for Windows 后，PilotDeck 内置终端会自动优先使用 Git Bash。如果 PowerShell 拦截 `npm.ps1`，请改用 `npm.cmd`。
 
@@ -231,6 +243,8 @@ corepack pnpm install --frozen-lockfile
 ```
 
 源码安装请使用仓库提交的 `pnpm-lock.yaml`。不要把这一步替换成 `npm install`；当前 lockfile 和 workspace 构建配置按 pnpm 维护，一键安装脚本验证的也是这条路径。
+
+当前应用使用 `better-sqlite3` 和 Node.js 22 内置的 `node:sqlite`，不需要旧的 `sqlite` 或 `sqlite3` npm 包。
 
 ClawHub CLI 是可选项，但如果需要使用技能市场功能，建议安装：
 
