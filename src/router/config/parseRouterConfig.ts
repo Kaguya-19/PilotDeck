@@ -8,6 +8,7 @@ import {
   DEFAULT_TIER_RULES,
   DEFAULT_TRIGGER_TIERS,
   DEFAULT_ZERO_USAGE_MAX_ATTEMPTS,
+  LITELLM_ROUTER_MAX_FALLBACKS,
   resolveProviderRef,
   type RouterAutoOrchestrateConfig,
   type RouterConfig,
@@ -164,6 +165,19 @@ function parseFallback(
 
   const fallback: RouterFallbackConfig = {};
   for (const [key, value] of Object.entries(raw)) {
+    if (key === "maxFallbacks") {
+      if (typeof value === "number" && Number.isInteger(value) && value >= 0) {
+        fallback.maxFallbacks = value;
+      } else {
+        diagnostics.push({
+          code: "ROUTER_FALLBACK_MAX_FALLBACKS_INVALID",
+          severity: "fatal",
+          path: "router.fallback.maxFallbacks",
+          message: "router.fallback.maxFallbacks must be a non-negative integer.",
+        });
+      }
+      continue;
+    }
     if (!SCENARIO_KEYS.includes(key as RouterScenarioType)) {
       diagnostics.push({
         code: "ROUTER_FALLBACK_UNKNOWN_SCENARIO",
@@ -193,6 +207,9 @@ function parseFallback(
     if (refs.length > 0) {
       fallback[key as RouterScenarioType] = refs;
     }
+  }
+  if (fallback.maxFallbacks === undefined) {
+    fallback.maxFallbacks = LITELLM_ROUTER_MAX_FALLBACKS;
   }
   return Object.keys(fallback).length > 0 ? fallback : undefined;
 }
@@ -365,6 +382,40 @@ function parseTokenSaver(
     }
   }
 
+  let cacheAwareSwitching: RouterTokenSaverConfig["cacheAwareSwitching"] = {
+    enabled: true,
+    minSavingsRatio: 0,
+  };
+  if (raw.cacheAwareSwitching !== undefined) {
+    if (!isRecord(raw.cacheAwareSwitching)) {
+      diagnostics.push({
+        code: "ROUTER_TOKEN_SAVER_CACHE_AWARE_SWITCHING_INVALID",
+        severity: "fatal",
+        path: "router.tokenSaver.cacheAwareSwitching",
+        message: "cacheAwareSwitching must be an object.",
+      });
+    } else {
+      const enabled = typeof raw.cacheAwareSwitching.enabled === "boolean"
+        ? raw.cacheAwareSwitching.enabled
+        : true;
+      const minSavingsRatioRaw = raw.cacheAwareSwitching.minSavingsRatio;
+      let minSavingsRatio = 0;
+      if (minSavingsRatioRaw !== undefined) {
+        if (typeof minSavingsRatioRaw === "number" && Number.isFinite(minSavingsRatioRaw) && minSavingsRatioRaw >= 0) {
+          minSavingsRatio = minSavingsRatioRaw;
+        } else {
+          diagnostics.push({
+            code: "ROUTER_TOKEN_SAVER_CACHE_AWARE_SWITCHING_MIN_SAVINGS_INVALID",
+            severity: "fatal",
+            path: "router.tokenSaver.cacheAwareSwitching.minSavingsRatio",
+            message: "cacheAwareSwitching.minSavingsRatio must be a non-negative number.",
+          });
+        }
+      }
+      cacheAwareSwitching = { enabled, minSavingsRatio };
+    }
+  }
+
   return {
     enabled,
     judge: judgeRef,
@@ -373,6 +424,7 @@ function parseTokenSaver(
     rules,
     subagent,
     judgeTimeoutMs,
+    cacheAwareSwitching,
   };
 }
 

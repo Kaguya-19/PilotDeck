@@ -13,10 +13,17 @@ export type AgentSubmitOptions = {
   metadata?: Record<string, unknown>;
   runMode?: AgentRunMode;
   permissionMode?: PermissionMode;
+  allowedReadFiles?: string[];
   /** The user's actual permission preference before plan-mode override. */
   basePermissionMode?: PermissionMode;
   /** Allow model-visible plan mode tools for this turn. */
   allowPlanModeTools?: boolean;
   canPrompt?: boolean;
   permissionRules?: Partial<PermissionRuleSet>;
+  /**
+   * Synthetic messages appended after the user input in the turn.
+   * Stored in transcript with `metadata.synthetic: true` so they are
+   * visible to the model but filtered out of the Web UI display.
+   */
+  syntheticMessages?: import("../../model/index.js").CanonicalMessage[];
 };

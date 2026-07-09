@@ -62,6 +62,11 @@ export default function FolderBrowserModal({
     [folders, showHiddenFolders],
   );
 
+  const isWindowsDrivePicker = useMemo(
+    () => (currentPath === '/' || currentPath === WINDOWS_DRIVES_PATH) && folders.some((folder) => /^[A-Za-z]:\\$/.test(folder.path)),
+    [currentPath, folders],
+  );
+
   const resetNewFolderState = () => {
     setShowNewFolderInput(false);
     setNewFolderName('');
@@ -74,6 +79,10 @@ export default function FolderBrowserModal({
   };
 
   const handleCreateFolder = useCallback(async () => {
+    if (isWindowsDrivePicker) {
+      return;
+    }
+
     if (!newFolderName.trim()) {
       return;
     }
@@ -91,7 +100,7 @@ export default function FolderBrowserModal({
     } finally {
       setCreatingFolder(false);
     }
-  }, [currentPath, loadFolders, newFolderName]);
+  }, [currentPath, isWindowsDrivePicker, loadFolders, newFolderName]);
 
   const parentPath = getParentPath(currentPath);
   const driveRootsPath = rootsPath || WINDOWS_DRIVES_PATH;
@@ -151,7 +160,7 @@ export default function FolderBrowserModal({
           </div>
         </div>
 
-        {showNewFolderInput && (
+        {showNewFolderInput && !isWindowsDrivePicker && (
           <div className="border-b border-border bg-muted/40 px-4 py-3">
             <div className="flex items-center gap-2">
               <Input

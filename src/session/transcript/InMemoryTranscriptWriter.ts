@@ -1,6 +1,7 @@
 import type { CanonicalMessage } from "../../model/index.js";
 import type { AgentTurnResult } from "../../agent/protocol/result.js";
 import type { AgentControlBoundaryTranscriptEntry, SessionMetadataValue } from "./TranscriptEntry.js";
+import type { AgentStatusMessageInput } from "./TranscriptWriter.js";
 import type { AgentTranscriptWriter, AgentTranscriptWriterState } from "./TranscriptWriter.js";
 
 export type InMemoryTranscriptEntry =
@@ -12,6 +13,7 @@ export type InMemoryTranscriptEntry =
       metadata?: Record<string, unknown>;
     }
   | { type: "durable_message"; sessionId: string; turnId: string; message: CanonicalMessage }
+  | { type: "agent_status_message"; sessionId: string; turnId: string } & AgentStatusMessageInput
   | { type: "turn_result"; sessionId: string; turnId: string; result: AgentTurnResult }
   | { type: "session_metadata"; sessionId: string; turnId: string; metadata: SessionMetadataValue }
   | {
@@ -41,6 +43,10 @@ export class InMemoryTranscriptWriter implements AgentTranscriptWriter {
 
   recordDurableMessage(sessionId: string, turnId: string, message: CanonicalMessage): void {
     this.entries.push({ type: "durable_message", sessionId, turnId, message });
+  }
+
+  recordAgentStatusMessage(sessionId: string, turnId: string, status: AgentStatusMessageInput): void {
+    this.entries.push({ type: "agent_status_message", sessionId, turnId, ...status });
   }
 
   recordTurnResult(sessionId: string, turnId: string, result: AgentTurnResult): void {

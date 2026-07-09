@@ -4,10 +4,12 @@ import { createAskUserQuestionTool } from "../builtin/askUserQuestion.js";
 import { createBashTool, type CreateBashToolOptions } from "../builtin/bash.js";
 import { createEditFileTool } from "../builtin/editFile.js";
 import { createEditNotebookTool } from "../builtin/editNotebook.js";
+import { createExecuteCodeTool } from "../builtin/executeCode.js";
 import { createGlobTool } from "../builtin/glob.js";
 import { createGrepTool } from "../builtin/grep.js";
 import { createGetCurrentTimeTool } from "../builtin/getCurrentTime.js";
 import { createReadFileTool } from "../builtin/readFile.js";
+import { createSendAttachmentTool } from "../builtin/sendAttachment.js";
 import { createEnterPlanModeTool, createExitPlanModeTool } from "../builtin/planMode.js";
 import { createStructuredOutputTool } from "../builtin/structuredOutput.js";
 import { createTodoWriteTool } from "../builtin/todoWrite.js";
@@ -16,6 +18,7 @@ import {
   createTaskListTool,
   createTaskOutputTool,
   createTaskStopTool,
+  createTaskWaitTool,
 } from "../builtin/taskTools.js";
 import { createWebFetchTool, type CreateWebFetchToolOptions } from "../builtin/webFetch.js";
 import { createWebSearchTool, type CreateWebSearchToolOptions } from "../builtin/webSearch.js";
@@ -50,7 +53,7 @@ export type CreateBuiltinRegistryOptions = {
   webFetch?: CreateWebFetchToolOptions | false;
   /**
    * Background task tools (`task_create` / `task_list` / `task_output` /
-   * `task_stop`). **Opt-in** — pass `{ runtime }` to register; absent or
+   * `task_wait` / `task_stop`). **Opt-in** — pass `{ runtime }` to register; absent or
    * `false` keeps them out of the registry. Stand-alone runtimes that do
    * not provide a `BackgroundTaskRuntime` would otherwise see every call
    * fail with `unsupported_tool`.
@@ -89,12 +92,14 @@ export function createBuiltinRegistry(options?: CreateBuiltinRegistryOptions): T
   const registry = new ToolRegistry();
   registry.register(createGetCurrentTimeTool());
   registry.register(createReadFileTool());
+  registry.register(createSendAttachmentTool());
   registry.register(createGlobTool());
   registry.register(createGrepTool());
   registry.register(createEditFileTool());
   registry.register(createEditNotebookTool());
   registry.register(createWriteFileTool());
   registry.register(createBashTool(options?.bash));
+  registry.register(createExecuteCodeTool());
   if (options?.webSearch !== false) {
     registry.register(createWebSearchTool(options?.webSearch));
   }
@@ -110,6 +115,7 @@ export function createBuiltinRegistry(options?: CreateBuiltinRegistryOptions): T
     registry.register(createTaskCreateTool(runtime));
     registry.register(createTaskListTool(runtime));
     registry.register(createTaskOutputTool(runtime));
+    registry.register(createTaskWaitTool(runtime));
     registry.register(createTaskStopTool(runtime));
   }
   if (options?.structuredOutput !== false) {

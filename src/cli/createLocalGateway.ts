@@ -19,10 +19,12 @@ import {
   CompactionEngine,
   ContextOverflowRecovery,
   DefaultContextRuntime,
+  DEFAULT_PROTECTED_TOOL_RESULT_NAMES,
   InstructionDiscovery,
   MicroCompactionEngine,
   PluginRuntimeExtensionResolver,
   SnipEngine,
+  TokenAccountingRuntime,
   TokenBudgetManager,
   ToolResultBudget,
   createEdgeClawMemoryProviderFromConfig,
@@ -72,12 +74,18 @@ import type { PilotAgentModelSelection, PilotConfigSnapshot } from "../pilot/con
 import { DEFAULT_JUDGE_TIMEOUT_MS, DEFAULT_ALLOWED_TOOLS, DEFAULT_TRIGGER_TIERS, type RouterConfig } from "../router/config/schema.js";
 import { createAgentProjectSessionStorage, listProjectSessions, resumeAgentSession } from "../session/index.js";
 import { sanitizeSessionIdForPath } from "../session/storage/ProjectSessionStorage.js";
+import { createSessionTitleGenerator } from "../session/title/SessionTitleGenerator.js";
 import { readWebSessionMessages, readSubagentWebMessages } from "../web/server/readSessionMessages.js";
 import { forkWebSession } from "../web/server/forkSession.js";
 import { describeWebProject, listWebProjects } from "../web/server/listProjects.js";
-import { BackgroundTaskRuntime } from "../task/runtime/BackgroundTaskRuntime.js";
-import { createBuiltinRegistry, createPlanFileManager } from "../tool/index.js";
-import type { PilotDeckToolDefinition, ToolRegistry, PilotDeckElicitationChannel } from "../tool/index.js";
+import { BackgroundTaskRuntime, type BackgroundTaskCompletionEvent } from "../task/runtime/BackgroundTaskRuntime.js";
+import { createBuiltinRegistry, createPlanFileManager, filterAvailableTools } from "../tool/index.js";
+import type {
+  PilotDeckElicitationChannel,
+  PilotDeckToolDefinition,
+  PilotDeckUnavailableToolDiagnostic,
+  ToolRegistry,
+} from "../tool/index.js";
 import { createRouterRuntime, type RouterRuntime } from "../router/index.js";
 import { SessionRouterStore } from "../router/session/SessionRouterStore.js";
 import type { RouterEventBus, RouterEvent } from "../router/protocol/events.js";
@@ -111,11 +119,13 @@ export type CreateLocalGatewayOptions = {
    */
   __testModelFactory?: (snapshot: PilotConfigSnapshot) => ModelRuntime;
   /**
-   * When true, the project list will not auto-include `projectRoot`.
-   * Set by non-interactive launchers (dev mode, install.sh wrapper) where
-   * `process.cwd()` is the PilotDeck source tree, not a user project.
+   * Fallback project root used as the agent cwd when no explicit
+   * `projectKey` is provided (e.g. IM channels without a bound project).
+   * Defaults to `projectRoot` when omitted; server mode should set this
+   * to `pilotHome` so IM sessions land in the general workspace instead
+   * of the gateway process's cwd.
    */
-  skipDefaultProject?: boolean;
+  fallbackProjectRoot?: string;
   /**
    * When true, `ask_user_question` tool calls are answered automatically
    * (first option selected) instead of waiting for a human. Intended for
@@ -248,8 +258,9 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
       );
     },
   });
+  const fallbackProjectRoot = options.fallbackProjectRoot ?? projectRoot;
   registry = new ProjectRuntimeRegistry({
-    defaultProjectRoot: projectRoot,
+    fallbackProjectRoot,
     pilotHome,
     env,
     permissionMode: options.permissionMode ?? "default",
@@ -353,26 +364,36 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
     setSessionCwd: (sessionKey, cwd) => registry.setSessionCwd(sessionKey, cwd),
     readSessionMessages: (input) =>
       readWebSessionMessages(input, {
-        projectRoot: input.projectKey ? input.projectKey : projectRoot,
+        projectRoot: input.projectKey ? input.projectKey : fallbackProjectRoot,
         pilotHome,
         now,
       }),
     readSubagentMessages: (input) =>
       readSubagentWebMessages(input, {
-        projectRoot: input.projectKey ? input.projectKey : projectRoot,
+        projectRoot: input.projectKey ? input.projectKey : fallbackProjectRoot,
         pilotHome,
         now,
       }),
     forkSession: (input) =>
       forkWebSession(input, {
-        projectRoot: input.projectKey ? input.projectKey : projectRoot,
+        projectRoot: input.projectKey ? input.projectKey : fallbackProjectRoot,
         pilotHome,
         now,
       }),
+    async recordAgentStatusMessage(input) {
+      const storage = createAgentProjectSessionStorage({
+        projectRoot: input.projectKey ? input.projectKey : fallbackProjectRoot,
+        pilotHome,
+        sessionId: input.sessionKey,
+        now,
+      });
+      await storage.transcript.recordAgentStatusMessage(input.sessionKey, input.turnId, input.status);
+      return { recorded: true };
+    },
     listProjects: () =>
-      listWebProjects({ pilotHome, defaultProjectRoot: options.skipDefaultProject ? undefined : projectRoot }),
+      listWebProjects({ pilotHome }),
     describeProject: (input) =>
-      describeWebProject(input.projectKey, { pilotHome, defaultProjectRoot: options.skipDefaultProject ? undefined : projectRoot }),
+      describeWebProject(input.projectKey, { pilotHome }),
     async reloadConfig() {
       let changedPaths: string[] = [];
       const unsubscribe = configStore.subscribe((event) => {
@@ -465,7 +486,7 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
 }
 
 type ProjectRuntimeRegistryOptions = {
-  defaultProjectRoot: string;
+  fallbackProjectRoot: string;
   pilotHome: string;
   env: Record<string, string | undefined>;
   permissionMode: AgentRuntimeConfig["permissionMode"];
@@ -484,9 +505,11 @@ type ProjectRuntime = {
   projectRoot: string;
   snapshot: ReturnType<typeof loadPilotConfig>;
   model: ModelRuntime;
+  tokenAccounting: TokenAccountingRuntime;
   router: RouterRuntime;
   pluginRuntime: PluginRuntime;
   tools: ToolRegistry;
+  unavailableTools?: PilotDeckUnavailableToolDiagnostic[];
   projectStorage: GatewayProjectStorageOptions;
   /** Per-project background task runtime (shared across sessions). C5. */
   backgroundTasks: BackgroundTaskRuntime;
@@ -568,6 +591,26 @@ class ProjectRuntimeRegistry {
 
   setGateway(gateway: InProcessGateway): void {
     this.gateway = gateway;
+  }
+
+  private emitBackgroundTaskCompletion(event: BackgroundTaskCompletionEvent): void {
+    if (!event.sessionId || !this.gateway) {
+      return;
+    }
+    const outputPreview = event.outputPreview.trimEnd();
+    this.gateway.emitForSession(event.sessionId, {
+      type: "agent_status",
+      event: "background_task_completed",
+      detail: {
+        taskId: event.taskId,
+        status: event.status,
+        exitCode: event.exitCode ?? null,
+        totalBytes: event.totalBytes,
+        startedAt: event.startedAt,
+        endedAt: event.endedAt,
+        ...(outputPreview ? { outputPreview } : {}),
+      },
+    });
   }
 
   private buildRouterEventBus(): RouterEventBus {
@@ -684,7 +727,7 @@ class ProjectRuntimeRegistry {
   }
 
   resolve(projectKey?: string): ProjectRuntime {
-    const projectRoot = resolve(projectKey ?? this.options.defaultProjectRoot);
+    const projectRoot = resolve(projectKey ?? this.options.fallbackProjectRoot);
     this.options.onProjectActivated?.(projectRoot);
     const cached = this.runtimes.get(projectRoot);
     if (cached) {
@@ -695,6 +738,9 @@ class ProjectRuntimeRegistry {
     const model = this.options.modelFactory
       ? this.options.modelFactory(snapshot)
       : createModelRuntime(snapshot.config.model);
+    const tokenAccounting = new TokenAccountingRuntime({
+      modelConfig: snapshot.config.model,
+    });
     const pluginRuntime = new PluginRuntime({
       projectRoot,
       pilotHome: this.options.pilotHome,
@@ -710,7 +756,10 @@ class ProjectRuntimeRegistry {
       events: this.buildRouterEventBus(),
       telemetry: this.options.telemetry,
     });
-    const backgroundTasks = new BackgroundTaskRuntime({ now: this.options.now });
+    const backgroundTasks = new BackgroundTaskRuntime({
+      now: this.options.now,
+      onCompletion: (event) => this.emitBackgroundTaskCompletion(event),
+    });
     const webSearchConfig = snapshot.config.tools?.webSearch;
     const tools = createBuiltinRegistry({
       backgroundTasks: { runtime: backgroundTasks },
@@ -749,6 +798,7 @@ class ProjectRuntimeRegistry {
       projectRoot,
       snapshot,
       model,
+      tokenAccounting,
       router,
       pluginRuntime,
       tools,
@@ -865,6 +915,7 @@ class ProjectRuntimeRegistry {
       dependencies: prepared.baseDependencies,
       projectStorage: prepared.runtime.projectStorage,
       extendDependencies: prepared.extendDependencies,
+      sessionTitleGenerator: prepared.sessionTitleGenerator,
     });
     return resumed.session;
   }
@@ -892,6 +943,7 @@ class ProjectRuntimeRegistry {
       transcript: storage.transcript,
       initialState: previous.state,
       seedState: previous.fileState,
+      sessionTitleGenerator: prepared.sessionTitleGenerator,
     });
     return session;
   }
@@ -979,6 +1031,14 @@ class ProjectRuntimeRegistry {
         }
       }
     }
+
+    const availability = await filterAvailableTools(sessionTools, {
+      cwd: runtime.projectRoot,
+      env: this.options.env,
+    });
+    sessionTools = availability.registry;
+    runtime.unavailableTools = availability.unavailable;
+
     // Inject the gateway's interactive permission hook so the agent's
     // PermissionRequest lifecycle is round-tripped through whichever
     // client is streaming this session (Web UI, TUI, etc.) instead of
@@ -1031,6 +1091,7 @@ class ProjectRuntimeRegistry {
       now: this.options.now,
       eventEmitter: eventBuf.emitter,
       drainEvents: eventBuf.drain,
+      tokenAccounting: runtime.tokenAccounting,
       getModelMaxContextTokens: (provider, model) => resolveRoutedModelMaxContextTokens({
         modelRuntime: runtime.model,
         agentModel: runtime.snapshot.config.agent.model,
@@ -1045,7 +1106,19 @@ class ProjectRuntimeRegistry {
           return undefined;
         }
       },
+      getModelTokenLimits: (provider, model) => {
+        try {
+          const caps = runtime.model.getCapabilities(provider, model);
+          return { maxContextTokens: caps.maxContextTokens, maxOutputTokens: caps.maxOutputTokens };
+        } catch {
+          return undefined;
+        }
+      },
     };
+    const sessionTitleGenerator = createSessionTitleGenerator({
+      modelRuntime: runtime.model,
+      agentModel: runtime.snapshot.config.agent.model,
+    });
     const extendDependencies = (storage: ReturnType<typeof createAgentProjectSessionStorage>) => {
       const toolResultBudget = new ToolResultBudget({ toolResultsDir: storage.toolResultsDir });
       const tokenBudget = new TokenBudgetManager();
@@ -1061,6 +1134,7 @@ class ProjectRuntimeRegistry {
             }),
         },
         tokenBudget,
+        tokenAccounting: runtime.tokenAccounting,
         lifecycle: {
           async dispatch(input) {
             await lifecycle.dispatch({
@@ -1078,13 +1152,18 @@ class ProjectRuntimeRegistry {
         },
         provider: runtime.snapshot.config.agent.model.provider,
         model_: runtime.snapshot.config.agent.model.model,
+        protectedToolNames: DEFAULT_PROTECTED_TOOL_RESULT_NAMES,
         now,
         eventEmitter: eventBuf.emitter,
       });
       const autoCompactionPolicy = new AutoCompactionPolicy({ tokenBudget });
       const microcompactEngine = new CachedMicroCompactionEngine({ enabled: true });
-      const microCompaction = new MicroCompactionEngine();
-      const snipEngine = new SnipEngine();
+      const microCompaction = new MicroCompactionEngine({
+        protectedToolNames: DEFAULT_PROTECTED_TOOL_RESULT_NAMES,
+      });
+      const snipEngine = new SnipEngine({
+        protectedToolNames: DEFAULT_PROTECTED_TOOL_RESULT_NAMES,
+      });
       const overflowRecovery = new ContextOverflowRecovery();
       const caps = runtime.model.getCapabilities(
         runtime.snapshot.config.agent.model.provider,
@@ -1191,6 +1270,7 @@ class ProjectRuntimeRegistry {
     return {
       runtime,
       baseDependencies,
+      sessionTitleGenerator,
       extendDependencies,
     };
   }
@@ -1233,15 +1313,17 @@ class ProjectRuntimeRegistry {
       // Model or provider not found — fall back to text-only.
     }
     let maxContextTokens: number | undefined;
+    let maxOutputTokens: number | undefined;
     try {
       const caps = runtime.model.getCapabilities(agent.model.provider, agent.model.model);
       maxContextTokens = agent.maxContextTokens ?? caps.maxContextTokens;
+      maxOutputTokens = caps.maxOutputTokens;
     } catch {
       maxContextTokens = agent.maxContextTokens;
     }
-    const maxOutputTokens = readPositiveIntegerEnv(this.options.env.PILOTDECK_MAX_OUTPUT_TOKENS)
+    maxOutputTokens = readPositiveIntegerEnv(this.options.env.PILOTDECK_MAX_OUTPUT_TOKENS)
       ?? agent.maxOutputTokens
-      ?? undefined;
+      ?? maxOutputTokens;
     return {
       provider: agent.model.provider,
       model: agent.model.model,

@@ -4,7 +4,7 @@ import { parse as parseCsv } from "csv-parse/sync";
 import { parseFragment as parseHtmlFragment, type ParserError } from "parse5";
 import { LineCounter, parseDocument } from "yaml";
 
-type SyntaxDiagnostic = {
+export type SyntaxDiagnostic = {
   line: number;
   column: number;
   message: string;
@@ -169,7 +169,7 @@ async function collectTypeScriptDiagnostics(
   });
 }
 
-async function collectPythonDiagnostics(
+export async function collectPythonSyntaxDiagnostics(
   filePath: string,
   content: string,
 ): Promise<SyntaxDiagnostic[]> {
@@ -186,6 +186,13 @@ async function collectPythonDiagnostics(
     column: positiveInteger(parsed.column) ?? 1,
     message: trimDiagnosticMessage(stringValue(parsed.message) ?? "Invalid Python syntax."),
   }];
+}
+
+async function collectPythonDiagnostics(
+  filePath: string,
+  content: string,
+): Promise<SyntaxDiagnostic[]> {
+  return collectPythonSyntaxDiagnostics(filePath, content);
 }
 
 async function collectBashDiagnostics(content: string): Promise<SyntaxDiagnostic[]> {

@@ -2,9 +2,15 @@ import type { CanonicalMessage } from "../../model/index.js";
 import type { AgentTurnResult } from "../../agent/protocol/result.js";
 import type {
   AgentControlBoundaryTranscriptEntry,
+  AgentStatusMessageTranscriptEntry,
   AgentTranscriptEntry,
   SessionMetadataValue,
 } from "./TranscriptEntry.js";
+
+export type AgentStatusMessageInput = Pick<
+  AgentStatusMessageTranscriptEntry,
+  "event" | "kind" | "text" | "detail"
+>;
 
 export type AgentTranscriptWriterState = {
   sequence: number;
@@ -19,6 +25,7 @@ export type AgentTranscriptWriter = {
     metadata?: Record<string, unknown>,
   ): void | Promise<void>;
   recordDurableMessage(sessionId: string, turnId: string, message: CanonicalMessage): void | Promise<void>;
+  recordAgentStatusMessage?(sessionId: string, turnId: string, status: AgentStatusMessageInput): void | Promise<void>;
   recordTurnResult(sessionId: string, turnId: string, result: AgentTurnResult): void | Promise<void>;
   recordSessionMetadata?(sessionId: string, turnId: string, metadata: SessionMetadataValue): void | Promise<void>;
   recordControlBoundary?(

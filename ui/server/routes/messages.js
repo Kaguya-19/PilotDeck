@@ -164,6 +164,9 @@ function mapWebMessageToNormalized(message, sessionId) {
         ...(Array.isArray(message.images) && message.images.length > 0
           ? { images: message.images.map((image) => image?.data).filter(Boolean) }
           : {}),
+        ...(Array.isArray(payload.attachments) && payload.attachments.length > 0
+          ? { attachments: payload.attachments }
+          : {}),
         ...(payload.forkUnsupportedContent === true
           ? {
               forkUnsupportedContent: true,

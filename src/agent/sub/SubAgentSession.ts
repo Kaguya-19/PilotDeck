@@ -47,7 +47,6 @@ import {
 
 
 const SUMMARY_FIELDS = ["Scope", "Result", "Key files", "Files changed", "Issues"] as const;
-const SUBAGENT_DEFAULT_MAX_TURNS = 16;
 
 export type SubAgentSessionOptions = {
   /** The subagent preset (general-purpose / explore / plan). */
@@ -69,7 +68,7 @@ export type SubAgentSessionOptions = {
   subagentSessionId: string;
   /** Stable subagent UUID — mirrors C3 sidechain naming. */
   subagentId: string;
-  /** Cap on AgentLoop turns inside the fork. Defaults to 16. */
+  /** Optional cap on AgentLoop turns inside the fork. Unbounded when omitted. */
   maxTurns?: number;
   /** Abort signal forwarded to the child loop. */
   abortSignal?: AbortSignal;
@@ -139,7 +138,7 @@ export class SubAgentSession {
       sessionId: this.options.subagentSessionId,
       turnId,
       messages,
-      maxTurns: this.options.maxTurns ?? SUBAGENT_DEFAULT_MAX_TURNS,
+      maxTurns: this.options.maxTurns,
       abortSignal: this.options.abortSignal,
     });
     while (true) {
@@ -267,6 +266,10 @@ export class SubAgentSession {
       uuid: this.options.parentDependencies.uuid,
       auditRecorder: this.options.parentDependencies.auditRecorder,
       lifecycle: this.options.parentDependencies.lifecycle,
+      tokenAccounting: this.options.parentDependencies.tokenAccounting,
+      getModelMaxContextTokens: this.options.parentDependencies.getModelMaxContextTokens,
+      getModelMaxOutputTokens: this.options.parentDependencies.getModelMaxOutputTokens,
+      getModelTokenLimits: this.options.parentDependencies.getModelTokenLimits,
       subagentTranscript: this.options.parentDependencies.subagentTranscript,
     };
   }

@@ -8,13 +8,15 @@ import type {
   ClaudeWorkStatus,
   PilotDeckWorkStatus,
   PilotDeckPermissionSuggestion,
-  PermissionGrantResult,
+  SessionPermissionGrantResult,
 } from '../chat/types/types';
 import type { SessionStore } from '../../stores/useSessionStore';
 import { getSessionRequestParams, isReadOnlySession, type Project, type ProjectSession, type SessionProvider } from '../../types/app';
 import { getIntrinsicMessageKey } from '../chat/utils/messageKeys';
 import MessageRowV2 from './MessageRowV2';
 import SubagentDetailModal from './SubagentDetailModal';
+import ChatHistorySearchBar from './ChatHistorySearchBar';
+import { useChatHistorySearch } from './useChatHistorySearch';
 import { useSubagentMessages } from './useSubagentMessages';
 import { ProcessLiveStatus, ProcessRunHeader, StreamingThinkingPreview, type ProcessTraceStep } from './ProcessTrace';
 import { formatProcessDuration } from './processTraceUtils';
@@ -58,7 +60,7 @@ type MessagesPaneV2Props = {
   onShowSettings?: () => void;
   onGrantSessionToolPermission?: (
     suggestion: PilotDeckPermissionSuggestion,
-  ) => PermissionGrantResult | null | undefined;
+  ) => SessionPermissionGrantResult | null | undefined;
   autoExpandTools?: boolean;
   showRawParameters?: boolean;
   showThinking?: boolean;
@@ -247,6 +249,7 @@ function MeasuredMessageItem({
     <div
       ref={itemRef}
       className={`chat-message ${isLast ? '' : compactBottomSpacing ? 'pb-2' : 'pb-4'}`}
+      data-message-key={itemKey}
       data-message-timestamp={message.timestamp ? String(message.timestamp) : undefined}
     >
       {children}
@@ -468,15 +471,21 @@ export default function MessagesPaneV2({
   );
   const renderableMessages = useMemo(
     () => {
-      const filtered = visibleMessages.filter((message) =>
+      const lastUserIndex = isAssistantWorking
+        ? visibleMessages.reduce((lastIndex, message, index) => (
+            message.type === 'user' ? index : lastIndex
+          ), -1)
+        : -1;
+      const filtered = visibleMessages.filter((message, index) =>
         !message.isAgentActivity &&
         !isSubagentThinkingPlaceholder(message) &&
+        !(isAssistantWorking && message.isThinking && !message.isStreaming && index < lastUserIndex) &&
         (!inlineThinking && isStreamingThinkingMessage(message) ? false : true) &&
         !(message.isThinking && !showThinking)
       );
       return filtered;
     },
-    [visibleMessages, showThinking, inlineThinking],
+    [visibleMessages, showThinking, inlineThinking, isAssistantWorking],
   );
   const liveProcessDetailMessages = useMemo(
     () => isAssistantWorking ? getLiveProcessDetailMessages(renderableMessages) : [],
@@ -927,13 +936,44 @@ export default function MessagesPaneV2({
     t,
   ]);
 
+  const keyedMessagesForSearch = useMemo(
+    () => keyedMessageItems.map((item) => ({
+      message: item.message,
+      messageKey: item.itemKey,
+    })),
+    [keyedMessageItems],
+  );
+
+  const chatHistorySearch = useChatHistorySearch({
+    scrollContainerRef,
+    keyedMessages: keyedMessagesForSearch,
+    measuredItemHeights,
+    allMessagesLoaded,
+    hasMoreMessages,
+    loadAllMessages,
+    sessionId,
+  });
+
   return (
-    <div
-      ref={scrollContainerRef}
-      onWheel={onWheel}
-      onTouchMove={onTouchMove}
-      className="relative flex-1 overflow-y-auto overflow-x-hidden bg-white dark:bg-neutral-950"
-    >
+    <div className="relative min-h-0 flex-1">
+      {chatHistorySearch.isOpen ? (
+        <ChatHistorySearchBar
+          query={chatHistorySearch.query}
+          onQueryChange={chatHistorySearch.setQuery}
+          matchCount={chatHistorySearch.matches.length}
+          activeMatchIndex={chatHistorySearch.activeMatchIndex}
+          onPrevious={chatHistorySearch.goToPrevious}
+          onNext={chatHistorySearch.goToNext}
+          onClose={chatHistorySearch.closeSearch}
+          inputRef={chatHistorySearch.inputRef}
+        />
+      ) : null}
+      <div
+        ref={scrollContainerRef}
+        onWheel={onWheel}
+        onTouchMove={onTouchMove}
+        className="h-full overflow-y-auto overflow-x-hidden bg-white dark:bg-neutral-950"
+      >
       {hasSessionLoadError ? (
         <div className="mx-auto flex h-full max-w-[720px] flex-col items-center justify-center gap-3 px-6 py-10 text-center">
           <XCircle className="h-5 w-5 text-amber-600 dark:text-amber-400" strokeWidth={1.75} />
@@ -1134,6 +1174,7 @@ export default function MessagesPaneV2({
           onClose={() => setOpenSubagentId(null)}
         />
       ) : null}
+      </div>
     </div>
   );
 }

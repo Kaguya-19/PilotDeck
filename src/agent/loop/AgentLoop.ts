@@ -13,8 +13,11 @@ import {
   type CanonicalModelRequest,
   type CanonicalToolSchema,
   type CanonicalUsage,
+  type CanonicalToolCallBlock,
   materializeMediaReferences,
   type PartialTextToolCallInfo,
+  getSelfCorrectPrompt,
+  detectFormatByText,
 } from "../../model/index.js";
 import type {
   PilotDeckToolDefinition,
@@ -52,9 +55,23 @@ import {
   isAskModeAllowedTool,
 } from "../../tool/askModeConstraints.js";
 import { buildAskModeAgentToolSchema } from "../../tool/builtin/agent.js";
+import { repairToolName } from "../../model/streaming/repairToolName.js";
+import {
+  createAgentStatusDetail,
+  createVisibleErrorStatusDetail,
+} from "../../status/agentStatus.js";
 
 const TOOL_EVENT_PUMP_INTERVAL_MS = 500;
 const SUBAGENT_STATUS_HEARTBEAT_MS = 2_000;
+const DEFAULT_RESERVED_OUTPUT_TOKENS = 4_096;
+const EMPTY_LENGTH_OUTPUT_RETRY_FLOOR = 4_096;
+const CIRCUIT_BREAKER_GRACE_PROMPT = [
+  "Your last several tool calls all failed input validation with the same error.",
+  "This may indicate a tool-side issue rather than a problem with your approach.",
+  "Options: (1) try a different tool or different parameters,",
+  "(2) explain the situation in text without calling tools,",
+  "(3) if you believe the tool should work, try once more with corrected input.",
+].join(" ");
 const PLAN_MODE_REMINDER_MESSAGE = [
   "Plan mode is active.",
   "Read first using read-only tools, then write or refine plan markdown only under `.pilotdeck/plans/`.",
@@ -71,6 +88,13 @@ type ActiveSubagentStatus = {
   currentToolName?: string;
 };
 
+type AgentStatusMessage = {
+  event: string;
+  kind: "status" | "error";
+  text: string;
+  detail?: Record<string, unknown>;
+};
+
 export type AgentLoopInput = {
   sessionId: string;
   turnId: string;
@@ -78,6 +102,7 @@ export type AgentLoopInput = {
   maxTurns?: number;
   runMode?: AgentRunMode;
   permissionMode?: PermissionMode;
+  allowedReadFiles?: string[];
   /** The user's actual permission preference before plan-mode override. */
   basePermissionMode?: PermissionMode;
   /** Allow model-visible plan mode tools for this turn. */
@@ -86,6 +111,7 @@ export type AgentLoopInput = {
   permissionRules?: Partial<PermissionRuleSet>;
   abortSignal?: AbortSignal;
   onDurableMessage?: (message: CanonicalMessage) => void | Promise<void>;
+  onAgentStatusMessage?: (status: AgentStatusMessage) => void | Promise<void>;
 };
 
 export type AgentLoopRunResult = {
@@ -96,11 +122,19 @@ export type AgentLoopRunResult = {
 export type AgentLoopSeedState = {
   readFileState?: PilotDeckReadFileStateMap;
   writeSnapshots?: PilotDeckWriteSnapshotMap;
+  allowedReadFiles?: string[];
 };
 
 export class AgentLoop {
   private readonly readFileState: PilotDeckReadFileStateMap;
   private readonly writeSnapshots: PilotDeckWriteSnapshotMap;
+  private readonly allowedReadFiles: Set<string>;
+  private readonly transientTokenCaps = new Map<string, {
+    maxContextTokens?: number;
+    requestedMaxOutputTokens?: number;
+    attemptMaxOutputTokens?: number;
+    hardMaxOutputTokens?: number;
+  }>();
 
   constructor(
     private readonly config: AgentRuntimeConfig,
@@ -109,25 +143,47 @@ export class AgentLoop {
   ) {
     this.readFileState = cloneReadFileStateMap(seedState?.readFileState);
     this.writeSnapshots = cloneWriteSnapshotMap(seedState?.writeSnapshots);
+    this.allowedReadFiles = new Set(seedState?.allowedReadFiles ?? []);
   }
 
   snapshotFileState(): AgentLoopSeedState {
     return {
       readFileState: cloneReadFileStateMap(this.readFileState),
       writeSnapshots: cloneWriteSnapshotMap(this.writeSnapshots),
+      allowedReadFiles: [...this.allowedReadFiles],
     };
   }
 
   async *run(input: AgentLoopInput): AsyncGenerator<AgentEvent, AgentLoopRunResult, unknown> {
+    this.clearTurnScopedTokenCaps();
     this.applyRunModeOverride(input.runMode);
     this.applyPermissionOverrides(input.permissionMode, input.permissionRules, input.basePermissionMode);
+    for (const filePath of input.allowedReadFiles ?? []) {
+      this.allowedReadFiles.add(filePath);
+    }
     const startedAt = this.now().toISOString();
     let messages = [...input.messages];
     let turnCount = 1;
     let usage: CanonicalUsage = {};
+    let lastModelUsage: CanonicalUsage | undefined;
     let permissionDenials: AgentPermissionDenial[] = [];
     let structuredOutput: unknown;
     let finalMessage: CanonicalMessage | undefined;
+    const toAgentStatusEvent = (status: AgentStatusMessage): AgentEvent => ({
+      type: "agent_status",
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      event: status.event,
+      detail: status.detail,
+    });
+    const emitStatus = async (status: AgentStatusMessage): Promise<AgentEvent> => {
+      await input.onAgentStatusMessage?.(status);
+      return toAgentStatusEvent(status);
+    };
+    const createAbortStatus = (): AgentStatusMessage | undefined => {
+      if (!shouldSurfaceAbortStatus(input.abortSignal?.reason)) return undefined;
+      return createTurnAbortedStatus({ reason: stringifyAbortReason(input.abortSignal?.reason) });
+    };
     const captureTurn = async (errored: boolean): Promise<void> => {
       const hook = this.dependencies.context?.captureTurn;
       if (!hook) return;
@@ -174,17 +230,20 @@ export class AgentLoop {
     let consecutiveEmptyCount = 0;
     const MAX_JSON_SELF_CORRECT_RETRIES = 3;
     let jsonSelfCorrectCount = 0;
+    let hasAttemptedToolCallRetry = false;
     const largeFileRepair = new LargeFileRepair();
 
     /**
-     * Circuit breaker: consecutive turns where ALL tool calls are
-     * `invalid_tool_input` errors. When the model is stuck in a loop
-     * (e.g. qwen repeatedly emitting empty-param bash calls), terminate
-     * early instead of burning tokens. Resets on any turn with at least
-     * one successful tool call.
+     * Circuit breaker: detects loops by fingerprinting each turn's
+     * invalid_tool_input errors (toolName + errorMessage). Only identical
+     * repeated failures trigger recovery, so changed parameters/tools are not
+     * mistaken for the same stuck loop. A one-time grace prompt gives the
+     * model a final chance to change strategy before termination.
      */
-    const MAX_CONSECUTIVE_ALL_INVALID_TURNS = 3;
-    let consecutiveAllInvalidTurns = 0;
+    const MAX_SAME_INVALID_FINGERPRINT = 3;
+    let lastInvalidFingerprint: string | undefined;
+    let sameInvalidFingerprintCount = 0;
+    let hasUsedInvalidGracePeriod = false;
     let lastToolFailureFingerprint: string | undefined;
     let transientPromptCounter = 0;
     const activeTransientPromptIds = new Set<string>();
@@ -223,8 +282,10 @@ export class AgentLoop {
     } | {
       type: "completed";
       result: AgentTurnResult;
+      status?: AgentStatusMessage;
     }> => {
       if (decision.type === "stop") {
+        const error = agentError("agent_tool_error_loop", decision.reason);
         const result = this.createTurnResult(input, {
           type: "error",
           stopReason: "tool_error",
@@ -234,9 +295,9 @@ export class AgentLoop {
           startedAt,
           finalMessage,
           structuredOutput,
-          errors: [agentError("agent_tool_error_loop", decision.reason)],
+          errors: [error],
         });
-        return { type: "completed", result };
+        return { type: "completed", result, status: createToolErrorLoopStatus({ error }) };
       }
       if (options.stripCurrentAssistant !== false) {
         if (decision.strip === "error_pair") {
@@ -275,6 +336,10 @@ export class AgentLoop {
           startedAt,
           finalMessage,
         });
+        const status = createAbortStatus();
+        if (status) {
+          yield await emitStatus(status);
+        }
         await captureTurn(result.type === "error");
         yield { type: "turn_completed", sessionId: input.sessionId, turnId: input.turnId, result };
         return { result, messages };
@@ -282,11 +347,19 @@ export class AgentLoop {
 
       let pendingContextBudget: TokenBudgetSnapshot | undefined;
       const ctx = this.dependencies.context;
+      const preRoutingMaxContextTokens = this.currentMaxContextTokens(this.config.provider, this.config.model);
       if (ctx?.tryAutoCompact) {
         try {
+          const reservedOutputTokens = this.getReservedOutputTokens();
           const compact = await ctx.tryAutoCompact({
             messages,
             abortSignal: input.abortSignal,
+            reservedOutputTokens,
+            lastUsage: lastModelUsage,
+            budgetEvaluator: this.createBudgetEvaluator(input, {
+              maxContextTokens: preRoutingMaxContextTokens,
+              reservedOutputTokens,
+            }),
           });
           if (compact.type === "compacted") {
             messages = compact.messages;
@@ -316,6 +389,10 @@ export class AgentLoop {
           startedAt,
           finalMessage,
         });
+        const status = createAbortStatus();
+        if (status) {
+          yield await emitStatus(status);
+        }
         await captureTurn(result.type === "error");
         yield { type: "turn_completed", sessionId: input.sessionId, turnId: input.turnId, result };
         return { result, messages };
@@ -339,26 +416,41 @@ export class AgentLoop {
         request,
         sessionId: input.sessionId,
         isMainAgent: !this.config.isSubagent,
-        metadata: previousTier ? { previousTier } : undefined,
+        metadata: stickyInfo
+          ? {
+            previousTier,
+            previousProvider: stickyInfo.previousProvider,
+            previousModel: stickyInfo.previousModel,
+          }
+          : previousTier ? { previousTier } : undefined,
       });
-      const routedMaxOutputTokens = this.dependencies.getModelMaxOutputTokens?.(decision.provider, decision.model);
+      const routedLimits = this.getModelTokenLimits(decision.provider, decision.model);
+      const routedMaxOutputTokens = routedLimits?.maxOutputTokens;
 
-      const getMaxCtx = this.dependencies.getModelMaxContextTokens;
-      const agentMaxCtx = this.config.maxContextTokens;
       let emittedContextBudget = false;
-      if (ctx?.tryAutoCompact && getMaxCtx) {
-        const routedMaxCtx = getMaxCtx(decision.provider, decision.model);
-        const currentBudgetMaxCtx = pendingContextBudget?.maxContextTokens ?? agentMaxCtx;
+      if (ctx?.tryAutoCompact) {
+        const routedMaxCtx = routedLimits?.maxContextTokens ?? this.dependencies.getModelMaxContextTokens?.(decision.provider, decision.model);
+        const currentBudgetMaxCtx = preRoutingMaxContextTokens;
         if (routedMaxCtx !== undefined && routedMaxCtx !== currentBudgetMaxCtx) {
           try {
+            const reservedOutputTokens = this.getReservedOutputTokens(decision.provider, decision.model);
             const recompact = await ctx.tryAutoCompact({
               messages,
               abortSignal: input.abortSignal,
               maxContextTokens: routedMaxCtx,
+              reservedOutputTokens,
+              lastUsage: lastModelUsage,
+              budgetEvaluator: this.createBudgetEvaluator(input, {
+                decision,
+                baseRequest: request,
+                maxContextTokens: routedMaxCtx,
+                reservedOutputTokens,
+              }),
             });
             if (recompact.type === "compacted") {
               messages = recompact.messages;
               request = await this.createModelRequest(messages, input);
+              request = this.applyTokenCapsToRequest(request, decision.provider, decision.model);
               yield {
                 type: "turn_continued",
                 sessionId: input.sessionId,
@@ -378,6 +470,8 @@ export class AgentLoop {
           }
         }
       }
+      request = this.applyTokenCapsToRequest(request, decision.provider, decision.model);
+      this.clearAttemptOutputTokenCap(decision.provider, decision.model);
       if (pendingContextBudget && !emittedContextBudget) {
         yield {
           type: "context_budget",
@@ -439,6 +533,14 @@ export class AgentLoop {
           finalMessage,
           errors: [agentError("agent_model_error", stopFailureMsg)],
         });
+        const abortStatus = createAbortStatus();
+        if (abortStatus) {
+          yield await emitStatus(abortStatus);
+        } else {
+          yield await emitStatus(createModelRequestFailedStatus({
+            error: result.errors![0]!,
+          }));
+        }
         yield { type: "turn_failed", sessionId: input.sessionId, turnId: input.turnId, error: result.errors![0]! };
         await captureTurn(result.type === "error");
         yield { type: "turn_completed", sessionId: input.sessionId, turnId: input.turnId, result };
@@ -464,6 +566,10 @@ export class AgentLoop {
           startedAt,
           finalMessage,
         });
+        const status = createAbortStatus();
+        if (status) {
+          yield await emitStatus(status);
+        }
         await captureTurn(result.type === "error");
         yield { type: "turn_completed", sessionId: input.sessionId, turnId: input.turnId, result };
         return { result, messages };
@@ -471,8 +577,15 @@ export class AgentLoop {
 
       const assembled = assembleAssistantMessage(assembler);
       usage = mergeUsage(usage, assembled.usage);
-      finalMessage = assembled.message;
-      const toolCalls = collectToolCalls(assembled.message);
+      lastModelUsage = assembled.usage;
+      let assistantMessage = assembled.message;
+      let toolCalls = collectToolCalls(assistantMessage);
+      if (assembled.hasTextFallbackToolCalls) {
+        const repaired = this.repairTextExtractedToolNames(assistantMessage, toolCalls);
+        assistantMessage = repaired.message;
+        toolCalls = repaired.toolCalls;
+      }
+      finalMessage = assistantMessage;
       expireConsumedTransientPrompts();
 
       if (assembled.hasPartialTextToolCall) {
@@ -508,6 +621,11 @@ export class AgentLoop {
             `Partial text tool-call recovery exhausted after ${MAX_OUTPUT_RECOVERY_LIMIT} attempts (${detail}).`,
           )],
         });
+        yield await emitStatus(createToolCallRecoveryExhaustedStatus({
+          error: result.errors![0]!,
+          attempts: maxOutputRecoveryCount,
+          reason: detail,
+        }));
         yield { type: "turn_failed", sessionId: input.sessionId, turnId: input.turnId, error: result.errors![0]! };
         await captureTurn(result.type === "error");
         yield { type: "turn_completed", sessionId: input.sessionId, turnId: input.turnId, result };
@@ -531,6 +649,9 @@ export class AgentLoop {
         if (largeFileDecision) {
           const continued = await continueWithSyntheticPrompt(largeFileDecision, { stripCurrentAssistant: false });
           if (continued.type === "completed") {
+            if (continued.status) {
+              yield await emitStatus(continued.status);
+            }
             yield { type: "turn_failed", sessionId: input.sessionId, turnId: input.turnId, error: continued.result.errors![0]! };
             await captureTurn(continued.result.type === "error");
             yield { type: "turn_completed", sessionId: input.sessionId, turnId: input.turnId, result: continued.result };
@@ -541,15 +662,27 @@ export class AgentLoop {
         }
 
         // Phase A: token doubling (if not yet attempted)
-        if (!hasAttemptedOutputRetry) {
-          hasAttemptedOutputRetry = true;
-          const nextMaxOutputTokens = resolveOutputTokenRetryBump({
-            currentMaxOutputTokens: this.config.maxOutputTokens,
-            modelMaxOutputTokens: routedMaxOutputTokens,
-          });
-          if (nextMaxOutputTokens !== undefined) {
-            this.config.maxOutputTokens = nextMaxOutputTokens;
-            yield {
+          if (!hasAttemptedOutputRetry) {
+            hasAttemptedOutputRetry = true;
+            const nextMaxOutputTokens = resolveOutputTokenRetryBump({
+              currentMaxOutputTokens: this.currentMaxOutputTokens(decision.provider, decision.model),
+              modelMaxOutputTokens: routedMaxOutputTokens,
+            });
+            if (nextMaxOutputTokens !== undefined) {
+              const previousOutput = this.currentMaxOutputTokens(decision.provider, decision.model);
+              this.setTransientTokenCap(decision.provider, decision.model, { requestedMaxOutputTokens: nextMaxOutputTokens });
+              yield {
+                type: "token_cap_adjusted",
+                sessionId: input.sessionId,
+                turnId: input.turnId,
+                provider: decision.provider,
+                model: decision.model,
+                cap: "output",
+                previous: previousOutput,
+                next: nextMaxOutputTokens,
+                reason: "max-output-retry-bump",
+              };
+              yield {
               type: "turn_continued",
               sessionId: input.sessionId,
               turnId: input.turnId,
@@ -592,15 +725,137 @@ export class AgentLoop {
             "Recovered tool call still looked repaired/truncated after max-output recovery was exhausted.",
           )],
         });
+        yield await emitStatus(createToolCallRecoveryExhaustedStatus({
+          error: result.errors![0]!,
+          attempts: maxOutputRecoveryCount,
+          reason: "repaired_truncated_tool_calls",
+        }));
         yield { type: "turn_failed", sessionId: input.sessionId, turnId: input.turnId, error: result.errors![0]! };
         await captureTurn(result.type === "error");
         yield { type: "turn_completed", sessionId: input.sessionId, turnId: input.turnId, result };
         return { result, messages };
       }
 
-      messages.push(assembled.message);
-      yield { type: "assistant_message", sessionId: input.sessionId, turnId: input.turnId, message: assembled.message };
-      await input.onDurableMessage?.(assembled.message);
+      if (!assembled.error && toolCalls.length === 0 && textFromMessage(assistantMessage).length === 0) {
+        if (maxOutputRecoveryCount > 0) {
+          consecutiveEmptyCount++;
+          if (consecutiveEmptyCount < MAX_CONSECUTIVE_EMPTY
+            && maxOutputRecoveryCount < MAX_OUTPUT_RECOVERY_LIMIT) {
+            maxOutputRecoveryCount++;
+            if (assembled.finishReason === "length") {
+              const previousMaxOutputTokens = this.currentMaxOutputTokens(decision.provider, decision.model);
+              const nextMaxOutputTokens = clampOutputToModelCap(
+                Math.max((previousMaxOutputTokens ?? 0) * 2, EMPTY_LENGTH_OUTPUT_RETRY_FLOOR),
+                routedMaxOutputTokens,
+              );
+              if (nextMaxOutputTokens !== undefined && nextMaxOutputTokens !== previousMaxOutputTokens) {
+                this.setTransientTokenCap(decision.provider, decision.model, { requestedMaxOutputTokens: nextMaxOutputTokens });
+                yield {
+                  type: "empty_output_recovery",
+                  sessionId: input.sessionId,
+                  turnId: input.turnId,
+                  provider: decision.provider,
+                  model: decision.model,
+                  finishReason: assembled.finishReason,
+                  previousMaxOutputTokens,
+                  nextMaxOutputTokens,
+                };
+              }
+            }
+            pushTransientSyntheticPrompt(
+              "Output token limit hit. Resume directly - no apology, no recap of what you were doing. "
+                + "Pick up mid-sentence if that is where the cut happened.",
+              "max_output_recovery",
+            );
+            yield {
+              type: "turn_continued",
+              sessionId: input.sessionId,
+              turnId: input.turnId,
+              reason: "model_error",
+            };
+            continue;
+          }
+          finalMessage = messages.filter((m) => m.role === "assistant").at(-1);
+          const status = createEmptyResponseStatus({
+            provider: request.provider,
+            model: request.model,
+            attempts: consecutiveEmptyCount,
+          });
+          yield await emitStatus(status);
+          const result = this.createTurnResult(input, {
+            type: "success",
+            stopReason: "completed",
+            usage,
+            permissionDenials,
+            turns: turnCount,
+            startedAt,
+            finalMessage,
+          });
+          await captureTurn(true);
+          yield { type: "turn_completed", sessionId: input.sessionId, turnId: input.turnId, result };
+          return { result, messages };
+        }
+
+        if (!hasAttemptedEmptyRetry) {
+          hasAttemptedEmptyRetry = true;
+          maxOutputRecoveryCount++;
+          if (assembled.finishReason === "length") {
+            const previousMaxOutputTokens = this.currentMaxOutputTokens(decision.provider, decision.model);
+            const nextMaxOutputTokens = clampOutputToModelCap(
+              Math.max((previousMaxOutputTokens ?? 0) * 2, EMPTY_LENGTH_OUTPUT_RETRY_FLOOR),
+              routedMaxOutputTokens,
+            );
+            if (nextMaxOutputTokens !== undefined && nextMaxOutputTokens !== previousMaxOutputTokens) {
+              this.setTransientTokenCap(decision.provider, decision.model, { requestedMaxOutputTokens: nextMaxOutputTokens });
+              yield {
+                type: "empty_output_recovery",
+                sessionId: input.sessionId,
+                turnId: input.turnId,
+                provider: decision.provider,
+                model: decision.model,
+                finishReason: assembled.finishReason,
+                previousMaxOutputTokens,
+                nextMaxOutputTokens,
+              };
+            }
+          }
+          pushTransientSyntheticPrompt(
+            "Your previous response was empty (thinking only, no visible text). "
+              + "Please provide your answer as visible text output.",
+            "empty_response_retry",
+          );
+          yield {
+            type: "turn_continued",
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            reason: "model_error",
+          };
+          continue;
+        }
+
+        const status = createEmptyResponseStatus({
+          provider: request.provider,
+          model: request.model,
+          attempts: 2,
+        });
+        yield await emitStatus(status);
+        const result = this.createTurnResult(input, {
+          type: "success",
+          stopReason: "completed",
+          usage,
+          permissionDenials,
+          turns: turnCount,
+          startedAt,
+          finalMessage: messages.filter((m) => m.role === "assistant").at(-1),
+        });
+        await captureTurn(true);
+        yield { type: "turn_completed", sessionId: input.sessionId, turnId: input.turnId, result };
+        return { result, messages };
+      }
+
+      messages.push(assistantMessage);
+      yield { type: "assistant_message", sessionId: input.sessionId, turnId: input.turnId, message: assistantMessage };
+      await input.onDurableMessage?.(assistantMessage);
 
       if (assembled.error) {
         if (toolCalls.length > 0) {
@@ -646,6 +901,103 @@ export class AgentLoop {
         // model error (e.g. `prompt_too_long` → truncate head and retry).
         // Single-shot per turn — see legacy parity §3.1 #8.
         const reactive = await this.tryReactiveRecover(input, assembled.error, messages, hasAttemptedCompact);
+        if (reactive && reactive.type === "adjust_output_and_retry" && !hasAttemptedOutputRetry) {
+          hasAttemptedOutputRetry = true;
+          const target = modelErrorTarget(assembled.error, decision.provider, decision.model);
+          const previousOutput = this.currentMaxOutputTokens(target.provider, target.model);
+          this.setTransientTokenCap(target.provider, target.model, reactive.scope === "attempt"
+            ? { attemptMaxOutputTokens: reactive.maxOutputTokens }
+            : { hardMaxOutputTokens: reactive.maxOutputTokens });
+          if (target.provider !== decision.provider || target.model !== decision.model) {
+            this.setTransientTokenCap(decision.provider, decision.model, { attemptMaxOutputTokens: reactive.maxOutputTokens });
+          }
+          messages = stripTrailingErrorPair(messages);
+          yield {
+            type: "token_cap_adjusted",
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            provider: target.provider,
+            model: target.model,
+            cap: "output",
+            previous: previousOutput,
+            next: reactive.maxOutputTokens,
+            reason: reactive.reason,
+          };
+          yield {
+            type: "turn_continued",
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            reason: "model_error",
+          };
+          continue;
+        }
+
+        if (reactive && reactive.type === "compact_and_retry" && !hasAttemptedCompact) {
+          const target = modelErrorTarget(assembled.error, decision.provider, decision.model);
+          const previousContext = this.currentMaxContextTokens(target.provider, target.model);
+          if (reactive.maxContextTokens !== undefined) {
+            this.setTransientTokenCap(target.provider, target.model, { maxContextTokens: reactive.maxContextTokens });
+            yield {
+              type: "token_cap_adjusted",
+              sessionId: input.sessionId,
+              turnId: input.turnId,
+              provider: target.provider,
+              model: target.model,
+              cap: "context",
+              previous: previousContext,
+              next: reactive.maxContextTokens,
+              reason: reactive.reason,
+            };
+          }
+          if (reactive.maxOutputTokens !== undefined) {
+            const previousOutput = this.currentMaxOutputTokens(target.provider, target.model);
+            this.setTransientTokenCap(target.provider, target.model, { attemptMaxOutputTokens: reactive.maxOutputTokens });
+            if (target.provider !== decision.provider || target.model !== decision.model) {
+              this.setTransientTokenCap(decision.provider, decision.model, { attemptMaxOutputTokens: reactive.maxOutputTokens });
+            }
+            yield {
+              type: "token_cap_adjusted",
+              sessionId: input.sessionId,
+              turnId: input.turnId,
+              provider: target.provider,
+              model: target.model,
+              cap: "output",
+              previous: previousOutput,
+              next: reactive.maxOutputTokens,
+              reason: reactive.reason,
+            };
+          }
+          messages = stripTrailingErrorPair(messages);
+          if (ctx?.tryAutoCompact) {
+            try {
+              const compact = await ctx.tryAutoCompact({
+                messages,
+                abortSignal: input.abortSignal,
+                maxContextTokens: this.currentMaxContextTokens(target.provider, target.model),
+                reservedOutputTokens: this.getReservedOutputTokens(target.provider, target.model),
+                lastUsage: lastModelUsage,
+              });
+              if (compact.type === "compacted") {
+                messages = compact.messages;
+              } else {
+                messages = truncateHeadKeepRatio(messages, 0.5);
+              }
+            } catch {
+              messages = truncateHeadKeepRatio(messages, 0.5);
+            }
+          } else {
+            messages = truncateHeadKeepRatio(messages, 0.5);
+          }
+          hasAttemptedCompact = true;
+          yield {
+            type: "turn_continued",
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            reason: "model_error",
+          };
+          continue;
+        }
+
         if (reactive && reactive.type === "truncate_head_and_retry") {
           // Drop the failed assistant message + any synthetic tool_result we just
           // pushed so the retry doesn't carry a half-baked tool_call. Then apply
@@ -687,12 +1039,24 @@ export class AgentLoop {
           if (!hasAttemptedOutputRetry) {
             hasAttemptedOutputRetry = true;
             const nextMaxOutputTokens = resolveOutputTokenRetryBump({
-              currentMaxOutputTokens: this.config.maxOutputTokens,
+              currentMaxOutputTokens: this.currentMaxOutputTokens(decision.provider, decision.model),
               modelMaxOutputTokens: routedMaxOutputTokens,
             });
             if (nextMaxOutputTokens !== undefined) {
               messages = stripTrailingErrorPair(messages);
-              this.config.maxOutputTokens = nextMaxOutputTokens;
+              const previousOutput = this.currentMaxOutputTokens(decision.provider, decision.model);
+              this.setTransientTokenCap(decision.provider, decision.model, { requestedMaxOutputTokens: nextMaxOutputTokens });
+              yield {
+                type: "token_cap_adjusted",
+                sessionId: input.sessionId,
+                turnId: input.turnId,
+                provider: decision.provider,
+                model: decision.model,
+                cap: "output",
+                previous: previousOutput,
+                next: nextMaxOutputTokens,
+                reason: "max-output-retry-bump",
+              };
               yield {
                 type: "turn_continued",
                 sessionId: input.sessionId,
@@ -738,6 +1102,10 @@ export class AgentLoop {
           finalMessage,
           errors: [classified.error],
         });
+        yield await emitStatus(createModelRequestFailedStatus({
+          error: classified.error,
+          modelError: assembled.error,
+        }));
         yield { type: "turn_failed", sessionId: input.sessionId, turnId: input.turnId, error: result.errors![0]! };
         await captureTurn(result.type === "error");
         yield { type: "turn_completed", sessionId: input.sessionId, turnId: input.turnId, result };
@@ -745,7 +1113,7 @@ export class AgentLoop {
       }
 
       if (toolCalls.length === 0) {
-        const assistantText = textFromMessage(assembled.message);
+        const assistantText = textFromMessage(assistantMessage);
 
         // Global guard: empty assistant response (no text, no tool calls).
         // The model produced nothing visible — typically because extended
@@ -758,6 +1126,26 @@ export class AgentLoop {
             if (consecutiveEmptyCount < MAX_CONSECUTIVE_EMPTY
               && maxOutputRecoveryCount < MAX_OUTPUT_RECOVERY_LIMIT) {
               maxOutputRecoveryCount++;
+              if (assembled.finishReason === "length") {
+                const previousMaxOutputTokens = this.currentMaxOutputTokens(decision.provider, decision.model);
+                const nextMaxOutputTokens = clampOutputToModelCap(
+                  Math.max((previousMaxOutputTokens ?? 0) * 2, EMPTY_LENGTH_OUTPUT_RETRY_FLOOR),
+                  routedMaxOutputTokens,
+                );
+                if (nextMaxOutputTokens !== undefined && nextMaxOutputTokens !== previousMaxOutputTokens) {
+                  this.setTransientTokenCap(decision.provider, decision.model, { requestedMaxOutputTokens: nextMaxOutputTokens });
+                  yield {
+                    type: "empty_output_recovery",
+                    sessionId: input.sessionId,
+                    turnId: input.turnId,
+                    provider: decision.provider,
+                    model: decision.model,
+                    finishReason: assembled.finishReason,
+                    previousMaxOutputTokens,
+                    nextMaxOutputTokens,
+                  };
+                }
+              }
               pushTransientSyntheticPrompt(
                 "Output token limit hit. Resume directly - no apology, no recap of what you were doing. "
                   + "Pick up mid-sentence if that is where the cut happened.",
@@ -771,30 +1159,52 @@ export class AgentLoop {
               };
               continue;
             }
-            // Exhausted consecutive empty retries — surface error via frontend banner.
+            // Exhausted consecutive empty retries — surface a UI-only status
+            // message instead of injecting diagnostic assistant text into the
+            // model transcript.
             finalMessage = messages.filter((m) => m.role === "assistant").at(-1);
+            const status = createEmptyResponseStatus({
+              provider: request.provider,
+              model: request.model,
+              attempts: consecutiveEmptyCount,
+            });
+            yield await emitStatus(status);
             const result = this.createTurnResult(input, {
-              type: "error",
-              stopReason: "model_error",
+              type: "success",
+              stopReason: "completed",
               usage,
               permissionDenials,
               turns: turnCount,
               startedAt,
               finalMessage,
-              errors: [agentError(
-                "agent_model_error",
-                "The model returned multiple consecutive empty responses. "
-                  + "The max output token limit is likely too low — "
-                  + "try increasing it so the model has room for visible output after reasoning.",
-              )],
             });
-            yield { type: "turn_failed", sessionId: input.sessionId, turnId: input.turnId, error: result.errors![0]! };
-            await captureTurn(result.type === "error");
+            await captureTurn(true);
             yield { type: "turn_completed", sessionId: input.sessionId, turnId: input.turnId, result };
             return { result, messages };
           } else if (!hasAttemptedEmptyRetry) {
             // First occurrence: prompt the model to produce visible output.
             hasAttemptedEmptyRetry = true;
+            maxOutputRecoveryCount++;
+            if (assembled.finishReason === "length") {
+              const previousMaxOutputTokens = this.currentMaxOutputTokens(decision.provider, decision.model);
+              const nextMaxOutputTokens = clampOutputToModelCap(
+                Math.max((previousMaxOutputTokens ?? 0) * 2, EMPTY_LENGTH_OUTPUT_RETRY_FLOOR),
+                routedMaxOutputTokens,
+              );
+              if (nextMaxOutputTokens !== undefined && nextMaxOutputTokens !== previousMaxOutputTokens) {
+                this.setTransientTokenCap(decision.provider, decision.model, { requestedMaxOutputTokens: nextMaxOutputTokens });
+                yield {
+                  type: "empty_output_recovery",
+                  sessionId: input.sessionId,
+                  turnId: input.turnId,
+                  provider: decision.provider,
+                  model: decision.model,
+                  finishReason: assembled.finishReason,
+                  previousMaxOutputTokens,
+                  nextMaxOutputTokens,
+                };
+              }
+            }
             pushTransientSyntheticPrompt(
               "Your previous response was empty (thinking only, no visible text). "
                 + "Please provide your answer as visible text output.",
@@ -808,19 +1218,12 @@ export class AgentLoop {
             };
             continue;
           } else {
-            // Retry also returned empty — give user a diagnostic hint.
-            finalMessage = {
-              role: "assistant",
-              content: [{
-                type: "text",
-                text: "[The model returned an empty response. "
-                  + "This usually means the max output token limit is too low — "
-                  + "the model's reasoning/thinking consumed all available output "
-                  + "tokens before producing visible text. "
-                  + "Try increasing the max output tokens setting.]",
-              }],
-            };
-            messages.push(finalMessage);
+            const status = createEmptyResponseStatus({
+              provider: request.provider,
+              model: request.model,
+              attempts: 2,
+            });
+            yield await emitStatus(status);
           }
           // fall through to normal stop
         }
@@ -852,12 +1255,17 @@ export class AgentLoop {
           }
           // Exhausted — fall through to normal completion with whatever
           // text was produced so far.
+          const status = createMaxOutputRecoveryExhaustedStatus({ attempts: maxOutputRecoveryCount });
+          yield await emitStatus(status);
         }
 
         const largeFileDecision = largeFileRepair.onNoToolCalls();
         if (largeFileDecision) {
           const continued = await continueWithSyntheticPrompt(largeFileDecision);
           if (continued.type === "completed") {
+            if (continued.status) {
+              yield await emitStatus(continued.status);
+            }
             yield { type: "turn_failed", sessionId: input.sessionId, turnId: input.turnId, error: continued.result.errors![0]! };
             await captureTurn(continued.result.type === "error");
             yield { type: "turn_completed", sessionId: input.sessionId, turnId: input.turnId, result: continued.result };
@@ -867,9 +1275,37 @@ export class AgentLoop {
           continue;
         }
 
+        if (!assembled.hasPartialTextToolCall && assembled.hasUnparsedTextToolCall) {
+          if (!hasAttemptedToolCallRetry) {
+            hasAttemptedToolCallRetry = true;
+            pushTransientSyntheticPrompt(
+              getSelfCorrectPrompt(this.config.toolCallFormat ?? assembled.textToolCallFormat, assistantText),
+              "unparsed_tool_call_retry",
+            );
+            yield {
+              type: "turn_continued",
+              sessionId: input.sessionId,
+              turnId: input.turnId,
+              reason: "model_error",
+            };
+            continue;
+          }
+
+          yield {
+            type: "warning",
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            code: "unparsed_tool_call",
+            message: "Model attempted to call a tool but the output could not be parsed. The response may be incomplete.",
+            metadata: {
+              detectedFormat: assembled.textToolCallFormat ?? detectFormatByText(assistantText)?.id,
+            },
+          };
+        }
+
         const stopHooks = await this.dispatchLifecycle(input, "Stop", {
           stopHookActive: false,
-          lastAssistantMessage: textFromMessage(assembled.message),
+          lastAssistantMessage: textFromMessage(assistantMessage),
         });
         yield { type: "stop_requested", sessionId: input.sessionId, turnId: input.turnId };
         messages.push(...stopHooks.messages);
@@ -886,11 +1322,20 @@ export class AgentLoop {
             structuredOutput,
             errors: [agentError("agent_unsupported_feature", stopBlock.reason)],
           });
+          yield await emitStatus(createLifecycleBlockedStatus({
+            error: result.errors![0]!,
+            stage: "stop",
+          }));
           yield { type: "turn_failed", sessionId: input.sessionId, turnId: input.turnId, error: result.errors![0]! };
           await captureTurn(result.type === "error");
           yield { type: "turn_completed", sessionId: input.sessionId, turnId: input.turnId, result };
           return { result, messages };
         }
+        const finishStatus = createFinishReasonStatus(assembled.finishReason, assistantText);
+        if (finishStatus) {
+          yield await emitStatus(finishStatus);
+        }
+
         const result = this.createTurnResult(input, {
           type: "success",
           stopReason: "completed",
@@ -1036,6 +1481,9 @@ export class AgentLoop {
       if (toolResultRepair) {
         const continued = await continueWithSyntheticPrompt(toolResultRepair);
         if (continued.type === "completed") {
+          if (continued.status) {
+            yield await emitStatus(continued.status);
+          }
           yield { type: "turn_failed", sessionId: input.sessionId, turnId: input.turnId, error: continued.result.errors![0]! };
           await captureTurn(continued.result.type === "error");
           yield { type: "turn_completed", sessionId: input.sessionId, turnId: input.turnId, result: continued.result };
@@ -1058,6 +1506,10 @@ export class AgentLoop {
           structuredOutput,
           errors: [agentError("agent_unsupported_feature", lifecycleBlock.reason)],
         });
+        yield await emitStatus(createLifecycleBlockedStatus({
+          error: result.errors![0]!,
+          stage: "tool_lifecycle",
+        }));
         yield { type: "turn_failed", sessionId: input.sessionId, turnId: input.turnId, error: result.errors![0]! };
         await captureTurn(result.type === "error");
         yield { type: "turn_completed", sessionId: input.sessionId, turnId: input.turnId, result };
@@ -1065,8 +1517,8 @@ export class AgentLoop {
       }
 
       // Circuit breaker: detect turns where ALL tool calls returned
-      // invalid_tool_input. If the model is stuck (e.g. repeatedly emitting
-      // empty-param bash), terminate early after MAX_CONSECUTIVE_ALL_INVALID_TURNS.
+      // invalid_tool_input. Uses fingerprint-based detection (toolName +
+      // errorMessage), and injects one grace prompt before final termination.
       // When LargeFileRepair is actively managing recovery, defer to its own
       // attempt limits instead of terminating here.
       const allInvalid = pairedResults.length > 0 && pairedResults.every(
@@ -1077,6 +1529,9 @@ export class AgentLoop {
         if (fallbackRepair) {
           const continued = await continueWithSyntheticPrompt(fallbackRepair);
           if (continued.type === "completed") {
+            if (continued.status) {
+              yield await emitStatus(continued.status);
+            }
             yield { type: "turn_failed", sessionId: input.sessionId, turnId: input.turnId, error: continued.result.errors![0]! };
             await captureTurn(continued.result.type === "error");
             yield { type: "turn_completed", sessionId: input.sessionId, turnId: input.turnId, result: continued.result };
@@ -1087,8 +1542,23 @@ export class AgentLoop {
         }
       }
       if (allInvalid) {
-        consecutiveAllInvalidTurns++;
-        if (consecutiveAllInvalidTurns >= MAX_CONSECUTIVE_ALL_INVALID_TURNS) {
+        const fingerprint = buildInvalidFingerprint(pairedResults);
+        if (fingerprint === lastInvalidFingerprint) {
+          sameInvalidFingerprintCount++;
+        } else {
+          sameInvalidFingerprintCount = 1;
+          lastInvalidFingerprint = fingerprint;
+          hasUsedInvalidGracePeriod = false;
+        }
+
+        if (sameInvalidFingerprintCount >= MAX_SAME_INVALID_FINGERPRINT) {
+          if (!hasUsedInvalidGracePeriod) {
+            hasUsedInvalidGracePeriod = true;
+            pushTransientSyntheticPrompt(CIRCUIT_BREAKER_GRACE_PROMPT, "circuit_breaker_grace");
+            yield { type: "turn_continued", sessionId: input.sessionId, turnId: input.turnId, reason: "model_error" };
+            continue;
+          }
+
           const result = this.createTurnResult(input, {
             type: "error",
             stopReason: "tool_error",
@@ -1100,18 +1570,24 @@ export class AgentLoop {
             structuredOutput,
             errors: [agentError(
               "agent_tool_error_loop",
-              `Terminated: ${consecutiveAllInvalidTurns} consecutive turns with all tool calls failing input validation. The model appears stuck in a loop.`,
+              `Terminated: ${sameInvalidFingerprintCount} consecutive turns with identical tool input validation failures (same tool + same error). The model appears stuck in a loop.`,
               undefined,
               "The model is repeatedly producing invalid tool calls. Consider switching to a more capable model via settings.",
             )],
           });
+          yield await emitStatus(createToolErrorLoopStatus({
+            error: result.errors![0]!,
+            repeatedFailures: sameInvalidFingerprintCount,
+          }));
           yield { type: "turn_failed", sessionId: input.sessionId, turnId: input.turnId, error: result.errors![0]! };
           await captureTurn(result.type === "error");
           yield { type: "turn_completed", sessionId: input.sessionId, turnId: input.turnId, result };
           return { result, messages };
         }
       } else {
-        consecutiveAllInvalidTurns = 0;
+        sameInvalidFingerprintCount = 0;
+        lastInvalidFingerprint = undefined;
+        hasUsedInvalidGracePeriod = false;
         if (!pairedResults.some((r) => r.type === "error")) {
           lastToolFailureFingerprint = undefined;
         }
@@ -1119,6 +1595,7 @@ export class AgentLoop {
         consecutiveEmptyCount = 0;
         hasAttemptedOutputRetry = false;
         hasAttemptedEmptyRetry = false;
+        hasAttemptedToolCallRetry = false;
       }
 
       if (this.config.stopOnStructuredOutput && structuredOutput !== undefined) {
@@ -1132,6 +1609,8 @@ export class AgentLoop {
           finalMessage,
           structuredOutput,
         });
+        const status = createStructuredOutputCompletedStatus();
+        yield await emitStatus(status);
         await captureTurn(result.type === "error");
         yield { type: "turn_completed", sessionId: input.sessionId, turnId: input.turnId, result };
         return { result, messages };
@@ -1139,6 +1618,12 @@ export class AgentLoop {
 
       const nextTurnCount = turnCount + 1;
       if (input.maxTurns && nextTurnCount > input.maxTurns) {
+        const maxTurnsError = agentError(
+          "agent_max_turns_reached",
+          `Reached maximum number of turns (${input.maxTurns}).`,
+          undefined,
+          "Max turn limit reached. Increase maxTurns in config or break the task into smaller steps.",
+        );
         const result = this.createTurnResult(input, {
           type: "max_turns",
           stopReason: "max_turns",
@@ -1148,13 +1633,10 @@ export class AgentLoop {
           startedAt,
           finalMessage,
           structuredOutput,
-          errors: [agentError(
-            "agent_max_turns_reached",
-            `Reached maximum number of turns (${input.maxTurns}).`,
-            undefined,
-            "Max turn limit reached. Increase maxTurns in config or break the task into smaller steps.",
-          )],
+          errors: [maxTurnsError],
         });
+        const status = createMaxTurnsStatus({ maxTurns: input.maxTurns, error: maxTurnsError });
+        yield await emitStatus(status);
         await captureTurn(result.type === "error");
         yield { type: "turn_completed", sessionId: input.sessionId, turnId: input.turnId, result };
         return { result, messages };
@@ -1192,6 +1674,7 @@ export class AgentLoop {
   private async createModelRequest(
     messages: CanonicalMessage[],
     input: AgentLoopInput,
+    options: { emitInstructionEvents?: boolean } = {},
   ): Promise<CanonicalModelRequest> {
     const contextRuntime = this.dependencies.context ?? new NullContextRuntime();
     const planTodo = this.dependencies.planTodoManager?.forSession(input.sessionId);
@@ -1232,15 +1715,17 @@ export class AgentLoop {
       abortSignal: input.abortSignal,
     });
 
-    this.dispatchLifecycle(input, "InstructionsLoaded", {
-      hasSystemPrompt: !!prepared.systemPrompt,
-    }).catch(() => {});
-    this.dependencies.eventEmitter?.({
-      type: "instructions_loaded",
-      sessionId: input.sessionId,
-      turnId: input.turnId,
-      hasSystemPrompt: !!prepared.systemPrompt,
-    });
+    if (options.emitInstructionEvents !== false) {
+      this.dispatchLifecycle(input, "InstructionsLoaded", {
+        hasSystemPrompt: !!prepared.systemPrompt,
+      }).catch(() => {});
+      this.dependencies.eventEmitter?.({
+        type: "instructions_loaded",
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        hasSystemPrompt: !!prepared.systemPrompt,
+      });
+    }
 
     const materialized = await materializeMediaReferences(prepared.messages);
     for (const diagnostic of materialized.diagnostics) {
@@ -1265,6 +1750,157 @@ export class AgentLoop {
       stream: true,
       metadata: this.config.metadata,
       cacheBreakpoints: prepared.cacheBreakpoints,
+    };
+  }
+
+  private createBudgetEvaluator(
+    input: AgentLoopInput,
+    options: {
+      decision?: import("../../router/index.js").RouterDecision;
+      baseRequest?: CanonicalModelRequest;
+      maxContextTokens?: number;
+      reservedOutputTokens: number;
+    },
+  ): ((candidateMessages: CanonicalMessage[], lastUsage?: CanonicalUsage) => Promise<TokenBudgetSnapshot>) | undefined {
+    const tokenAccounting = this.dependencies.tokenAccounting;
+    const maxContextTokens = options.maxContextTokens;
+    if (!tokenAccounting || !maxContextTokens) {
+      return undefined;
+    }
+    return async (candidateMessages, lastUsage) => {
+      let candidateRequest = await this.createModelRequest(candidateMessages, input, {
+        emitInstructionEvents: false,
+      });
+      if (options.decision && options.baseRequest && this.dependencies.router.materializeRequest) {
+        const patchedBase = { ...options.baseRequest, messages: candidateRequest.messages };
+        candidateRequest = this.dependencies.router.materializeRequest(options.decision, {
+          ...patchedBase,
+          systemPrompt: candidateRequest.systemPrompt,
+          tools: candidateRequest.tools,
+          cacheBreakpoints: candidateRequest.cacheBreakpoints,
+        });
+      }
+      const snapshot = await tokenAccounting.evaluateRequestBudget(candidateRequest, {
+        maxContextTokens,
+        reservedOutputTokens: options.reservedOutputTokens,
+        signal: input.abortSignal,
+      });
+      const usageTokens = tokensFromUsage(lastUsage);
+      if (usageTokens === undefined || usageTokens <= snapshot.tokens) {
+        return snapshot;
+      }
+      return tokenAccounting.snapshotFromTokens(usageTokens, maxContextTokens, {
+        reservedOutputTokens: options.reservedOutputTokens,
+        usageTokens,
+        source: snapshot.source,
+        exact: snapshot.exact,
+        estimatorError: snapshot.estimatorError,
+      });
+    };
+  }
+
+  private getReservedOutputTokens(provider?: string, model?: string): number {
+    if (provider && model) {
+      return this.currentMaxOutputTokens(provider, model) ?? DEFAULT_RESERVED_OUTPUT_TOKENS;
+    }
+    return this.currentMaxOutputTokens(this.config.provider, this.config.model) ?? DEFAULT_RESERVED_OUTPUT_TOKENS;
+  }
+
+  private tokenCapKey(provider: string, model: string): string {
+    return `${provider}/${model}`;
+  }
+
+  private getModelTokenLimits(provider: string, model: string): { maxContextTokens?: number; maxOutputTokens?: number } | undefined {
+    const combined = this.dependencies.getModelTokenLimits?.(provider, model);
+    if (combined) return combined;
+    const maxContextTokens = this.dependencies.getModelMaxContextTokens?.(provider, model);
+    const maxOutputTokens = this.dependencies.getModelMaxOutputTokens?.(provider, model);
+    if (maxContextTokens === undefined && maxOutputTokens === undefined) return undefined;
+    return { maxContextTokens, maxOutputTokens };
+  }
+
+  private currentMaxContextTokens(provider: string, model: string): number {
+    const transient = this.transientTokenCaps.get(this.tokenCapKey(provider, model))?.maxContextTokens;
+    return transient ?? this.getModelTokenLimits(provider, model)?.maxContextTokens ?? this.config.maxContextTokens ?? 1_000_000;
+  }
+
+  private currentMaxOutputTokens(provider: string, model: string): number | undefined {
+    const transient = this.transientTokenCaps.get(this.tokenCapKey(provider, model));
+    const modelMaxOutputTokens = this.getModelTokenLimits(provider, model)?.maxOutputTokens;
+    const requested = transient?.attemptMaxOutputTokens ?? transient?.requestedMaxOutputTokens ?? this.config.maxOutputTokens ?? modelMaxOutputTokens;
+    const candidates = [requested, modelMaxOutputTokens, transient?.hardMaxOutputTokens]
+      .filter((value): value is number => typeof value === "number" && Number.isFinite(value) && value > 0);
+    return candidates.length > 0 ? Math.min(...candidates.map((value) => Math.floor(value))) : undefined;
+  }
+
+  private setTransientTokenCap(provider: string, model: string, cap: {
+    maxContextTokens?: number;
+    requestedMaxOutputTokens?: number;
+    attemptMaxOutputTokens?: number;
+    hardMaxOutputTokens?: number;
+  }): void {
+    const key = this.tokenCapKey(provider, model);
+    const previous = this.transientTokenCaps.get(key) ?? {};
+    this.transientTokenCaps.set(key, { ...previous, ...cap });
+  }
+
+  private clearAttemptOutputTokenCap(provider: string, model: string): void {
+    const key = this.tokenCapKey(provider, model);
+    const previous = this.transientTokenCaps.get(key);
+    if (!previous || previous.attemptMaxOutputTokens === undefined) return;
+    const { attemptMaxOutputTokens: _attemptMaxOutputTokens, ...rest } = previous;
+    this.transientTokenCaps.set(key, rest);
+  }
+
+  private clearTurnScopedTokenCaps(): void {
+    for (const [key, cap] of this.transientTokenCaps) {
+      const {
+        requestedMaxOutputTokens: _requestedMaxOutputTokens,
+        attemptMaxOutputTokens: _attemptMaxOutputTokens,
+        ...sessionCaps
+      } = cap;
+      if (sessionCaps.maxContextTokens === undefined && sessionCaps.hardMaxOutputTokens === undefined) {
+        this.transientTokenCaps.delete(key);
+      } else {
+        this.transientTokenCaps.set(key, sessionCaps);
+      }
+    }
+  }
+
+  private applyTokenCapsToRequest(request: CanonicalModelRequest, provider: string, model: string): CanonicalModelRequest {
+    return {
+      ...request,
+      provider,
+      model,
+      maxOutputTokens: this.currentMaxOutputTokens(provider, model),
+    };
+  }
+
+  private repairTextExtractedToolNames(
+    message: CanonicalMessage,
+    toolCalls: CanonicalToolCall[],
+  ): { message: CanonicalMessage; toolCalls: CanonicalToolCall[] } {
+    if (toolCalls.length === 0) return { message, toolCalls };
+    const validNames = new Set(this.dependencies.tools.registry.list().map((tool) => tool.name));
+    const repairedById = new Map<string, string>();
+    const repairedToolCalls = toolCalls.map((call) => {
+      const repaired = repairToolName(call.name, validNames, this.config.toolAliases);
+      if (!repaired) return call;
+      repairedById.set(call.id, repaired.name);
+      return { ...call, name: repaired.name };
+    });
+    if (repairedById.size === 0) return { message, toolCalls };
+
+    return {
+      message: {
+        ...message,
+        content: message.content.map((block) => {
+          if (block.type !== "tool_call") return block;
+          const repairedName = repairedById.get(block.id);
+          return repairedName ? ({ ...block, name: repairedName } satisfies CanonicalToolCallBlock) : block;
+        }),
+      },
+      toolCalls: repairedToolCalls,
     };
   }
 
@@ -1321,6 +1957,7 @@ export class AgentLoop {
       modelMultimodal: this.config.modelMultimodal,
       maxOutputTokens: this.config.maxOutputTokens,
       readFileState: this.readFileState,
+      allowedReadFiles: [...this.allowedReadFiles],
       writeSnapshots: this.writeSnapshots,
       fileUpdateNotifier: this.dependencies.fileUpdateNotifier,
       ...(planTodo ? { planTodo } : {}),
@@ -1813,6 +2450,17 @@ function truncateHeadKeepRatio(messages: CanonicalMessage[], keepRatio: number):
   return messages.slice(-keep);
 }
 
+function buildInvalidFingerprint(results: PilotDeckToolResult[]): string {
+  return results
+    .filter(
+      (result): result is PilotDeckToolErrorResult =>
+        result.type === "error" && result.error.code === "invalid_tool_input",
+    )
+    .map((result) => `${result.toolName}::${result.error.message}`)
+    .sort()
+    .join("\n");
+}
+
 /**
  * Drop the trailing `[assistant_message_with_partial_tool_call,
  * synthetic_tool_result]` pair the loop just appended on a model error so a
@@ -2127,6 +2775,285 @@ function classifyModelError(error: CanonicalModelError): {
   };
 }
 
+function createModelRequestFailedStatus(args: {
+  error: ReturnType<typeof agentError>;
+  modelError?: CanonicalModelError;
+}): AgentStatusMessage {
+  const text = args.error.message || "The model request failed, so this turn has stopped.";
+  return {
+    event: "model_request_failed",
+    kind: "error",
+    text,
+    detail: createAgentTurnErrorDetail({
+      message: text,
+      code: args.error.code,
+      userHint: args.error.userHint ?? args.modelError?.userHint ?? defaultModelFailureHint(args.modelError),
+      detail: {
+        provider: args.modelError?.provider,
+        status: args.modelError?.status,
+        modelErrorCode: args.modelError?.code,
+        retryable: args.modelError?.retryable,
+      },
+    }),
+  };
+}
+
+function createToolCallRecoveryExhaustedStatus(args: {
+  error: ReturnType<typeof agentError>;
+  attempts?: number;
+  reason?: string;
+}): AgentStatusMessage {
+  const text = args.error.message || "Tool-call recovery was exhausted, so this turn has stopped.";
+  return {
+    event: "tool_call_recovery_exhausted",
+    kind: "error",
+    text,
+    detail: createAgentTurnErrorDetail({
+      message: text,
+      code: args.error.code,
+      userHint: args.error.userHint ?? "Retry with a shorter prompt or ask the agent to split large tool inputs into smaller steps.",
+      detail: {
+        attempts: args.attempts,
+        reason: args.reason,
+      },
+    }),
+  };
+}
+
+function createToolErrorLoopStatus(args: {
+  error: ReturnType<typeof agentError>;
+  repeatedFailures?: number;
+}): AgentStatusMessage {
+  const text = args.error.message || "The agent repeatedly hit the same tool error, so this turn has stopped.";
+  return {
+    event: "tool_error_loop",
+    kind: "error",
+    text,
+    detail: createAgentTurnErrorDetail({
+      message: text,
+      code: args.error.code,
+      userHint: args.error.userHint ?? "Try changing the request, granting the required permission, or switching to a more capable model.",
+      detail: {
+        repeatedFailures: args.repeatedFailures,
+      },
+    }),
+  };
+}
+
+function createLifecycleBlockedStatus(args: {
+  error: ReturnType<typeof agentError>;
+  stage: string;
+}): AgentStatusMessage {
+  const text = args.error.message || "A lifecycle hook blocked this turn.";
+  return {
+    event: "lifecycle_blocked",
+    kind: "error",
+    text,
+    detail: createAgentTurnErrorDetail({
+      message: text,
+      code: args.error.code,
+      userHint: args.error.userHint ?? "Review the blocking lifecycle hook output or disable the hook, then retry.",
+      detail: {
+        stage: args.stage,
+      },
+    }),
+  };
+}
+
+function defaultModelFailureHint(error: CanonicalModelError | undefined): string {
+  if (!error) {
+    return "Check the model provider settings and retry.";
+  }
+  if (error.retryable) {
+    return "The provider marked this error as retryable. Retry the turn; if it repeats, check provider status and rate limits.";
+  }
+  if (error.status === 401 || error.status === 403 || error.code === "auth_error") {
+    return "Check the provider API key and model access settings.";
+  }
+  if (error.status === 429 || error.code === "rate_limit_error") {
+    return "Wait for the rate limit to reset or switch to another provider/model.";
+  }
+  if (error.code === "billing") {
+    return "Check the provider billing or quota settings.";
+  }
+  return "Check the provider/model settings and retry.";
+}
+
+function createEmptyResponseStatus(args: {
+  provider?: string;
+  model?: string;
+  attempts: number;
+}): AgentStatusMessage {
+  const text = "The model returned empty content repeatedly, so this turn has stopped. Try again later or increase max output tokens.";
+  return {
+    event: "model_empty_response_exhausted",
+    kind: "error",
+    text,
+    detail: createAgentTurnErrorDetail({
+      message: text,
+      code: "model_empty_response_exhausted",
+      userHint: "Increase max output tokens or retry with a shorter prompt.",
+      detail: {
+        provider: args.provider,
+        model: args.model,
+        attempts: args.attempts,
+      },
+    }),
+  };
+}
+
+function createMaxTurnsStatus(args: {
+  maxTurns: number;
+  error: ReturnType<typeof agentError>;
+}): AgentStatusMessage {
+  const text = `Reached the maximum number of turns (${args.maxTurns}), so this turn has stopped. Increase maxTurns or split the task into smaller steps and try again.`;
+  return {
+    event: "max_turns_reached",
+    kind: "error",
+    text,
+    detail: createAgentTurnErrorDetail({
+      message: text,
+      code: args.error.code,
+      userHint: args.error.userHint ?? "Increase maxTurns or split the task into smaller steps and try again.",
+      detail: {
+        maxTurns: args.maxTurns,
+      },
+    }),
+  };
+}
+
+function createMaxOutputRecoveryExhaustedStatus(args: {
+  attempts: number;
+}): AgentStatusMessage {
+  const text = "Output token recovery was exhausted, so the visible response may be incomplete. Increase max output tokens or split the task into smaller steps and try again.";
+  return {
+    event: "max_output_recovery_exhausted",
+    kind: "error",
+    text,
+    detail: createAgentTurnErrorDetail({
+      message: text,
+      severity: "warning",
+      code: "max_output_recovery_exhausted",
+      userHint: "Increase max output tokens or split the task into smaller steps.",
+      detail: {
+        attempts: args.attempts,
+      },
+    }),
+  };
+}
+
+function createStructuredOutputCompletedStatus(): AgentStatusMessage {
+  const text = "Structured output was returned, so this turn has completed.";
+  return {
+    event: "structured_output_completed",
+    kind: "status",
+    text,
+    detail: createAgentTurnStatusDetail({
+      message: text,
+      code: "structured_output_completed",
+    }),
+  };
+}
+
+function createContentFilterStopStatus(): AgentStatusMessage {
+  const text = "The response may be incomplete because the model stopped due to content filtering.";
+  return {
+    event: "content_filter_stop",
+    kind: "error",
+    text,
+    detail: createAgentTurnErrorDetail({
+      message: text,
+      severity: "warning",
+      code: "content_filter_stop",
+      userHint: "Retry with a narrower request or adjust the prompt to avoid filtered content.",
+    }),
+  };
+}
+
+function createUnknownFinishReasonStatus(): AgentStatusMessage {
+  const text = "The model stream ended without a normal finish reason, so the response may be incomplete.";
+  return {
+    event: "unknown_finish_reason",
+    kind: "error",
+    text,
+    detail: createAgentTurnErrorDetail({
+      message: text,
+      severity: "warning",
+      code: "unknown_finish_reason",
+      userHint: "Retry the turn; if it repeats, check the provider stream and gateway logs.",
+    }),
+  };
+}
+
+function createTurnAbortedStatus(args: { reason?: string }): AgentStatusMessage {
+  const text = "This turn was aborted before completion.";
+  return {
+    event: "turn_aborted",
+    kind: "status",
+    text,
+    detail: createAgentTurnStatusDetail({
+      message: text,
+      code: "turn_aborted",
+      userHint: "Retry when you are ready to continue.",
+      detail: {
+        reason: args.reason,
+      },
+    }),
+  };
+}
+
+function createFinishReasonStatus(finishReason: string | undefined, assistantText: string): AgentStatusMessage | undefined {
+  if (assistantText.trim().length === 0) return undefined;
+  if (finishReason === "content_filter") return createContentFilterStopStatus();
+  if (finishReason === "unknown") return createUnknownFinishReasonStatus();
+  return undefined;
+}
+
+function createAgentTurnErrorDetail(input: {
+  message: string;
+  code: string;
+  userHint: string;
+  severity?: "error" | "warning";
+  detail?: Record<string, unknown>;
+}): Record<string, unknown> {
+  return createVisibleErrorStatusDetail({
+    ...input,
+    scope: "turn",
+    source: "agent",
+  });
+}
+
+function createAgentTurnStatusDetail(input: {
+  message: string;
+  code: string;
+  userHint?: string;
+  detail?: Record<string, unknown>;
+}): Record<string, unknown> {
+  return createAgentStatusDetail({
+    ...input,
+    visible: true,
+    scope: "turn",
+    source: "agent",
+  });
+}
+
+function shouldSurfaceAbortStatus(reason: unknown): boolean {
+  if (reason === undefined || reason === null) return false;
+  const text = (stringifyAbortReason(reason) ?? "").toLowerCase();
+  return text.includes("timeout") || text.includes("cancel") || text.includes("abort");
+}
+
+function stringifyAbortReason(reason: unknown): string | undefined {
+  if (reason === undefined || reason === null) return undefined;
+  if (typeof reason === "string") return reason;
+  if (reason instanceof Error) return reason.message;
+  try {
+    return JSON.stringify(reason);
+  } catch {
+    return String(reason);
+  }
+}
+
 function isPromptTooLong(error: CanonicalModelError): boolean {
   if (error.code === "prompt_too_long" || error.recoverableViaCompact) {
     return true;
@@ -2141,6 +3068,37 @@ function isPromptTooLong(error: CanonicalModelError): boolean {
     return true;
   }
   return false;
+}
+
+function clampOutputToModelCap(requested: number, modelMaxOutputTokens: number | undefined): number | undefined {
+  if (!Number.isFinite(requested) || requested <= 0) return undefined;
+  const next = Math.floor(requested);
+  if (modelMaxOutputTokens !== undefined && Number.isFinite(modelMaxOutputTokens) && modelMaxOutputTokens > 0) {
+    return Math.min(next, Math.floor(modelMaxOutputTokens));
+  }
+  return next;
+}
+
+function tokensFromUsage(usage: CanonicalUsage | undefined): number | undefined {
+  if (!usage) return undefined;
+  const inputTokens = usage.inputTokens;
+  if (typeof inputTokens !== "number" || !Number.isFinite(inputTokens) || inputTokens <= 0) {
+    return undefined;
+  }
+  const outputTokens = typeof usage.outputTokens === "number" && Number.isFinite(usage.outputTokens) && usage.outputTokens > 0
+    ? usage.outputTokens
+    : 0;
+  return Math.ceil(inputTokens + outputTokens);
+}
+
+function modelErrorTarget(error: CanonicalModelError, fallbackProvider: string, fallbackModel: string): {
+  provider: string;
+  model: string;
+} {
+  return {
+    provider: error.provider || fallbackProvider,
+    model: error.model || fallbackModel,
+  };
 }
 
 function composeAbortSignal(args: {

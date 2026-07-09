@@ -1,44 +1,83 @@
-import { Brain, Zap, Sparkles, Atom } from 'lucide-react';
+import { Atom, Brain, Gauge, MinusCircle, Sparkles, Zap } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 
-export const thinkingModes = [
+export type ThinkingModeId = 'default' | 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
+export type ThinkingModeOption = {
+  id: ThinkingModeId;
+  name: string;
+  description: string;
+  icon: LucideIcon | null;
+  color: string;
+};
+
+export const thinkingModes: ThinkingModeOption[] = [
   {
-    id: 'none',
-    name: 'Standard',
-    description: 'Regular response',
+    id: 'default',
+    name: 'Default',
+    description: 'Use the model/provider default',
     icon: null,
-    prefix: '',
-    color: 'text-gray-600'
+    color: 'text-neutral-600',
   },
   {
-    id: 'think',
-    name: 'Think',
-    description: 'Basic extended thinking',
+    id: 'off',
+    name: 'Off',
+    description: 'Disable reasoning when the model supports it',
+    icon: MinusCircle,
+    color: 'text-neutral-500',
+  },
+  {
+    id: 'minimal',
+    name: 'Minimal',
+    description: 'Smallest supported reasoning effort',
+    icon: Gauge,
+    color: 'text-sky-600',
+  },
+  {
+    id: 'low',
+    name: 'Low',
+    description: 'Light reasoning effort',
     icon: Brain,
-    prefix: 'think',
-    color: 'text-blue-600'
+    color: 'text-blue-600',
   },
   {
-    id: 'think-hard',
-    name: 'Think Hard',
-    description: 'More thorough evaluation',
+    id: 'medium',
+    name: 'Medium',
+    description: 'Balanced reasoning effort',
     icon: Zap,
-    prefix: 'think hard',
-    color: 'text-purple-600'
+    color: 'text-purple-600',
   },
   {
-    id: 'think-harder',
-    name: 'Think Harder',
-    description: 'Deep analysis with alternatives',
+    id: 'high',
+    name: 'High',
+    description: 'Deeper reasoning for harder tasks',
     icon: Sparkles,
-    prefix: 'think harder',
-    color: 'text-indigo-600'
+    color: 'text-indigo-600',
   },
   {
-    id: 'ultrathink',
-    name: 'Ultrathink',
-    description: 'Maximum thinking budget',
+    id: 'xhigh',
+    name: 'Extra High',
+    description: 'Maximum effort for supported models',
     icon: Atom,
-    prefix: 'ultrathink',
-    color: 'text-red-600'
-  }
+    color: 'text-red-600',
+  },
+  {
+    id: 'max',
+    name: 'Max',
+    description: 'Provider maximum reasoning mode',
+    icon: Atom,
+    color: 'text-red-700',
+  },
 ];
+
+export function isThinkingModeId(value: unknown): value is ThinkingModeId {
+  return typeof value === 'string' && thinkingModes.some((mode) => mode.id === value);
+}
+
+export function thinkingModeToConfig(mode: ThinkingModeId) {
+  return {
+    mode,
+    enabled: mode !== 'default' && mode !== 'off',
+    ...(mode === 'off' ? { enabled: false } : {}),
+  };
+}

@@ -46,12 +46,23 @@ import GatewaySettingsTab from './tabs/GatewaySettingsTab';
 type SettingsPage = 'main' | 'config' | 'mcp' | 'permissions' | 'chatInput' | 'codeEditor' | 'gateway';
 type ThemeMode = 'system' | 'light' | 'dark';
 
+const splitInitialTab = (tab: string) => {
+  const [page, section] = String(tab || '').split(':', 2);
+  return { page, section };
+};
+
 const pageFromInitialTab = (tab: string): SettingsPage => {
-  if (tab === 'config') return 'config';
-  if (tab === 'mcp') return 'mcp';
-  if (tab === 'permissions') return 'permissions';
-  if (tab === 'gateway') return 'gateway';
+  const { page } = splitInitialTab(tab);
+  if (page === 'config') return 'config';
+  if (page === 'mcp') return 'mcp';
+  if (page === 'permissions') return 'permissions';
+  if (page === 'gateway') return 'gateway';
   return 'main';
+};
+
+const configSectionFromInitialTab = (tab: string): string | undefined => {
+  const { page, section } = splitInitialTab(tab);
+  return page === 'config' && section ? section : undefined;
 };
 
 function Settings({ isOpen, onClose, projects = [], initialTab = 'appearance' }: SettingsProps) {
@@ -64,6 +75,10 @@ function Settings({ isOpen, onClose, projects = [], initialTab = 'appearance' }:
     updateCodeEditorSetting,
   } = useSettingsController({ isOpen, initialTab });
   const [page, setPage] = useState<SettingsPage>(() => pageFromInitialTab(initialTab));
+  const configInitialSection = useMemo(
+    () => configSectionFromInitialTab(initialTab),
+    [initialTab],
+  );
 
   useEffect(() => {
     if (!isOpen) return;
@@ -127,7 +142,7 @@ function Settings({ isOpen, onClose, projects = [], initialTab = 'appearance' }:
               />
             )}
 
-            {page === 'config' && <PilotDeckConfigTab projects={projects} />}
+            {page === 'config' && <PilotDeckConfigTab projects={projects} initialSection={configInitialSection} />}
             {page === 'mcp' && <McpServersTab projects={projects} />}
             {page === 'permissions' && <PermissionsSettingsTab />}
             {page === 'gateway' && <GatewaySettingsTab />}

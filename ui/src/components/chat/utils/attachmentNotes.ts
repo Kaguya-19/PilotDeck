@@ -1,4 +1,9 @@
 import type { ChatAttachment } from '../types/types';
+import {
+  DOCUMENT_SELECTION_ATTACHMENT_KIND,
+  parseDocumentSelectionPromptBlock,
+  type DocumentSelectionReference,
+} from '../../../types/documentSelection';
 
 const ATTACHMENT_NOTE_MARKER = '[Files attached by user and available for reading in the project:]';
 
@@ -32,10 +37,12 @@ export function parseUserAttachmentNote(content: unknown): {
   content: string;
   attachments: ChatAttachment[];
 } {
-  const text = typeof content === 'string' ? content : '';
+  const parsedSelections = parseDocumentSelectionPromptBlock(content);
+  const text = parsedSelections.content;
   const markerIndex = text.indexOf(ATTACHMENT_NOTE_MARKER);
+  const selectionAttachments = parsedSelections.references.map(documentSelectionToAttachment);
   if (markerIndex < 0) {
-    return { content: text, attachments: [] };
+    return { content: text, attachments: selectionAttachments };
   }
 
   const visibleContent = text.slice(0, markerIndex).trimEnd();
@@ -61,5 +68,23 @@ export function parseUserAttachmentNote(content: unknown): {
     });
   }
 
-  return { content: visibleContent, attachments };
+  return { content: visibleContent, attachments: [...attachments, ...selectionAttachments] };
+}
+
+function documentSelectionToAttachment(reference: DocumentSelectionReference): ChatAttachment {
+  return {
+    kind: DOCUMENT_SELECTION_ATTACHMENT_KIND,
+    name: reference.fileName,
+    path: reference.filePath,
+    fileName: reference.fileName,
+    filePath: reference.filePath,
+    source: reference.source,
+    pageNumbers: reference.pageNumbers,
+    selectedText: reference.selectedText,
+    surroundingText: reference.surroundingText,
+    occurrenceIndex: reference.occurrenceIndex,
+    createdAt: reference.createdAt,
+    truncated: reference.truncated,
+    mimeType: 'application/vnd.pilotdeck.document-selection',
+  };
 }

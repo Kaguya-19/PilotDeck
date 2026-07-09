@@ -12,6 +12,7 @@ import type {
 import {
   ArrowUp,
   AtSign,
+  Brain,
   Bot,
   Check,
   ChevronDown,
@@ -27,10 +28,16 @@ import {
 } from 'lucide-react';
 import type { ChatRunMode, PendingPermissionRequest, PermissionMode } from '../chat/types/types';
 import { MAX_ATTACHMENTS_ERROR_KEY } from '../chat/hooks/useChatComposerState';
+import { thinkingModes, type ThinkingModeId } from '../chat/constants/thinkingModes';
+import { getEffectiveThinkingMode, type ThinkingModeAvailability } from '../chat/constants/thinkingModeAvailability';
 import PermissionRequestsBanner from '../chat/view/subcomponents/PermissionRequestsBanner';
 import ImageAttachment from '../chat/view/subcomponents/ImageAttachment';
 import CommandMenu from '../chat/view/subcomponents/CommandMenu';
 import { cn } from '../../lib/utils.js';
+import {
+  type DocumentSelectionReference,
+} from '../../types/documentSelection';
+import DocumentReferenceChip from './DocumentReferenceChip';
 
 interface MentionableFile {
   name: string;
@@ -65,6 +72,8 @@ export type ComposerV2Props = {
   openImagePicker: () => void;
   attachedImages: File[];
   onRemoveImage: (index: number) => void;
+  documentReferences: DocumentSelectionReference[];
+  onRemoveDocumentReference: (id: string) => void;
   uploadingImages: Map<string, number>;
   imageErrors: Map<string, string>;
 
@@ -90,8 +99,14 @@ export type ComposerV2Props = {
   isLoading: boolean;
   canAbortSession: boolean;
   isAbortPending?: boolean;
+  isBusySendQueued?: boolean;
+  isBusySendConfirmed?: boolean;
+  onCancelBusySendQueue?: () => void;
   isSubmitPending?: boolean;
   tokenBudget?: Record<string, unknown> | null;
+  thinkingMode: ThinkingModeId;
+  thinkingModeAvailability: ThinkingModeAvailability;
+  onThinkingModeChange: (mode: ThinkingModeId) => void;
 
   pendingPermissionRequests: PendingPermissionRequest[];
   handlePermissionDecision: (
@@ -192,7 +207,6 @@ const BLOCKING_PERMISSION_TOOLS = new Set([
   'exit_plan_mode',
 ]);
 
-
 function readNumber(value: unknown): number | null {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value === 'string' && value.trim()) {
@@ -267,6 +281,8 @@ export default function ComposerV2({
   openImagePicker,
   attachedImages,
   onRemoveImage,
+  documentReferences,
+  onRemoveDocumentReference,
   uploadingImages,
   imageErrors,
   showFileDropdown,
@@ -287,8 +303,14 @@ export default function ComposerV2({
   isLoading,
   canAbortSession,
   isAbortPending = false,
+  isBusySendQueued = false,
+  isBusySendConfirmed = false,
+  onCancelBusySendQueue,
   isSubmitPending = false,
   tokenBudget,
+  thinkingMode,
+  thinkingModeAvailability,
+  onThinkingModeChange,
   pendingPermissionRequests,
   handlePermissionDecision,
   handleGrantToolPermission,
@@ -302,6 +324,7 @@ export default function ComposerV2({
 }: ComposerV2Props) {
   const { t } = useTranslation('chat');
   const [isContextPopoverOpen, setIsContextPopoverOpen] = useState(false);
+  const [isThinkingModeMenuOpen, setIsThinkingModeMenuOpen] = useState(false);
   const [isRunModeMenuOpen, setIsRunModeMenuOpen] = useState(false);
   const [isPermissionMenuOpen, setIsPermissionMenuOpen] = useState(false);
   const permissionSelectorDisabled = runMode === 'plan';
@@ -316,11 +339,24 @@ export default function ComposerV2({
     (request) => BLOCKING_PERMISSION_TOOLS.has(request.toolName),
   );
 
-  const hasDraftContent = input.trim().length > 0 || attachedImages.length > 0;
+  const hasDraftContent = input.trim().length > 0 || attachedImages.length > 0 || documentReferences.length > 0;
   const hasUploadingImages = uploadingImages.size > 0;
   const attachmentLimitError = imageErrors.get(MAX_ATTACHMENTS_ERROR_KEY);
-  const disabled = !hasDraftContent || isLoading || isSubmitPending || hasUploadingImages;
+  const disabled = !hasDraftContent || isSubmitPending || hasUploadingImages;
+  const showAbortButton = isLoading && canAbortSession && !hasDraftContent;
+  const sendTitle = isSubmitPending || hasUploadingImages
+    ? (t('input.sending', { defaultValue: 'Sending...' }) as string)
+    : isBusySendConfirmed
+      ? (t('input.queuedSendConfirmed', { defaultValue: 'Stopping current turn — sending next message' }) as string)
+      : isBusySendQueued
+        ? (t('input.queuedSendConfirm', { defaultValue: 'Queued — click send again to stop this turn and send now' }) as string)
+      : isLoading
+        ? (t('input.queueSend', { defaultValue: 'Queue message' }) as string)
+        : (t('input.send', { defaultValue: 'Send' }) as string);
   const contextStatus = getContextStatus(tokenBudget);
+  const effectiveThinkingMode = getEffectiveThinkingMode(thinkingMode, thinkingModeAvailability);
+  const selectedThinkingMode = thinkingModes.find((option) => option.id === effectiveThinkingMode) || thinkingModes[0];
+  const SelectedThinkingIcon = selectedThinkingMode.icon || Brain;
   const selectedPermissionOption =
     PERMISSION_MODE_OPTIONS.find((option) => option.mode === permissionMode) ||
     PERMISSION_MODE_OPTIONS[0];
@@ -350,11 +386,11 @@ export default function ComposerV2({
   return (
     <div
       className={cn(
-        'shrink-0',
+        'min-w-0 shrink-0',
         chromeless ? '' : 'bg-white px-6 pb-6 pt-3 dark:bg-neutral-950',
       )}
     >
-      <div className={cn(chromeless ? '' : 'mx-auto max-w-[720px]')}>
+      <div className={cn('min-w-0', chromeless ? '' : 'mx-auto max-w-[720px]')}>
         {pendingPermissionRequests.length > 0 ? (
           <div className="mb-3">
             <PermissionRequestsBanner
@@ -369,11 +405,20 @@ export default function ComposerV2({
         {!hasBlockingPermissionPanel ? (
           <form
             onSubmit={onSubmit as (event: FormEvent<HTMLFormElement>) => void}
-            className="relative"
+            className="pd-composer-container relative"
           >
-            {attachedImages.length > 0 ? (
-              <div className="mb-2 rounded-lg border border-neutral-200 bg-neutral-50 p-2 dark:border-neutral-800 dark:bg-neutral-900">
+            {attachedImages.length > 0 || documentReferences.length > 0 ? (
+              <div className="pd-composer-attachment-panel mb-2 overflow-hidden rounded-lg border border-neutral-200 bg-neutral-50 p-2 dark:border-neutral-800 dark:bg-neutral-900">
                 <div className="flex flex-wrap gap-2">
+                  {documentReferences.map((reference) => (
+                    <DocumentReferenceChip
+                      key={reference.id}
+                      reference={reference}
+                      className="pd-composer-reference-chip sm:max-w-[520px]"
+                      removeLabel={t('documentReferences.remove', { defaultValue: 'Remove reference' }) as string}
+                      onRemove={() => onRemoveDocumentReference(reference.id)}
+                    />
+                  ))}
                   {attachedImages.map((file, index) => (
                     <ImageAttachment
                       key={index}
@@ -477,8 +522,8 @@ export default function ComposerV2({
                 />
               </div>
 
-                <div className="flex items-center justify-between px-1 pt-1">
-                  <div className="flex min-w-0 items-center gap-0.5">
+                <div className="pd-composer-control-row flex flex-wrap items-center gap-x-2 gap-y-1 px-1 pt-1">
+                  <div className="pd-composer-toolbar-left flex min-w-0 flex-1 flex-wrap items-center gap-0.5">
                     <div
                       className="relative mr-1"
                       onBlur={(event) => {
@@ -492,12 +537,8 @@ export default function ComposerV2({
                         type="button"
                         onClick={() => setIsRunModeMenuOpen((open) => !open)}
                         className={cn(
-                          'inline-flex h-7 max-w-[108px] items-center justify-center gap-1.5 rounded-md px-2 text-[12px] font-medium transition sm:max-w-[140px]',
-                          runMode === 'plan'
-                            ? 'text-blue-600 hover:bg-blue-50 dark:text-blue-300 dark:hover:bg-blue-950/30'
-                            : runMode === 'ask'
-                              ? 'text-emerald-600 hover:bg-emerald-50 dark:text-emerald-300 dark:hover:bg-emerald-950/30'
-                            : 'text-neutral-600 hover:bg-neutral-100 dark:text-neutral-300 dark:hover:bg-neutral-800',
+                          'pd-composer-icon-button inline-flex h-7 max-w-[108px] items-center justify-center gap-1.5 rounded-md px-2 text-[12px] font-medium transition sm:max-w-[140px]',
+                          'text-neutral-600 hover:bg-neutral-100 dark:text-neutral-300 dark:hover:bg-neutral-800',
                         )}
                         title={t('input.runModes.change', {
                           defaultValue: 'Select run mode',
@@ -506,10 +547,10 @@ export default function ComposerV2({
                         aria-expanded={isRunModeMenuOpen}
                       >
                         <SelectedRunModeIcon className="h-4 w-4 shrink-0" strokeWidth={1.9} />
-                        <span className="truncate">{selectedRunModeLabel}</span>
+                        <span className="pd-composer-run-label truncate">{selectedRunModeLabel}</span>
                         <ChevronDown
                           className={cn(
-                            'h-3.5 w-3.5 shrink-0 transition-transform',
+                            'pd-composer-control-chevron h-3.5 w-3.5 shrink-0 transition-transform',
                             isRunModeMenuOpen && 'rotate-180',
                           )}
                           strokeWidth={2}
@@ -535,7 +576,7 @@ export default function ComposerV2({
                                 }) as string)
                               : isAsk
                                 ? (t('input.runModes.askDescription', {
-                                    defaultValue: 'Read-only analysis with optional subagents',
+                                    defaultValue: 'Only answers questions without modifying files',
                                   }) as string)
                               : (t('input.runModes.agentDescription', {
                                   defaultValue: 'Directly process and execute the task',
@@ -563,25 +604,16 @@ export default function ComposerV2({
                                 )}
                               >
                                 <Icon
-                                  className={cn(
-                                    'h-4 w-4 shrink-0',
-                                    isPlan
-                                      ? 'text-blue-600 dark:text-blue-300'
-                                      : isAsk
-                                        ? 'text-emerald-600 dark:text-emerald-300'
-                                      : 'text-neutral-500 dark:text-neutral-400',
-                                  )}
+                                  className="h-4 w-4 shrink-0 text-neutral-500 dark:text-neutral-400"
                                   strokeWidth={1.9}
                                 />
                                 <span className="min-w-0 flex-1">
                                   <span
                                     className={cn(
-                                      'block truncate text-[13px] font-medium',
-                                      isPlan
-                                        ? 'text-blue-700 dark:text-blue-300'
-                                        : isAsk
-                                          ? 'text-emerald-700 dark:text-emerald-300'
-                                        : 'text-neutral-900 dark:text-neutral-100',
+                                      'block truncate text-[13px]',
+                                      isSelected
+                                        ? 'font-bold text-neutral-900 dark:text-neutral-100'
+                                        : 'font-medium text-neutral-700 dark:text-neutral-300',
                                     )}
                                   >
                                     {label}
@@ -636,7 +668,7 @@ export default function ComposerV2({
                         setIsPermissionMenuOpen((open) => !open);
                       }}
                       className={cn(
-                        'inline-flex h-7 max-w-[132px] items-center justify-center gap-1.5 rounded-md px-2 text-[12px] font-medium transition sm:max-w-[190px]',
+                        'pd-composer-icon-button inline-flex h-7 max-w-[132px] items-center justify-center gap-1.5 rounded-md px-2 text-[12px] font-medium transition sm:max-w-[190px]',
                         permissionSelectorDisabled
                           ? 'cursor-not-allowed text-neutral-400 opacity-45 dark:text-neutral-500'
                           : permissionMode === 'bypassPermissions'
@@ -650,10 +682,10 @@ export default function ComposerV2({
                       aria-expanded={permissionSelectorDisabled ? false : isPermissionMenuOpen}
                     >
                       <SelectedPermissionIcon className="h-4 w-4 shrink-0" strokeWidth={1.9} />
-                      <span className="truncate">{selectedPermissionLabel}</span>
+                      <span className="pd-composer-permission-label truncate">{selectedPermissionLabel}</span>
                       <ChevronDown
                         className={cn(
-                          'h-3.5 w-3.5 shrink-0 transition-transform',
+                          'pd-composer-control-chevron h-3.5 w-3.5 shrink-0 transition-transform',
                           isPermissionMenuOpen && 'rotate-180',
                         )}
                         strokeWidth={2}
@@ -728,7 +760,25 @@ export default function ComposerV2({
                   </div>
                   </div>
 
-                  <div className="ml-2 flex shrink-0 items-center gap-1">
+                  {isBusySendQueued ? (
+                    <div className="hidden min-w-0 flex-1 items-center justify-end gap-1 px-2 text-[12px] text-amber-700 dark:text-amber-300 sm:flex">
+                      <span className="truncate rounded-full bg-amber-50 px-2 py-1 dark:bg-amber-950/30">
+                        {isBusySendConfirmed
+                          ? t('input.queuedSendConfirmedInline', { defaultValue: 'Stopping current turn; sending next' })
+                          : t('input.queuedSendConfirmInline', { defaultValue: 'Queued; click again to stop this turn and send now' })}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={onCancelBusySendQueue}
+                        className="rounded-full px-2 py-1 text-amber-700 transition hover:bg-amber-100 dark:text-amber-300 dark:hover:bg-amber-950/50"
+                        title={t('input.cancelQueuedSend', { defaultValue: 'Cancel queued message' }) as string}
+                      >
+                        {t('input.cancelQueuedSendShort', { defaultValue: 'Cancel' })}
+                      </button>
+                    </div>
+                  ) : null}
+
+                  <div className="pd-composer-toolbar-right ml-auto flex shrink-0 items-center gap-1">
                     <div
                       className="relative"
                       onBlur={(event) => {
@@ -742,7 +792,7 @@ export default function ComposerV2({
                         type="button"
                         onClick={() => setIsContextPopoverOpen((open) => !open)}
                         className={cn(
-                          'inline-flex h-7 min-w-[44px] items-center justify-center gap-1 rounded-md px-1.5 text-[11px] tabular-nums transition',
+                          'pd-composer-icon-button inline-flex h-7 min-w-[44px] items-center justify-center gap-1 rounded-md px-1.5 text-[11px] tabular-nums transition',
                           contextStatus.tone === 'red'
                             ? 'text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/30'
                             : contextStatus.tone === 'amber'
@@ -756,7 +806,7 @@ export default function ComposerV2({
                         aria-expanded={isContextPopoverOpen}
                       >
                         <CircleGauge className="h-4 w-4" strokeWidth={1.75} />
-                        <span>{contextStatus.known ? `${contextStatus.percent}%` : '--'}</span>
+                        <span className="pd-composer-context-label">{contextStatus.known ? `${contextStatus.percent}%` : '--'}</span>
                       </button>
                       {isContextPopoverOpen ? (
                         <div
@@ -811,7 +861,83 @@ export default function ComposerV2({
                       ) : null}
                     </div>
 
-                    {isLoading && canAbortSession ? (
+                    <div
+                      className="relative"
+                      onBlur={(event) => {
+                        const nextTarget = event.relatedTarget as Node | null;
+                        if (!nextTarget || !event.currentTarget.contains(nextTarget)) {
+                          setIsThinkingModeMenuOpen(false);
+                        }
+                      }}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => setIsThinkingModeMenuOpen((open) => !open)}
+                        className={cn(
+                          'pd-composer-icon-button inline-flex h-7 max-w-[116px] items-center justify-center gap-1.5 rounded-md px-2 text-[12px] font-medium transition sm:max-w-[140px]',
+                          effectiveThinkingMode === 'default'
+                            ? 'text-neutral-600 hover:bg-neutral-100 dark:text-neutral-300 dark:hover:bg-neutral-800'
+                            : 'text-purple-600 hover:bg-purple-50 dark:text-purple-300 dark:hover:bg-purple-950/30',
+                        )}
+                        title={t('input.thinking.change', { defaultValue: 'Select thinking strength' }) as string}
+                        aria-haspopup="menu"
+                        aria-expanded={isThinkingModeMenuOpen}
+                      >
+                        <SelectedThinkingIcon className="h-4 w-4 shrink-0" strokeWidth={1.9} />
+                        <span className="pd-composer-thinking-label truncate">{selectedThinkingMode.name}</span>
+                        <ChevronDown
+                          className={cn(
+                            'pd-composer-control-chevron h-3.5 w-3.5 shrink-0 transition-transform',
+                            isThinkingModeMenuOpen && 'rotate-180',
+                          )}
+                          strokeWidth={2}
+                        />
+                      </button>
+                      {isThinkingModeMenuOpen ? (
+                        <div
+                          role="menu"
+                          className="absolute bottom-full right-0 z-50 mb-2 w-64 rounded-xl border border-neutral-200 bg-white p-1.5 text-left shadow-lg dark:border-neutral-800 dark:bg-neutral-900"
+                        >
+                          {thinkingModes.map((option) => {
+                            const Icon = option.icon || Brain;
+                            const isSelected = option.id === thinkingMode;
+                            const unavailableReason = thinkingModeAvailability[option.id];
+                            return (
+                              <button
+                                key={option.id}
+                                type="button"
+                                role="menuitemradio"
+                                aria-checked={isSelected}
+                                disabled={Boolean(unavailableReason)}
+                                onClick={() => {
+                                  if (unavailableReason) return;
+                                  onThinkingModeChange(option.id);
+                                  setIsThinkingModeMenuOpen(false);
+                                }}
+                                className={cn(
+                                  'flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition',
+                                  isSelected
+                                    ? 'bg-neutral-100 text-neutral-950 dark:bg-neutral-800 dark:text-neutral-50'
+                                    : 'text-neutral-700 hover:bg-neutral-50 dark:text-neutral-200 dark:hover:bg-neutral-800/70',
+                                  unavailableReason && 'cursor-not-allowed opacity-45 hover:bg-transparent dark:hover:bg-transparent',
+                                )}
+                                title={option.name}
+                              >
+                                <Icon className={cn('h-4 w-4 shrink-0', option.color)} strokeWidth={1.9} />
+                                <span className="min-w-0 flex-1">
+                                  <span className="block text-[13px] font-medium">{option.name}</span>
+                                </span>
+                                {isSelected ? (
+                                  <Check className="h-4 w-4 shrink-0 text-neutral-500 dark:text-neutral-300" strokeWidth={2} />
+                                ) : null}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ) : null}
+                    </div>
+
+                    {showAbortButton ? (
                       <button
                         type="button"
                         onClick={onAbortSession}
@@ -832,28 +958,29 @@ export default function ComposerV2({
                           <Square className="h-3.5 w-3.5" strokeWidth={2.5} fill="currentColor" />
                         )}
                       </button>
-                    ) : (
-                      <button
-                        type="submit"
-                        disabled={disabled}
-                        aria-busy={isSubmitPending || hasUploadingImages}
-                        className={cn(
-                          'inline-flex h-8 w-8 items-center justify-center rounded-lg bg-neutral-900 text-white transition hover:opacity-90 disabled:opacity-40 dark:bg-neutral-50 dark:text-neutral-900',
-                          (isSubmitPending || hasUploadingImages) && 'cursor-wait',
-                        )}
-                        title={
-                          isSubmitPending || hasUploadingImages
-                            ? (t('input.sending', { defaultValue: 'Sending...' }) as string)
-                            : (t('input.send', { defaultValue: 'Send' }) as string)
-                        }
-                      >
-                        {isSubmitPending || hasUploadingImages ? (
-                          <Loader2 className="h-4 w-4 animate-spin" strokeWidth={2.25} />
-                        ) : (
-                          <ArrowUp className="h-4 w-4" strokeWidth={2} />
-                        )}
-                      </button>
-                    )}
+                    ) : null}
+                    <button
+                      type="submit"
+                      disabled={disabled}
+                      aria-busy={isSubmitPending || hasUploadingImages || isBusySendConfirmed}
+                      className={cn(
+                        'inline-flex h-8 w-8 items-center justify-center rounded-lg bg-neutral-900 text-white transition hover:opacity-90 disabled:opacity-40 dark:bg-neutral-50 dark:text-neutral-900',
+                        isBusySendQueued && 'bg-amber-500 text-white hover:bg-amber-600 dark:bg-amber-400 dark:text-neutral-950 dark:hover:bg-amber-300',
+                        isBusySendConfirmed && 'cursor-wait',
+                        (isSubmitPending || hasUploadingImages) && 'cursor-wait',
+                      )}
+                      title={sendTitle}
+                    >
+                      {isSubmitPending || hasUploadingImages ? (
+                        <Loader2 className="h-4 w-4 animate-spin" strokeWidth={2.25} />
+                      ) : isBusySendConfirmed ? (
+                        <Loader2 className="h-4 w-4 animate-spin" strokeWidth={2.25} />
+                      ) : isBusySendQueued ? (
+                        <Check className="h-4 w-4" strokeWidth={2.25} />
+                      ) : (
+                        <ArrowUp className="h-4 w-4" strokeWidth={2} />
+                      )}
+                    </button>
                   </div>
                 </div>
             </div>

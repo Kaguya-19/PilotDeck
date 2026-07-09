@@ -12,6 +12,7 @@ import { useChatProviderState } from '../chat/hooks/useChatProviderState';
 import { useChatSessionState } from '../chat/hooks/useChatSessionState';
 import { useChatRealtimeHandlers } from '../chat/hooks/useChatRealtimeHandlers';
 import { useChatComposerState } from '../chat/hooks/useChatComposerState';
+import { getThinkingModeAvailability } from '../chat/constants/thinkingModeAvailability';
 import { useSessionStore } from '../../stores/useSessionStore';
 import { safeLocalStorage } from '../chat/utils/chatStorage';
 import { useSessionWatch } from '../../hooks/useSessionWatch';
@@ -35,6 +36,7 @@ function ChatInterfaceV2({
   selectedSession,
   ws,
   sendMessage,
+  subscribe,
   // latestMessage is intentionally not consumed here — useChatRealtimeHandlers
   // now subscribes to the WebSocket directly so React 18 state batching can't
   // drop intermediate stream_delta events.
@@ -91,9 +93,15 @@ function ChatInterfaceV2({
     model,
     permissionMode,
     setPermissionMode: setPermissionModeRaw,
+    thinkingModelContext,
     pendingPermissionRequests,
     setPendingPermissionRequests,
   } = useChatProviderState({ selectedSession });
+
+  const thinkingModeAvailability = React.useMemo(
+    () => getThinkingModeAvailability(thinkingModelContext),
+    [thinkingModelContext],
+  );
 
   const cycleRunMode = useCallback(() => {
     setRunMode((currentMode) => {
@@ -172,8 +180,8 @@ function ChatInterfaceV2({
     textareaRef,
     inputHighlightRef,
     isTextareaExpanded: _isTextareaExpanded,
-    thinkingMode: _thinkingMode,
-    setThinkingMode: _setThinkingMode,
+    thinkingMode,
+    setThinkingMode,
     slashCommandsCount: _slashCommandsCount,
     filteredCommands,
     frequentCommands,
@@ -191,6 +199,8 @@ function ChatInterfaceV2({
     selectFile,
     attachedImages,
     setAttachedImages,
+    documentReferences,
+    removeDocumentReference,
     uploadingImages,
     imageErrors,
     getRootProps,
@@ -210,6 +220,9 @@ function ChatInterfaceV2({
     handleGrantToolPermission,
     handleGrantSessionToolPermission,
     handleInputFocusChange,
+    isBusySendQueued,
+    isBusySendConfirmed,
+    cancelBusySendQueue,
   } = useChatComposerState({
     selectedProject,
     selectedSession,
@@ -222,7 +235,9 @@ function ChatInterfaceV2({
     isLoading,
     canAbortSession,
     tokenBudget,
+    thinkingModeAvailability,
     sendMessage,
+    subscribe,
     sendByCtrlEnter,
     onSessionActive,
     onSessionProcessing,
@@ -243,6 +258,9 @@ function ChatInterfaceV2({
     setIsUserScrolledUp,
     pendingPermissionRequests,
     setPendingPermissionRequests,
+    referenceOnlyPrompt: t('documentReferences.defaultPrompt', {
+      defaultValue: 'Please answer based on the document selection I quoted.',
+    }) as string,
   });
 
   const handlePlanExecutionApproved = useCallback(() => {
@@ -483,6 +501,8 @@ function ChatInterfaceV2({
           previous.filter((_, currentIndex) => currentIndex !== index),
         )
       }
+      documentReferences={documentReferences}
+      onRemoveDocumentReference={removeDocumentReference}
       uploadingImages={uploadingImages}
       imageErrors={imageErrors}
       showFileDropdown={showFileDropdown}
@@ -504,7 +524,13 @@ function ChatInterfaceV2({
       isLoading={isLoading}
       canAbortSession={canAbortSession}
       isAbortPending={isAbortPending}
+      isBusySendQueued={isBusySendQueued}
+      isBusySendConfirmed={isBusySendConfirmed}
+      onCancelBusySendQueue={cancelBusySendQueue}
       tokenBudget={tokenBudget}
+      thinkingMode={thinkingMode}
+      thinkingModeAvailability={thinkingModeAvailability}
+      onThinkingModeChange={setThinkingMode}
       pendingPermissionRequests={pendingPermissionRequests}
       handlePermissionDecision={handlePermissionDecision}
       handleGrantToolPermission={handleGrantToolPermission}
@@ -543,7 +569,7 @@ function ChatInterfaceV2({
   }
 
   return (
-    <div className="flex h-full flex-col bg-white dark:bg-neutral-950">
+    <div className="flex h-full min-w-0 flex-col overflow-hidden bg-white dark:bg-neutral-950">
       <MessagesPaneV2
         scrollContainerRef={scrollContainerRef}
         onWheel={handleScroll}

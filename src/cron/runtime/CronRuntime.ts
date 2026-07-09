@@ -185,7 +185,7 @@ export class CronRuntime {
       await Promise.all(
         activeRuns.map((active) =>
           this.gateway!
-            .abortTurn({ sessionKey: active.sessionKey, runId: active.runId })
+            .abortTurn({ sessionKey: active.sessionKey, runId: active.runId, reason: "system:cron_shutdown" })
             .catch(() => undefined),
         ),
       );

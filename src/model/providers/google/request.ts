@@ -20,6 +20,7 @@ import type {
 import { flattenToolResultBlockText } from "../../protocol/toolResultContent.js";
 import { normalizeGoogleModelId } from "./modelId.js";
 import { cleanSchemaForGoogle, normalizeGoogleToolSchema } from "./schema.js";
+import { resolveThinkingPlan, throwIfUnsupportedThinkingPlan } from "../../thinking/registry.js";
 
 export type GoogleRequestBody = GenerateContentParameters;
 
@@ -83,10 +84,18 @@ function toGoogleThinkingConfig(
   request: CanonicalModelRequest,
   model: ModelDefinition,
 ): GenerateContentConfig["thinkingConfig"] {
-  if (!request.thinking?.enabled || !model.capabilities.supportsThinking) {
+  const thinkingPlan = resolveThinkingPlan(request.thinking, { id: "google", protocol: "google", url: "", apiKey: "", headers: {}, models: {} }, model);
+  throwIfUnsupportedThinkingPlan(thinkingPlan, request);
+  if (!thinkingPlan.enabled || !model.capabilities.supportsThinking) {
     return undefined;
   }
-  const budget = request.thinking.budgetTokens;
+  if (thinkingPlan.useGeminiLevel && thinkingPlan.thinkingLevel) {
+    return {
+      includeThoughts: true,
+      thinkingLevel: thinkingPlan.thinkingLevel,
+    } as unknown as GenerateContentConfig["thinkingConfig"];
+  }
+  const budget = thinkingPlan.budgetTokens;
   return {
     includeThoughts: true,
     ...(typeof budget === "number" && Number.isFinite(budget) && budget >= 0

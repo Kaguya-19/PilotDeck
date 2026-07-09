@@ -1,4 +1,5 @@
 import type { GatewayEvent } from "../../../gateway/index.js";
+import { isVisibleFailureStatusDetail } from "../../../status/agentStatus.js";
 
 export type ImLiveReplyHandle = unknown;
 
@@ -9,6 +10,7 @@ export type ImLiveReplyActivity = {
   text: string;
   elapsedMs: number;
   updateCount: number;
+  detail?: string;
 };
 
 export type ImLiveReplyTransportErrorPhase =
@@ -66,6 +68,7 @@ type Segment<Handle> = {
   activityUpdates: number;
   activityVisible: boolean;
   activityDisabled: boolean;
+  activityDetail?: string;
 };
 
 const DEFAULT_THROTTLE_MS = 2_000;
@@ -81,6 +84,34 @@ const DEFAULT_CURSOR = " ▉";
 const DEFAULT_ACTIVITY_ONLY_FINAL_TEXT = "处理完成，但没有可见回复。";
 const DEFAULT_TIMEOUT_FINAL_TEXT = "处理超时，请重新发送或稍后重试。";
 const DEFAULT_ABORT_FINAL_TEXT = "处理已中止，请重新发送或稍后重试。";
+const VISIBLE_FAILURE_STATUS_EVENTS = new Set([
+  "model_empty_response_exhausted",
+  "max_turns_reached",
+  "max_output_recovery_exhausted",
+  "model_request_failed",
+  "tool_call_recovery_exhausted",
+  "tool_error_loop",
+  "lifecycle_blocked",
+  "turn_failed",
+  "turn_timeout",
+  "gateway_submit_failed",
+  "session_busy",
+  "gateway_bridge_error",
+  "gateway_stream_ended_without_completion",
+  "web_http_request_failed",
+  "project_unavailable",
+  "config_invalid",
+  "gateway_unavailable",
+  "channel_submit_failed",
+  "subagent_failed",
+  "content_filter_stop",
+  "unknown_finish_reason",
+]);
+const WARNING_STATUS_EVENTS = new Set([
+  ...VISIBLE_FAILURE_STATUS_EVENTS,
+  "structured_output_completed",
+  "turn_aborted",
+]);
 
 export class ImLiveReplyController<Handle = ImLiveReplyHandle> {
   private readonly transport: ImLiveReplyTransport<Handle>;
@@ -112,6 +143,7 @@ export class ImLiveReplyController<Handle = ImLiveReplyHandle> {
   private lastFlushAt = 0;
   private closed = false;
   private turnTimerArmed = false;
+  private hasVisibleFailureStatus = false;
 
   constructor(options: ImLiveReplyControllerOptions<Handle>) {
     this.transport = options.transport;
@@ -140,12 +172,15 @@ export class ImLiveReplyController<Handle = ImLiveReplyHandle> {
 
     switch (event.type) {
       case "turn_started":
+        this.hasVisibleFailureStatus = false;
         this.armTurnTimer(true);
         this.markActivity("thinking");
         return;
       case "model_request_started":
-      case "assistant_thinking_delta":
         this.markActivity("thinking");
+        return;
+      case "assistant_thinking_delta":
+        this.markActivity("thinking", event.text);
         return;
       case "assistant_text_delta":
         await this.append(event.text);
@@ -156,7 +191,7 @@ export class ImLiveReplyController<Handle = ImLiveReplyHandle> {
         } else {
           this.clearTextTimer();
         }
-        this.markActivity("tool");
+        this.markActivity("tool", event.name);
         return;
       case "tool_call_finished":
         if (!event.ok) {
@@ -172,6 +207,9 @@ export class ImLiveReplyController<Handle = ImLiveReplyHandle> {
         await this.pauseActivity();
         return;
       case "error":
+        if (this.hasVisibleFailureStatus) {
+          return;
+        }
         await this.append(this.formatError(event));
         return;
       default:
@@ -259,12 +297,35 @@ export class ImLiveReplyController<Handle = ImLiveReplyHandle> {
   }
 
   private handleAgentStatus(event: GatewayEvent & { type: "agent_status" }): void {
+    const isVisibleFailure = event.detail?.visible !== false
+      && (VISIBLE_FAILURE_STATUS_EVENTS.has(event.event) || isVisibleFailureStatusDetail(event.detail));
+    if (isVisibleFailure) {
+      this.hasVisibleFailureStatus = true;
+    }
+    if (event.event === "model_empty_response_exhausted") {
+      const detailMessage = typeof event.detail?.message === "string" ? event.detail.message : undefined;
+      void this.append(`\n⚠️ ${detailMessage ?? "The model returned empty content repeatedly, so this turn has stopped. Try again later or increase max output tokens."}\n`);
+      return;
+    }
+    if (event.event === "max_turns_reached") {
+      const detailMessage = typeof event.detail?.message === "string" ? event.detail.message : undefined;
+      void this.append(`\n⚠️ ${detailMessage ?? "Reached the maximum number of turns, so this turn has stopped. Increase maxTurns or split the task into smaller steps and try again."}\n`);
+      return;
+    }
+    if (WARNING_STATUS_EVENTS.has(event.event) || isVisibleFailureStatusDetail(event.detail)) {
+      const detailMessage = typeof event.detail?.message === "string" ? event.detail.message : undefined;
+      if (detailMessage) {
+        void this.append(`\n⚠️ ${detailMessage}\n`);
+      }
+      return;
+    }
     if (event.event === "subagent_completed") {
       this.markActivity("thinking");
       return;
     }
     if (event.event.startsWith("subagent_")) {
-      this.markActivity("subagent");
+      const detail = typeof event.detail?.subagentType === "string" ? event.detail.subagentType : undefined;
+      this.markActivity("subagent", detail);
     }
   }
 
@@ -368,7 +429,7 @@ export class ImLiveReplyController<Handle = ImLiveReplyHandle> {
     this.turnTimer.unref?.();
   }
 
-  private markActivity(kind: ImLiveReplyActivityKind): void {
+  private markActivity(kind: ImLiveReplyActivityKind, detail?: string): void {
     if (!this.canUseActivity()) return;
     const segment = this.currentSegment;
     if (segment.activityDisabled || this.shouldSuppressActivityForText(segment)) return;
@@ -380,6 +441,9 @@ export class ImLiveReplyController<Handle = ImLiveReplyHandle> {
       segment.activityStartedAt = Date.now();
       segment.activityArmed = true;
       segment.activityUpdates = 0;
+    }
+    if (detail?.trim()) {
+      segment.activityDetail = detail.trim().slice(0, 160);
     }
 
     if (segment.activityVisible && !kindChanged) {
@@ -454,6 +518,7 @@ export class ImLiveReplyController<Handle = ImLiveReplyHandle> {
     };
     const activity: ImLiveReplyActivity = {
       ...activityBase,
+      ...(segment.activityDetail ? { detail: segment.activityDetail } : {}),
       text: this.formatActivity(activityBase),
     };
 
@@ -921,7 +986,19 @@ function defaultToolErrorFormatter(event: GatewayEvent & { type: "tool_call_fini
 }
 
 function defaultErrorFormatter(event: GatewayEvent & { type: "error" }): string {
-  return `\n❌ ${event.message}\n`;
+  const provider = event.providerError;
+  const providerLines = provider
+    ? [
+        "",
+        "Provider error:",
+        provider.provider ? `- provider: ${provider.provider}` : undefined,
+        provider.status !== undefined ? `- status: ${provider.status}` : undefined,
+        provider.code ? `- code: ${provider.code}` : undefined,
+        provider.message ? `- message: ${provider.message}` : undefined,
+        provider.raw ? `- raw: ${provider.raw}` : undefined,
+      ].filter((line): line is string => line !== undefined).join("\n")
+    : "";
+  return `\n❌ ${event.message}${providerLines}\n`;
 }
 
 function defaultActivityFormatter(activity: Omit<ImLiveReplyActivity, "text">): string {

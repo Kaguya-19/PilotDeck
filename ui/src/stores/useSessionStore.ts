@@ -9,7 +9,7 @@
 
 import { useCallback, useMemo, useRef, useState } from 'react';
 import type { SessionProvider } from '../types/app';
-import { authenticatedFetch } from '../utils/api';
+import { authenticatedFetch, readAgentStatusErrorFromResponse } from '../utils/api';
 
 // ─── NormalizedMessage (mirrors server/adapters/types.js) ────────────────────
 
@@ -54,10 +54,20 @@ export interface NormalizedMessage {
   content?: string;
   images?: string[];
   attachments?: Array<{
+    kind?: 'file' | 'document-selection';
     name: string;
     path?: string;
     size?: number;
     mimeType?: string;
+    fileName?: string;
+    filePath?: string;
+    source?: 'pdf' | 'office-pdf';
+    pageNumbers?: number[];
+    selectedText?: string;
+    surroundingText?: string;
+    occurrenceIndex?: number | null;
+    createdAt?: string;
+    truncated?: boolean;
   }>;
   toolName?: string;
   toolInput?: unknown;
@@ -456,6 +466,10 @@ function forceRecomputeMerged(slot: SessionSlot): void {
   slot.merged = computeMerged(slot.serverMessages, slot.realtimeMessages);
 }
 
+function streamingKey(sessionId: string, runId?: string): string {
+  return runId ? `${sessionId}_${runId}` : sessionId;
+}
+
 /**
  * Patch a single streaming row in `slot.merged` without recomputing the full list.
  * Returns true when the merged row was updated in place.
@@ -609,10 +623,16 @@ export function useSessionStore() {
 
       const qs = params.toString();
       const url = `/api/sessions/${encodeURIComponent(sessionId)}/messages${qs ? `?${qs}` : ''}`;
-      const response = await authenticatedFetch(url);
+      const response = await authenticatedFetch(url, { suppressServerErrorToast: true });
 
       if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
+        const statusError = await readAgentStatusErrorFromResponse(response, {
+          event: 'web_http_request_failed',
+          code: 'session_messages_load_failed',
+          message: `Unable to load conversation messages (HTTP ${response.status}).`,
+          scope: 'session',
+        });
+        throw new Error(statusError.message);
       }
 
       const data = await response.json();
@@ -698,8 +718,16 @@ export function useSessionStore() {
     const url = `/api/sessions/${encodeURIComponent(sessionId)}/messages${qs ? `?${qs}` : ''}`;
 
     try {
-      const response = await authenticatedFetch(url);
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const response = await authenticatedFetch(url, { suppressServerErrorToast: true });
+      if (!response.ok) {
+        const statusError = await readAgentStatusErrorFromResponse(response, {
+          event: 'web_http_request_failed',
+          code: 'session_messages_load_failed',
+          message: `Unable to load conversation messages (HTTP ${response.status}).`,
+          scope: 'session',
+        });
+        throw new Error(statusError.message);
+      }
       const data = await response.json();
       const olderMessages: NormalizedMessage[] = data.messages || [];
 
@@ -980,9 +1008,17 @@ export function useSessionStore() {
 
       const qs = params.toString();
       const url = `/api/sessions/${encodeURIComponent(sessionId)}/messages${qs ? `?${qs}` : ''}`;
-      const response = await authenticatedFetch(url);
+      const response = await authenticatedFetch(url, { suppressServerErrorToast: true });
 
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      if (!response.ok) {
+        const statusError = await readAgentStatusErrorFromResponse(response, {
+          event: 'web_http_request_failed',
+          code: 'session_messages_load_failed',
+          message: `Unable to refresh conversation messages (HTTP ${response.status}).`,
+          scope: 'session',
+        });
+        throw new Error(statusError.message);
+      }
       const data = await response.json();
 
       const incomingMessages = data.messages || [];
@@ -1033,9 +1069,9 @@ export function useSessionStore() {
    * Update or create a streaming message (accumulated text so far).
    * Uses a well-known ID so subsequent calls replace the same message.
    */
-  const updateStreaming = useCallback((sessionId: string, accumulatedText: string, msgProvider: SessionProvider) => {
+  const updateStreaming = useCallback((sessionId: string, accumulatedText: string, msgProvider: SessionProvider, runId?: string) => {
     const slot = getSlot(sessionId);
-    const streamId = `__streaming_${sessionId}`;
+    const streamId = `__streaming_${streamingKey(sessionId, runId)}`;
     const idx = slot.realtimeMessages.findIndex(m => m.id === streamId);
     if (idx >= 0) {
       // Subsequent delta — preserve the original turn-start timestamp so
@@ -1071,6 +1107,7 @@ export function useSessionStore() {
         provider: msgProvider,
         kind: 'stream_delta',
         content: accumulatedText,
+        runId,
         serverTailIdAtStart: serverTailId ?? undefined,
       };
       slot.realtimeMessages = [...slot.realtimeMessages, msg];
@@ -1083,10 +1120,10 @@ export function useSessionStore() {
    * Finalize streaming: convert the streaming message to a regular text message.
    * The well-known streaming ID is replaced with a unique text message ID.
    */
-  const finalizeStreaming = useCallback((sessionId: string) => {
+  const finalizeStreaming = useCallback((sessionId: string, runId?: string) => {
     const slot = storeRef.current.get(sessionId);
     if (!slot) return;
-    const streamId = `__streaming_${sessionId}`;
+    const streamId = `__streaming_${streamingKey(sessionId, runId)}`;
     const idx = slot.realtimeMessages.findIndex(m => m.id === streamId);
     if (idx >= 0) {
       const stream = slot.realtimeMessages[idx];
@@ -1108,9 +1145,9 @@ export function useSessionStore() {
    * Update or create a streaming thinking message (accumulated thinking so far).
    * Mirrors updateStreaming but uses kind='thinking' and a separate well-known ID.
    */
-  const updateStreamingThinking = useCallback((sessionId: string, accumulatedText: string, msgProvider: SessionProvider) => {
+  const updateStreamingThinking = useCallback((sessionId: string, accumulatedText: string, msgProvider: SessionProvider, runId?: string) => {
     const slot = getSlot(sessionId);
-    const streamId = `__streaming_thinking_${sessionId}`;
+    const streamId = `__streaming_thinking_${streamingKey(sessionId, runId)}`;
     const idx = slot.realtimeMessages.findIndex(m => m.id === streamId);
     if (idx >= 0) {
       const existing = slot.realtimeMessages[idx];
@@ -1139,6 +1176,7 @@ export function useSessionStore() {
         provider: msgProvider,
         kind: 'thinking',
         content: accumulatedText,
+        runId,
         serverTailIdAtStart: serverTailId ?? undefined,
       };
       slot.realtimeMessages = [...slot.realtimeMessages, msg];
@@ -1151,10 +1189,10 @@ export function useSessionStore() {
    * Finalize streaming thinking: replace the well-known streaming thinking ID
    * with a unique ID so subsequent thinking blocks don't overwrite it.
    */
-  const finalizeStreamingThinking = useCallback((sessionId: string) => {
+  const finalizeStreamingThinking = useCallback((sessionId: string, runId?: string) => {
     const slot = storeRef.current.get(sessionId);
     if (!slot) return;
-    const streamId = `__streaming_thinking_${sessionId}`;
+    const streamId = `__streaming_thinking_${streamingKey(sessionId, runId)}`;
     const idx = slot.realtimeMessages.findIndex(m => m.id === streamId);
     if (idx >= 0) {
       const stream = slot.realtimeMessages[idx];
@@ -1180,6 +1218,21 @@ export function useSessionStore() {
       recomputeMergedIfNeeded(slot);
       notify(sessionId);
     }
+  }, [notify]);
+
+  const clearAssistantRealtime = useCallback((sessionId: string) => {
+    const slot = storeRef.current.get(sessionId);
+    if (!slot) return;
+    const nextRealtime = slot.realtimeMessages.filter((message) => {
+      if (message.kind === 'thinking' || message.kind === 'stream_delta' || message.kind === 'stream_end') {
+        return false;
+      }
+      return !(message.kind === 'text' && message.role === 'assistant');
+    });
+    if (nextRealtime.length === slot.realtimeMessages.length) return;
+    slot.realtimeMessages = nextRealtime;
+    recomputeMergedIfNeeded(slot);
+    notify(sessionId);
   }, [notify]);
 
   /**
@@ -1218,6 +1271,7 @@ export function useSessionStore() {
     updateStreamingThinking,
     finalizeStreamingThinking,
     clearRealtime,
+    clearAssistantRealtime,
     getMessages,
     getActivityMessages,
     getSubagentDetailMessages,
@@ -1233,7 +1287,7 @@ export function useSessionStore() {
     appendRealtime, upsertActivity, setActivities, appendRealtimeBatch, refreshFromServer,
     setActiveSession, setStatus, isStale, updateStreaming, finalizeStreaming,
     updateStreamingThinking, finalizeStreamingThinking,
-    clearRealtime, getMessages, getActivityMessages, getSubagentDetailMessages, getSessionSlot,
+    clearRealtime, clearAssistantRealtime, getMessages, getActivityMessages, getSubagentDetailMessages, getSessionSlot,
     recordSubagentLink, appendSubagentDetailMessage, updateSubagentDetailStreaming,
     finalizeSubagentDetailStreaming, updateSubagentDetailThinking, finalizeSubagentDetailThinking,
   ]);

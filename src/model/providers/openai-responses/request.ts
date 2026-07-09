@@ -9,6 +9,7 @@ import type {
 } from "../../protocol/canonical.js";
 import { flattenToolResultBlockText } from "../../protocol/toolResultContent.js";
 import { normalizeOpenAISchema } from "../openai/schema.js";
+import { resolveThinkingPlan, throwIfUnsupportedThinkingPlan } from "../../thinking/registry.js";
 
 export type OpenAIResponsesRequestBody = {
   model: string;
@@ -30,6 +31,11 @@ export type OpenAIResponsesRequestBody = {
     };
   };
   store?: boolean;
+  reasoning?: {
+    effort?: string;
+  };
+  enable_thinking?: boolean;
+  thinking_budget?: number;
 };
 
 type OpenAIResponsesInputItem =
@@ -62,6 +68,8 @@ export function buildOpenAIResponsesRequest(
   model: ModelDefinition,
   _provider?: ProviderConfig,
 ): OpenAIResponsesRequestBody {
+  const thinkingPlan = resolveThinkingPlan(request.thinking, _provider ?? { id: "openai", protocol: "openai-responses", url: "", apiKey: "", headers: {}, models: {} }, model);
+  throwIfUnsupportedThinkingPlan(thinkingPlan, request);
   const body: OpenAIResponsesRequestBody = {
     model: request.model,
     input: request.messages.flatMap(toResponsesInputItems),
@@ -78,6 +86,12 @@ export function buildOpenAIResponsesRequest(
       : undefined,
     store: false,
   };
+
+  if (thinkingPlan.useOpenAIReasoning && thinkingPlan.effort) {
+    body.reasoning = { effort: thinkingPlan.effort };
+  } else if (thinkingPlan.bodyPatch) {
+    Object.assign(body, thinkingPlan.bodyPatch);
+  }
 
   if (request.outputSchema) {
     body.text = {

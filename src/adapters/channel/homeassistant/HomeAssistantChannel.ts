@@ -287,7 +287,7 @@ export class HomeAssistantChannel implements ChannelAdapter {
         }
         if (event.type === "permission_request") {
           const questionText = this.permissions.capture(chatId, sessionKey, event);
-          await this.sendReply(chatId, questionText);
+          if (questionText) await this.sendReply(chatId, questionText);
           continue;
         }
         const fragment = renderHomeAssistantEvent(event);

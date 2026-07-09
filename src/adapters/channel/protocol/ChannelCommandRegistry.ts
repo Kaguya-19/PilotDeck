@@ -12,6 +12,8 @@
  */
 
 import type { Gateway } from "../../../gateway/index.js";
+import { resolvePilotHome } from "../../../pilot/index.js";
+import { runChatSearchFormatted } from "../../../cli/commands/chatSearch.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -27,6 +29,8 @@ export type CommandExecContext = {
   bindProject?: (projectKey: string) => void;
   /** Get the currently bound project for this chat. */
   getProject?: () => string | undefined;
+  /** Reset the active session for this chat (equivalent to /new). */
+  resetSession?: () => void;
   logger?: {
     info?(msg: string): void;
     warn?(msg: string): void;
@@ -119,7 +123,8 @@ const commands: ChannelCommand[] = [
         return;
       }
       ctx.bindProject?.(target.projectKey);
-      await ctx.reply(`已切换到项目：${target.name}\n路径：${target.fullPath}`);
+      ctx.resetSession?.();
+      await ctx.reply(`已切换到项目：${target.name}\n路径：${target.fullPath}\n（已自动创建新会话）`);
     },
   },
 
@@ -239,6 +244,31 @@ const commands: ChannelCommand[] = [
       } catch (e) {
         await ctx.reply(`获取状态失败: ${e instanceof Error ? e.message : String(e)}`);
       }
+    },
+  },
+
+  {
+    name: "search",
+    aliases: ["find", "grep", "搜索"],
+    description: "Search chat history across sessions",
+    systemLevel: true,
+    handler: async (ctx, arg) => {
+      const projectRoot = ctx.getProject?.();
+      const parsed = arg.trim();
+      if (!parsed) {
+        await ctx.reply(
+          "用法：/search <关键词> [--all] [--limit N] [--role user|assistant]\n示例：/search docker 部署",
+        );
+        return;
+      }
+
+      const { text } = await runChatSearchFormatted({
+        arg: parsed,
+        projectRoot,
+        pilotHome: resolvePilotHome(process.env),
+        locale: "zh",
+      });
+      await ctx.reply(text);
     },
   },
 

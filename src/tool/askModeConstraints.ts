@@ -17,12 +17,17 @@ export const ASK_MODE_ALLOWED_TOOLS = new Set([
   "read_skill",
   "structured_output",
   "agent",
+  "execute_code",
   "bash",
+  "task_list",
+  "task_output",
+  "task_wait",
 ]);
 
 export const ASK_MODE_DESCRIPTION_SUFFIX: Record<string, string> = {
   bash: "\n\n[ASK MODE] READ-ONLY commands only. Write/modify/delete commands will be rejected.",
   agent: "\n\n[ASK MODE] Subagents inherit ask mode and the same permission setting. They can read and search, but cannot modify files.",
+  execute_code: "\n\n[ASK MODE] READ-ONLY Python scripts only. Scripts that call write_file, edit_file, or non-read-only bash commands will be rejected.",
 };
 
 const ASK_MODE_VIOLATION_HEADER = "[ASK_MODE_VIOLATION]";

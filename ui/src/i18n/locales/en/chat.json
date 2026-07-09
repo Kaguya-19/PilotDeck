@@ -267,8 +267,14 @@
       "change": "Select run mode",
       "agentDescription": "Directly process and execute the task",
       "planDescription": "Generate a plan first, then execute after confirmation",
-      "askDescription": "Read-only analysis with optional subagents"
+      "askDescription": "Only answers questions without modifying files"
     }
+  },
+  "documentReferences": {
+    "defaultPrompt": "Please answer based on the document selection I quoted.",
+    "pages": "p. {{pages}}",
+    "pageUnknown": "page unknown",
+    "remove": "Remove reference"
   },
   "commandMenu": {
     "empty": "No commands available",

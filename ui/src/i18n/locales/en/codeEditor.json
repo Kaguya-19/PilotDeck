@@ -40,5 +40,41 @@
   "binaryFile": {
     "title": "Binary File",
     "message": "The file \"{{fileName}}\" cannot be displayed in the text editor because it is a binary file."
+  },
+  "officePreview": {
+    "checkingService": "Checking Office preview service...",
+    "converting": "Loading...",
+    "refreshing": "File updated. Refreshing preview...",
+    "refresh": "Refresh preview",
+    "configureService": "Configure Office preview",
+    "disabledTitle": "Cannot preview binary file",
+    "disabledMessage": "No Office file preview service is configured. Configure the Office file preview service in Settings, or download the file and open it locally.",
+    "libreOfficeUnavailableTitle": "LibreOffice is unavailable",
+    "libreOfficeUnavailableMessage": "This format requires LibreOffice for preview. Install LibreOffice, or switch the Office file preview service to None in Settings.",
+    "failedMessage": "Failed to generate Office file preview."
+  },
+  "pdfToolbar": {
+    "zoomOut": "Zoom out",
+    "zoomIn": "Zoom in",
+    "zoomPercent": "Zoom percentage",
+    "fitWidth": "Fit width",
+    "fitPage": "Fit page",
+    "rotateCounterClockwise": "Rotate counterclockwise",
+    "rotateClockwise": "Rotate clockwise",
+    "pageNumber": "Page number",
+    "goToPage": "Go to page",
+    "pageOf": "/ {{total}}"
+  },
+  "fileTypes": {
+    "word": "Word document",
+    "excel": "Excel spreadsheet",
+    "powerpoint": "PowerPoint presentation",
+    "pdf": "PDF file",
+    "image": "Image file",
+    "file": "File"
+  },
+  "selection": {
+    "chatInPilotDeck": "Chat in PilotDeck",
+    "noSelectableText": "This preview does not contain selectable text."
   }
 }

@@ -5,6 +5,9 @@ import type { AgentRuntimeConfig } from "../runtime/AgentRuntimeConfig.js";
 import type { AgentRuntimeDependencies } from "../runtime/AgentRuntimeDependencies.js";
 import { InMemoryTranscriptWriter } from "../../session/transcript/InMemoryTranscriptWriter.js";
 import type { AgentTranscriptWriter } from "../../session/transcript/TranscriptWriter.js";
+import { SessionMetadataStore } from "../../session/metadata/SessionMetadataStore.js";
+import type { SessionTitleGenerator } from "../../session/title/SessionTitleGenerator.js";
+import type { SessionMetadataValue } from "../../session/transcript/TranscriptEntry.js";
 import { TurnRunner } from "../turn/TurnRunner.js";
 import { AgentSession } from "./AgentSession.js";
 import { createAgentEventBuffer, type AgentEvent } from "../protocol/events.js";
@@ -27,6 +30,8 @@ export type CreateAgentSessionOptions = {
   initialState?: AgentSessionStateShape;
   seedState?: AgentLoopSeedState;
   replayEvents?: AgentEvent[];
+  sessionTitleGenerator?: SessionTitleGenerator;
+  initialMetadata?: SessionMetadataValue;
 };
 
 export function createAgentSession(options: CreateAgentSessionOptions): AgentSession {
@@ -62,6 +67,14 @@ export function createAgentSessionWithStorage(options: CreateAgentSessionOptions
       : undefined
   );
   const transcript = options.transcript ?? storage?.transcript ?? new InMemoryTranscriptWriter();
+  const metadataStore = new SessionMetadataStore({
+    transcript,
+    sessionId: options.sessionId,
+    now: dependencies.now,
+  });
+  if (options.initialMetadata) {
+    metadataStore.restoreFromReplay(options.initialMetadata);
+  }
   const runtimeContext = {
     cwd: options.config.cwd,
     transcriptPath: storage?.transcriptPath ?? "",
@@ -73,6 +86,11 @@ export function createAgentSessionWithStorage(options: CreateAgentSessionOptions
     dependencies.now,
     dependencies.lifecycle,
     runtimeContext,
+    {
+      metadataStore,
+      sessionTitleGenerator: options.sessionTitleGenerator,
+      autoGenerateSessionTitle: options.config.isSubagent !== true,
+    },
   );
   return {
     session: new AgentSession({

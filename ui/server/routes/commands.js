@@ -13,6 +13,7 @@ import { isVirtualProjectPath, resolvePilotHome } from '../utils/pilotPaths.js';
 import { executeTurnkeySlashCommand } from '../turnkey-slash.js';
 import { getRegisteredCommands } from '../../../src/adapters/channel/protocol/ChannelCommandRegistry.js';
 import { prepareCliSpawn } from '../utils/processSpawn.js';
+import { runChatSearchFormatted } from '../../../src/cli/commands/chatSearch.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -331,6 +332,40 @@ const builtInCommands = [
  * Built-in command handlers
  * Each handler returns { type: 'builtin', action: string, data: any }
  */
+async function executeSearchCommand(args, context) {
+  const rawArg = (args || []).join(' ').trim();
+  if (!rawArg) {
+    return {
+      type: 'builtin',
+      action: 'search',
+      data: {
+        error: true,
+        content: 'Usage: /search <keyword> [--all] [--limit N] [--role user|assistant]\nExample: /search docker deploy',
+      },
+    };
+  }
+
+  const { result, text } = await runChatSearchFormatted({
+    arg: rawArg,
+    projectRoot: context?.projectPath,
+    pilotHome: resolvePilotHome(process.env),
+    locale: 'en',
+  });
+
+  return {
+    type: 'builtin',
+    action: 'search',
+    data: {
+      content: text,
+      format: 'markdown',
+      query: result.query,
+      matches: result.matches,
+      truncated: result.truncated,
+      sessionsScanned: result.sessionsScanned,
+    },
+  };
+}
+
 const builtInHandlers = {
   '/help': async (args, context) => {
     const helpText = `# PilotDeck Commands
@@ -601,6 +636,10 @@ Custom commands can be created in:
   },
 
   '/turnkey': async (args) => executeTurnkeySlashCommand(args),
+
+  '/search': executeSearchCommand,
+  '/find': executeSearchCommand,
+  '/grep': executeSearchCommand,
 
   '/update': async (args, context) => {
     const subcommand = (args && args[0]) || 'apply';

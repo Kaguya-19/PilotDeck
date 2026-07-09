@@ -1,7 +1,7 @@
 import type { WorkspaceType } from '../types';
 
 const SSH_PREFIXES = ['git@', 'ssh://'];
-const WINDOWS_DRIVE_PATTERN = /^[A-Za-z]:\\?$/;
+const WINDOWS_DRIVE_PATTERN = /^[A-Za-z]:[\\/]?$/;
 export const WINDOWS_DRIVES_PATH = '__pilotdeck_windows_drives__';
 
 export const isSshGitUrl = (url: string): boolean => {
@@ -19,6 +19,10 @@ export const isCloneWorkflow = (workspaceType: WorkspaceType, githubUrl: string)
 
 export const getSuggestionRootPath = (inputPath: string): string => {
   const trimmedPath = inputPath.trim();
+  if (/^[A-Za-z]:$/.test(trimmedPath)) {
+    return `${trimmedPath}\\`;
+  }
+
   const lastSeparatorIndex = Math.max(trimmedPath.lastIndexOf('/'), trimmedPath.lastIndexOf('\\'));
   if (lastSeparatorIndex === 2 && /^[A-Za-z]:/.test(trimmedPath)) {
     return `${trimmedPath.slice(0, 2)}\\`;
@@ -57,6 +61,9 @@ export const getParentPath = (currentPath: string): string | null => {
 export const joinFolderPath = (basePath: string, folderName: string): string => {
   const normalizedBasePath = basePath.trim().replace(/[\\/]+$/, '');
   const separator =
-    normalizedBasePath.includes('\\') && !normalizedBasePath.includes('/') ? '\\' : '/';
+    WINDOWS_DRIVE_PATTERN.test(normalizedBasePath) ||
+    (normalizedBasePath.includes('\\') && !normalizedBasePath.includes('/'))
+      ? '\\'
+      : '/';
   return `${normalizedBasePath}${separator}${folderName.trim()}`;
 };

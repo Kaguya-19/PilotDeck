@@ -6,6 +6,7 @@ export type AgentTranscriptEntryType =
   | "assistant_message"
   | "tool_result_message"
   | "durable_message"
+  | "agent_status_message"
   | "turn_result"
   | "control_boundary"
   | "session_metadata"
@@ -31,6 +32,14 @@ export type AgentAcceptedInputTranscriptEntry = AgentTranscriptEntryBase & {
 export type AgentMessageTranscriptEntry = AgentTranscriptEntryBase & {
   type: "assistant_message" | "tool_result_message" | "durable_message";
   message: CanonicalMessage;
+};
+
+export type AgentStatusMessageTranscriptEntry = AgentTranscriptEntryBase & {
+  type: "agent_status_message";
+  event: string;
+  kind: "status" | "error";
+  text: string;
+  detail?: Record<string, unknown>;
 };
 
 export type AgentTurnResultTranscriptEntry = AgentTranscriptEntryBase & {
@@ -164,6 +173,7 @@ export type AgentSubagentCompletedTranscriptEntry = AgentTranscriptEntryBase & {
 export type AgentTranscriptEntry =
   | AgentAcceptedInputTranscriptEntry
   | AgentMessageTranscriptEntry
+  | AgentStatusMessageTranscriptEntry
   | AgentTurnResultTranscriptEntry
   | AgentControlBoundaryTranscriptEntry
   | AgentSessionMetadataTranscriptEntry

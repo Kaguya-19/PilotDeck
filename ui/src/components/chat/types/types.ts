@@ -18,10 +18,20 @@ export interface ChatImage {
 }
 
 export interface ChatAttachment {
+  kind?: 'file' | 'document-selection';
   name: string;
   path?: string;
   size?: number;
   mimeType?: string;
+  fileName?: string;
+  filePath?: string;
+  source?: 'pdf' | 'office-pdf';
+  pageNumbers?: number[];
+  selectedText?: string;
+  surroundingText?: string;
+  occurrenceIndex?: number | null;
+  createdAt?: string;
+  truncated?: boolean;
 }
 
 export interface ToolResult {
@@ -170,7 +180,12 @@ export interface PermissionGrantResult {
   success: boolean;
   alreadyAllowed?: boolean;
   updatedSettings?: PilotDeckSettings;
+  completion?: Promise<PermissionGrantResult>;
 }
+
+export type SessionPermissionGrantResult = PermissionGrantResult & {
+  pending?: boolean;
+};
 
 export interface PendingPermissionRequest {
   requestId: string;
@@ -204,6 +219,7 @@ export interface ChatInterfaceProps {
   selectedSession: ProjectSession | null;
   ws: WebSocket | null;
   sendMessage: (message: unknown) => void;
+  subscribe?: (handler: (message: any) => void) => () => void;
   latestMessage: any;
   onFileOpen?: (filePath: string, diffInfo?: any) => void;
   onInputFocusChange?: (focused: boolean) => void;

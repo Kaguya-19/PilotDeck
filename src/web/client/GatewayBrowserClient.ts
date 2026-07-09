@@ -138,7 +138,7 @@ export class GatewayBrowserClient {
   }
 
   /** Convenience helpers. */
-  abortTurn(input: { sessionKey: string; runId?: string }): Promise<{ ok: boolean }> {
+  abortTurn(input: { sessionKey: string; runId?: string; reason?: string }): Promise<{ ok: boolean }> {
     return this.request<{ ok: boolean }>("abort_turn", input);
   }
 

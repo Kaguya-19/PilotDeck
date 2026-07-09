@@ -126,8 +126,8 @@ export function AuthProvider({ children }: AuthProviderProps) {
     if (IS_PLATFORM) {
       setUser({ username: 'platform-user' });
       setNeedsSetup(false);
-      setHasCompletedOnboarding(true);
-      setIsLoading(false);
+      setIsLoading(true);
+      checkOnboardingStatus().finally(() => setIsLoading(false));
       return;
     }
 

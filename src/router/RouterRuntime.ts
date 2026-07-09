@@ -7,6 +7,13 @@ import type {
 import { cloneMessages, downgradeUnsupportedContent, ModelRequestError } from "../model/index.js";
 import type { InputModality } from "../model/index.js";
 import {
+  LITELLM_DEFAULT_MAX_RETRIES,
+  LITELLM_INITIAL_RETRY_DELAY_MS,
+  LITELLM_MAX_RETRY_DELAY_MS,
+  LITELLM_RETRY_JITTER,
+} from "../model/streaming/streamModel.js";
+import { buildLiteLLMContinuationRequest } from "../model/streaming/continuationRequest.js";
+import {
   DEFAULT_SUBAGENT_POLICY,
   type RouterConfig,
   type RouterModelRef,
@@ -39,6 +46,7 @@ import {
 import { TokenStatsCollector } from "./stats/TokenStatsCollector.js";
 import { classifyAndRoute } from "./tokenSaver/classifyAndRoute.js";
 import { countMessagesTokens, countResponseTokens, dispose as disposeTokenizer } from "./utils/countTokens.js";
+import { calculateCacheReadCost, calculateInputCost } from "./utils/modelPricing.js";
 import {
   collectRequiredInputModalities,
   missingInputModalities,
@@ -63,6 +71,8 @@ export type RouterRuntimeDeps = {
 
 export type InvalidateStickyResult = {
   previousTier?: string;
+  previousProvider?: string;
+  previousModel?: string;
   orchestrating: boolean;
 };
 
@@ -78,6 +88,7 @@ export type RouterRuntime = {
     request: CanonicalModelRequest,
     ctx: RouterExecuteContext & { sessionId: string; isMainAgent: boolean; previousTier?: string },
   ): AsyncIterable<CanonicalModelEvent>;
+  materializeRequest(decision: RouterDecision, request: CanonicalModelRequest): CanonicalModelRequest;
   /**
    * Clear routing sticky (provider/model/tier) for a session while preserving
    * orchestration state.  Call at the start of each new user turn so the
@@ -204,6 +215,83 @@ export function createRouterRuntime(
     };
   }
 
+  function maybePreserveStickyForCache(
+    current: RouterModelRef | undefined,
+    next: RouterModelRef,
+    messages: CanonicalModelRequest["messages"],
+    lastUsage: import("../model/index.js").CanonicalUsage | undefined,
+  ): { selection: RouterModelRef; mutation?: RouterMutationsLog["cacheAwareSwitch"] } {
+    const cacheAware = config.tokenSaver?.cacheAwareSwitching;
+    if (cacheAware?.enabled === false || !current) {
+      return { selection: next };
+    }
+    if (current.provider === next.provider && current.model === next.model) {
+      return { selection: next };
+    }
+
+    const estimatedInputTokens = countMessagesTokens(messages);
+    const observedInputTokens = lastUsage?.inputTokens ?? 0;
+    const observedCacheReadTokens = lastUsage?.cacheReadTokens ?? 0;
+    const observedCacheHitRatio = observedInputTokens > 0
+      ? Math.min(1, Math.max(0, observedCacheReadTokens / observedInputTokens))
+      : 0;
+    if (observedCacheHitRatio <= 0) {
+      return { selection: next };
+    }
+
+    const estimatedCacheReadTokens = Math.floor(estimatedInputTokens * observedCacheHitRatio);
+    const estimatedUncachedTokens = Math.max(0, estimatedInputTokens - estimatedCacheReadTokens);
+    const cachedCost = calculateCacheReadCost(
+      estimatedCacheReadTokens,
+      current.provider,
+      current.model,
+      config.stats?.modelPricing,
+    ) + calculateInputCost(
+      estimatedUncachedTokens,
+      current.provider,
+      current.model,
+      config.stats?.modelPricing,
+    );
+    const prefillCost = calculateInputCost(
+      estimatedInputTokens,
+      next.provider,
+      next.model,
+      config.stats?.modelPricing,
+    );
+
+    const minSavingsRatio = cacheAware?.minSavingsRatio ?? 0;
+    const requiredSavings = cachedCost * minSavingsRatio;
+    const shouldSwitch = prefillCost + Number.EPSILON < cachedCost - requiredSavings;
+    const from = `${current.provider}/${current.model}`;
+    const to = `${next.provider}/${next.model}`;
+
+    if (shouldSwitch) {
+      return {
+        selection: next,
+        mutation: {
+          action: "switched",
+          from,
+          to,
+          cachedCost,
+          prefillCost,
+          estimatedInputTokens,
+        },
+      };
+    }
+
+    return {
+      selection: current,
+      mutation: {
+        action: "kept_sticky",
+        from,
+        to,
+        cachedCost,
+        prefillCost,
+        estimatedInputTokens,
+      },
+    };
+  }
+
   async function resolveCustom(
     input: RouterDecisionInput,
   ): Promise<Partial<RouterDecision> | undefined> {
@@ -267,6 +355,15 @@ export function createRouterRuntime(
     const scenarioOutcome = decideScenario(inputWithUsage, config.scenarios ?? {} as any);
 
     let scenarioType: RouterScenarioType = scenarioOutcome.scenarioType;
+    const previousStickySelection = (input.metadata?.previousProvider && input.metadata.previousModel)
+      ? {
+        id: `${input.metadata.previousProvider}/${input.metadata.previousModel}`,
+        provider: input.metadata.previousProvider,
+        model: input.metadata.previousModel,
+      }
+      : sticky?.stickyProvider && sticky.stickyModel
+      ? { id: `${sticky.stickyProvider}/${sticky.stickyModel}`, provider: sticky.stickyProvider, model: sticky.stickyModel }
+      : undefined;
     let selection: RouterModelRef | undefined =
       custom?.provider && custom.model
         ? { id: `${custom.provider}/${custom.model}`, provider: custom.provider, model: custom.model }
@@ -279,6 +376,7 @@ export function createRouterRuntime(
         : "scenario";
 
     let tokenSaverTier: string | undefined;
+    let cacheAwareSwitch: RouterMutationsLog["cacheAwareSwitch"];
     const subagentPolicy = config.tokenSaver?.subagent?.policy ?? DEFAULT_SUBAGENT_POLICY;
     if (
       !custom?.provider &&
@@ -337,8 +435,18 @@ export function createRouterRuntime(
           if (tokenSaver.selection) {
             selection = tokenSaver.selection;
             resolvedFrom = "tokenSaver";
+            const cacheAware = maybePreserveStickyForCache(
+              previousStickySelection,
+              selection,
+              input.request.messages,
+              baseUsage,
+            );
+            selection = cacheAware.selection;
+            cacheAwareSwitch = cacheAware.mutation;
           }
-          tokenSaverTier = tokenSaver.tier;
+          tokenSaverTier = cacheAwareSwitch?.action === "kept_sticky"
+            ? (sticky?.tokenSaverTier ?? input.metadata?.previousTier ?? tokenSaver.tier)
+            : tokenSaver.tier;
         }
       }
     }
@@ -383,6 +491,9 @@ export function createRouterRuntime(
     );
 
     let mutations: RouterMutationsLog = {};
+    if (cacheAwareSwitch) {
+      mutations = { ...mutations, cacheAwareSwitch };
+    }
     if (config.autoOrchestrate?.enabled && orchGate) {
       const orchestrated = applyOrchestration({
         config: config.autoOrchestrate,
@@ -463,9 +574,14 @@ export function createRouterRuntime(
         provider: decision.provider,
         model: decision.model,
       };
-      const cappedPassthroughRequest = clampMaxOutputTokensToModelCap(passthroughRequest, deps.modelRuntime);
+      const downgradedPassthrough = downgradeRequestForAttempt(
+        passthroughRequest,
+        { id: `${decision.provider}/${decision.model}`, provider: decision.provider, model: decision.model },
+        deps.modelRuntime,
+      );
+      const cappedPassthroughRequest = clampMaxOutputTokensToModelCap(downgradedPassthrough, deps.modelRuntime);
       let sawErrorEvent = false;
-      for await (const item of streamAttempt(cappedPassthroughRequest, deps.modelRuntime, ctx.abortSignal)) {
+      for await (const item of streamAttempt(cappedPassthroughRequest, deps.modelRuntime, ctx, events)) {
         if (item.kind === "event") {
           if (item.event.type === "error") {
             sawErrorEvent = true;
@@ -509,9 +625,9 @@ export function createRouterRuntime(
     const zeroUsageMax = Math.max(1, config.zeroUsageRetry?.maxAttempts ?? 5);
     const zeroUsageEnabled = config.zeroUsageRetry?.enabled ?? true;
     const transientRetryEnabled = config.transientRetry?.enabled ?? true;
-    const transientRetryMax = Math.max(1, config.transientRetry?.maxAttempts ?? 5);
-    const transientBaseDelayMs = config.transientRetry?.baseDelayMs ?? 1000;
-    const transientMaxDelayMs = config.transientRetry?.maxDelayMs ?? 30000;
+    const transientRetryMax = Math.max(1, config.transientRetry?.maxAttempts ?? LITELLM_DEFAULT_MAX_RETRIES);
+    const transientBaseDelayMs = config.transientRetry?.baseDelayMs ?? LITELLM_INITIAL_RETRY_DELAY_MS;
+    const transientMaxDelayMs = config.transientRetry?.maxDelayMs ?? LITELLM_MAX_RETRY_DELAY_MS;
 
     let lastBuffered: CanonicalModelEvent[] = [];
     let lastError: import("../model/index.js").CanonicalModelError | undefined;
@@ -572,10 +688,16 @@ export function createRouterRuntime(
         const estimated = countMessagesTokens(attemptRequest.messages);
         if (estimated > budget) {
           yield {
-            type: "text_delta",
-            text: `[PilotDeck] Sub-agent budget exceeded (${estimated} est. tokens > ${budget} limit). Terminating.`,
+            type: "error",
+            error: {
+              provider: attempt.provider,
+              protocol: protocolForProvider(deps.modelRuntime, attempt.provider),
+              code: "subagent_budget_exceeded",
+              message: `Sub-agent budget exceeded (${estimated} estimated tokens > ${budget} limit).`,
+              retryable: false,
+              userHint: "Reduce the subagent prompt/context, increase the subagent token budget, or split the task into smaller steps.",
+            },
           } as CanonicalModelEvent;
-          yield { type: "message_end", finishReason: "stop" } as CanonicalModelEvent;
           return;
         }
       }
@@ -591,7 +713,7 @@ export function createRouterRuntime(
         const pending: CanonicalModelEvent[] = [];
         let outcome: AttemptOutcome | undefined;
 
-        for await (const item of streamAttempt(attemptRequest, deps.modelRuntime, ctx.abortSignal)) {
+        for await (const item of streamAttempt(attemptRequest, deps.modelRuntime, ctx, events)) {
           if (item.kind === "outcome") {
             outcome = item.outcome;
             break;
@@ -672,10 +794,7 @@ export function createRouterRuntime(
           ) {
             const delay = outcome.error.retryAfterMs != null
               ? Math.min(outcome.error.retryAfterMs, transientMaxDelayMs)
-              : Math.min(
-                  transientBaseDelayMs * Math.pow(2, transientRetryCount) + Math.random() * 500,
-                  transientMaxDelayMs,
-                );
+              : calculateLiteLLMRetryDelay(transientRetryCount, transientBaseDelayMs, transientMaxDelayMs);
             console.warn(
               `[PilotDeck] transientRetry: ${outcome.error.code} (attempt ${transientRetryCount + 1}/${transientRetryMax}, delay=${Math.round(delay)}ms)`,
             );
@@ -726,13 +845,10 @@ export function createRouterRuntime(
             transientRetryCount < transientRetryMax
           ) {
             const partialText = extractPartialText(outcome.buffered);
-            if (partialText.length > 100) {
+            if (partialText.length > 0) {
               const midDelay = outcome.error.retryAfterMs != null
                 ? Math.min(outcome.error.retryAfterMs, transientMaxDelayMs)
-                : Math.min(
-                    transientBaseDelayMs * Math.pow(2, transientRetryCount) + Math.random() * 500,
-                    transientMaxDelayMs,
-                  );
+                : calculateLiteLLMRetryDelay(transientRetryCount, transientBaseDelayMs, transientMaxDelayMs);
               console.warn(
                 `[PilotDeck] midStreamRetry: ${outcome.error.code} after partial content ` +
                 `(attempt ${transientRetryCount + 1}/${transientRetryMax}, delay=${Math.round(midDelay)}ms)`,
@@ -749,7 +865,7 @@ export function createRouterRuntime(
                 model: attempt.model,
               });
               await abortableDelay(midDelay, ctx.abortSignal);
-              attemptRequest = buildMidStreamContinuationRequest(attemptRequest, partialText);
+              attemptRequest = buildLiteLLMContinuationRequest(attemptRequest, partialText);
               transientRetryCount++;
               continue;
             }
@@ -880,7 +996,7 @@ export function createRouterRuntime(
           }
         }
       }
-      yield { type: "error", error: lastError };
+      yield { type: "error", error: { ...lastError, provider: lastAttempt.provider, model: lastAttempt.model } };
     }
   }
 
@@ -904,6 +1020,8 @@ export function createRouterRuntime(
 
     const current = sessionStore.get(sessionId, false);
     const previousTier = current?.tokenSaverTier;
+    const previousProvider = current?.stickyProvider;
+    const previousModel = current?.stickyModel;
     const orchestrating = current?.orchestrating ?? false;
     if (orchestrating && previousTier) {
       // While orchestrating, preserve the tier sticky so continuation turns
@@ -925,13 +1043,14 @@ export function createRouterRuntime(
         updatedAt: (deps.now?.() ?? new Date()).getTime(),
       });
     }
-    return { previousTier, orchestrating };
+    return { previousTier, previousProvider, previousModel, orchestrating };
   }
 
   return {
     decide,
     execute,
     stream,
+    materializeRequest: applyDecisionToRequest,
     invalidateSticky,
     observeUsage(sessionId, usage) {
       if (!enabled) return;
@@ -1029,7 +1148,8 @@ function downgradeRequestForAttempt(
 async function* streamAttempt(
   request: CanonicalModelRequest,
   modelRuntime: ModelRuntime,
-  abortSignal?: AbortSignal,
+  ctx: RouterExecuteContext,
+  events: RouterEventBus,
 ): AsyncGenerator<
   | { kind: "event"; event: CanonicalModelEvent }
   | { kind: "outcome"; outcome: AttemptOutcome }
@@ -1037,9 +1157,25 @@ async function* streamAttempt(
   const buffered: CanonicalModelEvent[] = [];
   const state = createZeroUsageState();
   let providerError: import("../model/index.js").CanonicalModelError | undefined;
+  const abortSignal = ctx.abortSignal;
 
   try {
-    for await (const event of modelRuntime.stream(request, { signal: abortSignal })) {
+    for await (const event of modelRuntime.stream(request, {
+      signal: abortSignal,
+      onRetryProgress(progress) {
+        events.emit({
+          type: "pilotdeck_router_retry_progress",
+          sessionId: ctx.sessionId,
+          turnId: ctx.turnId,
+          attempt: progress.attempt,
+          maxAttempts: progress.maxAttempts,
+          delayMs: progress.delayMs,
+          reason: progress.reason,
+          provider: progress.provider,
+          model: progress.model,
+        });
+      },
+    })) {
       if (abortSignal?.aborted) {
         throwAbortError(abortSignal.reason);
       }
@@ -1171,6 +1307,12 @@ function classifyRetryReason(errorCode: string): "rate_limit" | "server_error" |
   return "server_error";
 }
 
+function calculateLiteLLMRetryDelay(attempt: number, baseDelayMs: number, maxDelayMs: number): number {
+  const deterministicDelay = baseDelayMs * (attempt + 1);
+  const jitterDelay = deterministicDelay * LITELLM_RETRY_JITTER * Math.random();
+  return Math.min(deterministicDelay + jitterDelay, maxDelayMs);
+}
+
 function createUnsupportedMediaError(
   attempt: RouterModelRef,
   required: readonly InputModality[],
@@ -1198,43 +1340,4 @@ function extractPartialText(buffered: CanonicalModelEvent[]): string {
     }
   }
   return text;
-}
-
-const MID_STREAM_CONTINUATION_MARKER = "Continue from where you left off.";
-
-function buildMidStreamContinuationRequest(
-  original: CanonicalModelRequest,
-  partialText: string,
-): CanonicalModelRequest {
-  const baseMessages = stripPriorContinuation(original.messages);
-  return {
-    ...original,
-    messages: [
-      ...baseMessages,
-      {
-        role: "assistant" as const,
-        content: [{ type: "text" as const, text: partialText }],
-      },
-      {
-        role: "user" as const,
-        content: [{ type: "text" as const, text: MID_STREAM_CONTINUATION_MARKER }],
-      },
-    ],
-  };
-}
-
-function stripPriorContinuation(messages: CanonicalModelRequest["messages"]): CanonicalModelRequest["messages"] {
-  if (messages.length < 2) return messages;
-  const last = messages[messages.length - 1];
-  const secondLast = messages[messages.length - 2];
-  if (
-    last.role === "user" &&
-    secondLast.role === "assistant" &&
-    last.content.length === 1 &&
-    last.content[0].type === "text" &&
-    (last.content[0] as { type: "text"; text: string }).text === MID_STREAM_CONTINUATION_MARKER
-  ) {
-    return messages.slice(0, -2);
-  }
-  return messages;
 }

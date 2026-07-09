@@ -89,6 +89,21 @@ export class JsonlTranscriptWriter implements AgentTranscriptWriter {
     });
   }
 
+  recordAgentStatusMessage(
+    sessionId: string,
+    turnId: string,
+    status: { event: string; kind: "status" | "error"; text: string; detail?: Record<string, unknown> },
+  ): Promise<void> {
+    return this.recordEntry({
+      type: "agent_status_message",
+      ...this.baseEntry(sessionId, turnId),
+      event: status.event,
+      kind: status.kind,
+      text: status.text,
+      ...(status.detail && Object.keys(status.detail).length > 0 ? { detail: status.detail } : {}),
+    });
+  }
+
   recordTurnResult(sessionId: string, turnId: string, result: AgentTurnResult): Promise<void> {
     return this.recordEntry({
       type: "turn_result",

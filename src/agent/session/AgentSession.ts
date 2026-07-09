@@ -79,10 +79,12 @@ export class AgentSession {
       maxTurns: submitOptions.maxTurns,
       runMode: submitOptions.runMode,
       permissionMode: submitOptions.permissionMode,
+      allowedReadFiles: submitOptions.allowedReadFiles,
       basePermissionMode: submitOptions.basePermissionMode,
       allowPlanModeTools: submitOptions.allowPlanModeTools,
       canPrompt: submitOptions.canPrompt,
       permissionRules: submitOptions.permissionRules,
+      syntheticMessages: submitOptions.syntheticMessages,
       abortSignal: this.state.abortController.signal,
     });
 

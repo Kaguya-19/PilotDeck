@@ -102,6 +102,7 @@ export async function readWebSessionMessages(
   }
 
   attachSubagentIds(entries, allMessages);
+  injectAgentStatusMessages(entries, allMessages, input.sessionKey, input.projectKey);
   injectErrorTurnMessages(entries, allMessages, input.sessionKey, input.projectKey);
   if (incompleteTurnIds.length > 0) {
     allMessages.push(createIncompleteTurnStatusMessage(input, incompleteTurnIds, options));
@@ -773,7 +774,8 @@ function attachSubagentIds(
 /**
  * Scan transcript entries for failed turns (`turn_result` with `type === "error"`)
  * and inject corresponding `WebMessage { kind: 'error' }` into the message list
- * so error banners survive history reload.
+ * so error banners survive history reload when no visible semantic status
+ * already represents the same turn.
  */
 function injectErrorTurnMessages(
   entries: AgentTranscriptEntry[],
@@ -781,9 +783,19 @@ function injectErrorTurnMessages(
   sessionKey: string,
   projectKey?: string,
 ): void {
+  const visibleFailureStatusTurnIds = new Set(
+    entries
+      .filter((entry) =>
+        entry.type === "agent_status_message" &&
+        entry.kind === "error" &&
+        entry.detail?.visible !== false
+      )
+      .map((entry) => entry.turnId),
+  );
   const errorMessages: WebMessage[] = [];
   for (const entry of entries) {
     if (entry.type !== "turn_result" || entry.result.type !== "error") continue;
+    if (visibleFailureStatusTurnIds.has(entry.turnId)) continue;
     const errorTexts = entry.result.errors?.map((e) => e.message).filter(Boolean) ?? [];
     const text = errorTexts.length > 0
       ? errorTexts.join("\n")
@@ -813,6 +825,43 @@ function injectErrorTurnMessages(
       if (i === 0) insertAt = 0;
     }
     allMessages.splice(insertAt, 0, errMsg);
+  }
+}
+
+function injectAgentStatusMessages(
+  entries: AgentTranscriptEntry[],
+  allMessages: WebMessage[],
+  sessionKey: string,
+  projectKey?: string,
+): void {
+  const statusMessages: WebMessage[] = [];
+  for (const entry of entries) {
+    if (entry.type !== "agent_status_message") continue;
+    statusMessages.push({
+      id: entry.entryId ?? `${sessionKey}-agent-status-${entry.turnId}-${entry.sequence}`,
+      sessionKey,
+      projectKey,
+      createdAt: entry.createdAt,
+      provider: "pilotdeck",
+      role: entry.kind === "error" ? "error" : "system",
+      kind: entry.kind,
+      text: entry.text,
+      payload: { event: entry.event, ...(entry.detail ? { detail: entry.detail } : {}) },
+      source: "history",
+    });
+  }
+  if (statusMessages.length === 0) return;
+
+  for (const statusMsg of statusMessages) {
+    let insertAt = allMessages.length;
+    for (let i = allMessages.length - 1; i >= 0; i--) {
+      if (allMessages[i].createdAt <= statusMsg.createdAt) {
+        insertAt = i + 1;
+        break;
+      }
+      if (i === 0) insertAt = 0;
+    }
+    allMessages.splice(insertAt, 0, statusMsg);
   }
 }
 

@@ -7,6 +7,7 @@ import type {
   CanonicalToolSchema,
   ModelDefinition,
 } from "../../protocol/canonical.js";
+import { resolveThinkingPlan, throwIfUnsupportedThinkingPlan } from "../../thinking/registry.js";
 
 export type AnthropicRequestBody = {
   model: string;
@@ -17,8 +18,11 @@ export type AnthropicRequestBody = {
   tool_choice?: Record<string, unknown>;
   temperature?: number;
   thinking?: {
-    type: "enabled";
+    type: "enabled" | "adaptive";
     budget_tokens?: number;
+  };
+  output_config?: {
+    effort?: string;
   };
   stream?: boolean;
   metadata?: Record<string, unknown>;
@@ -45,6 +49,8 @@ export function buildAnthropicRequest(
   request: CanonicalModelRequest,
   model: ModelDefinition,
 ): AnthropicRequestBody {
+  const thinkingPlan = resolveThinkingPlan(request.thinking, { id: "anthropic", protocol: "anthropic", url: "", apiKey: "", headers: {}, models: {} }, model);
+  throwIfUnsupportedThinkingPlan(thinkingPlan, request);
   // A3: lower outputSchema → forced hidden tool. This goes BEFORE the
   // user-supplied tools so the dispatch order is stable, but Anthropic
   // does not actually care about ordering. We force `tool_choice` to point
@@ -89,10 +95,17 @@ export function buildAnthropicRequest(
     tools: tools.length > 0 ? tools : undefined,
     tool_choice: toolChoice,
     temperature: request.temperature,
-    thinking:
-      request.thinking?.enabled && model.capabilities.supportsThinking
-        ? { type: "enabled", budget_tokens: request.thinking.budgetTokens }
-        : undefined,
+    thinking: thinkingPlan.enabled && thinkingPlan.thinkingType
+      ? {
+          type: thinkingPlan.thinkingType === "adaptive" ? "adaptive" : "enabled",
+          ...(thinkingPlan.thinkingType === "enabled" && thinkingPlan.budgetTokens !== undefined
+            ? { budget_tokens: thinkingPlan.budgetTokens }
+            : {}),
+        }
+      : undefined,
+    output_config: thinkingPlan.useAnthropicOutputEffort && thinkingPlan.effort
+      ? { effort: thinkingPlan.effort }
+      : undefined,
     stream: request.stream,
     metadata: toAnthropicMetadata(request.metadata),
   };

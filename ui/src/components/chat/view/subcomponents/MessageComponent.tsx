@@ -3,16 +3,22 @@ import { useTranslation } from 'react-i18next';
 import { FileText, Search, Settings } from 'lucide-react';
 import SessionProviderLogo from '../../../llm-logo-provider/SessionProviderLogo';
 import type {
+  ChatAttachment,
   ChatMessage,
   PilotDeckPermissionSuggestion,
-  PermissionGrantResult,
   Provider,
+  SessionPermissionGrantResult,
 } from '../../types/types';
+import {
+  DOCUMENT_SELECTION_ATTACHMENT_KIND,
+  type DocumentSelectionReference,
+} from '../../../../types/documentSelection';
 import { formatUsageLimitText } from '../../utils/chatFormatting';
 import { getPilotDeckPermissionSuggestion } from '../../utils/chatPermissions';
 import type { Project } from '../../../../types/app';
 import { ToolRenderer, shouldHideToolResult } from '../../tools';
 import { CollapsibleDisplay } from '../../tools/components';
+import DocumentReferenceChip from '../../../chat-v2/DocumentReferenceChip';
 import { Markdown } from './Markdown';
 import MessageCopyControl from './MessageCopyControl';
 import ImageLightbox, { type LightboxImage } from './ImageLightbox';
@@ -29,7 +35,7 @@ type MessageComponentProps = {
   createDiff: (oldStr: string, newStr: string) => DiffLine[];
   onFileOpen?: (filePath: string, diffInfo?: unknown) => void;
   onShowSettings?: () => void;
-  onGrantSessionToolPermission?: (suggestion: PilotDeckPermissionSuggestion) => PermissionGrantResult | null | undefined;
+  onGrantSessionToolPermission?: (suggestion: PilotDeckPermissionSuggestion) => SessionPermissionGrantResult | null | undefined;
   autoExpandTools?: boolean;
   showRawParameters?: boolean;
   showThinking?: boolean;
@@ -96,6 +102,25 @@ function getAttachmentAccent(name?: string, mimeType?: string): string {
   return 'bg-neutral-500 text-white';
 }
 
+function attachmentToDocumentReference(attachment: ChatAttachment): DocumentSelectionReference | null {
+  if (attachment.kind !== DOCUMENT_SELECTION_ATTACHMENT_KIND || !attachment.selectedText) return null;
+  const filePath = attachment.filePath || attachment.path || '';
+  if (!filePath) return null;
+  return {
+    kind: DOCUMENT_SELECTION_ATTACHMENT_KIND,
+    id: `${filePath}-${attachment.createdAt || ''}-${attachment.occurrenceIndex ?? ''}`,
+    fileName: attachment.fileName || attachment.name,
+    filePath,
+    source: attachment.source === 'pdf' ? 'pdf' : 'office-pdf',
+    pageNumbers: Array.isArray(attachment.pageNumbers) ? attachment.pageNumbers : [],
+    selectedText: attachment.selectedText,
+    surroundingText: attachment.surroundingText,
+    occurrenceIndex: attachment.occurrenceIndex,
+    createdAt: attachment.createdAt || new Date(0).toISOString(),
+    truncated: attachment.truncated,
+  };
+}
+
 const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, onShowSettings, onGrantSessionToolPermission, autoExpandTools, showRawParameters, showThinking, selectedProject, provider, hideHeader = false }: MessageComponentProps) => {
   const { t } = useTranslation('chat');
   const isGrouped = prevMessage && prevMessage.type === message.type &&
@@ -114,6 +139,10 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, o
   const messageAttachments = Array.isArray(message.attachments)
     ? message.attachments.filter((attachment) => attachment && typeof attachment.name === 'string')
     : [];
+  const documentReferenceAttachments = messageAttachments
+    .map(attachmentToDocumentReference)
+    .filter((reference): reference is DocumentSelectionReference => Boolean(reference));
+  const fileAttachments = messageAttachments.filter((attachment) => attachment.kind !== DOCUMENT_SELECTION_ATTACHMENT_KIND);
   const toolResultImages: LightboxImage[] = useMemo(
     () => {
       const list = (message.toolResult?.images ?? []) as Array<{ data?: unknown; name?: unknown; mimeType?: unknown }>;
@@ -191,9 +220,21 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, o
         /* User message bubble on the right */
         <div className="flex w-full items-end space-x-0 sm:w-auto sm:max-w-[85%] sm:space-x-3 md:max-w-md lg:max-w-lg xl:max-w-xl">
           <div className="group flex-1 rounded-2xl rounded-br-md bg-blue-600 px-3 py-2 text-white shadow-sm sm:flex-initial sm:px-4">
-            {messageAttachments.length > 0 && (
+            {documentReferenceAttachments.length > 0 && (
+              <div className="mb-2 flex flex-wrap gap-2">
+                {documentReferenceAttachments.map((reference) => (
+                  <DocumentReferenceChip
+                    key={reference.id}
+                    reference={reference}
+                    summaryLength={100}
+                    className="bg-white/90 text-neutral-700"
+                  />
+                ))}
+              </div>
+            )}
+            {fileAttachments.length > 0 && (
               <div className="mb-2 grid grid-cols-1 gap-2">
-                {messageAttachments.map((attachment, idx) => (
+                {fileAttachments.map((attachment, idx) => (
                   <div
                     key={`${attachment.name || 'attachment'}-${idx}`}
                     className="flex min-w-0 items-center gap-3 rounded-2xl bg-white/90 p-2.5 pr-3 text-neutral-900"
@@ -514,7 +555,14 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, o
                                       onClick={() => {
                                         if (!onGrantSessionToolPermission) return;
                                         const result = onGrantSessionToolPermission(permissionSuggestion);
-                                        if (result?.success) {
+                                        if (result?.pending && result.completion) {
+                                          setPermissionGrantState('idle');
+                                          result.completion.then((completion) => {
+                                            setPermissionGrantState(completion.success ? 'granted' : 'error');
+                                          }).catch(() => {
+                                            setPermissionGrantState('error');
+                                          });
+                                        } else if (result?.success) {
                                           setPermissionGrantState('granted');
                                         } else {
                                           setPermissionGrantState('error');

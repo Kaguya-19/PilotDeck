@@ -78,6 +78,7 @@
     "multer": "^2.0.1",
     "node-fetch": "^2.7.0",
     "node-pty": "^1.1.0-beta34",
+    "pdfjs-dist": "^6.1.200",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-dropzone": "^15.0.0",

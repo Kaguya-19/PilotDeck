@@ -198,7 +198,7 @@ export class BlueBubblesChannel implements ChannelAdapter {
         }
         if (event.type === "permission_request") {
           const questionText = this.permissions.capture(chatGuid, sessionKey, event);
-          await this.sendReply(chatGuid, questionText);
+          if (questionText) await this.sendReply(chatGuid, questionText);
           continue;
         }
         const fragment = renderBlueBubblesEvent(event);

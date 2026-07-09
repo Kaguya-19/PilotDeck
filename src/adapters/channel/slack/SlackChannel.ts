@@ -184,7 +184,7 @@ export class SlackChannel implements ChannelAdapter {
         }
         if (event.type === "permission_request") {
           const questionText = this.permissions.capture(chatId, sessionKey, event);
-          await this.sendReply(ctx, questionText);
+          if (questionText) await this.sendReply(ctx, questionText);
           continue;
         }
         const fragment = renderSlackEvent(event);

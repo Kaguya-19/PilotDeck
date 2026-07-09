@@ -85,7 +85,7 @@ export async function handleWebApiRequest(
       }
       if (subPath === "/files/write" && request.method === "POST") {
         const body = await readJsonBody<{ path?: string; content?: string; encoding?: "utf8" | "base64" }>(request);
-        if (!body?.path || typeof body.content !== "string") {
+        if (typeof body?.path !== "string" || !body.path || typeof body.content !== "string" || (body.encoding !== undefined && body.encoding !== "utf8" && body.encoding !== "base64")) {
           sendJson(response, 400, {
             error: { code: "invalid_body", message: "Expected { path, content[, encoding] }" },
           });

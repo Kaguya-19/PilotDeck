@@ -193,7 +193,7 @@ export class MatrixChannel implements ChannelAdapter {
         }
         if (event.type === "permission_request") {
           const questionText = this.permissions.capture(roomId, sessionKey, event);
-          await this.sendReply(roomId, questionText);
+          if (questionText) await this.sendReply(roomId, questionText);
           continue;
         }
         const fragment = renderMatrixEvent(event);

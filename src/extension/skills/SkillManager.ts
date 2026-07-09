@@ -359,15 +359,21 @@ export class SkillManager {
     const resolvedRoot = resolve(expandHome(input.parentPath.trim()));
     let entries: import("node:fs").Dirent[];
     try {
+      const rootStat = await fs.stat(resolvedRoot);
+      if (!rootStat.isDirectory()) {
+        throw new SkillManagerError("not_directory", `Path is not a directory: ${resolvedRoot}`);
+      }
       entries = await fs.readdir(resolvedRoot, { withFileTypes: true });
     } catch (e) {
+      if (e instanceof SkillManagerError) throw e;
       if ((e as NodeJS.ErrnoException).code === "ENOENT") {
         throw new SkillManagerError("not_found", `Directory not found: ${resolvedRoot}`);
       }
       throw e;
     }
 
-    const folders: SkillScanFolder[] = [];
+    const currentFolder = await buildSkillScanFolder(resolvedRoot, basename(resolvedRoot));
+    const childFolders: SkillScanFolder[] = [];
     for (const entry of entries) {
       if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
       let isDir = entry.isDirectory();
@@ -382,52 +388,17 @@ export class SkillManager {
       if (!isDir) continue;
 
       const subDir = join(resolvedRoot, entry.name);
-      let hasSkillMd = false;
-      let meta: SkillSummary | null = null;
-      try {
-        await fs.access(join(subDir, "SKILL.md"));
-        hasSkillMd = true;
-        meta = await readSkillMeta(subDir, "user");
-      } catch {
-        /* no SKILL.md */
-      }
-
-      let fileCount = 0;
-      let totalSize = 0;
-      if (hasSkillMd) {
-        try {
-          const files = await fs.readdir(subDir, { recursive: true, withFileTypes: false });
-          for (const f of files) {
-            try {
-              const st = await fs.stat(join(subDir, String(f)));
-              if (st.isFile()) {
-                fileCount++;
-                totalSize += st.size;
-              }
-            } catch {
-              /* skip */
-            }
-          }
-        } catch {
-          /* skip */
-        }
-      }
-
-      folders.push({
-        folderName: entry.name,
-        hasSkillMd,
-        name: meta?.name ?? null,
-        description: meta?.description ?? null,
-        sourcePath: subDir,
-        fileCount,
-        totalSize,
-      });
+      childFolders.push(await buildSkillScanFolder(subDir, entry.name));
     }
 
-    folders.sort((a, b) => {
+    childFolders.sort((a, b) => {
       if (a.hasSkillMd !== b.hasSkillMd) return a.hasSkillMd ? -1 : 1;
       return a.folderName.localeCompare(b.folderName);
     });
+
+    const folders = currentFolder.hasSkillMd
+      ? [currentFolder, ...childFolders]
+      : childFolders;
 
     return { parentPath: resolvedRoot, folders };
   }
@@ -611,6 +582,49 @@ async function readSkillMeta(skillDir: string, scope: SkillScope): Promise<Skill
     skillDir,
     scope,
     mtime,
+  };
+}
+
+async function buildSkillScanFolder(skillDir: string, folderName: string): Promise<SkillScanFolder> {
+  let hasSkillMd = false;
+  let meta: SkillSummary | null = null;
+  try {
+    await fs.access(join(skillDir, "SKILL.md"));
+    hasSkillMd = true;
+    meta = await readSkillMeta(skillDir, "user");
+  } catch {
+    /* no SKILL.md */
+  }
+
+  let fileCount = 0;
+  let totalSize = 0;
+  if (hasSkillMd) {
+    try {
+      const files = await fs.readdir(skillDir, { recursive: true, withFileTypes: false });
+      for (const file of files) {
+        try {
+          const stats = await fs.stat(join(skillDir, String(file)));
+          if (stats.isFile()) {
+            fileCount++;
+            totalSize += stats.size;
+          }
+        } catch {
+          /* skip */
+        }
+      }
+    } catch {
+      /* skip */
+    }
+  }
+
+  return {
+    folderName,
+    hasSkillMd,
+    name: meta?.name ?? null,
+    description: meta?.description ?? null,
+    sourcePath: skillDir,
+    fileCount,
+    totalSize,
   };
 }
 

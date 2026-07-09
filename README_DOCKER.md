@@ -1,5 +1,7 @@
 # PilotDeck Docker
 
+简体中文版本：[README_DOCKER.zh.md](./README_DOCKER.zh.md)
+
 PilotDeck runs as two cooperating Node.js processes in the container:
 
 - **Gateway**: agent runtime on `PILOTDECK_GATEWAY_PORT` (default `18789`)
@@ -13,6 +15,25 @@ The Docker Compose setup persists the full `PILOT_HOME` directory, including gen
 
 - [Docker](https://docs.docker.com/get-docker/) v20+
 - [Docker Compose](https://docs.docker.com/compose/) v2+
+
+Make sure the Docker daemon is running before starting PilotDeck. On macOS/Windows, start Docker Desktop first and wait until the engine is ready:
+
+```bash
+docker info
+```
+
+The first build pulls base images such as `node:22-bookworm` and `node:22-bookworm-slim` from Docker Hub. If pulling images is slow or fails with `context deadline exceeded`, configure a Docker registry mirror or Docker Desktop proxy, then retry `docker compose up -d --build`. On Docker Desktop, registry mirrors can be configured in **Settings → Docker Engine**. On Linux, add mirrors to `/etc/docker/daemon.json`, then restart Docker.
+
+As a one-off workaround, you can pre-pull the required Node images from a reachable mirror and tag them with the names used by the Dockerfile:
+
+```bash
+docker pull mirror.gcr.io/library/node:22-bookworm
+docker pull mirror.gcr.io/library/node:22-bookworm-slim
+docker tag mirror.gcr.io/library/node:22-bookworm node:22-bookworm
+docker tag mirror.gcr.io/library/node:22-bookworm-slim node:22-bookworm-slim
+```
+
+The Docker build also downloads Debian and npm packages inside the image, so slow package registries may still require a stable network proxy.
 
 ### Option A: Configure via environment variables
 

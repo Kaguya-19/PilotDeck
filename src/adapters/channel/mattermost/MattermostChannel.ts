@@ -227,7 +227,7 @@ export class MattermostChannel implements ChannelAdapter {
         if (event.type === "permission_request") {
           const chatId = ctx.rootId ? `${ctx.channelId}:${ctx.rootId}` : ctx.channelId;
           const questionText = this.permissions.capture(chatId, sessionKey, event);
-          await this.sendReply(ctx, questionText);
+          if (questionText) await this.sendReply(ctx, questionText);
           continue;
         }
         const fragment = renderMattermostEvent(event);

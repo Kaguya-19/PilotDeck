@@ -9,7 +9,10 @@ import { TurnInputProcessor } from "./TurnInputProcessor.js";
 import type { CanonicalMessage, CanonicalUsage } from "../../model/index.js";
 import type { LifecycleRuntime } from "../../lifecycle/index.js";
 import type { PermissionMode, PermissionRuleSet } from "../../permission/index.js";
-import type { AgentTranscriptWriterState } from "../../session/transcript/TranscriptWriter.js";
+import type { AgentStatusMessageInput, AgentTranscriptWriterState } from "../../session/transcript/TranscriptWriter.js";
+import type { SessionMetadataStore } from "../../session/metadata/SessionMetadataStore.js";
+import type { SessionTitleGenerator } from "../../session/title/SessionTitleGenerator.js";
+import { createVisibleErrorStatusDetail } from "../../status/agentStatus.js";
 
 export type TurnRunnerOptions = {
   sessionId: string;
@@ -19,6 +22,7 @@ export type TurnRunnerOptions = {
   maxTurns?: number;
   runMode?: AgentRunMode;
   permissionMode?: PermissionMode;
+  allowedReadFiles?: string[];
   /** The user's actual permission preference before plan-mode override. */
   basePermissionMode?: PermissionMode;
   /** Allow model-visible plan mode tools for this turn. */
@@ -26,6 +30,8 @@ export type TurnRunnerOptions = {
   canPrompt?: boolean;
   permissionRules?: Partial<PermissionRuleSet>;
   abortSignal?: AbortSignal;
+  /** Synthetic messages appended after user input; stored with metadata.synthetic flag. */
+  syntheticMessages?: CanonicalMessage[];
 };
 
 export type TurnRunnerResult = {
@@ -43,6 +49,19 @@ export type TurnRunnerRuntimeReloadSnapshot = {
   transcriptWriterState?: AgentTranscriptWriterState;
 };
 
+export type TurnRunnerDependencies = {
+  metadataStore?: SessionMetadataStore;
+  sessionTitleGenerator?: SessionTitleGenerator;
+  autoGenerateSessionTitle?: boolean;
+};
+
+type PendingSessionTitle = {
+  controller: AbortController;
+  cleanup: () => void;
+  completed: boolean;
+  title: string | null;
+};
+
 export class TurnRunner {
   constructor(
     private readonly loop: AgentLoop,
@@ -54,23 +73,27 @@ export class TurnRunner {
       cwd: process.cwd(),
       transcriptPath: "",
     },
+    private readonly turnDependencies: TurnRunnerDependencies = {},
   ) {}
 
   async *run(options: TurnRunnerOptions): AsyncGenerator<AgentEvent, TurnRunnerResult, unknown> {
     yield { type: "turn_started", sessionId: options.sessionId, turnId: options.turnId };
     const accepted = this.inputProcessor.accept(options.input);
-    const messages = [...options.messages, ...accepted.messages];
+    const allAcceptedMessages = [...accepted.messages, ...(options.syntheticMessages ?? [])];
+    const messages = [...options.messages, ...allAcceptedMessages];
 
     try {
       await this.transcript.recordAcceptedInput(
         options.sessionId,
         options.turnId,
-        accepted.messages,
+        allAcceptedMessages,
         acceptedInputMetadata(options),
       );
     } catch (error) {
       const agentTranscriptError = agentError("agent_transcript_error", "Failed to record accepted input.", error);
       const result = this.createErrorResult(options, agentTranscriptError);
+      const status = await this.recordTurnFailureStatus(options, agentTranscriptError);
+      yield this.toAgentStatusEvent(options, status);
       yield { type: "turn_failed", sessionId: options.sessionId, turnId: options.turnId, error: agentTranscriptError };
       yield { type: "turn_completed", sessionId: options.sessionId, turnId: options.turnId, result };
       return { result, messages: options.messages };
@@ -92,46 +115,86 @@ export class TurnRunner {
     });
     yield { type: "user_prompt_submitted", sessionId: options.sessionId, turnId: options.turnId, prompt };
     if (userPromptHooks?.effects.some((effect) => effect.type === "block")) {
+      const error = agentError("agent_unsupported_feature", "UserPromptSubmit hook blocked model execution.");
       const result = this.createErrorResult(
         options,
-        agentError("agent_unsupported_feature", "UserPromptSubmit hook blocked model execution."),
+        error,
       );
+      await this.recordErrorResult(options, result);
+      const status = await this.recordTurnFailureStatus(options, error);
+      yield this.toAgentStatusEvent(options, status);
+      yield { type: "turn_failed", sessionId: options.sessionId, turnId: options.turnId, error };
       yield { type: "turn_completed", sessionId: options.sessionId, turnId: options.turnId, result };
       return { result, messages };
     }
     messages.push(...(userPromptHooks?.messages ?? []));
 
+    const sessionTitle = this.maybeGenerateSessionTitle(options, accepted.messages);
+
     if (!accepted.shouldCallModel) {
+      const error = agentError("agent_unsupported_feature", "Input was accepted but model execution was not requested.");
       const result = this.createErrorResult(
         options,
-        agentError("agent_unsupported_feature", "Input was accepted but model execution was not requested."),
+        error,
       );
+      await this.recordErrorResult(options, result);
+      const status = await this.recordTurnFailureStatus(options, error);
+      yield this.toAgentStatusEvent(options, status);
+      await this.flushReadySessionTitle(options, sessionTitle);
+      yield { type: "turn_failed", sessionId: options.sessionId, turnId: options.turnId, error };
       yield { type: "turn_completed", sessionId: options.sessionId, turnId: options.turnId, result };
       return { result, messages };
     }
 
     try {
-      const runResult = yield* this.loop.run({
+      let hasRecordedVisibleFailureStatus = false;
+      const generator = this.loop.run({
         sessionId: options.sessionId,
         turnId: options.turnId,
         messages,
         maxTurns: options.maxTurns,
         runMode: options.runMode,
         permissionMode: options.permissionMode,
+        allowedReadFiles: options.allowedReadFiles,
         basePermissionMode: options.basePermissionMode,
         allowPlanModeTools: options.allowPlanModeTools,
         canPrompt: options.canPrompt,
         permissionRules: options.permissionRules,
         abortSignal: options.abortSignal,
         onDurableMessage: (msg) => this.transcript.recordDurableMessage(options.sessionId, options.turnId, msg),
+        onAgentStatusMessage: async (status) => {
+          if (isVisibleFailureStatus(status)) {
+            hasRecordedVisibleFailureStatus = true;
+          }
+          await this.transcript.recordAgentStatusMessage?.(options.sessionId, options.turnId, status);
+        },
       });
+      let runResult: TurnRunnerResult | undefined;
+      while (true) {
+        const next = await generator.next();
+        if (next.done) {
+          runResult = next.value;
+          break;
+        }
+        const event = next.value;
+        if (event.type === "turn_failed" && !hasRecordedVisibleFailureStatus) {
+          const status = await this.recordTurnFailureStatus(options, event.error);
+          hasRecordedVisibleFailureStatus = true;
+          yield this.toAgentStatusEvent(options, status);
+        }
+        yield event;
+      }
 
       await this.transcript.recordTurnResult(options.sessionId, options.turnId, runResult.result);
+      await this.flushReadySessionTitle(options, sessionTitle);
       return runResult;
     } catch (error) {
       const normalized = normalizeAgentError(error);
       const result = this.createErrorResult(options, normalized);
       await Promise.resolve(this.transcript.recordTurnResult(options.sessionId, options.turnId, result)).catch(() => {});
+      const status = await this.recordTurnFailureStatus(options, normalized);
+      yield this.toAgentStatusEvent(options, status);
+      await this.flushReadySessionTitle(options, sessionTitle);
       yield { type: "turn_failed", sessionId: options.sessionId, turnId: options.turnId, error: normalized };
       yield { type: "turn_completed", sessionId: options.sessionId, turnId: options.turnId, result };
       return { result, messages };
@@ -164,6 +227,120 @@ export class TurnRunner {
       errors: [error],
     };
   }
+
+  private async recordErrorResult(_options: TurnRunnerOptions, result: AgentTurnResult): Promise<void> {
+    await Promise.resolve(this.transcript.recordTurnResult(result.sessionId, result.turnId, result)).catch(() => {});
+  }
+
+  private async recordTurnFailureStatus(
+    options: TurnRunnerOptions,
+    error: ReturnType<typeof agentError>,
+  ): Promise<AgentStatusMessageInput> {
+    const status = this.createTurnFailureStatus(error);
+    await Promise.resolve(this.transcript.recordAgentStatusMessage?.(options.sessionId, options.turnId, status)).catch(() => {});
+    return status;
+  }
+
+  private createTurnFailureStatus(error: ReturnType<typeof agentError>): AgentStatusMessageInput {
+    return {
+      event: "turn_failed",
+      kind: "error",
+      text: error.message,
+      detail: createVisibleErrorStatusDetail({
+        message: error.message,
+        code: error.code,
+        userHint: error.userHint ?? "Retry the turn; if it repeats, check the gateway logs or adjust the request.",
+        scope: "turn",
+        source: "agent",
+      }),
+    };
+  }
+
+  private toAgentStatusEvent(options: TurnRunnerOptions, status: AgentStatusMessageInput): AgentEvent {
+    return {
+      type: "agent_status",
+      sessionId: options.sessionId,
+      turnId: options.turnId,
+      event: status.event,
+      detail: status.detail,
+    };
+  }
+
+  private maybeGenerateSessionTitle(
+    options: TurnRunnerOptions,
+    acceptedMessages: CanonicalMessage[],
+  ): PendingSessionTitle | undefined {
+    if (this.turnDependencies.autoGenerateSessionTitle !== true) {
+      return undefined;
+    }
+    const metadataStore = this.turnDependencies.metadataStore;
+    const generateTitle = this.turnDependencies.sessionTitleGenerator;
+    if (!metadataStore || !generateTitle || options.messages.length > 0) {
+      return undefined;
+    }
+    const snapshot = metadataStore.getSnapshot();
+    if (snapshot.title || snapshot.aiTitle) {
+      return undefined;
+    }
+    const text = firstHumanText(acceptedMessages);
+    if (!text) {
+      return undefined;
+    }
+
+    const controller = new AbortController();
+    const cleanup = linkAbortSignal(options.abortSignal, controller);
+    const pending: PendingSessionTitle = {
+      controller,
+      cleanup,
+      completed: false,
+      title: null,
+    };
+    void generateTitle({
+      text,
+      sessionId: options.sessionId,
+      turnId: options.turnId,
+      signal: controller.signal,
+    })
+      .then((title) => {
+        pending.title = title;
+      })
+      .catch(() => {})
+      .finally(() => {
+        pending.completed = true;
+        cleanup();
+      });
+    return pending;
+  }
+
+  private async flushReadySessionTitle(
+    options: TurnRunnerOptions,
+    pending: PendingSessionTitle | undefined,
+  ): Promise<void> {
+    if (!pending) {
+      return;
+    }
+    if (!pending.completed) {
+      pending.controller.abort("turn_completed");
+      pending.cleanup();
+      return;
+    }
+    if (!pending.title) {
+      return;
+    }
+    const metadataStore = this.turnDependencies.metadataStore;
+    if (!metadataStore) {
+      return;
+    }
+    const latest = metadataStore.getSnapshot();
+    if (latest.title || latest.aiTitle) {
+      return;
+    }
+    await metadataStore.saveAiTitle(pending.title, options.turnId);
+  }
+}
+
+function isVisibleFailureStatus(status: AgentStatusMessageInput): boolean {
+  return status.kind === "error" && status.event !== "turn_failed";
 }
 
 function acceptedInputMetadata(options: TurnRunnerOptions): Record<string, unknown> | undefined {
@@ -195,4 +372,37 @@ function inputToPromptText(input: AgentInput): string {
     .filter((block) => block.type === "text")
     .map((block) => block.text)
     .join("\n");
+}
+
+function firstHumanText(messages: CanonicalMessage[]): string | null {
+  for (const message of messages) {
+    if (message.role !== "user" || message.metadata?.synthetic) {
+      continue;
+    }
+    const text = message.content
+      .filter((block) => block.type === "text")
+      .map((block) => (block.type === "text" ? block.text : ""))
+      .join("\n")
+      .trim();
+    if (text) {
+      return text;
+    }
+  }
+  return null;
+}
+
+function linkAbortSignal(
+  source: AbortSignal | undefined,
+  controller: AbortController,
+): () => void {
+  if (!source) {
+    return () => {};
+  }
+  if (source.aborted) {
+    controller.abort(source.reason);
+    return () => {};
+  }
+  const onAbort = () => controller.abort(source.reason);
+  source.addEventListener("abort", onAbort, { once: true });
+  return () => source.removeEventListener("abort", onAbort);
 }

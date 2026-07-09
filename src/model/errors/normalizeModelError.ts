@@ -18,6 +18,7 @@ import {
   type CanonicalModelErrorCode,
   type SettingsFix,
 } from "../protocol/errors.js";
+import { parseTokenLimitError } from "./tokenLimitParsing.js";
 
 export function normalizeModelError(
   provider: string,
@@ -53,6 +54,16 @@ export function normalizeModelError(
     raw,
     ...hint,
   };
+  const tokenLimit = parseTokenLimitError(message);
+  if (tokenLimit.maxContextTokens !== undefined) {
+    result.maxContextTokens = tokenLimit.maxContextTokens;
+  }
+  if (tokenLimit.maxOutputTokens !== undefined) {
+    result.maxOutputTokens = tokenLimit.maxOutputTokens;
+  }
+  if (tokenLimit.availableOutputTokens !== undefined) {
+    result.availableOutputTokens = tokenLimit.availableOutputTokens;
+  }
   if (code === "prompt_too_long" || code === "context_overflow") {
     result.recoverableViaCompact = true;
   }

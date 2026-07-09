@@ -15,12 +15,32 @@ export {
   type SessionInfo,
 } from "./storage/SessionList.js";
 export {
+  formatChatHistorySearchResults,
+  type FormatChatHistorySearchOptions,
+} from "./search/formatChatHistorySearch.js";
+export {
+  parseChatSearchArgs,
+  searchChatHistory,
+  type ChatHistorySearchMatch,
+  type ChatHistorySearchRole,
+  type ParsedChatSearchArgs,
+  type SearchChatHistoryOptions,
+  type SearchChatHistoryResult,
+} from "./search/searchChatHistory.js";
+export {
   buildConversationChain,
   type TranscriptChainNode,
   type TranscriptChainResult,
 } from "./transcript/TranscriptChain.js";
 export { readSessionLite, type SessionLiteFile } from "./storage/SessionLiteReader.js";
 export { SessionMetadataStore, mergeMetadata, type SessionMetadataStoreOptions } from "./metadata/SessionMetadataStore.js";
+export {
+  createSessionTitleGenerator,
+  normalizeSessionTitleInput,
+  type CreateSessionTitleGeneratorOptions,
+  type SessionTitleGenerator,
+  type SessionTitleGeneratorInput,
+} from "./title/SessionTitleGenerator.js";
 export { resumeAgentSession, type ResumeAgentSessionOptions, type ResumeAgentSessionResult } from "./resume/resumeAgentSession.js";
 export { InMemoryTranscriptWriter, type InMemoryTranscriptEntry } from "./transcript/InMemoryTranscriptWriter.js";
 export {

@@ -3,6 +3,7 @@ import fsPromises from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
+import { parseGatewayConfig } from '../../../src/pilot/config/parseGatewayConfig.js';
 
 // Source of truth: ~/.pilotdeck/pilotdeck.yaml. The disk format and the
 // "internal" config object are the same V2 schema — no more adapter layer.
@@ -89,6 +90,10 @@ export function buildDefaultPilotDeckConfig() {
         databasePath: path.join(PILOT_HOME_DIR, 'auth.db'),
         workspacesRoot: os.homedir(),
       },
+      officePreview: {
+        service: 'libreoffice',
+        binaryPath: '',
+      },
     },
     telemetry: {
       enabled: false,
@@ -113,10 +118,13 @@ export function sanitizeProviderCredentials(config) {
   if (!isRecord(config)) return config;
   const providers = config?.model?.providers;
   if (!isRecord(providers)) return config;
-  for (const provider of Object.values(providers)) {
+  for (const [providerId, provider] of Object.entries(providers)) {
     if (!isRecord(provider)) continue;
     if (typeof provider.apiKey === 'string') {
       provider.apiKey = provider.apiKey.trim();
+      if (allowsMissingApiKey(providerId) && provider.apiKey.length === 0) {
+        delete provider.apiKey;
+      }
     }
     if (typeof provider.url === 'string') {
       provider.url = provider.url.trim();
@@ -166,6 +174,10 @@ export function resolveModel(config, ref, options = {}) {
 
 // ─── Validation ──────────────────────────────────────────────────────────────
 
+function allowsMissingApiKey(providerId) {
+  return providerId === 'ollama';
+}
+
 function validateProvider(id, provider, errors) {
   if (!isRecord(provider)) {
     errors.push(`model.providers.${id} must be an object`);
@@ -177,7 +189,9 @@ function validateProvider(id, provider, errors) {
     errors.push(`model.providers.${id}.protocol must be "openai", "openai-responses", "anthropic", or "google"`);
   }
   if (!normalizeString(provider.url)) errors.push(`model.providers.${id}.url is required`);
-  if (!normalizeString(provider.apiKey)) errors.push(`model.providers.${id}.apiKey is required`);
+  if (!allowsMissingApiKey(id) && !normalizeString(provider.apiKey)) {
+    errors.push(`model.providers.${id}.apiKey is required`);
+  }
 }
 
 function validateModelRef(config, ref, label, errors) {
@@ -219,6 +233,19 @@ function validateRouterModelRefs(config, errors) {
   }
 }
 
+function validateGatewayConfig(config, errors, warnings) {
+  const diagnostics = [];
+  parseGatewayConfig(config.gateway, diagnostics);
+  for (const diagnostic of diagnostics) {
+    const message = diagnostic.path ? `${diagnostic.path}: ${diagnostic.message}` : diagnostic.message;
+    if (diagnostic.severity === 'warning') {
+      warnings.push(message);
+    } else {
+      errors.push(message);
+    }
+  }
+}
+
 export function validatePilotDeckConfig(config) {
   const normalized = normalizePilotDeckConfig(config);
   const errors = [];
@@ -247,12 +274,25 @@ export function validatePilotDeckConfig(config) {
   }
 
   validateRouterModelRefs(normalized, errors);
+  validateGatewayConfig(normalized, errors, warnings);
 
   if (normalized.webui?.runtime?.contextWindow !== undefined) {
     warnings.push(
       'webui.runtime.contextWindow is deprecated and ignored. ' +
       'Use agent.maxContextTokens to override the model\'s context window for auto-compaction.',
     );
+  }
+
+  const officePreviewService = normalized.webui?.officePreview?.service;
+  if (
+    officePreviewService !== undefined
+    && !['none', 'libreoffice'].includes(normalizeString(officePreviewService).toLowerCase())
+  ) {
+    errors.push('webui.officePreview.service must be "none" or "libreoffice"');
+  }
+  const libreOfficeBinaryPath = normalized.webui?.officePreview?.binaryPath;
+  if (libreOfficeBinaryPath !== undefined && typeof libreOfficeBinaryPath !== 'string') {
+    errors.push('webui.officePreview.binaryPath must be a string');
   }
 
   return { valid: errors.length === 0, errors, warnings, config: normalized };
@@ -440,12 +480,25 @@ export function readPilotDeckConfigFile() {
       raw: '',
       config: buildDefaultPilotDeckConfig(),
       rawYaml: {},
+      parseError: null,
     };
   }
   const raw = fs.readFileSync(configPath, 'utf8');
-  const parsed = parseYaml(raw) || {};
+  let parsed;
+  try {
+    parsed = parseYaml(raw) || {};
+  } catch (error) {
+    return {
+      exists: true,
+      configPath,
+      raw,
+      config: buildDefaultPilotDeckConfig(),
+      rawYaml: null,
+      parseError: error instanceof Error ? error.message : String(error),
+    };
+  }
   const config = normalizePilotDeckConfig(parsed);
-  return { exists: true, configPath, raw, config, rawYaml: parsed };
+  return { exists: true, configPath, raw, config, rawYaml: parsed, parseError: null };
 }
 
 // Keep `router.scenarios.default` aligned with `agent.model` whenever we

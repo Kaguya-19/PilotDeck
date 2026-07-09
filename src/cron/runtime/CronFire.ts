@@ -96,7 +96,7 @@ export class CronFire {
           if (!abortRequested) {
             abortRequested = true;
             void this.deps.gateway
-              .abortTurn({ sessionKey: task.sessionKey, runId })
+              .abortTurn({ sessionKey: task.sessionKey, runId, reason: "system:interaction_required" })
               .catch(() => undefined);
           }
           continue;

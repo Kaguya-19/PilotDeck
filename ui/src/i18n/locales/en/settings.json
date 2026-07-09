@@ -576,6 +576,7 @@
 	      "unsavedChanges": "Unsaved changes",
 	      "noUnsavedChanges": "No unsaved changes",
 	      "fixYamlInFilesystem": "Fix the config file in the filesystem, then refresh.",
+	      "fixYamlInRawEditor": "Fix the Raw YAML below, then save to re-enable form settings.",
 	      "subsystems": {
 	        "pending": "Waiting for config parsing.",
 	        "processEnv": {
@@ -606,14 +607,16 @@
 	      "configInvalidSeeBelow": "Config has validation errors — see below",
 	      "errors": "Errors",
 	      "warnings": "Warnings",
-	      "yamlParseError": "The config file YAML failed to parse. Fix it in the filesystem, then refresh.",
-	      "cannotParse": "Could not parse the config file YAML. Fix it in the filesystem, then refresh.",
+	      "yamlParseError": "The config file YAML failed to parse. Fix the Raw YAML below, then save.",
+	      "yamlParseErrorWithDetail": "The config file YAML failed to parse: {{error}}",
+	      "cannotParse": "Could not parse the config file YAML. Fix the Raw YAML above, then save to restore form settings.",
 	      "rawYaml": "Raw YAML"
 	    },
     "sectionGroups": {
       "basic": "Basic",
       "basicDescription": "Configure model services before running this service.",
       "features": "Features",
+      "extensions": "Extensions",
       "advanced": "Advanced"
     },
     "sections": {
@@ -657,6 +660,10 @@
       "gateway": {
         "label": "Gateway",
         "description": "Messaging gateway home + channels"
+      },
+      "officePreview": {
+        "label": "Office File Preview Service",
+        "description": "Read-only preview for Word, Excel, and PPT"
       }
     },
     "panels": {
@@ -674,6 +681,53 @@
           "proxyUrl": { "label": "HTTPS proxy", "description": "Outbound HTTPS proxy URL. Applies to both Gateway and UI Server (proxy.url in pilotdeck.yaml)." },
           "proxyNoProxy": { "label": "No-proxy list", "description": "Comma-separated hostnames/IPs that bypass the proxy (proxy.noProxy in pilotdeck.yaml). 127.0.0.1 and localhost are always excluded." }
         }
+      },
+      "officePreview": {
+        "title": "Office File Preview Service",
+        "description": "Configure how PilotDeck previews Word, Excel, and PowerPoint files. Selecting None disables Office conversion.",
+        "fields": {
+          "service": {
+            "label": "Preview service",
+            "description": "Local service used when opening Office files for preview."
+          },
+          "binaryPath": {
+            "label": "LibreOffice executable path",
+            "description": "Optional. Enter the full soffice/libreoffice path for custom installations; leave empty to auto-detect.",
+            "placeholder": "/Applications/LibreOffice.app/Contents/MacOS/soffice"
+          },
+          "detectedBinaryPath": {
+            "label": "Auto-scanned paths",
+            "description": "Selecting a detected path writes it to the executable path above; select auto-detect to clear the manual path."
+          }
+        },
+        "options": {
+          "none": "None",
+          "libreOffice": "LibreOffice",
+          "libreOfficeUnavailable": "LibreOffice (unavailable)",
+          "autoDetect": "Auto-detect (no fixed path)",
+          "candidateAvailable": "{{path}} (available)",
+          "candidateUnavailable": "{{path}} (unavailable)",
+          "candidateAvailableShort": "Available",
+          "candidateUnavailableShort": "Unavailable"
+        },
+        "scan": {
+          "button": "Scan",
+          "title": "Select LibreOffice path",
+          "scanning": "Scanning available paths..."
+        },
+        "status": {
+          "checking": "Checking LibreOffice...",
+          "available": "LibreOffice is available",
+          "unavailable": "LibreOffice is unavailable",
+          "unknown": "LibreOffice status is temporarily unavailable",
+          "error": "Could not check LibreOffice status",
+          "refresh": "Check again",
+          "noDetectedPaths": "No candidate paths were found yet. You can still enter a full path manually and check again.",
+          "path": "Path: {{path}}",
+          "version": "Version: {{version}}"
+        },
+        "disabledNote": "Office preview is disabled. Opening an Office file will show the binary-file prompt with a shortcut back to this setting.",
+        "unavailableWarning": "LibreOffice is selected, but no LibreOffice/soffice executable is available on this machine. Install LibreOffice or switch the preview service to None."
       },
       "models": {
         "title": "Model Pool",
@@ -1052,7 +1106,7 @@
   },
   "gateway": {
     "title": "IM Channels",
-    "description": "Configure instant messaging channels (Feishu, WeChat) so the agent can be reached from IM apps.",
+    "description": "Configure instant messaging channels (Feishu, WeChat, WeCom) so the agent can be reached from IM apps.",
     "connected": "Connected",
     "notConfigured": "Not configured",
     "enabled": "Enabled",
@@ -1087,6 +1141,27 @@
       "loadingQr": "Generating QR code…",
       "scanPrompt": "Open WeChat and scan the QR code to log in",
       "loginSuccess": "Login successful — credentials saved"
+    },
+    "wecom": {
+      "title": "Enterprise WeChat / WeCom",
+      "label": "WeCom Bot",
+      "chooseMethod": "Choose how to configure the WeCom AI Bot:",
+      "qrSetup": "QR Code Setup",
+      "qrSetupDesc": "Scan with WeCom to create or retrieve bot credentials",
+      "manualInput": "Manual Input",
+      "manualInputDesc": "Copy Bot ID and Secret from the WeCom admin console",
+      "startQr": "Generate WeCom QR Code",
+      "connecting": "Connecting to WeCom…",
+      "scanPrompt": "Open WeCom and scan the QR code",
+      "qrSuccess": "WeCom configured — bot credentials saved and enabled",
+      "retry": "Retry",
+      "botId": "Bot ID",
+      "secret": "Secret",
+      "websocketUrl": "WebSocket URL",
+      "dmPolicy": "DM Policy",
+      "groupPolicy": "Group Policy",
+      "policyHint": "Basic policies are written to pilotdeck.yaml; edit YAML later for finer user or group allowlists.",
+      "saveSuccess": "WeCom config saved"
     }
   }
 }

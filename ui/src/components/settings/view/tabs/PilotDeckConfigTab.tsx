@@ -12,6 +12,7 @@ import {
   Clock,
   Database,
   FileCog,
+  FileText,
   FolderOpen,
   Gauge,
   Image as ImageIcon,
@@ -33,6 +34,11 @@ import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { Button } from '../../../../shared/view/ui';
 import { authenticatedFetch } from '../../../../utils/api';
 import { isImeEnterEvent } from '../../../../utils/ime';
+import {
+  readOfficePreviewStatus,
+  type OfficePreviewService,
+  type OfficePreviewStatus,
+} from '../../../../utils/officePreviewStatus';
 import { usePilotDeckConfig, type ConfigReload } from '../../../../hooks/usePilotDeckConfig';
 import {
   getAlwaysOnProjectRoot,
@@ -51,6 +57,7 @@ import {
   type CatalogProviderProtocol,
   type CatalogModel,
 } from '../../../../shared/catalogProviders';
+import { fetchProviderModels, fetchRemoteDefaultModels, type ApiModelListItem } from '../../../../shared/modelListApi';
 import type { SettingsProject } from '../../types/types';
 import { isCronConfigEnabled, patch } from './pilotDeckConfigForm';
 
@@ -109,6 +116,10 @@ type PilotDeckConfig = {
       apiTimeoutMs?: number;
       databasePath?: string;
       workspacesRoot?: string;
+    };
+    officePreview?: {
+      service?: 'none' | 'libreoffice' | string;
+      binaryPath?: string;
     };
   };
   alwaysOn?: {
@@ -203,7 +214,7 @@ type PilotDeckConfig = {
   };
 };
 
-type SectionId = 'models' | 'agents' | 'memory' | 'tools' | 'router' | 'gateway' | 'customEnv' | 'alwaysOn' | 'cron' | 'advanced';
+type SectionId = 'models' | 'agents' | 'memory' | 'tools' | 'router' | 'gateway' | 'officePreview' | 'customEnv' | 'alwaysOn' | 'cron' | 'advanced';
 
 const SECTIONS: Array<{ id: SectionId; labelKey: string; descriptionKey: string }> = [
   { id: 'advanced',  labelKey: 'runtime',   descriptionKey: 'runtime' },
@@ -215,12 +226,14 @@ const SECTIONS: Array<{ id: SectionId; labelKey: string; descriptionKey: string 
   { id: 'tools',     labelKey: 'tools',     descriptionKey: 'tools' },
   { id: 'router',    labelKey: 'router',    descriptionKey: 'router' },
   { id: 'gateway',   labelKey: 'gateway',   descriptionKey: 'gateway' },
+  { id: 'officePreview', labelKey: 'officePreview', descriptionKey: 'officePreview' },
   { id: 'customEnv', labelKey: 'customEnv', descriptionKey: 'customEnv' },
 ];
 
-const SECTION_GROUPS: Array<{ id: 'basic' | 'features' | 'advanced'; sections: SectionId[] }> = [
+const SECTION_GROUPS: Array<{ id: 'basic' | 'features' | 'extensions' | 'advanced'; sections: SectionId[] }> = [
   { id: 'basic', sections: ['models', 'agents'] },
   { id: 'features', sections: ['router', 'memory', 'tools', 'alwaysOn', 'cron', 'gateway'] },
+  { id: 'extensions', sections: ['officePreview'] },
   { id: 'advanced', sections: ['advanced', 'customEnv'] },
 ];
 
@@ -233,6 +246,7 @@ const SECTION_ICONS: Record<SectionId, LucideIcon> = {
   alwaysOn: Zap,
   cron: Clock,
   gateway: Wifi,
+  officePreview: FileText,
   advanced: Server,
   customEnv: FileCog,
 };
@@ -440,6 +454,25 @@ function rewriteProviderRefs(config: PilotDeckConfig, oldProviderId: string, new
   return next;
 }
 
+function replaceFallbackModelRef(config: PilotDeckConfig, oldRef: string, newRef: string): PilotDeckConfig {
+  const fallback = config.router?.fallback;
+  if (!fallback || !oldRef || oldRef === newRef) return config;
+
+  let changed = false;
+  const rewritten = Object.fromEntries(
+    Object.entries(fallback).map(([key, refs]) => {
+      const nextRefs = refs.map((ref) => {
+        if (ref !== oldRef) return ref;
+        changed = true;
+        return newRef;
+      });
+      return [key, nextRefs];
+    }),
+  );
+
+  return changed ? patch(config, ['router', 'fallback'], rewritten) : config;
+}
+
 const MASK = '********';
 
 function isMaskedSecret(value: string | undefined): boolean {
@@ -565,12 +598,16 @@ function Select({
 }: {
   value: string | undefined;
   onChange: (next: string) => void;
-  options: Array<{ value: string; label: string }>;
+  options: Array<{ value: string; label: string; disabled?: boolean }>;
 }) {
-  const selectedLabel = options.find((opt) => opt.value === value)?.label ?? '';
+  const selectedOption = options.find((opt) => opt.value === value);
+  const selectedLabel = selectedOption?.label ?? '';
   return (
     <div className="relative min-w-0">
-      <div className="pointer-events-none flex w-full min-w-0 items-center rounded-md border border-border bg-background px-2 py-1.5 pr-8 text-[13px] leading-5 text-foreground">
+      <div className={cn(
+        'pointer-events-none flex w-full min-w-0 items-center rounded-md border border-border bg-background px-2 py-1.5 pr-8 text-[13px] leading-5',
+        selectedOption?.disabled ? 'text-muted-foreground' : 'text-foreground',
+      )}>
         <span className="block min-w-0 truncate" title={selectedLabel}>{selectedLabel}</span>
       </div>
       <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">▾</span>
@@ -581,7 +618,7 @@ function Select({
         aria-label={selectedLabel}
       >
         {options.map((opt) => (
-          <option key={opt.value} value={opt.value}>{opt.label}</option>
+          <option key={opt.value} value={opt.value} disabled={opt.disabled}>{opt.label}</option>
         ))}
       </select>
     </div>
@@ -624,6 +661,10 @@ function FormRow({ label, description, children }: { label: string; description?
 }
 
 // ── Section components ─────────────────────────────────────────────────
+
+function getOfficePreviewService(config: PilotDeckConfig): OfficePreviewService {
+  return config.webui?.officePreview?.service === 'none' ? 'none' : 'libreoffice';
+}
 
 function ServiceSection({ config, onChange }: { config: PilotDeckConfig; onChange: (next: PilotDeckConfig) => void }) {
   const { t } = useTranslation('settings');
@@ -683,6 +724,244 @@ function ServiceSection({ config, onChange }: { config: PilotDeckConfig; onChang
   );
 }
 
+function OfficePreviewSection({ config, onChange }: { config: PilotDeckConfig; onChange: (next: PilotDeckConfig) => void }) {
+  const { t } = useTranslation('settings');
+  const [status, setStatus] = useState<OfficePreviewStatus | null>(null);
+  const [statusError, setStatusError] = useState<string | null>(null);
+  const [statusLoading, setStatusLoading] = useState(true);
+  const [statusReloadKey, setStatusReloadKey] = useState(0);
+  const [scanListOpen, setScanListOpen] = useState(false);
+  const service = getOfficePreviewService(config);
+
+  useEffect(() => {
+    let cancelled = false;
+    setStatusLoading(true);
+    setStatusError(null);
+
+    readOfficePreviewStatus({ refresh: statusReloadKey > 0 })
+      .then((body: OfficePreviewStatus) => {
+        if (cancelled) return;
+        setStatus(body);
+        setStatusError(body.statusError || null);
+      })
+      .catch((error: Error) => {
+        if (cancelled) return;
+        setStatusError(error.message || t('pilotDeckConfig.panels.officePreview.status.error'));
+      })
+      .finally(() => {
+        if (!cancelled) setStatusLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [statusReloadKey, t]);
+
+  const libreOfficeStatusKnown = status?.libreOffice?.available !== undefined;
+  const libreOfficeAvailable = status?.libreOffice?.available === true;
+  const libreOfficeUnavailable = !statusLoading && status?.libreOffice?.available === false;
+  const showLibreOfficeStatus = service === 'libreoffice' && libreOfficeStatusKnown;
+  const libreOfficeUnknown = showLibreOfficeStatus && !statusLoading && !statusError && !libreOfficeStatusKnown;
+  const configuredBinaryPath = config.webui?.officePreview?.binaryPath ?? '';
+  const detectedBinaryPaths = status?.libreOffice?.candidates ?? [];
+  const setService = (next: OfficePreviewService) =>
+    onChange(patch(config, ['webui', 'officePreview', 'service'], next));
+  const setBinaryPath = (next: string) =>
+    onChange(patch(config, ['webui', 'officePreview', 'binaryPath'], next));
+  const selectBinaryPath = (next: string) => {
+    setBinaryPath(next);
+    setScanListOpen(false);
+  };
+  const scanLibreOfficePaths = () => {
+    setScanListOpen(true);
+    setStatusReloadKey((value) => value + 1);
+  };
+
+  return (
+    <SettingsSection
+      title={t('pilotDeckConfig.panels.officePreview.title')}
+      description={t('pilotDeckConfig.panels.officePreview.description')}
+    >
+      <SettingsCard>
+        <div className="divide-y divide-border">
+          <FormRow
+            label={t('pilotDeckConfig.panels.officePreview.fields.service.label')}
+            description={t('pilotDeckConfig.panels.officePreview.fields.service.description')}
+          >
+            <div className="max-w-xs">
+              <Select
+                value={service}
+                onChange={(value) => setService(value as OfficePreviewService)}
+                options={[
+                  { value: 'none', label: t('pilotDeckConfig.panels.officePreview.options.none') },
+                  {
+                    value: 'libreoffice',
+                    label: libreOfficeUnavailable
+                      ? t('pilotDeckConfig.panels.officePreview.options.libreOfficeUnavailable')
+                      : t('pilotDeckConfig.panels.officePreview.options.libreOffice'),
+                  },
+                ]}
+              />
+            </div>
+          </FormRow>
+          {service === 'libreoffice' && (
+            <FormRow
+              label={t('pilotDeckConfig.panels.officePreview.fields.binaryPath.label')}
+              description={t('pilotDeckConfig.panels.officePreview.fields.binaryPath.description')}
+            >
+              <div className="relative space-y-2">
+                <div className="flex gap-2">
+                  <div className="min-w-0 flex-1">
+                    <TextInput
+                      value={configuredBinaryPath}
+                      placeholder={t('pilotDeckConfig.panels.officePreview.fields.binaryPath.placeholder')}
+                      monospace
+                      onChange={setBinaryPath}
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={scanLibreOfficePaths}
+                    className="inline-flex h-[34px] shrink-0 items-center gap-1.5 rounded-md border border-border px-3 text-[12px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                  >
+                    <RefreshCw className={cn('h-3.5 w-3.5', scanListOpen && statusLoading && 'animate-spin')} />
+                    {t('pilotDeckConfig.panels.officePreview.scan.button')}
+                  </button>
+                </div>
+                {scanListOpen && (
+                  <div className="absolute left-0 right-0 top-full z-20 mt-1 overflow-hidden rounded-lg border border-border bg-popover shadow-lg">
+                    <div className="border-b border-border px-3 py-2 text-[12px] font-medium text-foreground">
+                      {t('pilotDeckConfig.panels.officePreview.scan.title')}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => selectBinaryPath('')}
+                      className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-[12px] transition-colors hover:bg-accent"
+                    >
+                      <span className="min-w-0 truncate text-foreground">
+                        {t('pilotDeckConfig.panels.officePreview.options.autoDetect')}
+                      </span>
+                      {!configuredBinaryPath && <Check className="h-3.5 w-3.5 shrink-0 text-green-500" />}
+                    </button>
+                    {statusLoading ? (
+                      <div className="flex items-center gap-2 px-3 py-3 text-[12px] text-muted-foreground">
+                        <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                        {t('pilotDeckConfig.panels.officePreview.scan.scanning')}
+                      </div>
+                    ) : detectedBinaryPaths.length > 0 ? (
+                      <div className="max-h-64 overflow-auto border-t border-border">
+                        {detectedBinaryPaths.map((candidate) => (
+                          <button
+                            key={candidate.binaryPath}
+                            type="button"
+                            disabled={!candidate.available}
+                            onClick={() => selectBinaryPath(candidate.binaryPath)}
+                            className="flex w-full items-start justify-between gap-3 px-3 py-2 text-left transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            <span className="min-w-0">
+                              <span className="block truncate font-mono text-[11px] text-foreground" title={candidate.binaryPath}>
+                                {candidate.binaryPath}
+                              </span>
+                              <span className={cn(
+                                'mt-0.5 block truncate text-[11px]',
+                                candidate.available ? 'text-green-600 dark:text-green-400' : 'text-muted-foreground',
+                              )}>
+                                {candidate.available
+                                  ? t('pilotDeckConfig.panels.officePreview.options.candidateAvailableShort')
+                                  : t('pilotDeckConfig.panels.officePreview.options.candidateUnavailableShort')}
+                                {candidate.version ? ` · ${candidate.version}` : ''}
+                              </span>
+                            </span>
+                            {configuredBinaryPath === candidate.binaryPath && (
+                              <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-green-500" />
+                            )}
+                          </button>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="border-t border-border px-3 py-3 text-[12px] leading-5 text-muted-foreground">
+                        {t('pilotDeckConfig.panels.officePreview.status.noDetectedPaths')}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </FormRow>
+          )}
+
+          <div className="space-y-2 px-4 py-3">
+            {showLibreOfficeStatus && (
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex min-w-0 items-center gap-2 text-[12px] text-muted-foreground">
+                  <span className={cn(
+                    'h-2 w-2 flex-shrink-0 rounded-full',
+                    libreOfficeAvailable ? 'bg-green-500' : libreOfficeUnavailable || statusError ? 'bg-muted-foreground/60' : 'bg-amber-500',
+                  )} />
+                  <span className="min-w-0 truncate">
+                    {statusLoading
+                      ? t('pilotDeckConfig.panels.officePreview.status.checking')
+                      : statusError
+                        ? t('pilotDeckConfig.panels.officePreview.status.error')
+                        : libreOfficeAvailable
+                          ? t('pilotDeckConfig.panels.officePreview.status.available')
+                          : libreOfficeUnavailable
+                            ? t('pilotDeckConfig.panels.officePreview.status.unavailable')
+                            : libreOfficeUnknown
+                              ? t('pilotDeckConfig.panels.officePreview.status.unknown')
+                              : t('pilotDeckConfig.panels.officePreview.status.unavailable')}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setStatusReloadKey((value) => value + 1)}
+                  className="inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                >
+                  <RefreshCw className={cn('h-3.5 w-3.5', statusLoading && 'animate-spin')} />
+                  {t('pilotDeckConfig.panels.officePreview.status.refresh')}
+                </button>
+              </div>
+            )}
+
+            {service === 'libreoffice' && libreOfficeAvailable && (
+              <div className="space-y-1 rounded-md bg-muted/30 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
+                {status?.libreOffice?.binaryPath && (
+                  <div className="truncate" title={status.libreOffice.binaryPath}>
+                    {t('pilotDeckConfig.panels.officePreview.status.path', { path: status.libreOffice.binaryPath })}
+                  </div>
+                )}
+                {status?.libreOffice?.version && (
+                  <div className="truncate" title={status.libreOffice.version}>
+                    {t('pilotDeckConfig.panels.officePreview.status.version', { version: status.libreOffice.version })}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {service === 'none' && (
+              <div className="rounded-md bg-muted/30 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
+                {t('pilotDeckConfig.panels.officePreview.disabledNote')}
+              </div>
+            )}
+
+            {service === 'libreoffice' && libreOfficeUnavailable && (
+              <div className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[12px] leading-5 text-amber-700 dark:text-amber-300">
+                <AlertCircle className="mt-0.5 h-4 w-4 flex-shrink-0" />
+                <div>{t('pilotDeckConfig.panels.officePreview.unavailableWarning')}</div>
+              </div>
+            )}
+
+            {service === 'libreoffice' && statusError && (
+              <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-[12px] leading-5 text-destructive">
+                {statusError}
+              </div>
+            )}
+          </div>
+        </div>
+      </SettingsCard>
+    </SettingsSection>
+  );
+}
+
 function ProviderCard({
   providerId,
   provider,
@@ -707,6 +986,9 @@ function ProviderCard({
   const [showProviderAdvanced, setShowProviderAdvanced] = useState(false);
   const [providerIdDraft, setProviderIdDraft] = useState(providerId);
   const [providerIdError, setProviderIdError] = useState('');
+  const [apiModels, setApiModels] = useState<ApiModelListItem[] | null>(null);
+  const [apiModelsStatus, setApiModelsStatus] = useState<'idle' | 'loading' | 'error'>('idle');
+  const [apiModelsError, setApiModelsError] = useState('');
   const displayName = providerDisplayName(
     providerIdDraft || providerId,
     catalogEntry,
@@ -753,6 +1035,46 @@ function ProviderCard({
       addModel(mid);
     }
   };
+  const visibleModels: Array<ApiModelListItem | CatalogModel> = apiModels ?? catalogEntry?.models ?? [];
+  const hasProviderApiKey = Boolean(provider.apiKey) && !isMaskedKey;
+  const canFetchModels = Boolean(effectiveUrl);
+  const refreshModels = async () => {
+    if (!canFetchModels) return;
+    setApiModelsStatus('loading');
+    setApiModelsError('');
+    try {
+      const models = hasProviderApiKey || !catalogEntry || ![catalogEntry.defaultUrl, catalogEntry.modelListUrl].includes(effectiveUrl)
+        ? await fetchProviderModels({ protocol, baseUrl: effectiveUrl, apiKey: hasProviderApiKey ? provider.apiKey : '', providerId })
+        : await fetchRemoteDefaultModels(providerId);
+      setApiModels(!hasProviderApiKey && catalogEntry && models.length === 0 ? catalogEntry.models : models);
+      setApiModelsStatus('idle');
+    } catch (error) {
+      setApiModelsStatus('error');
+      setApiModelsError(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  useEffect(() => {
+    if (!catalogEntry || hasProviderApiKey) return;
+    const catalogModels = catalogEntry.models;
+    const controller = new AbortController();
+    setApiModelsStatus('loading');
+    setApiModelsError('');
+    fetchRemoteDefaultModels(providerId)
+      .then((models) => {
+        if (controller.signal.aborted) return;
+        setApiModels(models.length > 0 ? models : catalogModels);
+        setApiModelsStatus('idle');
+      })
+      .catch((error) => {
+        if (controller.signal.aborted) return;
+        setApiModels(catalogModels);
+        setApiModelsStatus('idle');
+        const message = error instanceof Error ? error.message : String(error);
+        setApiModelsError(`Using bundled model list. Remote model list unavailable: ${message}`);
+      });
+    return () => controller.abort();
+  }, [catalogEntry, hasProviderApiKey, providerId]);
 
   return (
     <div className="space-y-3 rounded-lg border border-border bg-background/50 p-4 transition-colors">
@@ -862,10 +1184,29 @@ function ProviderCard({
           <span className="text-[10px] text-muted-foreground/60">
             · <ImageIcon className="inline h-2.5 w-2.5" /> {t('pilotDeckConfig.panels.models.supportsImageInput')}
           </span>
+          <button
+            type="button"
+            onClick={refreshModels}
+            disabled={!canFetchModels || apiModelsStatus === 'loading'}
+            className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <RefreshCw className={cn('h-2.5 w-2.5', apiModelsStatus === 'loading' && 'animate-spin')} />
+            {hasProviderApiKey || !catalogEntry ? 'Fetch API models' : 'Fetch remote models'}
+          </button>
         </div>
-        {catalogEntry && catalogEntry.models.length > 0 && (
+        {apiModelsStatus === 'error' && apiModelsError && (
+          <div className="mb-2 rounded-md border border-destructive/30 bg-destructive/5 px-2 py-1 text-[11px] text-destructive">
+            {apiModelsError}
+          </div>
+        )}
+        {apiModelsStatus === 'idle' && apiModelsError && (
+          <div className="mb-2 rounded-md border border-border bg-muted/30 px-2 py-1 text-[11px] text-muted-foreground">
+            {apiModelsError}
+          </div>
+        )}
+        {visibleModels.length > 0 && (
           <div className="mb-2 flex flex-wrap gap-1.5">
-            {catalogEntry.models.map((m) => {
+            {visibleModels.map((m) => {
               const on = provider.models && m.id in provider.models;
               return (
                 <div
@@ -885,7 +1226,7 @@ function ProviderCard({
                   >
                     {on && <Check className="h-3 w-3 text-foreground" strokeWidth={2.5} />}
                     {m.displayName}
-                    {m.supportsImage && (
+                    {'supportsImage' in m && m.supportsImage && (
                       <ImageIcon
                         className="h-3 w-3 text-muted-foreground/70"
                         strokeWidth={2}
@@ -898,7 +1239,7 @@ function ProviderCard({
           </div>
         )}
         {/* Custom (off-catalog) models currently enabled */}
-        {enabledModels.filter((mid) => !catalogEntry || !catalogEntry.models.some((m) => m.id === mid)).map((mid) => {
+        {enabledModels.filter((mid) => !visibleModels.some((m) => m.id === mid)).map((mid) => {
           return (
             <div key={mid} className="mb-1 flex items-center gap-2 rounded-md border border-border bg-muted/40 px-2 py-1 text-[11px]">
               <code className="flex-1 truncate font-mono">{mid}</code>
@@ -1019,9 +1360,6 @@ function CatalogPicker({
             className="rounded-md border border-border bg-background px-3 py-2 text-left text-sm transition-colors hover:border-foreground/40 hover:bg-muted"
           >
             <div className="font-medium text-foreground">{p.displayName}</div>
-            <div className="mt-0.5 text-[10px] text-muted-foreground">
-              {t('pilotDeckConfig.panels.models.modelCount', { count: p.models.length })}
-            </div>
           </button>
         ))}
         <button
@@ -2276,76 +2614,6 @@ function ModelPricingEditor({ config, onChange }: { config: PilotDeckConfig; onC
   );
 }
 
-function RouterScenarioEditor({ config, onChange }: { config: PilotDeckConfig; onChange: (next: PilotDeckConfig) => void }) {
-  const { t } = useTranslation('settings');
-  const scenarios = config.router?.scenarios ?? {};
-  const entries = Object.entries(scenarios);
-  const modelOpts = buildModelRefOptions(config);
-  const [newKey, setNewKey] = useState('');
-
-  const setScenario = (key: string, value: string) =>
-    onChange(patch(ensureModelRefConfigured(config, value), ['router', 'scenarios', key], value));
-  const removeScenario = (key: string) => {
-    const next = { ...scenarios };
-    delete next[key];
-    onChange(patch(config, ['router', 'scenarios'], next));
-  };
-  const addScenario = () => {
-    const key = newKey.trim();
-    if (!key || scenarios[key]) return;
-    const value = modelOpts[0]?.value ?? '';
-    onChange(patch(ensureModelRefConfigured(config, value), ['router', 'scenarios', key], value));
-    setNewKey('');
-  };
-
-  return (
-    <SettingsCard className="space-y-3 p-4">
-      <div>
-        <div className="text-sm font-semibold text-foreground">{t('pilotDeckConfig.panels.router.scenarios.title')}</div>
-        <div className="mt-0.5 text-xs text-muted-foreground">
-          {t('pilotDeckConfig.panels.router.scenarios.description')}
-        </div>
-      </div>
-      {entries.length === 0 && (
-        <div className="rounded-md border border-dashed border-border px-3 py-4 text-center text-xs text-muted-foreground">
-          {t('pilotDeckConfig.panels.router.scenarios.empty')}
-        </div>
-      )}
-      {entries.map(([key, model]) => (
-        <div key={key} className="flex items-center gap-2">
-          <code className="w-28 shrink-0 truncate rounded bg-muted px-2 py-1.5 text-xs text-foreground">{key}</code>
-          <div className="min-w-0 flex-1">
-            <ModelRefInput value={model} options={modelOpts} onChange={(v) => setScenario(key, v)} />
-          </div>
-          <button
-            type="button"
-            onClick={() => removeScenario(key)}
-            className="shrink-0 rounded p-1.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-            title={t('pilotDeckConfig.actions.remove')}
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-          </button>
-        </div>
-      ))}
-      <div className="border-t border-border pt-3">
-        <div className="flex items-center gap-2">
-          <input
-            value={newKey}
-            onChange={(e) => setNewKey(e.target.value)}
-            placeholder="scenario name"
-            className="min-w-0 flex-1 rounded-md border border-border bg-background px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:ring-1 focus:ring-ring"
-            onKeyDown={(e) => { if (e.key === 'Enter' && !isImeEnterEvent(e)) addScenario(); }}
-          />
-          <Button variant="outline" size="sm" className="shrink-0" onClick={addScenario} disabled={!newKey.trim()}>
-            <Plus className="mr-1 h-3.5 w-3.5" />
-            {t('pilotDeckConfig.panels.router.scenarios.add')}
-          </Button>
-        </div>
-      </div>
-    </SettingsCard>
-  );
-}
-
 function RouterFallbackEditor({ config, onChange }: { config: PilotDeckConfig; onChange: (next: PilotDeckConfig) => void }) {
   const { t } = useTranslation('settings');
   const fallback = config.router?.fallback ?? {};
@@ -2619,6 +2887,7 @@ function RouterLevelEditor({ config, onChange }: { config: PilotDeckConfig; onCh
 
   const setDefault = (value: string) => {
     let next = patch(ensureModelRefConfigured(config, value), ['router', 'scenarios', 'default'], value);
+    next = replaceFallbackModelRef(next, defaultValue, value);
     const fallbackDefault = config.router?.fallback?.default ?? [];
     if (
       fallbackDefault.length === 0 ||
@@ -3131,9 +3400,19 @@ function ConfigSectionHome({ onSelect }: { onSelect: (section: SectionId) => voi
   );
 }
 
+function isSectionId(value: string | undefined): value is SectionId {
+  return Boolean(value) && SECTIONS.some((section) => section.id === value);
+}
+
 // ── Main tab ───────────────────────────────────────────────────────────
 
-export default function PilotDeckConfigTab({ projects = [] }: { projects?: SettingsProject[] }) {
+export default function PilotDeckConfigTab({
+  projects = [],
+  initialSection,
+}: {
+  projects?: SettingsProject[];
+  initialSection?: string;
+}) {
   const { t } = useTranslation('settings');
   const {
     path,
@@ -3148,6 +3427,8 @@ export default function PilotDeckConfigTab({ projects = [] }: { projects?: Setti
 	    loading,
 	    saving,
 	    opening,
+	    configDisabled,
+	    parseError: serverParseError,
 	    error,
 	    refresh,
 	    save,
@@ -3160,12 +3441,18 @@ export default function PilotDeckConfigTab({ projects = [] }: { projects?: Setti
   const [activeSection, setActiveSection] = useState<SectionId | null>(null);
   const [showConfigDetails, setShowConfigDetails] = useState(false);
 
+  useEffect(() => {
+    if (isSectionId(initialSection)) {
+      setActiveSection(initialSection);
+    }
+  }, [initialSection]);
+
   // Parse `raw` into a typed config for the form. Memoised so we don't
   // reparse on every keystroke unrelated to YAML, but raw IS the source of
   // truth — every form patch reserialises back into raw, which keeps the
   // existing save/watcher pipeline (and hot-reload) functional unchanged.
   const parsedConfig = useMemo(() => safeParseYaml(raw), [raw]);
-  const parseError = !parsedConfig && raw.trim().length > 0;
+  const parseError = configDisabled || (!parsedConfig && raw.trim().length > 0);
 
   // Form patches: take the next config, stringify back into YAML, push into
   // the existing `setRaw`. This is what keeps the save+reload pipeline a
@@ -3295,7 +3582,7 @@ export default function PilotDeckConfigTab({ projects = [] }: { projects?: Setti
                   {t('pilotDeckConfig.rawYaml.configInvalid')}
                 </div>
                 <div className="mt-0.5 pl-6 text-[11px] leading-4">
-                  {t('pilotDeckConfig.status.fixYamlInFilesystem')}
+                  {t('pilotDeckConfig.status.fixYamlInRawEditor')}
                 </div>
               </div>
             )}
@@ -3333,14 +3620,16 @@ export default function PilotDeckConfigTab({ projects = [] }: { projects?: Setti
             )}
             {parseError && (
               <div className="mt-3 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-xs text-destructive">
-                {t('pilotDeckConfig.rawYaml.yamlParseError')}
+                {serverParseError
+                  ? t('pilotDeckConfig.rawYaml.yamlParseErrorWithDetail', { error: serverParseError })
+                  : t('pilotDeckConfig.rawYaml.yamlParseError')}
               </div>
             )}
           </>
         )}
       </SettingsCard>
 
-      {parsedConfig ? (
+      {!configDisabled && parsedConfig ? (
         activeSection ? (
           <div className="space-y-4">
             <button
@@ -3358,6 +3647,7 @@ export default function PilotDeckConfigTab({ projects = [] }: { projects?: Setti
               {activeSection === 'tools' && <ToolsSection config={parsedConfig} onChange={onFormChange} />}
               {activeSection === 'router' && <RouterSection config={parsedConfig} onChange={onFormChange} />}
               {activeSection === 'gateway' && <GatewaySection config={parsedConfig} onChange={onFormChange} />}
+              {activeSection === 'officePreview' && <OfficePreviewSection config={parsedConfig} onChange={onFormChange} />}
               {activeSection === 'customEnv' && <CustomEnvSection config={parsedConfig} onChange={onFormChange} />}
               {activeSection === 'alwaysOn' && <AlwaysOnSection config={parsedConfig} projects={projects} onChange={onFormChange} />}
               {activeSection === 'cron' && <CronSection config={parsedConfig} onChange={onFormChange} />}
@@ -3368,8 +3658,23 @@ export default function PilotDeckConfigTab({ projects = [] }: { projects?: Setti
           <ConfigSectionHome onSelect={setActiveSection} />
         )
       ) : (
-        <SettingsCard className="p-5 text-xs text-muted-foreground">
-          {t('pilotDeckConfig.rawYaml.cannotParse')}
+        <SettingsCard className="space-y-3 p-5">
+          <div>
+            <div className="text-sm font-semibold text-foreground">{t('pilotDeckConfig.rawYaml.rawYaml')}</div>
+            <div className="mt-1 text-xs text-muted-foreground">{t('pilotDeckConfig.rawYaml.cannotParse')}</div>
+          </div>
+          <textarea
+            value={raw}
+            onChange={(event) => setRaw(event.target.value)}
+            spellCheck={false}
+            className="min-h-[360px] w-full resize-y rounded-md border border-border bg-background px-3 py-2 font-mono text-xs leading-5 text-foreground outline-none focus:ring-1 focus:ring-ring"
+          />
+          <div className="flex justify-end">
+            <Button type="button" size="sm" onClick={save} disabled={saving || !isDirty} className="h-8 gap-1.5 px-2.5 text-xs">
+              <Save className="mr-1.5 h-3.5 w-3.5" />
+              {saving ? t('pilotDeckConfig.actions.saving') : t('pilotDeckConfig.actions.saveAndReloadShort')}
+            </Button>
+          </div>
         </SettingsCard>
       )}
 

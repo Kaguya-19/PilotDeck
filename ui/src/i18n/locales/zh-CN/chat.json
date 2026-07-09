@@ -250,8 +250,14 @@
       "change": "选择运行模式",
       "agentDescription": "直接处理并执行任务",
       "planDescription": "先产出计划，确认后再执行",
-      "askDescription": "只读分析，可使用只读子智能体"
+      "askDescription": "仅回答问题，不修改文件"
     }
+  },
+  "documentReferences": {
+    "defaultPrompt": "请根据我引用的文档内容回答。",
+    "pages": "第 {{pages}} 页",
+    "pageUnknown": "页码未知",
+    "remove": "删除引用"
   },
   "commandMenu": {
     "empty": "暂无可用命令",

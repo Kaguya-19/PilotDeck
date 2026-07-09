@@ -30,6 +30,8 @@ export type {
 } from "./protocol/schema.js";
 export type {
   PilotDeckToolCall,
+  PilotDeckToolAvailability,
+  PilotDeckToolAvailabilityContext,
   PilotDeckToolDefinition,
   PilotDeckToolExecutionOutput,
   PilotDeckToolSupplementalMessage,
@@ -53,6 +55,11 @@ export type {
 } from "./protocol/types.js";
 export { ToolRegistry } from "./registry/ToolRegistry.js";
 export { createBuiltinRegistry, type CreateBuiltinRegistryOptions } from "./registry/createBuiltinRegistry.js";
+export {
+  filterAvailableTools,
+  type FilterAvailableToolsResult,
+  type PilotDeckUnavailableToolDiagnostic,
+} from "./registry/filterAvailableTools.js";
 export { ConcurrentToolScheduler } from "./scheduler/ConcurrentToolScheduler.js";
 export { SequentialToolScheduler } from "./scheduler/SequentialToolScheduler.js";
 export type { PilotDeckToolScheduler } from "./scheduler/ToolScheduler.js";
@@ -69,6 +76,12 @@ export { createReadFileTool, type ReadFileInput } from "./builtin/readFile.js";
 export { createReadSkillTool, type ReadSkillDeps, type ReadSkillInput } from "./builtin/readSkill.js";
 export { createGlobTool, extractGlobBaseDirectory, type GlobInput } from "./builtin/glob.js";
 export { createGrepTool, type GrepInput } from "./builtin/grep.js";
+export {
+  createExecuteCodeTool,
+  type ExecuteCodeOutput,
+  type ExecuteCodeStatus,
+  type ExecuteCodeToolCallLogEntry,
+} from "./builtin/executeCode.js";
 export {
   createGetCurrentTimeTool,
   type GetCurrentTimeInput,
@@ -188,6 +201,7 @@ export {
   createTaskListTool,
   createTaskOutputTool,
   createTaskStopTool,
+  createTaskWaitTool,
   createTaskTools,
   type CreateTaskToolsOptions,
   type TaskCreateInput,
@@ -198,6 +212,8 @@ export {
   type TaskOutputResult,
   type TaskStopInput,
   type TaskStopResult,
+  type TaskWaitInput,
+  type TaskWaitResult,
 } from "./builtin/taskTools.js";
 export {
   createTodoWriteTool,

@@ -56,6 +56,7 @@ import type {
   CronStopResult,
 } from "../../cron/protocol/types.js";
 import { GatewayWsClient, type GatewayWsNotificationHandler } from "./GatewayWsClient.js";
+import { parseReloadConfigResult } from "../protocol/reloadConfigResult.js";
 
 export class RemoteGateway implements Gateway {
   constructor(private readonly client: GatewayWsClient) {}
@@ -68,7 +69,7 @@ export class RemoteGateway implements Gateway {
     return this.client.stream("submit_turn", input);
   }
 
-  async abortTurn(input: { sessionKey: string; runId?: string }): Promise<void> {
+  async abortTurn(input: { sessionKey: string; runId?: string; reason?: string }): Promise<void> {
     await this.client.request("abort_turn", input);
   }
 
@@ -86,6 +87,10 @@ export class RemoteGateway implements Gateway {
 
   async closeSession(input: { sessionKey: string; reason?: string }): Promise<void> {
     await this.client.request("close_session", input);
+  }
+
+  async recordAgentStatusMessage(input: import("../protocol/types.js").GatewayRecordAgentStatusMessageInput): Promise<{ recorded: boolean }> {
+    return (await this.client.request("record_agent_status_message", input)) as { recorded: boolean };
   }
 
   async describeServer(): Promise<GatewayServerInfo> {
@@ -149,7 +154,7 @@ export class RemoteGateway implements Gateway {
   }
 
   async reloadConfig(): Promise<ReloadConfigResult> {
-    return (await this.client.request("reload_config", {})) as ReloadConfigResult;
+    return parseReloadConfigResult(await this.client.request("reload_config", {}));
   }
 
   async reloadExtensions(input: ReloadExtensionsInput = {}): Promise<ReloadExtensionsResult> {

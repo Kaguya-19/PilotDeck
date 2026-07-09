@@ -13,6 +13,7 @@ type StartSessionOptions = {
   basePermissionMode?: PermissionMode | string;
   runMode?: ChatRunMode | string;
   model?: string;
+  thinking?: unknown;
   sessionSummary?: string | null;
   toolsSettings?: PilotDeckSettings;
   images?: unknown[];
@@ -20,6 +21,7 @@ type StartSessionOptions = {
   alwaysOnPlanId?: string;
   alwaysOnExecutionToken?: string;
   workspaceCwd?: string;
+  forceStart?: boolean;
 };
 
 const VALID_PERMISSION_MODES = new Set<PermissionMode>([
@@ -88,6 +90,7 @@ export function startSessionCommand({
   basePermissionMode,
   runMode,
   model,
+  thinking,
   sessionSummary,
   toolsSettings = getPilotDeckSettings(),
   images,
@@ -95,6 +98,7 @@ export function startSessionCommand({
   alwaysOnPlanId,
   alwaysOnExecutionToken,
   workspaceCwd,
+  forceStart,
 }: StartSessionOptions): string {
   const sessionToActivate =
     sessionId || temporarySessionId || createTemporarySessionId();
@@ -112,6 +116,7 @@ export function startSessionCommand({
       permissionMode,
       ...(basePermissionMode ? { basePermissionMode } : {}),
       ...(model ? { model } : {}),
+      ...(thinking ? { thinking } : {}),
       sessionSummary,
       ...(typeof userVisibleInput === 'string' && userVisibleInput.trim()
         ? { userVisibleInput: userVisibleInput.trim() }
@@ -121,6 +126,7 @@ export function startSessionCommand({
       ...(Array.isArray(images) && images.length > 0 ? { images } : {}),
       ...(Array.isArray(attachments) && attachments.length > 0 ? { attachments } : {}),
       ...(workspaceCwd ? { workspaceCwd } : {}),
+      ...(forceStart ? { forceStart: true } : {}),
     },
   });
 

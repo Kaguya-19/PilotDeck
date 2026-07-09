@@ -24,6 +24,7 @@ export type WsGatewayMethod =
   | "resume_session"
   | "new_session"
   | "close_session"
+  | "record_agent_status_message"
   | "describe_server"
   | "active_turn_snapshot"
   | "cron_create"

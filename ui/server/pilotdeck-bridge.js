@@ -52,6 +52,10 @@ import { resolvePilotHome, createProjectId, sanitizeSessionIdForPath } from './u
 // rewrites this import to the compiled `dist/src` tree so packaged builds do
 // not need a TypeScript loader.
 import { createRemoteGateway } from '../../src/gateway/index.js';
+import {
+    createVisibleErrorStatusDetail,
+    isVisibleFailureStatusDetail,
+} from '../../src/status/agentStatus.js';
 import { createNormalizedMessage } from './pilotdeck-message.js';
 import { readPermissionSettings } from './services/permissionSettings.js';
 
@@ -75,6 +79,29 @@ const GATEWAY_CONNECT_RETRY_INTERVAL_MS = 500;
 const subagentActivityStarts = new Map();
 /** @type {Map<string, string[]>} sessionId → [toolCallId, ...] for pending agent/Task tool calls */
 const pendingAgentToolCalls = new Map();
+const visibleFailureAgentStatusEvents = new Set([
+    'model_empty_response_exhausted',
+    'max_turns_reached',
+    'max_output_recovery_exhausted',
+    'model_request_failed',
+    'tool_call_recovery_exhausted',
+    'tool_error_loop',
+    'lifecycle_blocked',
+    'turn_failed',
+    'turn_timeout',
+    'gateway_submit_failed',
+    'session_busy',
+    'gateway_bridge_error',
+    'gateway_stream_ended_without_completion',
+    'web_http_request_failed',
+    'project_unavailable',
+    'config_invalid',
+    'gateway_unavailable',
+    'channel_submit_failed',
+    'subagent_failed',
+    'content_filter_stop',
+    'unknown_finish_reason',
+]);
 
 function normalizeToolDisplayName(name) {
     const aliases = {
@@ -113,6 +140,12 @@ function normalizeToolErrorCode(errorCode, resultPreview) {
     if (errorCode === 'plan_mode_violation') return 'plan_mode_denied';
     if (errorCode === 'ask_mode_violation') return 'ask_mode_denied';
     return readOnlyModeToolDenyCode(resultPreview) || errorCode;
+}
+
+function isVisibleFailureAgentStatus(event) {
+    return event?.type === 'agent_status'
+        && (visibleFailureAgentStatusEvents.has(event.event) || isVisibleFailureStatusDetail(event.detail))
+        && event.detail?.visible !== false;
 }
 
 /**
@@ -187,6 +220,15 @@ function ensureGateway() {
     return gatewayPromise;
 }
 
+function resetGatewayConnection() {
+    gatewayPromise = null;
+}
+
+export function isGatewayUnavailableError(error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return /gateway websocket (closed|is not connected)|failed to connect to gateway websocket|gateway hello timed out|gateway closed during hello|gateway connect failed/i.test(message);
+}
+
 /**
  * Public accessor for the shared gateway client. Other ui/server modules
  * (`projects.js`, etc.) await this so they share one WebSocket
@@ -209,7 +251,11 @@ export function getPilotDeckRepoRoot() {
 const sessionState = new Map();
 
 function isPilotDeckSessionKey(value) {
-    return typeof value === 'string' && /^web[:_-]s_/.test(value);
+    if (typeof value !== 'string' || !value.trim()) return false;
+    if (value.startsWith('new-session-')) return false;
+    if (/^web[:_-]s_/.test(value)) return true;
+    if (/^[a-z]+:/.test(value)) return true;
+    return false;
 }
 
 function newSessionKey() {
@@ -232,6 +278,7 @@ function ensureSessionState(sessionKey, projectKey, channelKey) {
             runId: undefined,
             active: false,
             tokenBudget: null,
+            hasVisibleFailureStatus: false,
         };
         sessionState.set(sessionKey, state);
     } else {
@@ -305,6 +352,7 @@ function uiFilesToAttachments(files) {
     const out = [];
     for (const file of files) {
         if (!file || typeof file !== 'object') continue;
+        if (file.kind === 'document-selection') continue;
         const filePath = typeof file.path === 'string' ? file.path : '';
         if (!filePath) continue;
         out.push({
@@ -354,7 +402,7 @@ function resolvePermissionMode(options) {
  * @returns {object[]} NormalizedMessage frames.
  */
 export function gatewayEventToFrames(event, sessionId, provider) {
-    const base = { sessionId, provider };
+    const base = { sessionId, provider, ...(event.runId ? { runId: event.runId } : {}) };
     switch (event.type) {
         case 'turn_started':
             return [
@@ -606,11 +654,16 @@ export function gatewayEventToFrames(event, sessionId, provider) {
                 ];
             }
             if (event.event === 'retry_progress') {
+                const retryText = detail.reason === 'continuation'
+                    ? 'Continuing response'
+                    : detail.reason === 'rate_limit' || detail.reason === 'overloaded'
+                        ? 'Switching model'
+                        : 'Reconnecting';
                 return [
                     createNormalizedMessage({
                         ...base,
                         kind: 'status',
-                        text: `Reconnecting... ${detail.attempt}/${detail.maxAttempts}`,
+                        text: `${retryText}... ${detail.attempt}/${detail.maxAttempts}`,
                         tokens: 0,
                         canInterrupt: true,
                         retryProgress: {
@@ -621,6 +674,54 @@ export function gatewayEventToFrames(event, sessionId, provider) {
                             provider: detail.provider,
                             model: detail.model,
                         },
+                    }),
+                ];
+            }
+            if (event.event === 'model_empty_response_exhausted') {
+                return [
+                    createNormalizedMessage({
+                        ...base,
+                        kind: 'error',
+                        content: detail.message || 'The model returned empty content repeatedly, so this turn has stopped. Try again later or increase max output tokens.',
+                        code: event.event,
+                        recoverable: false,
+                        userHint: detail.userHint,
+                    }),
+                ];
+            }
+            if (event.event === 'max_turns_reached') {
+                return [
+                    createNormalizedMessage({
+                        ...base,
+                        kind: 'error',
+                        content: detail.message || 'Reached the maximum number of turns, so this turn has stopped. Increase maxTurns or split the task into smaller steps and try again.',
+                        code: event.event,
+                        recoverable: false,
+                        userHint: detail.userHint,
+                    }),
+                ];
+            }
+            if (visibleFailureAgentStatusEvents.has(event.event) || isVisibleFailureStatusDetail(detail)) {
+                return [
+                    createNormalizedMessage({
+                        ...base,
+                        kind: 'error',
+                        content: detail.message || 'Agent execution stopped before producing a complete response. Please retry or adjust the task.',
+                        code: event.event,
+                        recoverable: false,
+                        userHint: detail.userHint,
+                    }),
+                ];
+            }
+            if (event.event === 'structured_output_completed' || event.event === 'turn_aborted') {
+                return [
+                    createNormalizedMessage({
+                        ...base,
+                        kind: 'status',
+                        content: detail.message || 'This turn ended before producing a standard assistant response.',
+                        code: event.event,
+                        recoverable: false,
+                        userHint: detail.userHint,
                     }),
                 ];
             }
@@ -829,6 +930,27 @@ function tryParseJson(value) {
     }
 }
 
+function createBridgeFailureStatusEvent({ event, message, userHint, scope = 'turn', detail = {} }) {
+    return {
+        type: 'agent_status',
+        event,
+        detail: createVisibleErrorStatusDetail({
+            message,
+            code: event,
+            userHint,
+            scope,
+            source: 'web_bridge',
+            detail,
+        }),
+    };
+}
+
+function sendBridgeStatusEvent(writer, statusEvent, sessionKey, provider) {
+    for (const frame of gatewayEventToFrames(statusEvent, sessionKey, provider)) {
+        writer.send(frame);
+    }
+}
+
 /**
  * Run a chat command through the PilotDeck gateway.
  *
@@ -859,7 +981,6 @@ export async function runChatViaGateway(
     writer,
     provider = 'pilotdeck',
 ) {
-    const gw = await ensureGateway();
     const projectKey = options.projectPath || options.cwd || GENERAL_HOME;
     const channelKey = 'web';
 
@@ -868,24 +989,8 @@ export async function runChatViaGateway(
     const isNewSession = sessionKey !== incoming;
 
     const state = ensureSessionState(sessionKey, projectKey, channelKey);
+    const staleRunId = state.active ? state.runId : undefined;
 
-    // If a previous turn for this session is still in-flight (e.g. the
-    // browser reloaded while a permission prompt was pending), abort it
-    // before starting the new one. Without this the gateway rejects
-    // with session_busy because the old turn's inFlightTurns slot is
-    // still occupied.
-    if (state.active && state.runId) {
-        console.log(
-            `[pilotdeck-bridge] aborting stale turn ${state.runId} for ${sessionKey} before resubmit`,
-        );
-        try {
-            await gw.abortTurn({ sessionKey, runId: state.runId });
-        } catch (err) {
-            console.warn('[pilotdeck-bridge] stale abort failed (continuing):', err?.message || err);
-        }
-        state.active = false;
-        state.runId = undefined;
-    }
 
     if (isNewSession) {
         writer.send(
@@ -902,6 +1007,7 @@ export async function runChatViaGateway(
     const runId = randomUUID();
     state.runId = runId;
     state.active = true;
+    state.hasVisibleFailureStatus = false;
 
     const attachments = [
         ...(uiImagesToAttachments(options?.images) || []),
@@ -912,7 +1018,41 @@ export async function runChatViaGateway(
     const runMode = normalizeRunMode(options?.runMode) || (resolvedMode === 'plan' ? 'plan' : 'agent');
     console.log(`[pilotdeck-bridge] submitTurn runMode=${runMode} mode=${resolvedMode} (options.permissionMode=${options?.permissionMode}, options.mode=${options?.mode})`);
 
+    let gw = null;
     try {
+        gw = await ensureGateway();
+
+        if (staleRunId) {
+            const abortReason = options?.forceStart === true
+                ? 'user:force_start_next_turn'
+                : 'system:stale_turn';
+            const abortAction = options?.forceStart === true ? 'force-start aborting' : 'aborting stale';
+            console.log(
+                `[pilotdeck-bridge] ${abortAction} turn ${staleRunId} for ${sessionKey} before submit`,
+            );
+            try {
+                await gw.abortTurn({ sessionKey, runId: staleRunId, reason: abortReason });
+            } catch (err) {
+                if (options?.forceStart === true) {
+                    const message = 'Could not stop the current turn before sending the queued message. Please wait for the current turn to finish or try stopping it again.';
+                    console.warn('[pilotdeck-bridge] force-start abort failed:', err?.message || err);
+                    writer.send(
+                        createNormalizedMessage({
+                            provider,
+                            sessionId: sessionKey,
+                            kind: 'error',
+                            code: 'force_start_abort_failed',
+                            content: message,
+                            userHint: message,
+                        }),
+                    );
+                    clearActiveRunIfCurrent(state, staleRunId);
+                    return;
+                }
+                console.warn('[pilotdeck-bridge] stale abort failed (continuing):', err?.message || err);
+            }
+        }
+
         const stream = gw.submitTurn({
             sessionKey,
             channelKey,
@@ -922,6 +1062,7 @@ export async function runChatViaGateway(
             mode: resolvedMode,
             runId,
             canPrompt: true,
+            ...(options?.thinking ? { thinking: options.thinking } : {}),
             ...(basePermissionMode ? { basePermissionMode } : {}),
             ...(attachments.length > 0 ? { attachments } : {}),
             ...(options.workspaceCwd ? { workspaceCwd: options.workspaceCwd } : {}),
@@ -930,6 +1071,9 @@ export async function runChatViaGateway(
         let sawTurnCompleted = false;
         let sawGatewayError = false;
         for await (const event of stream) {
+            if (isVisibleFailureAgentStatus(event)) {
+                state.hasVisibleFailureStatus = true;
+            }
             if (event && event.type === 'error') {
                 sawGatewayError = true;
                 console.error(
@@ -964,41 +1108,94 @@ export async function runChatViaGateway(
                 sawTurnCompleted = true;
                 clearActiveRunIfCurrent(state, runId);
             }
-            for (const frame of gatewayEventToFrames(event, sessionKey, provider)) {
-                writer.send(frame);
+            const suppressDuplicateError = event?.type === 'error' && state.hasVisibleFailureStatus;
+            if (!suppressDuplicateError) {
+                for (const frame of gatewayEventToFrames(event, sessionKey, provider)) {
+                    writer.send(frame);
+                }
             }
         }
 
         if (!sawTurnCompleted && !sawGatewayError) {
             const message = 'Gateway stream ended before turn_completed; no final assistant response was received.';
+            const userHint = 'The model stream ended before PilotDeck received a final turn result. Please retry this message; if it repeats, check the gateway/model provider logs.';
+            const statusEvent = createBridgeFailureStatusEvent({
+                event: 'gateway_stream_ended_without_completion',
+                message,
+                userHint,
+            });
             console.warn(`[pilotdeck-bridge] ${message}`, { sessionKey, projectKey, runId });
-            writer.send(
-                createNormalizedMessage({
-                    provider,
-                    sessionId: sessionKey,
-                    kind: 'error',
-                    code: 'gateway_stream_ended_without_completion',
-                    content: message,
-                    userHint: 'The model stream ended before PilotDeck received a final turn result. Please retry this message; if it repeats, check the gateway/model provider logs.',
-                }),
-            );
+            await recordGatewayStatusMessage(gw, {
+                sessionKey,
+                turnId: runId,
+                projectKey,
+                event: statusEvent.event,
+                text: message,
+                detail: statusEvent.detail,
+            });
+            state.hasVisibleFailureStatus = true;
+            sendBridgeStatusEvent(writer, statusEvent, sessionKey, provider);
         }
     } catch (error) {
+        const rawMessage = error instanceof Error ? error.message : String(error);
+        const gatewayUnavailable = !gw || isGatewayUnavailableError(error);
+        if (gatewayUnavailable) {
+            resetGatewayConnection();
+        }
+        const message = gatewayUnavailable ? 'PilotDeck gateway is unavailable.' : rawMessage;
+        const statusEvent = gatewayUnavailable
+            ? createBridgeFailureStatusEvent({
+                event: 'gateway_unavailable',
+                message,
+                userHint: 'Start or restart the PilotDeck gateway, then retry this message.',
+                scope: 'preflight',
+                detail: {
+                    gatewayUrl: GATEWAY_URL,
+                },
+            })
+            : createBridgeFailureStatusEvent({
+                event: 'gateway_bridge_error',
+                message,
+                userHint: 'The Web bridge failed while streaming this turn. Retry this message; if it repeats, check the UI server and gateway logs.',
+            });
 
         console.error(
             '[pilotdeck-bridge] runChatViaGateway threw:',
             error instanceof Error ? (error.stack || error.message) : error,
         );
-        writer.send(
-            createNormalizedMessage({
-                provider,
-                sessionId: sessionKey,
-                kind: 'error',
-                content: error instanceof Error ? error.message : String(error),
-            }),
-        );
+        if (gw) {
+            await recordGatewayStatusMessage(gw, {
+                sessionKey,
+                turnId: runId,
+                projectKey,
+                event: statusEvent.event,
+                text: message,
+                detail: statusEvent.detail,
+            });
+        }
+        state.hasVisibleFailureStatus = true;
+        sendBridgeStatusEvent(writer, statusEvent, sessionKey, provider);
     } finally {
         clearActiveRunIfCurrent(state, runId);
+    }
+}
+
+async function recordGatewayStatusMessage(gateway, { sessionKey, turnId, projectKey, event, text, detail }) {
+    if (!gateway?.recordAgentStatusMessage) return;
+    try {
+        await gateway.recordAgentStatusMessage({
+            sessionKey,
+            turnId,
+            projectKey,
+            status: {
+                event,
+                kind: 'error',
+                text,
+                detail,
+            },
+        });
+    } catch (error) {
+        console.warn('[pilotdeck-bridge] failed to record gateway status message:', error?.message || error);
     }
 }
 
@@ -1008,7 +1205,12 @@ export async function abortViaGateway(sessionId, _provider = 'pilotdeck') {
     if (!sessionKey) return false;
     const state = sessionState.get(sessionKey);
     try {
-        await gw.abortTurn({ sessionKey, runId: state?.runId });
+        const runId = state?.runId;
+        await gw.abortTurn({ sessionKey, runId });
+        if (state && (!runId || state.runId === runId)) {
+            state.active = false;
+            state.runId = undefined;
+        }
         return true;
     } catch (error) {
         console.warn('[pilotdeck-bridge] abortTurn failed:', error);
@@ -1222,6 +1424,19 @@ function _loadRecordsFromJson(jsonPath, legacyPath) {
  * a human-readable title. Cached for the lifetime of the process.
  */
 const _sessionTitleCache = new Map();
+const DOCUMENT_SELECTION_PROMPT_MARKER = '[Document selections quoted by user:]';
+
+function _stripDocumentSelectionPromptBlock(text) {
+    if (typeof text !== 'string') return '';
+    const markerIndex = text.indexOf(DOCUMENT_SELECTION_PROMPT_MARKER);
+    return markerIndex >= 0 ? text.slice(0, markerIndex).trimEnd() : text;
+}
+
+function _formatPromptTitle(text) {
+    const trimmed = _stripDocumentSelectionPromptBlock(text).trim();
+    if (!trimmed) return null;
+    return trimmed.length > 80 ? trimmed.slice(0, 77) + '…' : trimmed;
+}
 
 function lookupSessionTitle(sessionId, projectKey) {
     if (_sessionTitleCache.has(sessionId)) return _sessionTitleCache.get(sessionId);
@@ -1275,8 +1490,8 @@ function _readFirstPrompt(sessionId, projectKey) {
                         ?.flatMap(m => m.content ?? [])
                         .find(b => b.type === 'text')?.text;
                     if (text?.trim()) {
-                        const trimmed = text.trim();
-                        return trimmed.length > 80 ? trimmed.slice(0, 77) + '…' : trimmed;
+                        const title = _formatPromptTitle(text);
+                        if (title) return title;
                     }
                 }
             } finally {

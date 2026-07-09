@@ -1,7 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useTranslation } from 'react-i18next';
 import { api } from '../../../../utils/api';
+import { readOfficePreviewStatus, type OfficePreviewStatus } from '../../../../utils/officePreviewStatus';
 import type { CodeEditorFile } from '../../types/types';
-import { isImageFile, isPdfFile } from '../../utils/binaryFile';
+import { isImageFile, isOfficeFile, isPdfFile } from '../../utils/binaryFile';
+import PdfDocumentPreview from './PdfDocumentPreview';
 
 type CodeEditorBinaryFileProps = {
   file: CodeEditorFile;
@@ -14,35 +17,155 @@ type CodeEditorBinaryFileProps = {
   message: string;
 };
 
-function useBlobUrl(projectName: string | undefined, filePath: string, enabled: boolean) {
-  const [blobUrl, setBlobUrl] = useState<string | null>(null);
-  const [error, setError] = useState(false);
+type BlobSource = 'raw' | 'office-pdf';
+type ReloadOptions = { force?: boolean };
+
+function getExtension(filename: string): string {
+  return filename.split('.').pop()?.toLowerCase() ?? '';
+}
+
+function getFileTypeBadge(filename: string) {
+  const extension = getExtension(filename);
+  if (['doc', 'docx', 'odt'].includes(extension)) {
+    return {
+      label: 'W',
+      className: 'bg-blue-600 text-white',
+      titleKey: 'fileTypes.word',
+    };
+  }
+  if (['xls', 'xlsx', 'ods'].includes(extension)) {
+    return {
+      label: 'X',
+      className: 'bg-emerald-600 text-white',
+      titleKey: 'fileTypes.excel',
+    };
+  }
+  if (['ppt', 'pptx', 'odp'].includes(extension)) {
+    return {
+      label: 'P',
+      className: 'bg-orange-600 text-white',
+      titleKey: 'fileTypes.powerpoint',
+    };
+  }
+  if (extension === 'pdf') {
+    return {
+      label: 'PDF',
+      className: 'bg-red-600 text-white text-[7px]',
+      titleKey: 'fileTypes.pdf',
+    };
+  }
+  if (isImageFile(filename)) {
+    return {
+      label: 'IMG',
+      className: 'bg-violet-600 text-white text-[7px]',
+      titleKey: 'fileTypes.image',
+    };
+  }
+  return {
+    label: 'F',
+    className: 'bg-neutral-500 text-white',
+    titleKey: 'fileTypes.file',
+  };
+}
+
+function FileTypeBadge({ fileName }: { fileName: string }) {
+  const { t } = useTranslation('codeEditor');
+  const badge = getFileTypeBadge(fileName);
+
+  return (
+    <span
+      title={t(badge.titleKey)}
+      aria-label={t(badge.titleKey)}
+      className={[
+        'flex h-5 w-5 shrink-0 items-center justify-center rounded-[4px] text-[10px] font-semibold leading-none shadow-sm ring-1 ring-black/5',
+        badge.className,
+      ].join(' ')}
+    >
+      {badge.label}
+    </span>
+  );
+}
+
+async function readPreviewErrorResponse(res: Response) {
+  let detail = '';
+  let code = '';
+  try {
+    const body = await res.json();
+    detail = body?.error || body?.code || '';
+    code = body?.code || '';
+  } catch {
+    detail = await res.text().catch(() => '');
+  }
+  const error = new Error(detail || `HTTP ${res.status}`) as Error & { code?: string };
+  error.code = code;
+  return error;
+}
+
+function useFileBlob(
+  projectName: string | undefined,
+  filePath: string,
+  enabled: boolean,
+  source: BlobSource = 'raw',
+) {
+  const [blob, setBlob] = useState<Blob | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [errorCode, setErrorCode] = useState<string | null>(null);
   const [loading, setLoading] = useState(enabled);
+  const [reloadRequest, setReloadRequest] = useState({ key: 0, force: false });
+  const lastRequestKeyRef = useRef('');
+
+  const reload = useCallback((options: ReloadOptions = {}) => {
+    setReloadRequest((value) => ({
+      key: value.key + 1,
+      force: Boolean(options.force),
+    }));
+  }, []);
 
   useEffect(() => {
     if (!enabled || !projectName) {
+      setBlob(null);
       setLoading(false);
+      setErrorMessage(enabled ? 'Project is not available.' : null);
+      setErrorCode(null);
       return;
     }
 
-    let objectUrl: string | null = null;
+    const requestKey = `${source}:${projectName}:${filePath}`;
+    const isNewFile = lastRequestKeyRef.current !== requestKey;
+    lastRequestKeyRef.current = requestKey;
+
     let cancelled = false;
 
+    if (isNewFile) {
+      setBlob(null);
+    }
     setLoading(true);
-    setError(false);
+    setErrorMessage(null);
+    setErrorCode(null);
 
-    api.readFileBlob(projectName, filePath)
-      .then((res: Response) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return res.blob();
+    const request = source === 'office-pdf'
+      ? api.readOfficePdfPreviewBlob(projectName, filePath, { force: reloadRequest.force })
+      : api.readFileBlob(projectName, filePath);
+
+    request
+      .then(async (res: Response) => {
+        if (res.ok) {
+          return res.blob();
+        }
+
+        throw await readPreviewErrorResponse(res);
       })
-      .then((blob: Blob) => {
+      .then((nextBlob: Blob) => {
         if (cancelled) return;
-        objectUrl = URL.createObjectURL(blob);
-        setBlobUrl(objectUrl);
+        setBlob(nextBlob);
       })
-      .catch(() => {
-        if (!cancelled) setError(true);
+      .catch((error: Error & { code?: string }) => {
+        if (cancelled) return;
+        if (isNewFile) {
+          setBlob(null);
+        }
+        setErrorMessage(error.message || 'Failed to load file preview.');
+        setErrorCode(error.code || null);
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -50,22 +173,223 @@ function useBlobUrl(projectName: string | undefined, filePath: string, enabled: 
 
     return () => {
       cancelled = true;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [enabled, projectName, filePath]);
+  }, [enabled, projectName, filePath, source, reloadRequest.force, reloadRequest.key]);
 
-  return { blobUrl, error, loading };
+  return { blob, errorMessage, errorCode, loading, reload };
 }
 
-function PreviewSpinner() {
+function useOfficePdfPreviewUrl(
+  projectName: string | undefined,
+  filePath: string,
+  enabled: boolean,
+) {
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [errorCode, setErrorCode] = useState<string | null>(null);
+  const [loading, setLoading] = useState(enabled);
+  const [reloadRequest, setReloadRequest] = useState({ key: 0, force: false });
+  const lastRequestKeyRef = useRef('');
+
+  const reload = useCallback((options: ReloadOptions = {}) => {
+    setReloadRequest((value) => ({
+      key: value.key + 1,
+      force: Boolean(options.force),
+    }));
+  }, []);
+
+  useEffect(() => {
+    if (!enabled || !projectName) {
+      setPreviewUrl(null);
+      setLoading(false);
+      setErrorMessage(enabled ? 'Project is not available.' : null);
+      setErrorCode(null);
+      return undefined;
+    }
+
+    const requestKey = `office-pdf:${projectName}:${filePath}`;
+    const isNewFile = lastRequestKeyRef.current !== requestKey;
+    lastRequestKeyRef.current = requestKey;
+    const controller = new AbortController();
+
+    if (isNewFile) {
+      setPreviewUrl(null);
+    }
+    setLoading(true);
+    setErrorMessage(null);
+    setErrorCode(null);
+
+    const cacheKey = `${reloadRequest.key}`;
+    const nextPreviewUrl = api.officePdfPreviewUrl(projectName, filePath, { cacheKey });
+
+    api.preflightOfficePdfPreview(projectName, filePath, {
+      force: reloadRequest.force,
+      cacheKey,
+      signal: controller.signal,
+    })
+      .then(async (res: Response) => {
+        if (!res.ok) {
+          throw await readPreviewErrorResponse(res);
+        }
+        await res.arrayBuffer().catch(() => null);
+        if (!controller.signal.aborted) {
+          setPreviewUrl(nextPreviewUrl);
+        }
+      })
+      .catch((error: Error & { code?: string; name?: string }) => {
+        if (controller.signal.aborted || error.name === 'AbortError') return;
+        if (isNewFile) {
+          setPreviewUrl(null);
+        }
+        setErrorMessage(error.message || 'Failed to load file preview.');
+        setErrorCode(error.code || null);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) {
+          setLoading(false);
+        }
+      });
+
+    return () => {
+      controller.abort();
+    };
+  }, [enabled, projectName, filePath, reloadRequest.force, reloadRequest.key]);
+
+  return { previewUrl, errorMessage, errorCode, loading, reload };
+}
+
+function useObjectUrl(blob: Blob | null) {
+  const [blobUrl, setBlobUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!blob) {
+      setBlobUrl(null);
+      return;
+    }
+
+    const objectUrl = URL.createObjectURL(blob);
+    setBlobUrl(objectUrl);
+    return () => {
+      URL.revokeObjectURL(objectUrl);
+    };
+  }, [blob]);
+
+  return blobUrl;
+}
+
+function useOfficeAutoRefresh(
+  projectName: string | undefined,
+  filePath: string,
+  reload: (options?: ReloadOptions) => void,
+) {
+  useEffect(() => {
+    const matchesFile = (detail: unknown) => {
+      if (!detail || typeof detail !== 'object') return true;
+      const payload = detail as { projectName?: string; filePath?: string; path?: string };
+      const changedPath = payload.filePath || payload.path;
+      return (!payload.projectName || payload.projectName === projectName)
+        && (!changedPath || changedPath === filePath);
+    };
+
+    const handleRefreshEvent = (event: Event) => {
+      const detail = (event as CustomEvent).detail as { force?: boolean } | undefined;
+      if (matchesFile(detail)) {
+        reload({ force: detail?.force === true });
+      }
+    };
+
+    window.addEventListener('pilotdeck:file-updated', handleRefreshEvent);
+    window.addEventListener('pilotdeck:files-changed', handleRefreshEvent);
+    window.addEventListener('pilotdeck:agent-turn-complete', handleRefreshEvent);
+    return () => {
+      window.removeEventListener('pilotdeck:file-updated', handleRefreshEvent);
+      window.removeEventListener('pilotdeck:files-changed', handleRefreshEvent);
+      window.removeEventListener('pilotdeck:agent-turn-complete', handleRefreshEvent);
+    };
+  }, [filePath, projectName, reload]);
+}
+
+function useOfficePreviewService() {
+  const [status, setStatus] = useState<OfficePreviewStatus | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  const reload = useCallback(() => {
+    setLoading(true);
+    readOfficePreviewStatus()
+      .then((nextStatus) => {
+        setStatus(nextStatus);
+      })
+      .catch(() => {
+        setStatus(null);
+      })
+      .finally(() => {
+        setLoading(false);
+      });
+  }, []);
+
+  useEffect(() => {
+    reload();
+  }, [reload]);
+
+  return { status, loading, reload };
+}
+
+function PreviewSpinner({ label }: { label?: string }) {
   return (
-    <div className="flex h-full w-full items-center justify-center">
+    <div className="flex h-full w-full flex-col items-center justify-center gap-3">
       <div className="h-6 w-6 animate-spin rounded-full border-2 border-neutral-300 border-t-neutral-600 dark:border-neutral-600 dark:border-t-neutral-300" />
+      {label && (
+        <p className="text-[12px] text-neutral-500 dark:text-neutral-400">{label}</p>
+      )}
     </div>
   );
 }
 
-function FallbackContent({ title, message, onClose }: { title: string; message: string; onClose: () => void }) {
+function DownloadButton({ projectName, file }: { projectName?: string; file: CodeEditorFile }) {
+  const { t } = useTranslation('codeEditor');
+  if (!projectName) return null;
+
+  return (
+    <a
+      href={api.fileDownloadUrl(projectName, file.path)}
+      download={file.name}
+      className="rounded-md border border-neutral-200 px-3 py-1.5 text-[13px] text-neutral-700 transition-colors hover:bg-neutral-50 dark:border-neutral-800 dark:text-neutral-200 dark:hover:bg-neutral-900"
+    >
+      {t('actions.download')}
+    </a>
+  );
+}
+
+function OfficePreviewSettingsButton() {
+  const { t } = useTranslation('codeEditor');
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        if (typeof window !== 'undefined') {
+          const openSettings = (window as Window & { openSettings?: (tab?: string) => void }).openSettings;
+          openSettings?.('config:officePreview');
+        }
+      }}
+      className="rounded-md border border-neutral-200 px-3 py-1.5 text-[13px] text-neutral-700 transition-colors hover:bg-neutral-50 dark:border-neutral-800 dark:text-neutral-200 dark:hover:bg-neutral-900"
+    >
+      {t('officePreview.configureService')}
+    </button>
+  );
+}
+
+function FallbackContent({
+  title,
+  message,
+  onClose,
+  actions,
+}: {
+  title: string;
+  message: string;
+  onClose: () => void;
+  actions?: ReactNode;
+}) {
+  const { t } = useTranslation('codeEditor');
   return (
     <div className="flex h-full w-full flex-col items-center justify-center bg-white p-8 dark:bg-neutral-950">
       <div className="flex max-w-md flex-col items-center gap-4 text-center">
@@ -90,14 +414,40 @@ function FallbackContent({ title, message, onClose }: { title: string; message: 
           </h3>
           <p className="text-[13px] text-neutral-500 dark:text-neutral-400">{message}</p>
         </div>
-        <button
-          onClick={onClose}
-          className="mt-2 rounded-md bg-neutral-900 px-4 py-1.5 text-[13px] text-white transition-colors hover:opacity-90 dark:bg-neutral-100 dark:text-neutral-900"
-        >
-          Close
-        </button>
+        <div className="mt-2 flex items-center justify-center gap-2">
+          {actions}
+          <button
+            onClick={onClose}
+            className="rounded-md bg-neutral-900 px-4 py-1.5 text-[13px] text-white transition-colors hover:opacity-90 dark:bg-neutral-100 dark:text-neutral-900"
+          >
+            {t('actions.close')}
+          </button>
+        </div>
       </div>
     </div>
+  );
+}
+
+function RefreshButton({ onRefresh, disabled }: { onRefresh: () => void; disabled?: boolean }) {
+  const { t } = useTranslation('codeEditor');
+  return (
+    <button
+      type="button"
+      onClick={onRefresh}
+      disabled={disabled}
+      className="flex h-7 w-7 items-center justify-center rounded-md text-neutral-500 transition-colors hover:bg-neutral-100 hover:text-neutral-900 disabled:cursor-not-allowed disabled:opacity-50 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-100"
+      title={t('officePreview.refresh')}
+      aria-label={t('officePreview.refresh')}
+    >
+      <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          strokeWidth={1.75}
+          d="M4 4v5h.582m0 0A7.5 7.5 0 1012 4.5M4.582 9H9"
+        />
+      </svg>
+    </button>
   );
 }
 
@@ -108,11 +458,12 @@ function ImagePreview({ projectName, file, title, message, onClose }: {
   message: string;
   onClose: () => void;
 }) {
-  const { blobUrl, error, loading } = useBlobUrl(projectName, file.path, true);
+  const { blob, errorMessage, loading } = useFileBlob(projectName, file.path, true);
+  const blobUrl = useObjectUrl(blob);
   const [imgError, setImgError] = useState(false);
 
-  if (loading) return <PreviewSpinner />;
-  if (error || imgError || !blobUrl) {
+  if (loading && !blobUrl) return <PreviewSpinner />;
+  if (errorMessage || imgError || !blobUrl) {
     return <FallbackContent title={title} message={message} onClose={onClose} />;
   }
 
@@ -135,21 +486,105 @@ function PdfPreview({ projectName, file, title, message, onClose }: {
   message: string;
   onClose: () => void;
 }) {
-  const { blobUrl, error, loading } = useBlobUrl(projectName, file.path, true);
+  const previewUrl = projectName ? api.fileContentUrl(projectName, file.path) : null;
 
-  if (loading) return <PreviewSpinner />;
-  if (error || !blobUrl) {
+  if (!previewUrl) {
     return <FallbackContent title={title} message={message} onClose={onClose} />;
   }
 
   return (
-    <div className="h-full w-full bg-white dark:bg-neutral-950">
-      <iframe
-        src={blobUrl}
-        className="h-full w-full border-0"
-        title={`PDF: ${file.name}`}
+    <PdfDocumentPreview
+      url={previewUrl}
+      projectName={projectName}
+      fileName={file.name}
+      filePath={file.path}
+      source="pdf"
+    />
+  );
+}
+
+function OfficePreview({
+  projectName,
+  file,
+  title,
+  onClose,
+}: {
+  projectName?: string;
+  file: CodeEditorFile;
+  title: string;
+  onClose: () => void;
+}) {
+  const { t } = useTranslation('codeEditor');
+  const {
+    status: previewServiceStatus,
+    loading: previewServiceLoading,
+  } = useOfficePreviewService();
+  const previewDisabledByConfig = previewServiceStatus?.service === 'none';
+  const shouldLoadOfficePdf = !previewServiceLoading && !previewDisabledByConfig;
+  const { previewUrl, errorMessage, errorCode, loading, reload } = useOfficePdfPreviewUrl(projectName, file.path, shouldLoadOfficePdf);
+
+  useOfficeAutoRefresh(projectName, file.path, reload);
+
+  if (previewServiceLoading && !previewUrl) {
+    return <PreviewSpinner label={t('officePreview.checkingService')} />;
+  }
+  if (previewDisabledByConfig) {
+    return (
+      <FallbackContent
+        title={t('officePreview.disabledTitle')}
+        message={t('officePreview.disabledMessage')}
+        onClose={onClose}
+        actions={(
+          <>
+            <DownloadButton projectName={projectName} file={file} />
+            <OfficePreviewSettingsButton />
+          </>
+        )}
       />
-    </div>
+    );
+  }
+
+  if (loading && !previewUrl) return <PreviewSpinner label={t('officePreview.converting')} />;
+  if (errorMessage || !previewUrl) {
+    const previewDisabled = errorCode === 'OFFICE_PREVIEW_DISABLED';
+    const needsLibreOffice = errorCode === 'LIBREOFFICE_NOT_FOUND'
+      || errorMessage?.includes('LibreOffice')
+      || errorMessage === 'LIBREOFFICE_NOT_FOUND';
+    const fallbackTitle = previewDisabled
+      ? t('officePreview.disabledTitle')
+      : needsLibreOffice
+        ? t('officePreview.libreOfficeUnavailableTitle')
+        : title;
+    const fallbackMessage = previewDisabled
+      ? t('officePreview.disabledMessage')
+      : needsLibreOffice
+        ? t('officePreview.libreOfficeUnavailableMessage')
+        : errorMessage || t('officePreview.failedMessage');
+
+    return (
+      <FallbackContent
+        title={fallbackTitle}
+        message={fallbackMessage}
+        onClose={onClose}
+        actions={(
+          <>
+            <DownloadButton projectName={projectName} file={file} />
+            {(previewDisabled || needsLibreOffice) && <OfficePreviewSettingsButton />}
+          </>
+        )}
+      />
+    );
+  }
+
+  return (
+    <PdfDocumentPreview
+      url={previewUrl}
+      projectName={projectName}
+      fileName={file.name}
+      filePath={file.path}
+      source="office-pdf"
+      loadingOverlay={loading ? t('officePreview.refreshing') : null}
+    />
   );
 }
 
@@ -163,33 +598,47 @@ export default function CodeEditorBinaryFile({
   title,
   message,
 }: CodeEditorBinaryFileProps) {
+  const { t } = useTranslation('codeEditor');
   const iconBtn =
     'flex h-7 w-7 items-center justify-center rounded-md text-neutral-500 transition-colors hover:bg-neutral-100 hover:text-neutral-900 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-100';
 
   const isImage = isImageFile(file.name);
   const isPdf = isPdfFile(file.name);
-  const canPreview = isImage || isPdf;
+  const isOffice = isOfficeFile(file.name);
+  const canPreview = isImage || isPdf || isOffice;
 
   const previewContent = isImage
     ? <ImagePreview projectName={projectName} file={file} title={title} message={message} onClose={onClose} />
     : isPdf
       ? <PdfPreview projectName={projectName} file={file} title={title} message={message} onClose={onClose} />
-      : <FallbackContent title={title} message={message} onClose={onClose} />;
+      : isOffice
+        ? <OfficePreview projectName={projectName} file={file} title={title} onClose={onClose} />
+        : <FallbackContent title={title} message={message} onClose={onClose} />;
 
   const headerTopBar = (
     <div className="flex flex-shrink-0 items-center justify-between border-b border-neutral-200 bg-white px-4 py-2 dark:border-neutral-800 dark:bg-neutral-950">
       <div className="flex min-w-0 flex-1 items-center gap-2">
+        <FileTypeBadge fileName={file.name} />
         <h3 className="truncate text-[13px] font-medium text-neutral-900 dark:text-neutral-100">
           {file.name}
         </h3>
       </div>
       <div className="flex shrink-0 items-center gap-0.5">
+        {isOffice && (
+          <RefreshButton
+            onRefresh={() => {
+              window.dispatchEvent(new CustomEvent('pilotdeck:file-updated', {
+                detail: { projectName, filePath: file.path, force: true },
+              }));
+            }}
+          />
+        )}
         {!isSidebar && (
           <button
             type="button"
             onClick={onToggleFullscreen}
             className={iconBtn}
-            title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+            title={isFullscreen ? t('actions.exitFullscreen') : t('actions.fullscreen')}
           >
             {isFullscreen ? (
               <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -212,7 +661,7 @@ export default function CodeEditorBinaryFile({
             )}
           </button>
         )}
-        <button type="button" onClick={onClose} className={iconBtn} title="Close">
+        <button type="button" onClick={onClose} className={iconBtn} title={t('actions.close')}>
           <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path
               strokeLinecap="round"

@@ -81,6 +81,7 @@ export async function resumeAgentSession(options: ResumeAgentSessionOptions): Pr
     transcript: storage.transcript,
     initialState: createAgentSessionStateFromReplay(options.sessionId, replay),
     replayEvents: replay.events,
+    initialMetadata: replay.metadata,
   });
 
   // Restore metadata into a SessionMetadataStore so downstream code
