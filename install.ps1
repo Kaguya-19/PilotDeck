@@ -22,6 +22,7 @@ if (-not $InstallDir) { $InstallDir = Join-Path $HOME '.pilotdeck\app' }
 if (-not $ConfigPath) { $ConfigPath = Join-Path $HOME '.pilotdeck\pilotdeck.yaml' }
 
 $MinimumNodeVersion = [version]'22.13.0'
+$MaximumNodeMajor = 22
 $NodeInstallVersion = if ($env:PILOTDECK_NODE_VERSION) { $env:PILOTDECK_NODE_VERSION } else { '22' }
 $RepoChanged = $true
 
@@ -54,7 +55,7 @@ function Test-NodeSqlite {
 
 function Test-CurrentNodeRuntime {
   $version = Get-NodeVersion
-  return $version -and $version -ge $MinimumNodeVersion -and (Test-NodeSqlite)
+  return $version -and $version -ge $MinimumNodeVersion -and $version.Major -eq $MaximumNodeMajor -and (Test-NodeSqlite)
 }
 
 function Refresh-ProcessPath {
@@ -184,8 +185,12 @@ function Install-NodeRuntime {
     Write-Step "Installing Node.js $NodeInstallVersion LTS with winget..."
     [void](Invoke-WingetInstall 'OpenJS.NodeJS.LTS' 'Node.js')
     Refresh-ProcessPath
-    if (Test-Command node) { return }
-    Write-Step 'Node.js is not visible in this shell after winget; using portable Node.js for this run.'
+    if (Test-CurrentNodeRuntime) { return }
+    if (Test-Command node) {
+      Write-Step 'winget did not provide the supported Node.js 22 runtime; using portable Node.js for this run.'
+    } else {
+      Write-Step 'Node.js is not visible in this shell after winget; using portable Node.js for this run.'
+    }
   }
 
   Install-PortableNodeRuntime
@@ -200,15 +205,15 @@ function Ensure-NodeRuntime {
   }
 
   if ($version) {
-    Write-Step "Node.js v$version is too old or lacks node:sqlite; installing Node.js $NodeInstallVersion..."
+    Write-Step "Node.js v$version is not the supported Node.js 22 runtime or lacks node:sqlite; installing Node.js $NodeInstallVersion..."
   } else {
     Write-Step "Node.js not found; installing Node.js $NodeInstallVersion..."
   }
 
   Install-NodeRuntime
   $version = Get-NodeVersion
-  if (-not $version -or $version -lt $MinimumNodeVersion -or -not (Test-NodeSqlite)) {
-    Write-Fail "Node.js >= $MinimumNodeVersion with node:sqlite is required. Current: $(if ($version) { "v$version" } else { 'not found' })."
+  if (-not $version -or $version -lt $MinimumNodeVersion -or $version.Major -ne $MaximumNodeMajor -or -not (Test-NodeSqlite)) {
+    Write-Fail "Node.js >= $MinimumNodeVersion and <23 with node:sqlite is required. Current: $(if ($version) { "v$version" } else { 'not found' })."
   }
   Write-Ok "Node.js v$version installed"
 }

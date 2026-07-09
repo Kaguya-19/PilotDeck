@@ -7,7 +7,7 @@ import { downloadToFile, resolveDownloadSource } from "./download-sources.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const desktopRoot = resolve(__dirname, "..");
-const version = process.env.PILOTDECK_DESKTOP_NODE_VERSION || "24.14.0";
+const version = process.env.PILOTDECK_DESKTOP_NODE_VERSION || "22.23.1";
 const targetDir = resolve(desktopRoot, "resources", "node");
 const tmpDir = resolve(desktopRoot, "resources", ".node-download");
 
