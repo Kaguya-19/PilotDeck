@@ -87,6 +87,7 @@
       "gatekeeperAssess": false,
       "entitlements": "resources/entitlements.mac.plist",
       "entitlementsInherit": "resources/entitlements.mac.plist",
+      "x64ArchFiles": "Contents/Resources/{runtime,runtime-x64}/**/*",
       "signIgnore": [
         "Contents/Resources/runtime/node_modules/playwright-core/\\.local-browsers/"
       ],
