@@ -22,7 +22,10 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const desktopRoot = resolve(__dirname, "..");
 const repoRoot = resolve(desktopRoot, "..", "..");
-const runtimeRoot = resolve(desktopRoot, ".runtime", "app");
+const defaultRuntimeRoot = resolve(desktopRoot, ".runtime", "app");
+const x64RuntimeRoot = resolve(desktopRoot, ".runtime", "app-x64");
+let runtimeRoot = defaultRuntimeRoot;
+let currentRuntimeArch = process.arch;
 const DESKTOP_BUILD = "260623";
 const DESKTOP_PLAYWRIGHT_BROWSER = "chrome-for-testing";
 
@@ -136,7 +139,7 @@ function createRuntimePackageJson(rootPackage, uiPackage) {
   };
 }
 
-function prepareRuntimeTree() {
+function prepareRuntimeTree(installEnv = process.env) {
   const rootPackage = readJson(resolve(repoRoot, "package.json"));
   const uiPackage = readJson(resolve(repoRoot, "ui", "package.json"));
   rmSync(runtimeRoot, { recursive: true, force: true });
@@ -175,7 +178,7 @@ function prepareRuntimeTree() {
     "--config.node-linker=hoisted",
     "--no-frozen-lockfile",
     "--prefer-offline",
-  ], runtimeRoot, withBundledPlaywrightEnv());
+  ], runtimeRoot, withBundledPlaywrightEnv(installEnv));
 
   installRuntimePlaywrightBrowser();
 
@@ -334,17 +337,22 @@ function removeIfExists(path) {
   rmSync(path, { recursive: true, force: true });
 }
 
-function keepOnlySubdir(parent, keepName) {
-  if (!existsSync(resolve(parent, keepName))) return;
+function keepOnlySubdirs(parent, keepNames) {
+  const keep = new Set(keepNames);
+  if (![...keep].some((name) => existsSync(resolve(parent, name)))) return;
   for (const entry of cpSafeReadDir(parent)) {
-    if (entry !== keepName) removeIfExists(resolve(parent, entry));
+    if (!keep.has(entry)) removeIfExists(resolve(parent, entry));
   }
+}
+
+function getNodePtyPrebuildsToKeep() {
+  return [`${process.platform}-${currentRuntimeArch}`];
 }
 
 function prunePackageSpecificFiles() {
   const nodeModules = resolve(runtimeRoot, "node_modules");
   const nodePtyRoot = resolve(nodeModules, "node-pty");
-  const nodePtyPrebuild = `${process.platform}-${process.arch}`;
+  const nodePtyPrebuilds = getNodePtyPrebuildsToKeep();
 
   removeIfExists(resolve(nodePtyRoot, "deps"));
   removeIfExists(resolve(nodePtyRoot, "node_modules"));
@@ -352,7 +360,7 @@ function prunePackageSpecificFiles() {
   removeIfExists(resolve(nodePtyRoot, "src"));
   removeIfExists(resolve(nodePtyRoot, "third_party"));
   removeIfExists(resolve(nodePtyRoot, "typings"));
-  keepOnlySubdir(resolve(nodePtyRoot, "prebuilds"), nodePtyPrebuild);
+  keepOnlySubdirs(resolve(nodePtyRoot, "prebuilds"), nodePtyPrebuilds);
 
   removeIfExists(resolve(nodeModules, "better-sqlite3", "deps"));
   removeIfExists(resolve(nodeModules, "better-sqlite3", "src"));
@@ -415,36 +423,81 @@ for (const file of sourceRequired) {
   }
 }
 
-prepareRuntimeTree();
-pruneRuntimeTree();
-
-const runtimeRequired = [
-  resolve(runtimeRoot, "dist", "src", "cli", "pilotdeck.js"),
-  resolve(runtimeRoot, "ui", "dist", "index.html"),
-  resolve(runtimeRoot, "ui", "server", "index.js"),
-  resolve(runtimeRoot, "node_modules", "express"),
-  resolve(runtimeRoot, "node_modules", "@playwright", "mcp", "cli.js"),
-  resolve(runtimeRoot, "node_modules", "edgeclaw-memory-core", "lib", "index.js"),
-  resolve(runtimeRoot, "node_modules", "edgeclaw-memory-core", "ui-source", "index.html"),
-];
-
-for (const file of runtimeRequired) {
-  if (!existsSync(file)) {
-    throw new Error(`Desktop runtime staged prerequisite missing: ${file}`);
+function stageRuntime(root, env = process.env, options = {}) {
+  runtimeRoot = root;
+  currentRuntimeArch = options.runtimeArch || process.arch;
+  try {
+    prepareRuntimeTree(env);
+    pruneRuntimeTree();
+  } finally {
+    currentRuntimeArch = process.arch;
   }
 }
 
-if (resolvePlaywrightInstallMode(process.env) === "preinstall" && !hasRuntimePlaywrightBrowser()) {
-  throw new Error("Desktop runtime preinstall mode did not stage a Playwright Chromium browser.");
+function verifyRuntime(root, label = "runtime") {
+  const previousRuntimeRoot = runtimeRoot;
+  runtimeRoot = root;
+
+  const runtimeRequired = [
+    resolve(runtimeRoot, "dist", "src", "cli", "pilotdeck.js"),
+    resolve(runtimeRoot, "ui", "dist", "index.html"),
+    resolve(runtimeRoot, "ui", "server", "index.js"),
+    resolve(runtimeRoot, "node_modules", "express"),
+    resolve(runtimeRoot, "node_modules", "@playwright", "mcp", "cli.js"),
+    resolve(runtimeRoot, "node_modules", "edgeclaw-memory-core", "lib", "index.js"),
+    resolve(runtimeRoot, "node_modules", "edgeclaw-memory-core", "ui-source", "index.html"),
+  ];
+
+  for (const file of runtimeRequired) {
+    if (!existsSync(file)) {
+      throw new Error(`Desktop ${label} staged prerequisite missing: ${file}`);
+    }
+  }
+
+  if (resolvePlaywrightInstallMode(process.env) === "preinstall" && !hasRuntimePlaywrightBrowser()) {
+    throw new Error(`Desktop ${label} preinstall mode did not stage a Playwright Chromium browser.`);
+  }
+
+  if (existsSync(resolve(runtimeRoot, "src"))) {
+    throw new Error(`Desktop ${label} should not include source tree: ${resolve(runtimeRoot, "src")}`);
+  }
+
+  if (existsSync(resolve(runtimeRoot, "node_modules", "tsx"))) {
+    throw new Error(`Desktop ${label} should not include tsx: ${resolve(runtimeRoot, "node_modules", "tsx")}`);
+  }
+
+  console.log(`[desktop] staged ${label} ready: ${runtimeRoot}`);
+  console.log(`[desktop] staged ${label} size: ${formatBytes(directorySize(runtimeRoot))}`);
+  runtimeRoot = previousRuntimeRoot;
 }
 
-if (existsSync(resolve(runtimeRoot, "src"))) {
-  throw new Error(`Desktop runtime should not include source tree: ${resolve(runtimeRoot, "src")}`);
+function shouldStageX64Runtime() {
+  return process.platform === "darwin" && process.env.PILOTDECK_DESKTOP_NODE_ARCH === "universal";
 }
 
-if (existsSync(resolve(runtimeRoot, "node_modules", "tsx"))) {
-  throw new Error(`Desktop runtime should not include tsx: ${resolve(runtimeRoot, "node_modules", "tsx")}`);
+function prepareRuntimePlaceholders() {
+  if (shouldStageX64Runtime()) return;
+  rmSync(x64RuntimeRoot, { recursive: true, force: true });
+  mkdirSync(x64RuntimeRoot, { recursive: true });
+  writeFileSync(resolve(x64RuntimeRoot, ".placeholder"), "not used for this build\n");
 }
 
-console.log(`[desktop] staged runtime ready: ${runtimeRoot}`);
-console.log(`[desktop] staged runtime size: ${formatBytes(directorySize(runtimeRoot))}`);
+stageRuntime(defaultRuntimeRoot);
+verifyRuntime(defaultRuntimeRoot);
+
+if (shouldStageX64Runtime()) {
+  stageRuntime(
+    x64RuntimeRoot,
+    {
+      ...process.env,
+      npm_config_arch: "x64",
+      npm_config_target_arch: "x64",
+      npm_config_platform: "darwin",
+      npm_config_target_platform: "darwin",
+    },
+    { runtimeArch: "x64" },
+  );
+  verifyRuntime(x64RuntimeRoot, "x64 runtime");
+} else {
+  prepareRuntimePlaceholders();
+}

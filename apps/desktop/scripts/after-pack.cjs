@@ -104,6 +104,7 @@ module.exports = async function afterPack(context) {
   const resourcesDir = getResourcesDir(context);
   const source = resolve(desktopRoot, ".runtime", "app", "node_modules");
   const runtimeRoot = join(resourcesDir, "runtime");
+  const x64RuntimeRoot = join(resourcesDir, "runtime-x64");
   const nodeRoot = join(resourcesDir, "node");
   const target = join(runtimeRoot, "node_modules");
 
@@ -119,9 +120,10 @@ module.exports = async function afterPack(context) {
     dereference: true,
   });
   const runtimeSymlinks = materializeSymlinks(runtimeRoot);
+  const x64RuntimeSymlinks = existsSync(x64RuntimeRoot) ? materializeSymlinks(x64RuntimeRoot) : 0;
   const nodeSymlinks = materializeSymlinks(nodeRoot);
   console.log(
-    `[desktop] afterPack materialized ${runtimeSymlinks} runtime symlinks and ${nodeSymlinks} node symlinks`,
+    `[desktop] afterPack materialized ${runtimeSymlinks} runtime symlinks, ${x64RuntimeSymlinks} x64 runtime symlinks, and ${nodeSymlinks} node symlinks`,
   );
 
   for (const dependency of ["express", "edgeclaw-memory-core", "clawhub"]) {

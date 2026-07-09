@@ -28,6 +28,7 @@ jobs:
       - name: Build macOS desktop artifact
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
+          PILOTDECK_DESKTOP_NODE_ARCH: universal
         run: pnpm --filter pilotdeck-desktop run dist:mac
 
       - name: Upload macOS artifacts

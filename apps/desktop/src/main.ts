@@ -623,6 +623,10 @@ function resolveRuntimeRoot(): string {
     return path.resolve(process.env.PILOTDECK_DESKTOP_RUNTIME_ROOT);
   }
   if (app.isPackaged) {
+    if (process.platform === "darwin" && process.arch === "x64") {
+      const x64Runtime = path.join(process.resourcesPath, "runtime-x64");
+      if (fs.existsSync(x64Runtime)) return x64Runtime;
+    }
     return path.join(process.resourcesPath, "runtime");
   }
   return path.resolve(__dirname, "..", "..", "..");

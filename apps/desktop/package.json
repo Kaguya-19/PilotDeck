@@ -10,7 +10,7 @@
     "compile": "tsc -p tsconfig.json",
     "dev": "node scripts/build-runtime.mjs && tsc -p tsconfig.json && electron .",
     "pack": "node scripts/build-runtime.mjs && tsc -p tsconfig.json && electron-builder --dir",
-    "dist:mac": "node scripts/build-runtime.mjs && tsc -p tsconfig.json && electron-builder --mac",
+    "dist:mac": "node scripts/build-runtime.mjs && tsc -p tsconfig.json && electron-builder --mac universal",
     "dist:win": "node scripts/build-runtime.mjs && tsc -p tsconfig.json && electron-builder --win",
     "download-git-bash": "node scripts/download-git-bash.mjs",
     "download-node": "node scripts/download-node.mjs",
@@ -68,6 +68,13 @@
       {
         "from": ".runtime/app",
         "to": "runtime",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": ".runtime/app-x64",
+        "to": "runtime-x64",
         "filter": [
           "**/*"
         ]

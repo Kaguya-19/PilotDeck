@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { chmodSync, existsSync, mkdirSync, rmSync, renameSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, rmSync, renameSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -10,6 +10,7 @@ const desktopRoot = resolve(__dirname, "..");
 const version = process.env.PILOTDECK_DESKTOP_NODE_VERSION || "22.23.1";
 const targetDir = resolve(desktopRoot, "resources", "node");
 const tmpDir = resolve(desktopRoot, "resources", ".node-download");
+const requestedArch = (process.env.PILOTDECK_DESKTOP_NODE_ARCH || process.arch).trim().toLowerCase();
 
 const platformMap = {
   darwin: "darwin",
@@ -22,9 +23,9 @@ const archMap = {
 };
 
 const nodePlatform = platformMap[process.platform];
-const nodeArch = archMap[process.arch];
-if (!nodePlatform || !nodeArch) {
-  throw new Error(`Unsupported platform for bundled Node: ${process.platform}/${process.arch}`);
+const nodeArch = requestedArch === "universal" ? "universal" : archMap[requestedArch];
+if (!nodePlatform || !nodeArch || (requestedArch === "universal" && process.platform !== "darwin")) {
+  throw new Error(`Unsupported platform for bundled Node: ${process.platform}/${requestedArch}`);
 }
 
 const nodeBinary = process.platform === "win32"
@@ -61,51 +62,106 @@ function pruneNodeDistribution() {
   }
 }
 
-if (existsSync(nodeBinary)) {
-  const result = spawnSync(nodeBinary, ["--version"], { encoding: "utf8" });
-  if (result.stdout.trim() === `v${version}`) {
-    pruneNodeDistribution();
-    console.log(`[desktop] bundled Node already present: ${result.stdout.trim()}`);
-    process.exit(0);
+function runChecked(command, args, options = {}) {
+  const result = spawnSync(command, args, { stdio: "inherit", ...options });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    throw new Error(`${command} ${args.join(" ")} failed`);
   }
 }
 
-const name = `node-v${version}-${nodePlatform}-${nodeArch}`;
-const ext = process.platform === "win32" ? "zip" : "tar.gz";
-const archiveName = `${name}.${ext}`;
-const source = resolveDownloadSource({
-  archiveEnv: "PILOTDECK_DESKTOP_NODE_ARCHIVE",
-  urlEnv: "PILOTDECK_DESKTOP_NODE_URL",
-  baseEnv: "PILOTDECK_DESKTOP_NODE_BASE_URL",
-  chinaBaseUrl: "https://mirrors.aliyun.com/nodejs-release",
-  officialBaseUrl: "https://nodejs.org/dist",
-  relativePath: `v${version}/${archiveName}`,
-});
+function bundledNodeMatchesRequest() {
+  if (!existsSync(nodeBinary)) return false;
+  const versionCheck = spawnSync(nodeBinary, ["--version"], { encoding: "utf8" });
+  if (versionCheck.stdout.trim() !== `v${version}`) return false;
+  if (nodeArch !== "universal") return true;
+
+  const archCheck = spawnSync("lipo", ["-archs", nodeBinary], { encoding: "utf8" });
+  if (archCheck.status !== 0) return false;
+  const archs = new Set(archCheck.stdout.trim().split(/\s+/u));
+  return archs.has("x86_64") && archs.has("arm64");
+}
+
+function downloadSourceForArchive(archiveName) {
+  return resolveDownloadSource({
+    archiveEnv: "PILOTDECK_DESKTOP_NODE_ARCHIVE",
+    urlEnv: "PILOTDECK_DESKTOP_NODE_URL",
+    baseEnv: "PILOTDECK_DESKTOP_NODE_BASE_URL",
+    chinaBaseUrl: "https://mirrors.aliyun.com/nodejs-release",
+    officialBaseUrl: "https://nodejs.org/dist",
+    relativePath: `v${version}/${archiveName}`,
+  });
+}
+
+async function resolveArchive(archiveName) {
+  const source = downloadSourceForArchive(archiveName);
+  if (source.type === "archive") {
+    if (!existsSync(source.path)) {
+      throw new Error(`Bundled Node archive not found: ${source.path}`);
+    }
+    console.log(`[desktop] using bundled Node archive from ${source.source}: ${source.path}`);
+    return source.path;
+  }
+
+  const archivePath = join(tmpDir, archiveName);
+  await downloadToFile(source.url, archivePath);
+  return archivePath;
+}
+
+async function extractNodeArchive(arch, destinationRoot) {
+  const name = `node-v${version}-${nodePlatform}-${arch}`;
+  const ext = process.platform === "win32" ? "zip" : "tar.gz";
+  const archiveName = `${name}.${ext}`;
+  const archivePath = await resolveArchive(archiveName);
+
+  console.log(`[desktop] extracting ${archivePath}`);
+  runChecked("tar", ["-xf", archivePath, "-C", tmpDir]);
+  renameSync(join(tmpDir, name), destinationRoot);
+}
+
+async function installSingleArchNode(arch) {
+  await extractNodeArchive(arch, targetDir);
+}
+
+async function installUniversalDarwinNode() {
+  if (process.platform !== "darwin") {
+    throw new Error("Universal bundled Node is only supported on macOS");
+  }
+
+  const arm64Dir = resolve(tmpDir, "node-arm64");
+  const x64Dir = resolve(tmpDir, "node-x64");
+  await extractNodeArchive("arm64", arm64Dir);
+  await extractNodeArchive("x64", x64Dir);
+
+  cpSync(arm64Dir, targetDir, { recursive: true });
+  const targetBinary = join(targetDir, "bin", "node");
+  console.log("[desktop] creating universal bundled Node binary");
+  runChecked("lipo", [
+    "-create",
+    join(arm64Dir, "bin", "node"),
+    join(x64Dir, "bin", "node"),
+    "-output",
+    targetBinary,
+  ]);
+}
+
+if (bundledNodeMatchesRequest()) {
+  pruneNodeDistribution();
+  console.log(`[desktop] bundled Node already present: v${version} (${nodeArch})`);
+  process.exit(0);
+}
 
 rmSync(tmpDir, { recursive: true, force: true });
 mkdirSync(tmpDir, { recursive: true });
 
-let archivePath;
-if (source.type === "archive") {
-  archivePath = source.path;
-  if (!existsSync(archivePath)) {
-    throw new Error(`Bundled Node archive not found: ${archivePath}`);
-  }
-  console.log(`[desktop] using bundled Node archive from ${source.source}: ${archivePath}`);
-} else {
-  archivePath = join(tmpDir, archiveName);
-  await downloadToFile(source.url, archivePath);
-}
-
 rmSync(targetDir, { recursive: true, force: true });
 
-console.log(`[desktop] extracting ${archivePath}`);
-const extract = spawnSync("tar", ["-xf", archivePath, "-C", tmpDir], { stdio: "inherit" });
-if (extract.status !== 0) {
-  throw new Error("Failed to extract Node archive with tar");
+if (nodeArch === "universal") {
+  await installUniversalDarwinNode();
+} else {
+  await installSingleArchNode(nodeArch);
 }
 
-renameSync(join(tmpDir, name), targetDir);
 rmSync(tmpDir, { recursive: true, force: true });
 if (process.platform !== "win32") chmodSync(nodeBinary, 0o755);
 pruneNodeDistribution();
