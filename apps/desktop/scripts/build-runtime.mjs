@@ -28,6 +28,17 @@ let runtimeRoot = defaultRuntimeRoot;
 let currentRuntimeArch = process.arch;
 const DESKTOP_BUILD = "260623";
 const DESKTOP_PLAYWRIGHT_BROWSER = "chrome-for-testing";
+const runtimeOnlyBuiltDependencies = [
+  "@google/genai",
+  "bcrypt",
+  "better-sqlite3",
+  "electron-winstaller",
+  "esbuild",
+  "node-pty",
+  "protobufjs",
+  "sharp",
+  "unrs-resolver",
+];
 
 const uiServerDependencies = [
   "@octokit/rest",
@@ -135,6 +146,9 @@ function createRuntimePackageJson(rootPackage, uiPackage) {
     private: true,
     type: "module",
     packageManager: rootPackage.packageManager,
+    pnpm: {
+      onlyBuiltDependencies: runtimeOnlyBuiltDependencies,
+    },
     dependencies,
   };
 }
@@ -466,9 +480,31 @@ function verifyRuntime(root, label = "runtime") {
     throw new Error(`Desktop ${label} should not include tsx: ${resolve(runtimeRoot, "node_modules", "tsx")}`);
   }
 
+  verifyRuntimeNativeModule("better-sqlite3", label);
+
   console.log(`[desktop] staged ${label} ready: ${runtimeRoot}`);
   console.log(`[desktop] staged ${label} size: ${formatBytes(directorySize(runtimeRoot))}`);
   runtimeRoot = previousRuntimeRoot;
+}
+
+function verifyRuntimeNativeModule(moduleName, label) {
+  const result = spawnSync(
+    process.execPath,
+    ["-e", `require(${JSON.stringify(moduleName)})`],
+    {
+      cwd: runtimeRoot,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        NODE_PATH: resolve(runtimeRoot, "node_modules"),
+      },
+    },
+  );
+  if (result.status !== 0) {
+    throw new Error(
+      `Desktop ${label} cannot load native module ${moduleName}: ${(result.stderr || result.stdout || "unknown error").trim()}`,
+    );
+  }
 }
 
 function shouldStageX64Runtime() {
