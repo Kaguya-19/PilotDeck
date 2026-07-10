@@ -138,6 +138,7 @@ type ContextStatus = {
   known: boolean;
   used: number;
   total: number;
+  displayTotal: number;
   percent: number;
   usedLabel: string;
   totalLabel: string;
@@ -227,13 +228,17 @@ function formatTokenCount(value: number): string {
 }
 
 function getContextStatus(tokenBudget?: Record<string, unknown> | null): ContextStatus {
-  const used = readNumber(tokenBudget?.used) ?? 0;
+  const used = readNumber(tokenBudget?.displayUsed) ?? readNumber(tokenBudget?.used) ?? 0;
+  const budgetUsed = readNumber(tokenBudget?.budgetUsed) ?? readNumber(tokenBudget?.used) ?? used;
   const total = readNumber(tokenBudget?.total) ?? 0;
-  if (total <= 0) {
+  const effectiveTotal = readNumber(tokenBudget?.effectiveTotal);
+  const displayTotal = effectiveTotal && effectiveTotal > 0 ? effectiveTotal : total;
+  if (displayTotal <= 0) {
     return {
       known: false,
       used: 0,
       total: 0,
+      displayTotal: 0,
       percent: 0,
       usedLabel: '--',
       totalLabel: '--',
@@ -241,7 +246,7 @@ function getContextStatus(tokenBudget?: Record<string, unknown> | null): Context
     };
   }
 
-  const percent = Math.max(0, Math.min(999, Math.round((used / total) * 100)));
+  const percent = Math.max(0, Math.min(999, Math.round((budgetUsed / displayTotal) * 100)));
   const snapshotState = typeof tokenBudget?.state === 'string' ? tokenBudget.state : null;
   const tone = snapshotState === 'blocking'
     ? 'red'
@@ -256,9 +261,10 @@ function getContextStatus(tokenBudget?: Record<string, unknown> | null): Context
     known: true,
     used,
     total,
+    displayTotal,
     percent,
     usedLabel: formatTokenCount(used),
-    totalLabel: formatTokenCount(total),
+    totalLabel: formatTokenCount(displayTotal),
     tone,
   };
 }
@@ -837,9 +843,9 @@ export default function ComposerV2({
                               <div className="text-neutral-500 dark:text-neutral-400">
                                 {t('input.contextStatusUsed', {
                                   used: contextStatus.used.toLocaleString(),
-                                  total: contextStatus.total.toLocaleString(),
+                                  total: contextStatus.displayTotal.toLocaleString(),
                                   defaultValue:
-                                    `${contextStatus.used.toLocaleString()} tokens used out of ${contextStatus.total.toLocaleString()}.`,
+                                    `${contextStatus.used.toLocaleString()} tokens used out of ${contextStatus.displayTotal.toLocaleString()}.`,
                                 })}
                               </div>
                               <div className="mt-2 text-neutral-500 dark:text-neutral-400">

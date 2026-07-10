@@ -22,6 +22,18 @@ PilotDeck 需要：
 npm config set registry https://registry.npmmirror.com
 ```
 
+如果使用 `pnpm` 安装依赖，也可以直接设置 pnpm registry：
+
+```bash
+pnpm config set registry https://registry.npmmirror.com
+```
+
+当 `node-pty`、`better-sqlite3` 等原生依赖回退到源码编译时，`node-gyp` 还会下载 Node.js headers。如果访问 Node.js 官方源超时，可为当前 shell 指定 Node.js headers 镜像：
+
+```bash
+export npm_config_disturl=https://npmmirror.com/mirrors/node
+```
+
 如需恢复 npm 官方源：
 
 ```bash
@@ -90,6 +102,21 @@ curl -fsSL https://fnm.vercel.app/install | bash
 FNM_NODE_DIST_MIRROR=https://npmmirror.com/mirrors/node fnm install 22
 fnm use 22
 node --version
+```
+
+如果没有 sudo 权限，或不希望修改系统 Node.js，也可以把官方 Node.js 二进制包安装到用户目录。下面示例安装到 `~/.local`，只影响当前用户和当前 shell：
+
+```bash
+NODE_VERSION=22.13.1
+NODE_DIR="$HOME/.local/node-v${NODE_VERSION}-linux-x64"
+mkdir -p "$HOME/.local"
+curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz"
+tar -xf "node-v${NODE_VERSION}-linux-x64.tar.xz" -C "$HOME/.local"
+rm "node-v${NODE_VERSION}-linux-x64.tar.xz"
+export PATH="$NODE_DIR/bin:$PATH"
+node --version
+npm install -g pnpm@10.32.1
+pnpm --version
 ```
 
 ### Fedora / RHEL
@@ -242,6 +269,13 @@ corepack enable         # 启用 package.json 中固定的 pnpm 版本
 corepack pnpm install --frozen-lockfile
 ```
 
+如果当前环境没有 Corepack，或正在使用用户目录安装的 Portable Node，可改用固定版本的全局 pnpm：
+
+```bash
+npm install -g pnpm@10.32.1
+pnpm install --frozen-lockfile
+```
+
 源码安装请使用仓库提交的 `pnpm-lock.yaml`。不要把这一步替换成 `npm install`；当前 lockfile 和 workspace 构建配置按 pnpm 维护，一键安装脚本验证的也是这条路径。
 
 当前应用使用 `better-sqlite3` 和 Node.js 22 内置的 `node:sqlite`，不需要旧的 `sqlite` 或 `sqlite3` npm 包。
@@ -265,6 +299,8 @@ node scripts/bootstrap-pilotdeck-config.mjs
 
 该命令会初始化 `~/.pilotdeck/pilotdeck.yaml`，让 Gateway 可以启动并进入首次 onboarding。随后打开 Web UI，在 onboarding/设置面板中完成 Provider 和 API Key 配置。
 
+注意：首次生成的配置只是占位配置，包含 `_placeholder/_placeholder`、`https://placeholder.invalid` 和 `PLACEHOLDER_RUN_ONBOARDING_TO_REPLACE`。它的作用是让 Gateway 和 Web UI 可以启动；在填写真实 Provider、API Key 和模型前，UI 仍会进入 onboarding，这是预期行为。
+
 ## 启动 PilotDeck
 
 开发模式，支持 HMR：
@@ -285,11 +321,21 @@ npm run start
 
 打开 <http://localhost:3001>。
 
+如果默认端口已被占用，可以通过环境变量换端口，例如：
+
+```bash
+SERVER_PORT=3002 PILOTDECK_GATEWAY_PORT=18790 PILOTDECK_GATEWAY_URL=ws://127.0.0.1:18790/ws npm run start
+```
+
 ## 常见问题
 
 - 出现 `Node.js >=22.13.0 and <23 is required`：切换到 Node.js 22.13.0 或更新的 Node.js 22 版本，并重新安装依赖。
 - 原生包编译失败：确认已安装 Python 3、`make` 和 C/C++ 编译器，然后重新运行 `corepack pnpm install --frozen-lockfile`。
+- Linux 上 `node-pty`、`better-sqlite3` 编译时下载 `node-v*-headers.tar.gz` 超时：先运行 `export npm_config_disturl=https://npmmirror.com/mirrors/node`，再重新安装依赖。
+- `pnpm install --frozen-lockfile` 下载 npm 包超时：运行 `pnpm config set registry https://registry.npmmirror.com` 后重试。
 - macOS 出现 `ModuleNotFoundError: No module named 'distutils'`：一键安装脚本会尝试自动选择兼容 Python；手动运行 npm 命令时，可用 `PYTHON=/usr/bin/python3 corepack pnpm install --frozen-lockfile` 重试，或切换到其他带 `distutils` 的 Python。
 - macOS 缺少编译工具：不需要完整 Xcode，但 `xcrun --find clang` 必须可用。可运行 `xcode-select --install` 重新安装 Xcode Command Line Tools；如果已安装但状态异常，可运行 `sudo xcode-select --reset` 后重试。
+- 启动时报 `EADDRINUSE`：默认 `3001` 或 `18789` 已被占用，设置 `SERVER_PORT`、`PILOTDECK_GATEWAY_PORT` 和 `PILOTDECK_GATEWAY_URL` 后重试。
+- 已有 `~/.pilotdeck/pilotdeck.yaml` 但仍进入 onboarding：检查配置里是否仍是 `PLACEHOLDER_RUN_ONBOARDING_TO_REPLACE` 或 `_placeholder/_placeholder`，需要替换为真实 Provider、API Key 和模型。
 - 缺少演示图片/视频：安装 Git LFS 后，在仓库根目录运行 `git lfs pull`。
 - 提示找不到 `rg`：安装 ripgrep 以启用完整的文件/搜索工具能力。

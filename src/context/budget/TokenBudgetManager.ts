@@ -11,6 +11,8 @@ export type TokenWarningState = "ok" | "warning" | "blocking";
 
 export type TokenBudgetSnapshot = {
   tokens: number;
+  displayTokens?: number;
+  budgetTokens?: number;
   estimateSource?: "estimator" | "usage";
   usageTokens?: number;
   maxContextTokens: number;
@@ -206,11 +208,14 @@ export class TokenBudgetManager {
       exact?: boolean;
       estimatorError?: string;
       usageTokens?: number;
+      displayTokens?: number;
+      budgetTokens?: number;
     } = {},
   ): TokenBudgetSnapshot {
+    const budgetTokens = options.budgetTokens !== undefined ? Math.max(options.budgetTokens, tokens) : tokens;
     const reserved = Math.max(0, Math.floor(options.reservedOutputTokens ?? 0));
     const promptBudget = effectiveInputContextTokens(maxContextTokens, reserved);
-    const ratio = promptBudget > 0 ? tokens / promptBudget : 0;
+    const ratio = promptBudget > 0 ? budgetTokens / promptBudget : 0;
     let state: TokenWarningState = "ok";
     if (ratio >= this.blockingRatio) {
       state = "blocking";
@@ -219,6 +224,8 @@ export class TokenBudgetManager {
     }
     return {
       tokens,
+      ...(options.displayTokens !== undefined && options.displayTokens !== tokens ? { displayTokens: options.displayTokens } : {}),
+      ...(budgetTokens !== tokens ? { budgetTokens } : {}),
       estimateSource: options.usageTokens !== undefined ? "usage" : "estimator",
       ...(options.usageTokens !== undefined ? { usageTokens: options.usageTokens } : {}),
       maxContextTokens: promptBudget,

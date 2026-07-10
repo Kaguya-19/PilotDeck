@@ -199,7 +199,11 @@ export type GatewayEvent =
   | {
       type: "context_budget";
       used: number;
+      displayUsed?: number;
+      budgetUsed?: number;
       total: number;
+      effectiveTotal?: number;
+      reservedOutputTokens?: number;
       ratio: number;
       state: "ok" | "warning" | "blocking";
     }

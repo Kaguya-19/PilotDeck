@@ -100,6 +100,8 @@ export class TokenAccountingRuntime {
       source: counted.source,
       exact: counted.exact,
       estimatorError: counted.estimatorError,
+      displayTokens: counted.exact ? undefined : this.estimateRequestInput(request),
+      budgetTokens: options.usePadding ? this.estimateRequestInput(request, { usePadding: true }) : undefined,
     });
   }
 
@@ -112,6 +114,8 @@ export class TokenAccountingRuntime {
       exact?: boolean;
       estimatorError?: string;
       usageTokens?: number;
+      displayTokens?: number;
+      budgetTokens?: number;
     } = {},
   ): TokenBudgetSnapshot {
     return this.tokenBudget.snapshotFromTokens(tokens, maxContextTokens, metadata);

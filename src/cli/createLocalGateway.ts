@@ -366,6 +366,8 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
       readWebSessionMessages(input, {
         projectRoot: input.projectKey ? input.projectKey : fallbackProjectRoot,
         pilotHome,
+        maxContextTokens: defaultRuntime.snapshot.config.agent.maxContextTokens,
+        maxOutputTokens: defaultRuntime.snapshot.config.agent.maxOutputTokens,
         now,
       }),
     readSubagentMessages: (input) =>
