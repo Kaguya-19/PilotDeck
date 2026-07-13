@@ -4,6 +4,7 @@ import {
   assembleAssistantMessage,
   cloneMessages,
   createModelMessageAssemblerState,
+  messageContent,
   type CanonicalToolCall,
   PROMPT_TOO_LONG_ANTHROPIC_PATTERN,
   PROMPT_TOO_LONG_OPENAI_PATTERN,
@@ -2533,7 +2534,11 @@ function removeTransientPromptsById(
 
 function normalizeMessagesForModelRequest(messages: CanonicalMessage[]): CanonicalMessage[] {
   const out: CanonicalMessage[] = [];
-  for (const message of messages) {
+  for (const rawMessage of messages) {
+    const message: CanonicalMessage = {
+      ...rawMessage,
+      content: messageContent(rawMessage),
+    };
     const last = out[out.length - 1];
     if (
       last?.role === "assistant" &&
@@ -2542,9 +2547,12 @@ function normalizeMessagesForModelRequest(messages: CanonicalMessage[]): Canonic
     ) {
       out[out.length - 1] = {
         role: "assistant",
-        content: [...last.content, ...message.content],
+        content: [...messageContent(last), ...messageContent(message)],
         metadata: mergeMessageMetadata(last.metadata, message.metadata),
       };
+      continue;
+    }
+    if (message.role === "assistant" && message.content.length === 0) {
       continue;
     }
     out.push(message);
@@ -2557,7 +2565,7 @@ function canMergeAssistantMessages(first: CanonicalMessage, second: CanonicalMes
 }
 
 function hasToolCallBlock(message: CanonicalMessage): boolean {
-  return message.content.some((block) => block.type === "tool_call");
+  return messageContent(message).some((block) => block.type === "tool_call");
 }
 
 function mergeMessageMetadata(

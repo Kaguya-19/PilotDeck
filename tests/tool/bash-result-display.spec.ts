@@ -94,7 +94,12 @@ test("bash failure tool result includes raw stdout and stderr tail for UI and mo
     assert.match(text, /stderr:/);
     assert.match(text, new RegExp(stderrTail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 
-    const budget = new ToolResultBudget({ toolResultsDir: dir, maxResultSizeChars: 50_000, previewBytes: 2_000 });
+    const budget = new ToolResultBudget({
+      toolResultsDir: dir,
+      maxResultSizeChars: 50_000,
+      maxResultSizeTokens: 2_000,
+      previewBytes: 2_000,
+    });
     const applied = await budget.applyToMessage({
       role: "user",
       content: [toCanonicalToolResultBlock(result)],
@@ -138,7 +143,12 @@ test("bash success keeps full output for ToolResultBudget persistence", async ()
     assert.equal(result.metadata?.truncated, undefined);
     assert.ok(result.metadata?.previewLimit, "expected preview limit metadata without truncating canonical content");
 
-    const budget = new ToolResultBudget({ toolResultsDir: dir, maxResultSizeChars: 50_000, previewBytes: 2_000 });
+    const budget = new ToolResultBudget({
+      toolResultsDir: dir,
+      maxResultSizeChars: 50_000,
+      maxResultSizeTokens: 2_000,
+      previewBytes: 2_000,
+    });
     const applied = await budget.applyToMessage({
       role: "user",
       content: [toCanonicalToolResultBlock(result)],

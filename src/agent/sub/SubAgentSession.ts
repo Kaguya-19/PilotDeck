@@ -21,6 +21,7 @@ import type {
   CanonicalMessage,
   CanonicalUsage,
 } from "../../model/index.js";
+import { messageContent } from "../../model/protocol/clone.js";
 import type { AgentRuntimeConfig } from "../runtime/AgentRuntimeConfig.js";
 import type { AgentRuntimeDependencies } from "../runtime/AgentRuntimeDependencies.js";
 import { ToolRegistry } from "../../tool/registry/ToolRegistry.js";
@@ -310,7 +311,7 @@ function extractFinalAssistantText(messages: CanonicalMessage[]): string {
     const message = messages[i]!;
     if (message.role !== "assistant") continue;
     const parts: string[] = [];
-    for (const block of message.content) {
+    for (const block of messageContent(message)) {
       if (block.type === "text") parts.push(block.text);
     }
     if (parts.length > 0) return parts.join("\n").trim();

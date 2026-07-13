@@ -60,7 +60,8 @@ export function createReadFileTool(): PilotDeckToolDefinition<ReadFileInput> {
       + "- For large PDFs, provide the pages parameter to validate specific page ranges (e.g., pages: \"1-5\"). Maximum 20 pages per request\n"
       + "- This tool can read Jupyter notebooks (.ipynb files) and returns a text rendering of notebook cells and outputs\n"
       + "- This tool can only read files, not directories\n"
-      + "- If you read a file that exists but has empty contents you will receive a system reminder warning in place of file contents",
+      + "- If you read a file that exists but has empty contents you will receive a system reminder warning in place of file contents\n"
+      + "- If a previous tool result says it was persisted, truncated, or preview-only, read the file_path shown in that notice with read_file",
     kind: "filesystem",
     inputSchema: {
       type: "object",
@@ -459,6 +460,7 @@ export function createReadFileTool(): PilotDeckToolDefinition<ReadFileInput> {
       let ranged = await readFileInRange(resolved.absolutePath, offset, effectiveLimit);
       let text = renderReadableRange(ranged.content, ranged.startLine, ranged.totalLines);
       let autoPaged = input.limit === undefined && effectiveLimit !== undefined;
+      let toolResultRefAutoPaged = false;
       if (autoPaged) {
         while (isOverTextBudget(text) && ranged.lineCount > 1) {
           const nextLimit = Math.max(1, Math.floor(ranged.lineCount / 2));
@@ -466,13 +468,27 @@ export function createReadFileTool(): PilotDeckToolDefinition<ReadFileInput> {
           text = renderReadableRange(ranged.content, ranged.startLine, ranged.totalLines);
         }
       }
+      if (!autoPaged && isManagedToolResultRefPath(resolved.relativePath)) {
+        while (isOverTextBudget(text) && ranged.lineCount > 1) {
+          const nextLimit = Math.max(1, Math.floor(ranged.lineCount / 2));
+          ranged = await readFileInRange(resolved.absolutePath, offset, nextLimit);
+          text = renderReadableRange(ranged.content, ranged.startLine, ranged.totalLines);
+          toolResultRefAutoPaged = true;
+        }
+      }
       if (isOverTextBudget(text) && input.limit === undefined) {
         autoPaged = true;
+        text = renderOversizedLinePreview(text, resolved.relativePath, ranged.startLine);
+      }
+      if (isOverTextBudget(text) && toolResultRefAutoPaged) {
         text = renderOversizedLinePreview(text, resolved.relativePath, ranged.startLine);
       }
       ensureTokenBudget(text, resolved.relativePath, ranged.startLine);
       if (autoPaged && ranged.truncated) {
         text += renderReadMoreNotice(resolved.relativePath, ranged.endLine + 1, ranged.lineCount);
+      }
+      if (toolResultRefAutoPaged && ranged.truncated) {
+        text += renderToolResultRefReadMoreNotice(resolved.relativePath, ranged.endLine + 1, ranged.lineCount);
       }
       readState.set(dedupKey, {
         mtimeMs: ranged.mtimeMs,
@@ -497,7 +513,7 @@ export function createReadFileTool(): PilotDeckToolDefinition<ReadFileInput> {
           endLine: ranged.endLine,
           totalLines: ranged.totalLines,
           truncated: ranged.truncated,
-          autoPaged,
+          autoPaged: autoPaged || toolResultRefAutoPaged,
           nextOffset: ranged.truncated ? ranged.endLine + 1 : undefined,
         },
         metadata: { truncated: ranged.truncated },
@@ -547,6 +563,17 @@ function renderReadMoreNotice(filePath: string, nextOffset: number, limit: numbe
     + `The file is too large to read in one response, so read_file returned the first ${limit} lines. `
     + `Continue with read_file({ file_path: "${filePath}", offset: ${nextOffset}, limit: ${limit} }) if you need more.`
     + "</system-reminder>";
+}
+
+function renderToolResultRefReadMoreNotice(filePath: string, nextOffset: number, limit: number): string {
+  return "\n<system-reminder>"
+    + `The persisted tool result was too large for the requested range, so read_file returned ${limit} lines. `
+    + `Continue with read_file({ file_path: "${filePath}", offset: ${nextOffset}, limit: ${limit} }) if you need more.`
+    + "</system-reminder>";
+}
+
+function isManagedToolResultRefPath(filePath: string): boolean {
+  return /^\.pilotdeck[\\/]tool-results[\\/]refs[\\/]result-\d+\.(?:txt|json)$/.test(filePath);
 }
 
 function renderOversizedLinePreview(text: string, filePath: string, offset: number): string {

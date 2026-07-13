@@ -86,6 +86,8 @@ export type CanonicalToolResultReferenceBlock = {
   isError?: boolean;
   /** Absolute path to the persisted file. */
   path: string;
+  /** Workspace-relative path that can be read with read_file when available. */
+  readFilePath?: string;
   /** Original size in bytes / characters of the full result. */
   originalBytes: number;
   /** Truncated preview (UTF-8 text) sent inline alongside the reference. */

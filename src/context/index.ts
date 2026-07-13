@@ -32,6 +32,7 @@ export {
 } from "./projection/MessageProjector.js";
 export {
   DEFAULT_MAX_RESULT_SIZE_CHARS,
+  DEFAULT_MAX_RESULT_SIZE_TOKENS,
   PREVIEW_SIZE_BYTES,
   ToolResultBudget,
   createToolResultBudgetState,

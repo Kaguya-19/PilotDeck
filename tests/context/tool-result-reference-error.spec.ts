@@ -26,14 +26,14 @@ const model: ModelDefinition = {
   multimodal: { input: ["text"] },
 };
 
-function requestWith(message: CanonicalMessage): CanonicalModelRequest {
+function requestWith(message: CanonicalMessage, toolCallId = "call-large-error"): CanonicalModelRequest {
   return {
     model: "test-model",
     provider: "test-provider",
     messages: [
       {
         role: "assistant",
-        content: [{ type: "tool_call", id: "call-large-error", name: "bash", input: { command: "test" } }],
+        content: [{ type: "tool_call", id: toolCallId, name: "bash", input: { command: "test" } }],
       },
       message,
     ],
@@ -42,10 +42,72 @@ function requestWith(message: CanonicalMessage): CanonicalModelRequest {
   };
 }
 
+test("tool text under token budget remains inline even when over legacy byte threshold", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "pilotdeck-tool-result-inline-token-"));
+  try {
+    const budget = new ToolResultBudget({
+      toolResultsDir: dir,
+      maxResultSizeChars: 80_000,
+      maxResultSizeTokens: 10_000,
+      previewBytes: 12_000,
+    });
+    const body = `search output start\n${"x".repeat(60_000)}\nsearch output tail`;
+    assert.ok(Buffer.byteLength(body, "utf8") > 50_000, "fixture should exceed the old 50KB threshold");
+
+    const applied = await budget.applyToMessage({
+      role: "user",
+      content: [{
+        type: "tool_result",
+        toolCallId: "call-large-but-inline",
+        content: [{ type: "text", text: body }],
+      }],
+    }, { turnId: "turn-1" });
+
+    assert.equal(applied.content[0]?.type, "tool_result");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("tool text over token budget is persisted with expanded grep-first preview", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "pilotdeck-tool-result-token-ref-"));
+  try {
+    const budget = new ToolResultBudget({
+      toolResultsDir: dir,
+      maxResultSizeChars: 500_000,
+      maxResultSizeTokens: 10_000,
+      previewBytes: 12_000,
+    });
+    const body = Array.from({ length: 20_000 }, (_, index) => `candidate ${index}: unique evidence token ${index}`).join("\n");
+
+    const applied = await budget.applyToMessage({
+      role: "user",
+      content: [{
+        type: "tool_result",
+        toolCallId: "call-over-token-budget",
+        content: [{ type: "text", text: body }],
+      }],
+    }, { turnId: "turn-1" });
+
+    const ref = applied.content.find((block) => block.type === "tool_result_reference");
+    assert.ok(ref, "expected a persisted tool_result_reference");
+    assert.match(ref.readFilePath ?? "", /refs\/result-0001\.txt$/);
+    assert.ok(Buffer.byteLength(ref.preview, "utf8") > 8_000, "expected a substantially larger preview");
+
+    const openai = buildOpenAIRequest(requestWith({ ...applied, content: [ref] }, "call-over-token-budget"), model);
+    const openaiTool = openai.messages.find((message) => message.role === "tool");
+    assert.match(String(openaiTool?.content), /grep\(\{ pattern: "<keyword>", path: ".*refs\/result-0001\.txt", output_mode: "content", head_limit: 20 \}/);
+    assert.match(String(openaiTool?.content), /Avoid paging through the whole file from offset 1/);
+    assert.match(String(openaiTool?.content), /search candidates/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("large tool error references preserve error semantics for model replay", async () => {
   const dir = await mkdtemp(join(tmpdir(), "pilotdeck-tool-result-test-"));
   try {
-    const budget = new ToolResultBudget({ toolResultsDir: dir, maxResultSizeChars: 120, previewBytes: 80 });
+    const budget = new ToolResultBudget({ toolResultsDir: dir, maxResultSizeChars: 120, maxResultSizeTokens: 20, previewBytes: 80 });
     const applied = await budget.applyToMessage({
       role: "user",
       content: [{
@@ -62,7 +124,9 @@ test("large tool error references preserve error semantics for model replay", as
 
     const openai = buildOpenAIRequest(requestWith(applied), model);
     const openaiTool = openai.messages.find((message) => message.role === "tool");
-    assert.match(String(openaiTool?.content), /Truncated: original/);
+    assert.match(String(openaiTool?.content), /Tool result preview only/);
+    assert.match(String(openaiTool?.content), /grep\(\{ pattern: "<keyword>", path: ".*refs\/result-0001\.txt", output_mode: "content", head_limit: 20 \}/);
+    assert.match(String(openaiTool?.content), /read_file\(\{ file_path: ".*refs\/result-0001\.txt"/);
 
     const anthropic = buildAnthropicRequest(requestWith(applied), model);
     const anthropicTool = anthropic.messages[1]?.content.find((part: any) => part?.type === "tool_result") as any;
@@ -72,17 +136,17 @@ test("large tool error references preserve error semantics for model replay", as
     const functionResponse = google.contents
       .flatMap((content: any) => content.parts ?? [])
       .find((part: any) => part.functionResponse);
-    assert.match(String(functionResponse?.functionResponse?.response?.error), /Truncated: original/);
+    assert.match(String(functionResponse?.functionResponse?.response?.error), /Tool result preview only/);
     assert.equal(functionResponse?.functionResponse?.response?.output, undefined);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
 });
 
-test("multibyte truncated tool result references still advertise read_file access", async () => {
+test("multibyte truncated tool result references advertise read_file access", async () => {
   const dir = await mkdtemp(join(tmpdir(), "pilotdeck-tool-result-multibyte-"));
   try {
-    const budget = new ToolResultBudget({ toolResultsDir: dir, maxResultSizeChars: 80, previewBytes: 40 });
+    const budget = new ToolResultBudget({ toolResultsDir: dir, maxResultSizeChars: 80, maxResultSizeTokens: 20, previewBytes: 40 });
     const applied = await budget.applyToMessage({
       role: "user",
       content: [{
@@ -99,7 +163,10 @@ test("multibyte truncated tool result references still advertise read_file acces
 
     const openai = buildOpenAIRequest(requestWith({ ...applied, content: [ref] }), model);
     const openaiTool = openai.messages.find((message) => message.role === "tool");
-    assert.match(String(openaiTool?.content), /Use read_file on this path/);
+    assert.match(String(openaiTool?.content), /grep/);
+    assert.match(String(openaiTool?.content), /read_file/);
+    assert.match(String(openaiTool?.content), /refs\/result-0001\.txt/);
+    assert.doesNotMatch(String(openaiTool?.content), /read_tool_result/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

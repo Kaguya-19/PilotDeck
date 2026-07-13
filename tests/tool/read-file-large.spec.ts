@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -62,6 +62,46 @@ test("read_file explicit limit reads a large file range without auto paging", as
     assert.doesNotMatch(text, /^3003\|line-3003/m);
     assert.equal((result.data as { autoPaged?: boolean }).autoPaged, false);
     assert.equal((result.data as { nextOffset?: number }).nextOffset, 3003);
+  } finally {
+    await rm(projectRoot, { recursive: true, force: true });
+  }
+});
+
+test("read_file auto-shrinks oversized persisted tool-result ref ranges", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "pilotdeck-read-ref-autopage-"));
+  try {
+    const refPath = join(projectRoot, ".pilotdeck", "tool-results", "refs", "result-0001.txt");
+    await mkdir(join(projectRoot, ".pilotdeck", "tool-results", "refs"), { recursive: true });
+    await writeFile(refPath, Array.from({ length: 300 }, (_, index) => `line-${index + 1} ${"x".repeat(1200)}`).join("\n"));
+
+    const result = await createReadFileTool().execute({
+      file_path: ".pilotdeck/tool-results/refs/result-0001.txt",
+      offset: 1,
+      limit: 200,
+    }, context(projectRoot));
+    const text = textOf(result);
+
+    assert.match(text, /^1\|line-1/m);
+    assert.match(text, /persisted tool result was too large for the requested range/);
+    assert.match(text, /Continue with read_file\({ file_path: "\.pilotdeck\/tool-results\/refs\/result-0001\.txt", offset: \d+, limit: \d+ }\)/);
+    assert.equal((result.data as { autoPaged?: boolean }).autoPaged, true);
+    assert.ok((result.data as { endLine?: number }).endLine! < 200);
+    assert.ok((result.data as { nextOffset?: number }).nextOffset! > 1);
+    assert.equal(result.metadata?.truncated, true);
+  } finally {
+    await rm(projectRoot, { recursive: true, force: true });
+  }
+});
+
+test("read_file keeps explicit oversized ordinary file ranges strict", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "pilotdeck-read-ordinary-strict-"));
+  try {
+    await writeFile(join(projectRoot, "large.txt"), Array.from({ length: 300 }, (_, index) => `line-${index + 1} ${"x".repeat(1200)}`).join("\n"));
+
+    await assert.rejects(
+      () => createReadFileTool().execute({ file_path: "large.txt", offset: 1, limit: 200 }, context(projectRoot)),
+      /exceeds the text token budget/,
+    );
   } finally {
     await rm(projectRoot, { recursive: true, force: true });
   }
