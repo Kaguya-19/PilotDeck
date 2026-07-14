@@ -795,7 +795,9 @@ function createFallbackGateway(): Gateway {
   };
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
-});
+if (process.env.PILOTDECK_SKIP_CLI_MAIN !== "1") {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  });
+}

@@ -457,6 +457,9 @@ function verifyRuntime(root, label = "runtime") {
     resolve(runtimeRoot, "ui", "dist", "index.html"),
     resolve(runtimeRoot, "ui", "server", "index.js"),
     resolve(runtimeRoot, "node_modules", "express"),
+    resolve(runtimeRoot, "node_modules", "react"),
+    resolve(runtimeRoot, "node_modules", "ink"),
+    resolve(runtimeRoot, "node_modules", "ink-text-input"),
     resolve(runtimeRoot, "node_modules", "@playwright", "mcp", "cli.js"),
     resolve(runtimeRoot, "node_modules", "edgeclaw-memory-core", "lib", "index.js"),
     resolve(runtimeRoot, "node_modules", "edgeclaw-memory-core", "ui-source", "index.html"),
@@ -481,10 +484,32 @@ function verifyRuntime(root, label = "runtime") {
   }
 
   verifyRuntimeNativeModule("better-sqlite3", label);
+  verifyRuntimeModuleImport(resolve(runtimeRoot, "dist", "src", "cli", "pilotdeck.js"), label);
 
   console.log(`[desktop] staged ${label} ready: ${runtimeRoot}`);
   console.log(`[desktop] staged ${label} size: ${formatBytes(directorySize(runtimeRoot))}`);
   runtimeRoot = previousRuntimeRoot;
+}
+
+function verifyRuntimeModuleImport(modulePath, label) {
+  const result = spawnSync(
+    process.execPath,
+    ["--input-type=module", "-e", `await import(${JSON.stringify(`file://${modulePath}`)})`],
+    {
+      cwd: runtimeRoot,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        NODE_PATH: resolve(runtimeRoot, "node_modules"),
+        PILOTDECK_SKIP_CLI_MAIN: "1",
+      },
+    },
+  );
+  if (result.status !== 0) {
+    throw new Error(
+      `Desktop ${label} cannot import runtime entry ${modulePath}: ${(result.stderr || result.stdout || "unknown error").trim()}`,
+    );
+  }
 }
 
 function verifyRuntimeNativeModule(moduleName, label) {
