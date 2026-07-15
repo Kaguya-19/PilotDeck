@@ -32,6 +32,7 @@ import type {
   ListSessionsInput,
   ListSessionsResult,
   NewSessionInput,
+  PrepareWeixinLoginResult,
   AlwaysOnApplyInput,
   AlwaysOnApplyResult,
   AlwaysOnRerunPlanInput,
@@ -134,6 +135,7 @@ export type InProcessGatewayOptions = {
    * the PilotConfigStore + ProjectRuntimeRegistry lifecycle.
    */
   reloadConfig?: () => Promise<ReloadConfigResult>;
+  prepareWeixinLogin?: () => Promise<PrepareWeixinLoginResult>;
   /**
    * Pluggable extension/MCP reload handler wired by `createLocalGateway`.
    * Unlike `reloadConfig`, this does not depend on `pilotdeck.yaml` changing.
@@ -783,6 +785,17 @@ export class InProcessGateway implements Gateway {
     return this.options.reloadConfig();
   }
 
+  async prepareWeixinLogin(): Promise<PrepareWeixinLoginResult> {
+    if (!this.options.prepareWeixinLogin) {
+      return {
+        requested: false,
+        requestedAt: new Date().toISOString(),
+        reason: "unsupported",
+      };
+    }
+    return this.options.prepareWeixinLogin();
+  }
+
   async reloadExtensions(input?: import("../protocol/types.js").ReloadExtensionsInput): Promise<import("../protocol/types.js").ReloadExtensionsResult> {
     if (!this.options.reloadExtensions) {
       return { reloaded: false, reason: "unsupported" };
@@ -800,6 +813,10 @@ export class InProcessGateway implements Gateway {
 
   setAlwaysOnRerunPlan(handler: InProcessGatewayOptions["alwaysOnRerunPlan"]): void {
     (this.options as { alwaysOnRerunPlan?: InProcessGatewayOptions["alwaysOnRerunPlan"] }).alwaysOnRerunPlan = handler;
+  }
+
+  setPrepareWeixinLogin(handler: InProcessGatewayOptions["prepareWeixinLogin"]): void {
+    (this.options as { prepareWeixinLogin?: InProcessGatewayOptions["prepareWeixinLogin"] }).prepareWeixinLogin = handler;
   }
 
   // -------------------------------------------------------------------

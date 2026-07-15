@@ -251,6 +251,15 @@ async function main(argv = process.argv.slice(2)): Promise<void> {
 
     let serverRef: Awaited<ReturnType<typeof startPilotDeckServer>> | undefined;
 
+    async function hotStartWeixinChannel(): Promise<void> {
+      if (!serverRef) return;
+      const savedWeixin = await channelStatePersistence.load<WeixinSessionMapperState>("weixin");
+      await serverRef.hotStartChannel(new WeixinChannel({
+        mapper: savedWeixin ? new WeixinSessionMapper(savedWeixin) : undefined,
+        onStateChange: (state) => channelStatePersistence.save("weixin", state),
+      }));
+    }
+
     async function handleAdapterHotReload(config: (typeof snapshot)["config"]): Promise<void> {
       if (!serverRef) return;
       const parts: string[] = [];
@@ -274,11 +283,7 @@ async function main(argv = process.argv.slice(2)): Promise<void> {
 
       const wCfg = config.adapters?.weixin;
       if (wCfg?.enabled === true) {
-        const savedWeixin = await channelStatePersistence.load<WeixinSessionMapperState>("weixin");
-        await serverRef.hotStartChannel(new WeixinChannel({
-          mapper: savedWeixin ? new WeixinSessionMapper(savedWeixin) : undefined,
-          onStateChange: (state) => channelStatePersistence.save("weixin", state),
-        }));
+        await hotStartWeixinChannel();
         parts.push("weixin=started");
       }
 
@@ -381,6 +386,20 @@ async function main(argv = process.argv.slice(2)): Promise<void> {
       config: snapshot.config,
     });
     serverRef = server;
+    (
+      gateway as {
+        setPrepareWeixinLogin?: (
+          handler: () => Promise<{ requested: boolean; requestedAt: string; reason?: "unsupported" }>
+        ) => void;
+      }
+    ).setPrepareWeixinLogin?.(async () => {
+      const requestedAt = new Date().toISOString();
+      if (!serverRef) {
+        return { requested: false, requestedAt, reason: "unsupported" };
+      }
+      await hotStartWeixinChannel();
+      return { requested: true, requestedAt };
+    });
     bindServer(server);
     deferredBroadcast = (name, payload) => server.broadcastNotification(name, payload);
     console.log(`PilotDeck server listening: ${server.url}`);

@@ -330,6 +330,12 @@ export type ReloadConfigResult = {
   reason?: "unsupported" | "unchanged";
 };
 
+export type PrepareWeixinLoginResult = {
+  requested: boolean;
+  requestedAt: string;
+  reason?: "unsupported";
+};
+
 export type ReloadExtensionsInput = {
   projectKey?: string;
   changedPaths?: string[];
@@ -429,6 +435,13 @@ export interface Gateway {
    * capability) may leave it undefined.
    */
   reloadConfig?(): Promise<ReloadConfigResult>;
+
+  /**
+   * Ask the gateway host to start or restart the Weixin channel so it can
+   * generate a runtime QR code. The host owns channel construction; UI/server
+   * callers must not invoke `weixin-ilink.loginWithQR()` directly.
+   */
+  prepareWeixinLogin?(): Promise<PrepareWeixinLoginResult>;
 
   /**
    * Trigger a plugin/skill/MCP extension reload without waiting for the file
