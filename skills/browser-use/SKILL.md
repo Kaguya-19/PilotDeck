@@ -62,6 +62,8 @@ If the download is slow or blocked, configure your network proxy first and rerun
 
 - Prefer browser-use for interactive browser tasks. Prefer HTTP, curl, requests, or structured parsing for non-interactive retrieval and batch scraping.
 - Try the existing browser setup before any installation step. If it works, continue; do not reinstall or upgrade browser binaries.
+- If browser-use times out or the page does not require interaction, switch to HTTP/file parsing or a narrower browser action instead of repeatedly retrying the same navigation.
+- Keep browser-use calls targeted: navigate to one URL, wait for a specific visible signal, extract the needed text/state, then stop. Avoid using browser automation as a general crawler.
 - For local PilotDeck checks, open the URL shown by `pilotdeck status`, usually `http://localhost:3001`.
 - If no model provider is configured, a clean PilotDeck instance should land on onboarding rather than settings or chat.
 - Keep browser tasks small and observable: navigate, wait for a visible heading, inspect relevant text, then report evidence.
