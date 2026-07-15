@@ -99,17 +99,10 @@ function getClawHubShimName(context) {
   return context.electronPlatformName === "win32" ? "clawhub.cmd" : "clawhub";
 }
 
-module.exports = async function afterPack(context) {
-  const desktopRoot = resolve(__dirname, "..");
-  const resourcesDir = getResourcesDir(context);
-  const source = resolve(desktopRoot, ".runtime", "app", "node_modules");
-  const runtimeRoot = join(resourcesDir, "runtime");
-  const x64RuntimeRoot = join(resourcesDir, "runtime-x64");
-  const nodeRoot = join(resourcesDir, "node");
+function copyRuntimeNodeModules(source, runtimeRoot, label) {
   const target = join(runtimeRoot, "node_modules");
-
   if (!existsSync(source)) {
-    throw new Error(`Desktop runtime dependencies missing: ${source}`);
+    throw new Error(`Desktop ${label} dependencies missing: ${source}`);
   }
 
   rmSync(target, { recursive: true, force: true });
@@ -119,17 +112,21 @@ module.exports = async function afterPack(context) {
     force: true,
     dereference: true,
   });
-  const runtimeSymlinks = materializeSymlinks(runtimeRoot);
-  const x64RuntimeSymlinks = existsSync(x64RuntimeRoot) ? materializeSymlinks(x64RuntimeRoot) : 0;
-  const nodeSymlinks = materializeSymlinks(nodeRoot);
-  console.log(
-    `[desktop] afterPack materialized ${runtimeSymlinks} runtime symlinks, ${x64RuntimeSymlinks} x64 runtime symlinks, and ${nodeSymlinks} node symlinks`,
-  );
+  return target;
+}
 
-  for (const dependency of ["express", "edgeclaw-memory-core", "clawhub"]) {
+function verifyPackagedRuntime(target, context, label) {
+  for (const dependency of [
+    "express",
+    "edgeclaw-memory-core",
+    "clawhub",
+    "react",
+    "ink",
+    "ink-text-input",
+  ]) {
     const dependencyPath = join(target, dependency);
     if (!existsSync(dependencyPath)) {
-      throw new Error(`Desktop runtime dependency was not packaged: ${dependencyPath}`);
+      throw new Error(`Desktop ${label} dependency was not packaged: ${dependencyPath}`);
     }
   }
   for (const requiredFile of [
@@ -139,11 +136,34 @@ module.exports = async function afterPack(context) {
     join(target, ".bin", getClawHubShimName(context)),
   ]) {
     if (!existsSync(requiredFile)) {
-      throw new Error(`Desktop runtime dependency file was not packaged: ${requiredFile}`);
+      throw new Error(`Desktop ${label} dependency file was not packaged: ${requiredFile}`);
     }
   }
   if (existsSync(join(target, "tsx"))) {
-    throw new Error(`Desktop runtime should not package tsx: ${join(target, "tsx")}`);
+    throw new Error(`Desktop ${label} should not package tsx: ${join(target, "tsx")}`);
   }
+}
+
+module.exports = async function afterPack(context) {
+  const desktopRoot = resolve(__dirname, "..");
+  const resourcesDir = getResourcesDir(context);
+  const source = resolve(desktopRoot, ".runtime", "app", "node_modules");
+  const x64Source = resolve(desktopRoot, ".runtime", "app-x64", "node_modules");
+  const runtimeRoot = join(resourcesDir, "runtime");
+  const x64RuntimeRoot = join(resourcesDir, "runtime-x64");
+  const nodeRoot = join(resourcesDir, "node");
+  const target = copyRuntimeNodeModules(source, runtimeRoot, "runtime");
+  const x64Target = existsSync(join(x64RuntimeRoot, "package.json"))
+    ? copyRuntimeNodeModules(x64Source, x64RuntimeRoot, "x64 runtime")
+    : null;
+  const runtimeSymlinks = materializeSymlinks(runtimeRoot);
+  const x64RuntimeSymlinks = existsSync(x64RuntimeRoot) ? materializeSymlinks(x64RuntimeRoot) : 0;
+  const nodeSymlinks = materializeSymlinks(nodeRoot);
+  console.log(
+    `[desktop] afterPack materialized ${runtimeSymlinks} runtime symlinks, ${x64RuntimeSymlinks} x64 runtime symlinks, and ${nodeSymlinks} node symlinks`,
+  );
+
+  verifyPackagedRuntime(target, context, "runtime");
+  if (x64Target) verifyPackagedRuntime(x64Target, context, "x64 runtime");
   ensureMacSigningFallback(context);
 };
