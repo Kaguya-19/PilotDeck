@@ -157,7 +157,12 @@ export class ToolRuntime {
           call.id,
           tool.name,
           "invalid_tool_input",
-          `PreToolUse hook produced invalid input for ${tool.name}.`,
+          `PreToolUse hook produced invalid input for ${tool.name}.
+
+${formatValidationError(tool.name, updatedValidation.issues, {
+            maxOutputTokens: runtimeContext.maxOutputTokens,
+            outputTruncated: runtimeContext.outputTruncated,
+          })}`,
           startedAt,
           context,
           { issues: updatedValidation.issues },
@@ -171,7 +176,10 @@ export class ToolRuntime {
         call.id,
         tool.name,
         "invalid_tool_input",
-        `Tool ${tool.name} rejected the input.`,
+        formatValidationError(tool.name, toolValidation.issues, {
+          maxOutputTokens: runtimeContext.maxOutputTokens,
+          outputTruncated: runtimeContext.outputTruncated,
+        }),
         startedAt,
         context,
         { issues: toolValidation.issues },
