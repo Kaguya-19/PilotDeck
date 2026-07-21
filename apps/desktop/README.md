@@ -22,7 +22,7 @@ pnpm --filter pilotdeck-desktop dist:win
 Platform release builds should run on matching GitHub Actions runners:
 
 - macOS DMG artifacts on `macos-latest`
-- Windows NSIS installer artifacts on `windows-latest`
+- Windows NSIS installer and portable executable artifacts on `windows-latest`
 
 The first packaging pass produces unsigned artifacts. Developer ID notarization
 and Windows Authenticode signing are separate hardening steps.

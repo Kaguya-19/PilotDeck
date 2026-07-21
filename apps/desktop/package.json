@@ -12,6 +12,7 @@
     "pack": "node scripts/build-runtime.mjs && tsc -p tsconfig.json && electron-builder --dir",
     "dist:mac": "node scripts/build-runtime.mjs && tsc -p tsconfig.json && electron-builder --mac --universal",
     "dist:win": "node scripts/build-runtime.mjs && tsc -p tsconfig.json && electron-builder --win",
+    "dist:win:portable": "node scripts/build-runtime.mjs && tsc -p tsconfig.json && electron-builder --win portable",
     "download-git-bash": "node scripts/download-git-bash.mjs",
     "download-node": "node scripts/download-node.mjs",
     "download-playwright-browsers": "node scripts/download-playwright-browsers.mjs"
@@ -104,16 +105,26 @@
           "arch": [
             "x64"
           ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
         }
       ]
     },
     "nsis": {
+      "artifactName": "${productName}-${version}-${os}-${arch}-setup.${ext}",
       "oneClick": false,
       "perMachine": true,
       "installerIcon": "resources/icons/installer-icon.ico",
       "uninstallerIcon": "resources/icons/installer-icon.ico",
       "include": "resources/installer.nsh",
       "allowToChangeInstallationDirectory": true
+    },
+    "portable": {
+      "artifactName": "${productName}-${version}-${os}-${arch}-portable.${ext}"
     }
   }
 }
