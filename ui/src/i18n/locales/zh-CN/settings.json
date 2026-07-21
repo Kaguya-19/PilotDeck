@@ -856,7 +856,7 @@
       },
       "cron": {
         "title": "Cron",
-        "description": "配置 Cron 任务使用的后台调度器。任务创建和管理仍在 Always-On > Plans & Cron Jobs 中完成。",
+        "description": "配置 Cron 任务使用的后台调度器。任务创建和管理在 Cron 模块中完成。",
         "enabled": {
           "label": "启用",
           "description": "定时 Cron 后台任务的总开关。"

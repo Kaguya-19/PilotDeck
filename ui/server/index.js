@@ -492,8 +492,8 @@ app.use('/api/mcp-utils', authenticateToken, mcpUtilsRoutes);
 app.use('/api/commands', authenticateToken, commandsRoutes);
 
 // Skills API Routes (protected) — list/edit/install skills surfaced in the
-// top-right Skills tab. Backed by ~/.pilotdeck/skills/ and project-level
-// .pilotdeck/skills/ via PilotDeck plugin runtime.
+// top-right Skills tab. Backed by bundled skills, ~/.pilotdeck/skills/, and
+// project-level .pilotdeck/skills/ via PilotDeck plugin runtime.
 app.use('/api/skills', authenticateToken, skillsRoutes);
 
 // Settings API Routes (protected)
@@ -582,6 +582,43 @@ app.get('/api/always-on/cron-jobs', authenticateToken, async (_req, res) => {
     } catch (error) {
         console.error('[always-on-cron-jobs] failed:', error);
         res.status(500).json({ error: error?.message || 'always-on-cron-jobs failed' });
+    }
+});
+
+app.post('/api/always-on/cron-jobs', authenticateToken, async (req, res) => {
+    try {
+        const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+        const projectKey = typeof req.body?.projectKey === 'string' ? req.body.projectKey : '';
+        const schedule = req.body?.schedule;
+        const timezone = typeof req.body?.timezone === 'string' && req.body.timezone.trim()
+            ? req.body.timezone.trim()
+            : undefined;
+
+        if (!message) {
+            res.status(400).json({ error: 'Cron message is required.' });
+            return;
+        }
+        if (!projectKey) {
+            res.status(400).json({ error: 'Cron projectKey is required.' });
+            return;
+        }
+        if (!schedule || typeof schedule !== 'object') {
+            res.status(400).json({ error: 'Cron schedule is required.' });
+            return;
+        }
+
+        const gateway = await getPilotDeckGateway();
+        const result = await gateway.cronCreate({
+            message,
+            projectKey,
+            schedule,
+            timezone,
+            channelKey: 'web',
+        });
+        res.json(result);
+    } catch (error) {
+        console.error('[always-on-cron-create] failed:', error);
+        res.status(500).json({ error: error?.message || 'cron create failed' });
     }
 });
 

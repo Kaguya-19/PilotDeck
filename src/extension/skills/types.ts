@@ -8,11 +8,11 @@
  */
 
 /**
- * "user" lives in `~/.pilotdeck/skills/`, available to every project.
- * "project" lives in `<projectRoot>/.pilotdeck/skills/`, scoped to the
- * project the agent is running against.
+ * "builtin" is shipped with PilotDeck and is read-only. "user" lives in
+ * `~/.pilotdeck/skills/`, available to every project. "project" lives in
+ * `<projectRoot>/.pilotdeck/skills/`, scoped to the active project.
  */
-export type SkillScope = "user" | "project";
+export type SkillScope = "builtin" | "user" | "project";
 export type SkillListScope = SkillScope | "preset";
 
 /**
@@ -32,8 +32,12 @@ export type SkillSummary = {
   /** Absolute path of the containing skill directory. */
   skillDir: string;
   scope: SkillListScope;
-  /** Preset/plugin skills are shipped by the runtime and cannot be edited from the skills panel. */
-  readonly?: boolean;
+  /** Built-in and preset/plugin skills are immutable; user/project skills remain editable. */
+  readonly: boolean;
+  /** Higher-priority scope currently shadowing this entry, when any. */
+  overriddenBy?: "user" | "project";
+  /** True when this entry shadows a bundled skill with the same slug. */
+  overridesBuiltin?: boolean;
   /** Last-modified time of SKILL.md in epoch ms, or null if unreadable. */
   mtime: number | null;
 };
@@ -48,6 +52,7 @@ export type SkillsListInput = {
 };
 
 export type SkillsListResult = {
+  builtin: SkillSummary[];
   user: SkillSummary[];
   project: SkillSummary[];
   preset?: SkillSummary[];

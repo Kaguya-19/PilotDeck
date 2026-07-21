@@ -51,6 +51,167 @@ type LatestChatMessage = {
   [key: string]: any;
 };
 
+function normalizeAssistantStreamText(value?: string): string {
+  return typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '';
+}
+
+function getMessageRunId(message: { runId?: unknown }): string | undefined {
+  return typeof message.runId === 'string' && message.runId.trim()
+    ? message.runId.trim()
+    : undefined;
+}
+
+function parseAssistantStreamTimestamp(value?: string): number | null {
+  if (!value) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function isCompatibleAssistantStreamRun(incoming: NormalizedMessage, existing: NormalizedMessage): boolean {
+  if (incoming.runId != null && existing.runId != null) return incoming.runId === existing.runId;
+  const isActiveStream = existing.kind === 'stream_delta' && String(existing.id || '').startsWith('__streaming_');
+  if (!isActiveStream) return false;
+  const incomingTimestamp = parseAssistantStreamTimestamp(incoming.timestamp);
+  const existingTimestamp = parseAssistantStreamTimestamp(existing.timestamp);
+  if (incomingTimestamp == null || existingTimestamp == null) return false;
+  return Math.abs(incomingTimestamp - existingTimestamp) <= 10_000;
+}
+
+export function getDuplicateAssistantStreamTextState(
+  incoming: NormalizedMessage,
+  realtimeMessages: NormalizedMessage[],
+): { isDuplicate: boolean; hasActiveStream: boolean; activeStreamRunId?: string | null } {
+  if (incoming.kind !== 'text' || incoming.role !== 'assistant') {
+    return { isDuplicate: false, hasActiveStream: false };
+  }
+
+  const incomingText = normalizeAssistantStreamText(incoming.content);
+  if (!incomingText) {
+    return { isDuplicate: false, hasActiveStream: false };
+  }
+
+  let hasActiveStream = false;
+  let activeStreamRunId: string | null | undefined;
+  const isDuplicate = realtimeMessages.some((message) => {
+    const isAssistantText = message.kind === 'text' && message.role === 'assistant';
+    const isActiveStream = message.kind === 'stream_delta' && String(message.id || '').startsWith('__streaming_');
+    if (!isAssistantText && !isActiveStream) return false;
+    if (isAssistantText && (incoming.runId == null || message.runId == null)) return false;
+    if (!isCompatibleAssistantStreamRun(incoming, message)) return false;
+    if (normalizeAssistantStreamText(message.content) !== incomingText) return false;
+    if (isActiveStream) {
+      hasActiveStream = true;
+      activeStreamRunId = message.runId ?? null;
+    }
+    return true;
+  });
+
+  return { isDuplicate, hasActiveStream, activeStreamRunId };
+}
+
+type ActiveTurnReplayState = {
+  realtimeMessages?: NormalizedMessage[];
+  serverMessages?: NormalizedMessage[];
+};
+
+type VolatileReplayBlock = {
+  kind: 'stream_delta' | 'thinking';
+  messages: LatestChatMessage[];
+  text: string;
+  runId?: string;
+};
+
+function isRenderedVolatileBlockCandidate(
+  block: VolatileReplayBlock,
+  message: NormalizedMessage,
+): boolean {
+  const blockText = normalizeAssistantStreamText(block.text);
+  if (!blockText) return false;
+
+  const messageRunId = getMessageRunId(message);
+  if (block.runId && messageRunId && block.runId !== messageRunId) {
+    return false;
+  }
+
+  if (block.kind === 'stream_delta') {
+    const isAssistantText = message.kind === 'text' && message.role === 'assistant';
+    const isActiveStream = message.kind === 'stream_delta' && String(message.id || '').startsWith('__streaming_');
+    if (!isAssistantText && !isActiveStream) return false;
+  } else if (message.kind !== 'thinking') {
+    return false;
+  }
+
+  return normalizeAssistantStreamText(message.content) === blockText;
+}
+
+function hasRenderedVolatileReplayBlock(
+  block: VolatileReplayBlock,
+  state: ActiveTurnReplayState,
+): boolean {
+  const messages = [
+    ...(state.realtimeMessages || []),
+    ...(state.serverMessages || []),
+  ];
+  return messages.some((message) => isRenderedVolatileBlockCandidate(block, message));
+}
+
+export function getActiveTurnReplayMessagesToApply(
+  activeTurnMessages: LatestChatMessage[],
+  state: ActiveTurnReplayState = {},
+  options: { skipVolatile?: boolean } = {},
+): LatestChatMessage[] {
+  if (!Array.isArray(activeTurnMessages) || activeTurnMessages.length === 0) {
+    return [];
+  }
+
+  const output: LatestChatMessage[] = [];
+  let block: VolatileReplayBlock | null = null;
+
+  const flushBlock = () => {
+    if (!block) return;
+    if (!options.skipVolatile && !hasRenderedVolatileReplayBlock(block, state)) {
+      output.push(...block.messages);
+    }
+    block = null;
+  };
+
+  for (const message of activeTurnMessages) {
+    const kind = String(message?.kind || '');
+    if (kind === 'thinking' || kind === 'stream_delta') {
+      if (block && block.kind !== kind) {
+        flushBlock();
+      }
+      if (!block) {
+        block = {
+          kind: kind as 'thinking' | 'stream_delta',
+          messages: [],
+          text: '',
+          runId: getMessageRunId(message),
+        };
+      }
+      block.messages.push(message);
+      block.text += typeof message.content === 'string' ? message.content : '';
+      block.runId ??= getMessageRunId(message);
+      continue;
+    }
+
+    if (kind === 'stream_end') {
+      if (block?.kind === 'stream_delta') {
+        block.messages.push(message);
+        block.runId ??= getMessageRunId(message);
+        flushBlock();
+      }
+      continue;
+    }
+
+    flushBlock();
+    output.push(message);
+  }
+
+  flushBlock();
+  return output;
+}
+
 
 function getExplicitSessionId(msg: LatestChatMessage): string | null {
   const value = msg.sessionId ?? msg.session_id ?? msg.actualSessionId ?? msg.newSessionId;
@@ -211,17 +372,21 @@ export function useChatRealtimeHandlers({
             const hasSeenSameVolatileReplay = Boolean(
               volatileSignature && previousVolatileSignature === volatileSignature,
             );
-            // Only replay messages that have stable IDs and can be deduped
-            // against server data (tool_use by toolId, tool_result/status by id).
-            // Skip thinking, stream_delta, stream_end — these create messages
-            // with generated IDs that can't be matched to server copies.
-            // But if this tab has no active streaming state (e.g. another tab
-            // started the turn), we need to replay them so content renders.
-            const skipKinds = new Set(['thinking', 'stream_delta', 'stream_end']);
+            // Replay active-turn snapshots only for content this tab has not
+            // already rendered. Volatile stream/thinking chunks are grouped
+            // into blocks so a status poll cannot re-feed an already-finalized
+            // assistant text back into the streaming accumulator.
             const skipVolatileReplay =
               hasLiveStreaming || hasReplayedCurrentTurnToolUse || hasSeenSameVolatileReplay;
-            for (const activeTurnMessage of msg.activeTurnMessages) {
-              if (skipVolatileReplay && skipKinds.has(activeTurnMessage.kind)) continue;
+            const activeTurnMessagesToApply = getActiveTurnReplayMessagesToApply(
+              msg.activeTurnMessages,
+              {
+                realtimeMessages: slot?.realtimeMessages || [],
+                serverMessages: slot?.serverMessages || [],
+              },
+              { skipVolatile: skipVolatileReplay },
+            );
+            for (const activeTurnMessage of activeTurnMessagesToApply) {
               handleMessage(activeTurnMessage, statusSessionId);
             }
             if (volatileSignature) {
@@ -440,12 +605,14 @@ export function useChatRealtimeHandlers({
     // The streaming pipeline (stream_delta → stream_end → finalizeStreaming)
     // already creates a text message in realtimeMessages. If the backend also
     // sends a standalone 'text' message with the same content, skip it.
-    const isDuplicateStreamText =
-      msg.kind === 'text' && msg.role === 'assistant' &&
-      sessionStore.getSessionSlot?.(sid)?.realtimeMessages.some(
-        (m) => m.kind === 'text' && m.role === 'assistant' && m.content === (msg as NormalizedMessage).content,
-      );
-    if (!isDuplicateStreamText) {
+    const duplicateStreamTextState = getDuplicateAssistantStreamTextState(
+      msg as NormalizedMessage,
+      sessionStore.getSessionSlot?.(sid)?.realtimeMessages ?? [],
+    );
+    if (duplicateStreamTextState.hasActiveStream) {
+      sessionStore.finalizeStreaming(sid, duplicateStreamTextState.activeStreamRunId ?? undefined);
+    }
+    if (!duplicateStreamTextState.isDuplicate) {
       sessionStore.appendRealtime(sid, msg as NormalizedMessage);
     }
 

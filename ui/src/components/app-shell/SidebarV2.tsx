@@ -1252,7 +1252,6 @@ export default function SidebarV2({
         role="separator"
         aria-orientation="vertical"
         aria-label={t('sidebar:tooltips.resize', { defaultValue: 'Resize sidebar' }) as string}
-        title={t('sidebar:tooltips.resize', { defaultValue: 'Drag to resize' }) as string}
         onMouseDown={handleResizeStart}
         onDoubleClick={() => {
           setSidebarWidth(SIDEBAR_DEFAULT_WIDTH);

@@ -144,7 +144,11 @@ export function createReadFileTool(): PilotDeckToolDefinition<ReadFileInput> {
       if (hasBinaryExtension(absolutePath)) {
         return {
           ok: false,
-          issues: [{ path: "file_path", code: "invalid_schema", message: "binary files are not supported by read_file. Use send_attachment/send_file when the user wants this file sent back through the current channel." }],
+          issues: [{
+            path: "file_path",
+            code: "invalid_schema",
+            message: "binary files are not supported by read_file. Convert Office/archive/binary files to a supported text, PDF, or image format before inspection; use send_attachment/send_file only when the user wants this file sent back through the current channel.",
+          }],
         };
       }
       return { ok: true, input };

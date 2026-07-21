@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import React from 'react';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { ChatMessage, ChatRunMode } from '../chat/types/types';
 import MessagesPaneV2 from './MessagesPaneV2';
@@ -16,6 +16,7 @@ beforeAll(() => {
     return window.setTimeout(() => callback(performance.now()), 0);
   });
   vi.stubGlobal('cancelAnimationFrame', (id: number) => window.clearTimeout(id));
+  Element.prototype.scrollIntoView = vi.fn();
 });
 
 afterEach(() => {
@@ -414,6 +415,55 @@ describe('MessagesPaneV2 render behavior', () => {
     const completedButton = summary.closest('button');
     expect(completedButton?.getAttribute('aria-expanded')).toBe('true');
     expect(screen.getByText('ReadHidden.tsx')).toBeTruthy();
+  });
+
+  it('does not search hidden completed process detail content', async () => {
+    const now = new Date().toISOString();
+    const messages: ChatMessage[] = [
+      {
+        id: 'u-1',
+        type: 'user',
+        content: '检查文件',
+        timestamp: now,
+      },
+      {
+        id: 'tool-read-1',
+        type: 'assistant',
+        content: '',
+        timestamp: now,
+        isToolUse: true,
+        toolName: 'Read',
+        toolId: 'tool-read-1',
+        toolInput: '{"file_path":"src/SearchHiddenNeedle.tsx"}',
+        toolResult: { content: 'ok', isError: false },
+      },
+      {
+        id: 'a-1',
+        type: 'assistant',
+        content: 'Done.',
+        timestamp: now,
+      },
+    ];
+
+    renderPane({ messages });
+
+    const summary = screen.getByText('Explored 1 file');
+    const processButton = summary.closest('button');
+    expect(processButton?.getAttribute('aria-expanded')).toBe('false');
+    expect(screen.queryByText('SearchHiddenNeedle.tsx')).toBeNull();
+
+    fireEvent.keyDown(document, { key: 'f', ctrlKey: true });
+    const search = screen.getByRole('search');
+    const input = search.querySelector('input[type="search"]') as HTMLInputElement | null;
+    if (!input) throw new Error('Expected chat search input');
+    fireEvent.change(input, { target: { value: 'SearchHiddenNeedle.tsx' } });
+
+    await waitFor(() => {
+      expect((screen.getByRole('button', { name: 'Previous match' }) as HTMLButtonElement).disabled).toBe(true);
+      expect((screen.getByRole('button', { name: 'Next match' }) as HTMLButtonElement).disabled).toBe(true);
+    });
+    expect(processButton?.getAttribute('aria-expanded')).toBe('false');
+    expect(document.querySelector('mark.chat-history-search-highlight-active')).toBeNull();
   });
 
   it('keeps separated live process rows at the positions where they happened', () => {

@@ -158,7 +158,12 @@ export class ToolRuntime {
           call.id,
           tool.name,
           "invalid_tool_input",
-          `PreToolUse hook produced invalid input for ${tool.name}.`,
+          `PreToolUse hook produced invalid input for ${tool.name}.
+
+${formatValidationError(tool.name, updatedValidation.issues, {
+            maxOutputTokens: runtimeContext.maxOutputTokens,
+            outputTruncated: runtimeContext.outputTruncated,
+          })}`,
           startedAt,
           context,
           { issues: updatedValidation.issues },
@@ -172,7 +177,10 @@ export class ToolRuntime {
         call.id,
         tool.name,
         "invalid_tool_input",
-        `Tool ${tool.name} rejected the input.`,
+        formatValidationError(tool.name, toolValidation.issues, {
+          maxOutputTokens: runtimeContext.maxOutputTokens,
+          outputTruncated: runtimeContext.outputTruncated,
+        }),
         startedAt,
         context,
         { issues: toolValidation.issues },
@@ -468,6 +476,11 @@ function formatRawToolErrorDetails(details?: Record<string, unknown>): string | 
     if (exitCode !== undefined) lines.push(`- exit_code: ${String(exitCode)}`);
     if (timedOut !== undefined) lines.push(`- timed_out: ${String(timedOut)}`);
     if (durationMs !== undefined) lines.push(`- duration_ms: ${String(durationMs)}`);
+  }
+
+  const diagnostic = readStringDetail(details, "diagnostic");
+  if (diagnostic) {
+    lines.push("", "Diagnostic:", diagnostic.trimEnd());
   }
 
   appendRawStream(lines, "stdout", readStringDetail(details, "stdout"));

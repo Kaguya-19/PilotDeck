@@ -294,10 +294,25 @@ export function buildAskModeAgentToolSchema(): {
 }
 
 function normalizeRequestedSubagentType(value: string | undefined): string | undefined {
-  if (value === "general_purpose") {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  const normalized = trimmed.toLowerCase();
+  if (
+    normalized === "general-purpose" ||
+    normalized === "general_purpose" ||
+    normalized === "general purpose"
+  ) {
     return "general-purpose";
   }
-  return value;
+  if (normalized === "explore" || normalized === "explorer") {
+    return "explore";
+  }
+  if (normalized === "plan" || normalized === "verify") {
+    return normalized;
+  }
+  return trimmed;
 }
 
 async function runFullFork(args: {

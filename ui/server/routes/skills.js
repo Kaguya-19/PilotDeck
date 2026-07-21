@@ -3,7 +3,8 @@
  * contract that `ui/src/components/main-content-v2/SkillsV2.tsx` was
  * built against into the gateway's `skill_*` RPCs. The gateway is the
  * authoritative skill manager (see `src/extension/skills/SkillManager.ts`)
- * backed by `~/.pilotdeck/skills/` and `<project>/.pilotdeck/skills/`,
+ * backed by release-bundled skills, `~/.pilotdeck/skills/`, and
+ * `<project>/.pilotdeck/skills/`,
  * so the UI and the agent always read from the same place.
  *
  * Two endpoints stay file-based for now because they don't map cleanly
@@ -30,6 +31,7 @@ import { promises as fs } from 'fs';
 import { statSync } from 'fs';
 import path from 'path';
 import os from 'os';
+import { fileURLToPath } from 'url';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import multer from 'multer';
@@ -115,6 +117,10 @@ const SLUG_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/;
 const PILOT_HOME = resolvePilotHome(process.env);
 const PROJECT_DIR = '.pilotdeck';
 const SKILLS_SUBDIR = 'skills';
+const BUNDLED_SKILLS_ROOT = path.resolve(
+  process.env.PILOTDECK_BUNDLED_SKILLS_DIR ||
+    path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills'),
+);
 
 function safeSlug(slug) {
   return typeof slug === 'string' && SLUG_RE.test(slug) && !slug.includes('..');
@@ -128,6 +134,10 @@ function isGeneralCwd(projectPath) {
 function resolveRequestedScope(scope, projectPath, { defaultToProjectWhenAvailable = false } = {}) {
   const generalCwd = isGeneralCwd(projectPath);
   const effectiveProjectPath = generalCwd ? null : projectPath || null;
+
+  if (scope === 'builtin') {
+    return { ok: false, error: 'built-in skills are read-only' };
+  }
 
   if (scope === 'project') {
     if (generalCwd) {
@@ -194,7 +204,10 @@ function classifySkillPath(skillPath, projectPath = null) {
     return { ok: false, reason: 'skillPath contains ".."' };
   }
 
-  const candidates = [{ root: userSkillsRoot(), scope: 'user' }];
+  const candidates = [
+    { root: BUNDLED_SKILLS_ROOT, scope: 'builtin' },
+    { root: userSkillsRoot(), scope: 'user' },
+  ];
   if (projectPath && !isGeneralCwd(projectPath)) {
     candidates.push({ root: projectSkillsRoot(projectPath), scope: 'project' });
   }
@@ -233,6 +246,8 @@ function sendGatewayError(res, err) {
     case 'project_required':
     case 'self_import':
       return res.status(400).json({ error: message, code });
+    case 'read_only':
+      return res.status(403).json({ error: message, code });
     case 'not_found':
     case 'source_missing':
     case 'source_not_directory':
@@ -272,10 +287,12 @@ router.post('/list', async (req, res) => {
     const generalCwd = isGeneralCwd(projectPath);
     const effectiveProjectPath = generalCwd ? null : projectPath || null;
     const data = await callGateway('skillsList', { projectKey: effectiveProjectPath });
-    const preset = Array.isArray(data.preset) && data.preset.length > 0
+    const builtinSlugs = new Set((data.builtin || []).map((skill) => skill.slug));
+    const preset = (Array.isArray(data.preset) && data.preset.length > 0
       ? data.preset
-      : builtinPresetSkillSummaries();
+      : builtinPresetSkillSummaries()).filter((skill) => !builtinSlugs.has(skill.slug));
     res.json({
+      builtin: data.builtin,
       user: data.user,
       project: data.project,
       preset,

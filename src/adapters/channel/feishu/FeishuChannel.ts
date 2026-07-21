@@ -320,6 +320,8 @@ export class FeishuChannel implements ChannelAdapter {
   }
 
   private enqueueInboundMessage(input: FeishuInboundMessage): void {
+    if (this.tryHandlePendingInteraction(input)) return;
+
     const batch = this.inboundBatches.get(input.chatId) ?? { messages: [], draining: false };
     batch.messages.push(input);
     if (batch.timer) clearTimeout(batch.timer);
@@ -331,6 +333,35 @@ export class FeishuChannel implements ChannelAdapter {
     }, shouldBatchFeishuMessage(input) ? FEISHU_MULTI_ATTACHMENT_BATCH_MS : 0);
     batch.timer.unref?.();
     this.inboundBatches.set(input.chatId, batch);
+  }
+
+  private tryHandlePendingInteraction(input: FeishuInboundMessage): boolean {
+    if (!this.gateway) return false;
+    if (this.elicitation.hasPending(input.chatId)) {
+      void this.answerPendingElicitation(input.chatId, input.text).catch((e: unknown) => {
+        this.logger?.error?.(`feishu: elicitation answer error: ${e}`);
+      });
+      return true;
+    }
+    if (this.permissions.hasPending(input.chatId)) {
+      void this.answerPendingPermission(input.chatId, input.text).catch((e: unknown) => {
+        this.logger?.error?.(`feishu: permission answer error: ${e}`);
+      });
+      return true;
+    }
+    return false;
+  }
+
+  private async answerPendingElicitation(chatId: string, text: string): Promise<void> {
+    if (!this.gateway) return;
+    const confirmation = await this.elicitation.answer(chatId, text, this.gateway);
+    if (confirmation) await this.send({ chatId, text: confirmation });
+  }
+
+  private async answerPendingPermission(chatId: string, text: string): Promise<void> {
+    if (!this.gateway) return;
+    const confirmation = await this.permissions.answer(chatId, text, this.gateway);
+    if (confirmation) await this.send({ chatId, text: confirmation });
   }
 
   private async drainInboundBatch(chatId: string): Promise<void> {
@@ -372,8 +403,7 @@ export class FeishuChannel implements ChannelAdapter {
 
     if (this.elicitation.hasPending(chatId)) {
       try {
-        const confirmation = await this.elicitation.answer(chatId, messageText, this.gateway);
-        if (confirmation) await this.send({ chatId, text: confirmation });
+        await this.answerPendingElicitation(chatId, messageText);
       } catch (e) {
         this.logger?.error?.(`feishu: elicitation answer error: ${e}`);
       }
@@ -382,8 +412,7 @@ export class FeishuChannel implements ChannelAdapter {
 
     if (this.permissions.hasPending(chatId)) {
       try {
-        const confirmation = await this.permissions.answer(chatId, messageText, this.gateway);
-        if (confirmation) await this.send({ chatId, text: confirmation });
+        await this.answerPendingPermission(chatId, messageText);
       } catch (e) {
         this.logger?.error?.(`feishu: permission answer error: ${e}`);
       }

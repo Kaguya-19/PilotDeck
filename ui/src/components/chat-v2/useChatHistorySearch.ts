@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { RefObject } from 'react';
-import type { ChatMessage } from '../chat/types/types';
 import {
   buildSearchableMessages,
   clearSearchHighlights,
@@ -8,16 +7,18 @@ import {
   highlightActiveMatch,
   scrollToMessageIndex,
   type ChatHistorySearchMatch,
+  type SearchableChatMessageInput,
 } from './chatHistorySearchUtils';
 
 type UseChatHistorySearchOptions = {
   scrollContainerRef: RefObject<HTMLElement | null>;
-  keyedMessages: Array<{ message: ChatMessage; messageKey: string }>;
+  keyedMessages: SearchableChatMessageInput[];
   measuredItemHeights: number[];
   allMessagesLoaded: boolean;
   hasMoreMessages: boolean;
   loadAllMessages: () => void;
   sessionId: string | null;
+  captureFindShortcutInModal?: boolean;
 };
 
 export function useChatHistorySearch({
@@ -28,6 +29,7 @@ export function useChatHistorySearch({
   hasMoreMessages,
   loadAllMessages,
   sessionId,
+  captureFindShortcutInModal = false,
 }: UseChatHistorySearchOptions) {
   const [isOpen, setIsOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -126,7 +128,7 @@ export function useChatHistorySearch({
     const handleKeyDown = (event: KeyboardEvent) => {
       const isFindShortcut = (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f';
       if (isFindShortcut) {
-        if (document.querySelector('[data-modal-overlay]')) return;
+        if (!captureFindShortcutInModal && document.querySelector('[data-modal-overlay]')) return;
         event.preventDefault();
         event.stopPropagation();
         if (isOpen) {
@@ -159,7 +161,7 @@ export function useChatHistorySearch({
 
     document.addEventListener('keydown', handleKeyDown, { capture: true });
     return () => document.removeEventListener('keydown', handleKeyDown, { capture: true });
-  }, [closeSearch, goToNext, goToPrevious, isOpen, openSearch]);
+  }, [captureFindShortcutInModal, closeSearch, goToNext, goToPrevious, isOpen, openSearch]);
 
   useEffect(() => {
     if (!isOpen || !activeMatch || !query.trim()) return;

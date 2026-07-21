@@ -238,6 +238,32 @@ describe('config test-connection route', () => {
 
     expect(data.ok).toBe(true);
   });
+
+  it('allows Ollama connection tests without an API key', async () => {
+    const calls = [];
+    const authHeaders = [];
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      calls.push(String(url));
+      authHeaders.push(init?.headers?.Authorization ?? init?.headers?.authorization);
+      return jsonResponse({ choices: [{ message: { content: 'ok' } }] });
+    }));
+
+    const { request } = await createConfigApp();
+    const data = await request('/api/config/test-connection', {
+      method: 'POST',
+      body: JSON.stringify({
+        providerId: 'ollama',
+        providerType: 'openai',
+        baseUrl: 'http://localhost:11434/v1',
+        apiKey: '',
+        model: 'qwen3:0.6b',
+      }),
+    });
+
+    expect(data.ok).toBe(true);
+    expect(calls).toEqual(['http://localhost:11434/v1/chat/completions']);
+    expect(authHeaders).toEqual([undefined]);
+  });
 });
 
 

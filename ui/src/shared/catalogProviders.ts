@@ -27,6 +27,7 @@ export type CatalogProvider = {
   protocol: CatalogProviderProtocol;
   defaultUrl: string;
   modelListUrl?: string;
+  requiresApiKey?: boolean;
   models: CatalogModel[];
 };
 
@@ -121,6 +122,18 @@ export const CATALOG_PROVIDERS: CatalogProvider[] = [
       { id: 'google/gemini-2.5-pro', displayName: 'Gemini 2.5 Pro', supportsImage: true, maxContextTokens: 1048576 },
       { id: 'deepseek/deepseek-v4-flash', displayName: 'DeepSeek V4 Flash', maxContextTokens: 1048576 },
       { id: 'moonshotai/kimi-k2.6', displayName: 'Kimi K2.6', supportsImage: true, maxContextTokens: 262144 },
+    ],
+  },
+  {
+    id: 'ollama',
+    displayName: 'Ollama',
+    protocol: 'openai',
+    defaultUrl: 'http://localhost:11434/v1',
+    requiresApiKey: false,
+    models: [
+      { id: 'qwen3:0.6b', displayName: 'Qwen3 0.6B (Ollama)', maxContextTokens: 40960, maxOutputTokens: 8192 },
+      { id: 'qwen3:8b', displayName: 'Qwen3 8B (Ollama)', maxContextTokens: 40960, maxOutputTokens: 8192 },
+      { id: 'llama3.1:8b', displayName: 'Llama 3.1 8B (Ollama)', maxContextTokens: 131072, maxOutputTokens: 8192 },
     ],
   },
   {

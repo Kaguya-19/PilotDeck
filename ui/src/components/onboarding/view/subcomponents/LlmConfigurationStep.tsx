@@ -46,6 +46,10 @@ function hasUsableApiKey(value: unknown) {
   return Boolean(key) && key !== PLACEHOLDER_API_KEY && key !== MASKED_SECRET && !key.startsWith('PLACEHOLDER_');
 }
 
+function requiresApiKey(provider: CatalogProvider | null) {
+  return provider?.requiresApiKey !== false;
+}
+
 export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepProps) {
   const [selectedProvider, setSelectedProvider] = useState<CatalogProvider | null>(DEFAULT_PROVIDER);
   const [selectedModelId, setSelectedModelId] = useState(() => defaultModelForProvider(DEFAULT_PROVIDER));
@@ -98,10 +102,11 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
     ? customProtocol
     : (selectedProvider?.protocol ?? 'openai');
   const effectiveProviderId = isCustomMode ? customProviderId.trim() : (selectedProvider?.id ?? '');
+  const selectedProviderRequiresApiKey = requiresApiKey(selectedProvider);
   const canFetchModels = Boolean(selectedProvider && effectiveProviderId && effectiveUrl);
   const canTest = Boolean(
     selectedProvider &&
-    apiKey.trim() &&
+    (!selectedProviderRequiresApiKey || apiKey.trim()) &&
     effectiveModelId &&
     effectiveProviderId &&
     (!isCustomMode || effectiveUrl.trim()),
@@ -115,6 +120,7 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
 
   useEffect(() => {
     if (!selectedProvider || isCustomMode || apiKey.trim()) return;
+    if (!selectedProviderRequiresApiKey) return;
     const catalogModels = selectedProvider.models;
     const controller = new AbortController();
     setModelListStatus('loading');
@@ -139,12 +145,12 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
         setModelListMessage(`Using bundled model list. Remote model list unavailable: ${message}`);
       });
     return () => controller.abort();
-  }, [apiKey, isCustomMode, selectedProvider]);
+  }, [apiKey, isCustomMode, selectedProvider, selectedProviderRequiresApiKey]);
 
   useEffect(() => {
     const key = apiKey.trim();
     if (!selectedProvider || !effectiveProviderId || !effectiveUrl) return;
-    if (!hasUsableApiKey(key) && !isCustomMode) return;
+    if (!hasUsableApiKey(key) && !isCustomMode && selectedProviderRequiresApiKey) return;
     const controller = new AbortController();
     setModelListStatus('loading');
     setModelListMessage('');
@@ -162,11 +168,18 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
       })
       .catch((error) => {
         if (controller.signal.aborted) return;
+        if (!selectedProviderRequiresApiKey && selectedProvider.models.length > 0) {
+          setApiModels(selectedProvider.models);
+          setModelListStatus('idle');
+          const message = error instanceof Error ? error.message : String(error);
+          setModelListMessage(`Using bundled model list. Local model list unavailable: ${message}`);
+          return;
+        }
         setModelListStatus('error');
         setModelListMessage(error instanceof Error ? error.message : String(error));
       });
     return () => controller.abort();
-  }, [apiKey, effectiveProviderId, effectiveProtocol, effectiveUrl, isCustomMode, selectedModelId, selectedProvider]);
+  }, [apiKey, effectiveProviderId, effectiveProtocol, effectiveUrl, isCustomMode, selectedModelId, selectedProvider, selectedProviderRequiresApiKey]);
 
   const handleFetchModels = useCallback(async () => {
     if (!canFetchModels) return;
@@ -229,6 +242,7 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
         method: 'POST',
         body: JSON.stringify({
           providerType: effectiveProtocol,
+          providerId: effectiveProviderId,
           baseUrl: effectiveUrl,
           apiKey: apiKey.trim(),
           model: effectiveModelId,
@@ -246,7 +260,7 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
       setTestStatus('error');
       setTestMessage(err instanceof Error ? err.message : 'Connection failed.');
     }
-  }, [canTest, selectedProvider, effectiveUrl, apiKey, effectiveModelId, effectiveProtocol]);
+  }, [canTest, selectedProvider, effectiveUrl, apiKey, effectiveModelId, effectiveProtocol, effectiveProviderId]);
 
   const handleSave = useCallback(async () => {
     if (!selectedProvider) return;
@@ -331,7 +345,7 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
       <div>
         <h2 className="text-lg font-semibold text-foreground">LLM Provider Setup</h2>
         <p className="mt-1 text-sm text-muted-foreground">
-          Select your provider and enter your API key. Model capabilities are auto-configured.
+          Select your provider and configure credentials. Model capabilities are auto-configured.
         </p>
       </div>
 
@@ -458,14 +472,14 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
           {/* API Key */}
           <div>
             <label htmlFor="llm-api-key" className="mb-1 block text-sm font-medium text-foreground">
-              API Key
+              API Key{selectedProviderRequiresApiKey ? '' : ' (optional)'}
             </label>
             <input
               id="llm-api-key"
               type="password"
               value={apiKey}
               onChange={(e) => { setApiKey(e.target.value); setTestStatus('idle'); setTestMessage(''); }}
-              placeholder="sk-..."
+              placeholder={selectedProviderRequiresApiKey ? 'sk-...' : 'Not required for this provider'}
               className="w-full rounded-lg border border-border bg-background px-3 py-2.5 font-mono text-sm text-foreground placeholder:text-muted-foreground/50 focus:border-foreground/40 focus:outline-none"
               autoComplete="off"
               spellCheck={false}

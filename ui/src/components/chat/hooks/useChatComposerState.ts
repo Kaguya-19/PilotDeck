@@ -14,7 +14,7 @@ import { authenticatedFetch } from '../../../utils/api';
 import { isThinkingModeId, thinkingModeToConfig, type ThinkingModeId } from '../constants/thinkingModes';
 import { getEffectiveThinkingMode, type ThinkingModeAvailability } from '../constants/thinkingModeAvailability';
 import { grantPilotDeckToolPermission } from '../utils/chatPermissions';
-import { safeLocalStorage } from '../utils/chatStorage';
+import { getDraftInputStorageKey, safeLocalStorage } from '../utils/chatStorage';
 import {
   createTemporarySessionId,
   getNotificationSessionSummary,
@@ -211,9 +211,12 @@ export function useChatComposerState({
   setPendingPermissionRequests,
   referenceOnlyPrompt = 'Please answer based on the document selection I quoted.',
 }: UseChatComposerStateArgs) {
+  const draftStorageKey = selectedProject
+    ? getDraftInputStorageKey(selectedProject.name, selectedSession?.id)
+    : null;
   const [input, setInput] = useState(() => {
-    if (typeof window !== 'undefined' && selectedProject) {
-      return safeLocalStorage.getItem(`draft_input_${selectedProject.name}`) || '';
+    if (typeof window !== 'undefined' && draftStorageKey) {
+      return safeLocalStorage.getItem(draftStorageKey) || '';
     }
     return '';
   });
@@ -233,6 +236,7 @@ export function useChatComposerState({
     ((event: FormEvent<HTMLFormElement> | MouseEvent | TouchEvent | KeyboardEvent<HTMLTextAreaElement>) => Promise<void>) | null
   >(null);
   const inputValueRef = useRef(input);
+  const activeDraftStorageKeyRef = useRef(draftStorageKey);
   const queuedBusySendRef = useRef(false);
   const queuedBusySendConfirmedRef = useRef(false);
   const queuedBusySendSnapshotRef = useRef<QueuedBusySendSnapshot | null>(null);
@@ -683,6 +687,7 @@ export function useChatComposerState({
     handleFileMentionsKeyDown,
   } = useFileMentions({
     selectedProject,
+    mentionScopeKey: draftStorageKey,
     input,
     setInput,
     textareaRef,
@@ -1043,7 +1048,9 @@ export function useChatComposerState({
         textareaRef.current.style.height = 'auto';
       }
 
-      safeLocalStorage.removeItem(`draft_input_${selectedProject.name}`);
+      if (activeDraftStorageKeyRef.current) {
+        safeLocalStorage.removeItem(activeDraftStorageKeyRef.current);
+      }
     },
     [
       selectedSession,
@@ -1103,28 +1110,37 @@ export function useChatComposerState({
   }, [isLoading]);
 
   useEffect(() => {
-    if (!selectedProject) {
-      return;
+    const key = activeDraftStorageKeyRef.current;
+    if (!key) return;
+    if (input !== '') {
+      safeLocalStorage.setItem(key, input);
+    } else {
+      safeLocalStorage.removeItem(key);
     }
-    const savedInput = safeLocalStorage.getItem(`draft_input_${selectedProject.name}`) || '';
+  }, [input]);
+
+  useEffect(() => {
+    const previousKey = activeDraftStorageKeyRef.current;
+    const previousInput = inputValueRef.current;
+    if (previousKey && previousKey !== draftStorageKey) {
+      if (previousInput !== '') safeLocalStorage.setItem(previousKey, previousInput);
+      else safeLocalStorage.removeItem(previousKey);
+    }
+
+    activeDraftStorageKeyRef.current = draftStorageKey;
+    const savedInput = draftStorageKey
+      ? safeLocalStorage.getItem(draftStorageKey) || ''
+      : '';
     setDocumentReferences([]);
+    setAttachedImages([]);
+    setUploadingImages(new Map());
+    setImageErrors(new Map());
     setInput((previous) => {
       const next = previous === savedInput ? previous : savedInput;
       inputValueRef.current = next;
       return next;
     });
-  }, [selectedProject]);
-
-  useEffect(() => {
-    if (!selectedProject) {
-      return;
-    }
-    if (input !== '') {
-      safeLocalStorage.setItem(`draft_input_${selectedProject.name}`, input);
-    } else {
-      safeLocalStorage.removeItem(`draft_input_${selectedProject.name}`);
-    }
-  }, [input, selectedProject]);
+  }, [draftStorageKey]);
 
   useEffect(() => {
     if (!textareaRef.current) {

@@ -856,7 +856,7 @@
       },
       "cron": {
         "title": "Cron",
-        "description": "Configure the background scheduler used by Cron jobs. Create and manage jobs from Always-On > Plans & Cron Jobs.",
+        "description": "Configure the background scheduler used by Cron jobs. Create and manage jobs from the Cron module.",
         "enabled": {
           "label": "Enabled",
           "description": "Master switch for scheduled Cron background tasks."

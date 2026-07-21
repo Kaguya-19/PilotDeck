@@ -1,4 +1,5 @@
 import { useEffect, useRef, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { X, Loader2 } from 'lucide-react';
 import type { ChatMessage } from '../chat/types/types';
@@ -82,11 +83,11 @@ export default function SubagentDetailModal({
     );
   }
 
-  return (
+  const modal = (
     <div
       ref={overlayRef}
       data-modal-overlay
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm"
+      className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm"
       onClick={handleOverlayClick}
     >
       <div className="relative flex max-h-[80vh] w-full max-w-3xl flex-col overflow-hidden rounded-xl border border-neutral-200 bg-white shadow-2xl dark:border-neutral-700 dark:bg-neutral-900">
@@ -108,11 +109,17 @@ export default function SubagentDetailModal({
           </button>
         </div>
 
-        {/* Scrollable content */}
-        <div className="flex-1 overflow-y-auto">
+        {/* Content */}
+        <div className="relative flex min-h-0 flex-1 flex-col">
           {content}
         </div>
       </div>
     </div>
   );
+
+  if (typeof document === 'undefined') {
+    return modal;
+  }
+
+  return createPortal(modal, document.body);
 }

@@ -40,7 +40,11 @@ export type WebElicitationAnswer =
   | { type: "answered"; answers: Record<string, string | string[]>; annotations?: Record<string, { preview?: string; notes?: string }> }
   | { type: "cancelled"; reason?: string };
 
-export type WebGatewayEvent =
+type WebGatewayEventMetadata = {
+  runId?: string;
+};
+
+export type WebGatewayEvent = WebGatewayEventMetadata & (
   | { type: "turn_started"; runId: string }
   | { type: "assistant_text_delta"; text: string }
   | { type: "assistant_thinking_delta"; text: string }
@@ -109,7 +113,8 @@ export type WebGatewayEvent =
         message?: string;
         raw?: string;
       };
-    };
+    }
+);
 
 export type WebGatewayMethod =
   | "submit_turn"

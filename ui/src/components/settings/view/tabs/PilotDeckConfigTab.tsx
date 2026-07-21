@@ -37,6 +37,7 @@ import { Button } from '../../../../shared/view/ui';
 import { authenticatedFetch } from '../../../../utils/api';
 import { isImeEnterEvent } from '../../../../utils/ime';
 import {
+  normalizeOfficePreviewService,
   readOfficePreviewStatus,
   type OfficePreviewService,
   type OfficePreviewStatus,
@@ -668,7 +669,7 @@ function FormRow({ label, description, children }: { label: string; description?
 // ── Section components ─────────────────────────────────────────────────
 
 function getOfficePreviewService(config: PilotDeckConfig): OfficePreviewService {
-  return config.webui?.officePreview?.service === 'none' ? 'none' : 'libreoffice';
+  return normalizeOfficePreviewService(config.webui?.officePreview?.service);
 }
 
 function ServiceSection({ config, onChange }: { config: PilotDeckConfig; onChange: (next: PilotDeckConfig) => void }) {
@@ -986,6 +987,7 @@ function ProviderCard({
   const isMaskedKey = isMaskedSecret(provider.apiKey);
   const protocol = provider.protocol ?? catalogEntry?.protocol ?? 'openai';
   const effectiveUrl = provider.url || catalogEntry?.defaultUrl || '';
+  const providerRequiresApiKey = catalogEntry?.requiresApiKey !== false;
   const enabledModels = Object.keys(provider.models ?? {});
   const [newModelId, setNewModelId] = useState('');
   const [showProviderAdvanced, setShowProviderAdvanced] = useState(false);
@@ -1167,10 +1169,12 @@ function ProviderCard({
 
       {/* API key — the only required field */}
       <label className="block text-xs text-muted-foreground">
-        <span className="mb-1 block">{t('pilotDeckConfig.panels.models.apiKey')}</span>
+        <span className="mb-1 block">
+          {t('pilotDeckConfig.panels.models.apiKey')}{providerRequiresApiKey ? '' : ' (optional)'}
+        </span>
         <SecretTextInput
           value={provider.apiKey}
-          emptyPlaceholder="sk-..."
+          emptyPlaceholder={providerRequiresApiKey ? 'sk-...' : 'Not required'}
           maskedPlaceholder={t('pilotDeckConfig.panels.models.maskedKeyPlaceholder')}
           onChange={(v) => update({ apiKey: v })}
         />

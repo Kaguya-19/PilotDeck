@@ -1,4 +1,5 @@
 import type { ChatMessage } from '../chat/types/types';
+import { getToolConfig, shouldHideToolResult } from '../chat/tools/configs/toolConfigs';
 
 export type ChatHistorySearchMatch = {
   /** Index in the rendered message list. */
@@ -11,6 +12,12 @@ export type ChatHistorySearchMatch = {
   length: number;
 };
 
+export type SearchableChatMessageInput = {
+  message: ChatMessage;
+  messageKey: string;
+  messageIndex?: number;
+};
+
 export type SearchableChatMessage = {
   message: ChatMessage;
   messageKey: string;
@@ -21,35 +28,175 @@ export type SearchableChatMessage = {
 const HIGHLIGHT_CLASS = 'chat-history-search-highlight';
 const ACTIVE_HIGHLIGHT_CLASS = 'chat-history-search-highlight-active';
 
+function appendSearchPart(parts: string[], value: unknown): void {
+  if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'boolean') {
+    return;
+  }
+  const text = String(value).trim();
+  if (text) parts.push(text);
+}
+
+function parseToolPayload(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  const trimmed = value.trim();
+  if (!trimmed) return value;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return value;
+  }
+}
+
+function callToolDisplayGetter<T>(
+  getter: ((value: unknown, helpers?: unknown) => T) | undefined,
+  value: unknown,
+  helpers?: unknown,
+): T | undefined {
+  if (typeof getter !== 'function') return undefined;
+  try {
+    return getter(value, helpers);
+  } catch {
+    return undefined;
+  }
+}
+
+function visibleFileName(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  const normalized = value.replace(/\\/g, '/');
+  return normalized.split('/').pop() || value;
+}
+
+function collectVisibleToolInputText(message: ChatMessage): string[] {
+  const toolName = typeof message.toolName === 'string' && message.toolName.trim()
+    ? message.toolName.trim()
+    : 'UnknownTool';
+  const config = getToolConfig(toolName);
+  const displayConfig = config.input;
+  if (!displayConfig || displayConfig.type === 'hidden' || message.toolInput === undefined) {
+    return [];
+  }
+
+  const parsedInput = parseToolPayload(message.toolInput);
+  const parts: string[] = [];
+
+  if (displayConfig.type === 'one-line') {
+    const value = callToolDisplayGetter(displayConfig.getValue, parsedInput);
+    const secondary = callToolDisplayGetter(displayConfig.getSecondary, parsedInput);
+
+    if (displayConfig.style === 'terminal') {
+      appendSearchPart(parts, value);
+      appendSearchPart(parts, secondary);
+      return parts;
+    }
+
+    const visibleLabel = displayConfig.label || toolName;
+    appendSearchPart(parts, visibleLabel);
+    appendSearchPart(parts, displayConfig.action === 'open-file' ? visibleFileName(value) : value);
+    appendSearchPart(parts, secondary);
+    return parts;
+  }
+
+  if (displayConfig.type === 'collapsible') {
+    const rawTitle = typeof displayConfig.title === 'function'
+      ? callToolDisplayGetter(displayConfig.title as (value: unknown, helpers?: unknown) => unknown, parsedInput, {
+          toolResult: message.toolResult,
+        })
+      : displayConfig.title;
+    appendSearchPart(parts, toolName);
+    appendSearchPart(parts, rawTitle || 'Details');
+  }
+
+  return parts;
+}
+
+function collectVisibleToolResultText(message: ChatMessage): string[] {
+  const toolResult = message.toolResult;
+  if (!toolResult) return [];
+
+  const toolName = typeof message.toolName === 'string' && message.toolName.trim()
+    ? message.toolName.trim()
+    : 'UnknownTool';
+  if (shouldHideToolResult(toolName, toolResult)) return [];
+
+  const toolContent = toolResult.content;
+  if (toolResult.isError) {
+    const parts: string[] = [];
+    appendSearchPart(parts, toolContent);
+    return parts;
+  }
+
+  const config = getToolConfig(toolName);
+  const resultConfig = config.result;
+  if (!resultConfig) return [];
+
+  const parts: string[] = [];
+  const parsedResult = parseToolPayload(toolResult);
+  if (resultConfig.type === 'collapsible') {
+    const rawTitle = typeof resultConfig.title === 'function'
+      ? callToolDisplayGetter(resultConfig.title as (value: unknown, helpers?: unknown) => unknown, parsedResult)
+      : resultConfig.title;
+    appendSearchPart(parts, toolName);
+    appendSearchPart(parts, rawTitle || 'Details');
+    return parts;
+  }
+
+  if (resultConfig.type === 'card' && resultConfig.contentType === 'plan-card') {
+    const contentProps = callToolDisplayGetter(resultConfig.getContentProps, parsedResult);
+    if (contentProps && typeof contentProps === 'object') {
+      const record = contentProps as Record<string, unknown>;
+      appendSearchPart(parts, record.planTitle);
+      appendSearchPart(parts, record.planSummary);
+      appendSearchPart(parts, record.planFilePath);
+    }
+  }
+
+  return parts;
+}
+
+function collectVisibleSubagentContainerText(message: ChatMessage): string[] {
+  const parsedInput = parseToolPayload(message.toolInput);
+  if (!parsedInput || typeof parsedInput !== 'object') {
+    return [];
+  }
+
+  const input = parsedInput as Record<string, unknown>;
+  const parts: string[] = [];
+  appendSearchPart(parts, input.subagent_type || input.subagentType || 'agent');
+  appendSearchPart(parts, input.description);
+  return parts;
+}
+
 /** Collect plain text from a chat message for in-page search. */
 export function extractSearchableText(message: ChatMessage): string {
+  if (message.isThinking) {
+    return '';
+  }
+  if (message.isSubagentContainer) {
+    return collectVisibleSubagentContainerText(message).join('\n');
+  }
+
   const parts: string[] = [];
 
   if (typeof message.content === 'string' && message.content.trim()) {
     parts.push(message.content);
   }
-  if (typeof message.toolInput === 'string' && message.toolInput.trim()) {
-    parts.push(message.toolInput);
-  }
-  const toolContent = message.toolResult?.content;
-  if (typeof toolContent === 'string' && toolContent.trim()) {
-    parts.push(toolContent);
-  }
-  if (typeof message.toolName === 'string' && message.toolName.trim()) {
-    parts.push(message.toolName);
+
+  if (message.isToolUse || message.toolName) {
+    parts.push(...collectVisibleToolInputText(message));
+    parts.push(...collectVisibleToolResultText(message));
   }
 
   return parts.join('\n');
 }
 
 export function buildSearchableMessages(
-  items: Array<{ message: ChatMessage; messageKey: string }>,
+  items: SearchableChatMessageInput[],
 ): SearchableChatMessage[] {
   return items
-    .map(({ message, messageKey }, messageIndex) => ({
+    .map(({ message, messageKey, messageIndex }, fallbackIndex) => ({
       message,
       messageKey,
-      messageIndex,
+      messageIndex: messageIndex ?? fallbackIndex,
       text: extractSearchableText(message),
     }))
     .filter((entry) => entry.text.trim().length > 0);
@@ -165,6 +312,22 @@ function highlightTextNode(
   return { highlighted: true, nextOccurrence: occurrence + 1 };
 }
 
+function countOccurrences(text: string, query: string): number {
+  const lowerText = text.toLowerCase();
+  const lowerQuery = query.toLowerCase();
+  if (!lowerQuery) return 0;
+
+  let count = 0;
+  let fromIndex = 0;
+  while (fromIndex < lowerText.length) {
+    const found = lowerText.indexOf(lowerQuery, fromIndex);
+    if (found < 0) break;
+    count += 1;
+    fromIndex = found + Math.max(1, lowerQuery.length);
+  }
+  return count;
+}
+
 function countOccurrencesBeforeOffset(text: string, query: string, offset: number): number {
   const lowerText = text.slice(0, offset).toLowerCase();
   const lowerQuery = query.toLowerCase();
@@ -181,6 +344,16 @@ function countOccurrencesBeforeOffset(text: string, query: string, offset: numbe
   return count;
 }
 
+function escapeMessageKeyForSelector(messageKey: string): string {
+  if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') {
+    return CSS.escape(messageKey);
+  }
+  return messageKey.replace(/[\0-\x1f\x7f"\\]/g, (character) => {
+    if (character === '"' || character === '\\') return `\\${character}`;
+    return `\\${character.charCodeAt(0).toString(16)} `;
+  });
+}
+
 /** Highlight the active match inside a message element and scroll it into view. */
 export function highlightActiveMatch(
   container: HTMLElement,
@@ -192,7 +365,7 @@ export function highlightActiveMatch(
   clearSearchHighlights(container);
 
   const messageEl = container.querySelector<HTMLElement>(
-    `.chat-message[data-message-key="${CSS.escape(messageKey)}"]`,
+    `.chat-message[data-message-key="${escapeMessageKeyForSelector(messageKey)}"]`,
   );
   if (!messageEl) return false;
 
@@ -206,12 +379,15 @@ export function highlightActiveMatch(
     if (!textNode.textContent?.trim()) continue;
     if (textNode.parentElement?.closest('mark')) continue;
 
-    const result = highlightTextNode(textNode, query, currentOccurrence - occurrence);
-    if (result.highlighted) {
-      highlighted = true;
+    const nodeOccurrenceCount = countOccurrences(textNode.textContent, query);
+    if (nodeOccurrenceCount === 0) continue;
+
+    if (occurrence < currentOccurrence + nodeOccurrenceCount) {
+      const result = highlightTextNode(textNode, query, occurrence - currentOccurrence);
+      highlighted = result.highlighted;
       break;
     }
-    currentOccurrence = result.nextOccurrence;
+    currentOccurrence += nodeOccurrenceCount;
   }
 
   const activeMark = messageEl.querySelector(`mark.${ACTIVE_HIGHLIGHT_CLASS}`);

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, realpath, stat, writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { extname, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import type { AgentEvent, AgentInput, AgentTurnResult } from "../../agent/index.js";
 import {
@@ -159,7 +159,7 @@ export type InProcessGatewayOptions = {
    */
   refreshConfigBeforeTurn?: () => Promise<void>;
   /**
-   * Authoritative skill CRUD manager backed by `~/.pilotdeck/skills/`.
+   * Authoritative skill CRUD manager for built-in, user, and project skills.
    * Wired by `createLocalGateway` so every host (CLI, TUI, Web UI bridge,
    * SDK) reads and writes the same skill directory the agent loads from.
    */
@@ -267,8 +267,9 @@ export class InProcessGateway implements Gateway {
   emitForSession(sessionKey: string, event: GatewayEvent): boolean {
     const sink = this.emitSinks.get(sessionKey);
     if (!sink) return false;
-    this.recordActiveTurnEvent(sessionKey, event);
-    sink(event);
+    const eventWithRunId = this.withActiveTurnRunId(sessionKey, event);
+    this.recordActiveTurnEvent(sessionKey, eventWithRunId);
+    sink(eventWithRunId);
     return true;
   }
 
@@ -410,6 +411,7 @@ export class InProcessGateway implements Gateway {
             }));
             const gatewayEvent: GatewayEvent = {
               type: "error",
+              runId,
               code: "turn_timeout",
               message,
               recoverable: false,
@@ -537,6 +539,7 @@ export class InProcessGateway implements Gateway {
           }));
           const gatewayEvent: GatewayEvent = {
             type: "error",
+            runId,
             code: "gateway_submit_failed",
             message,
             recoverable: false,
@@ -830,7 +833,9 @@ export class InProcessGateway implements Gateway {
   async skillsList(input: SkillsListInput): Promise<SkillsListResult> {
     const result = await this.requireSkills().list(input);
     const presetSkills = await this.options.pluginSkills?.list(input);
-    const preset = presetSkills?.map(pluginSkillToSummary) ?? [];
+    const builtinSlugs = new Set(result.builtin.map((skill) => skill.slug));
+    const preset = (presetSkills?.map(pluginSkillToSummary) ?? [])
+      .filter((skill) => !builtinSlugs.has(skill.slug));
     return { ...result, preset };
   }
 
@@ -932,10 +937,28 @@ export class InProcessGateway implements Gateway {
       replay.truncated = true;
     }
   }
+
+  private withActiveTurnRunId(sessionKey: string, event: GatewayEvent): GatewayEvent {
+    if (getGatewayEventRunId(event)) return event;
+    const replay = this.activeTurnReplays.get(sessionKey);
+    if (!replay) return event;
+    return { ...event, runId: replay.runId };
+  }
 }
 
 function cloneGatewayEvent(event: GatewayEvent): GatewayEvent {
   return JSON.parse(JSON.stringify(event)) as GatewayEvent;
+}
+
+function getGatewayEventRunId(event: GatewayEvent): string | undefined {
+  return typeof event.runId === "string" && event.runId.trim()
+    ? event.runId.trim()
+    : undefined;
+}
+
+function withGatewayRunId(event: GatewayEvent, runId: string): GatewayEvent {
+  if (getGatewayEventRunId(event)) return event;
+  return { ...event, runId };
 }
 
 function resolveSubmitTurnTelemetry(input: GatewaySubmitTurnInput): {
@@ -1353,13 +1376,19 @@ function inferToolErrorCategory(code: string | undefined):
 }
 
 export function mapAgentEvent(event: AgentEvent, runId: string): GatewayEvent[] {
+  return mapAgentEventForTurn(event, runId).map((gatewayEvent) =>
+    withGatewayRunId(gatewayEvent, runId)
+  );
+}
+
+function mapAgentEventForTurn(event: AgentEvent, runId: string): GatewayEvent[] {
   switch (event.type) {
     case "turn_started":
       return [{ type: "turn_started", runId }];
     case "model_request_started":
       return [{ type: "model_request_started", model: event.model, provider: event.provider }];
     case "model_event":
-      return mapModelEvent(event.event);
+      return mapModelEvent(event.event, runId);
     case "tool_calls_detected":
       return event.calls.map((call) => ({
         type: "tool_call_started",
@@ -1760,12 +1789,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function mapModelEvent(event: CanonicalModelEvent): GatewayEvent[] {
+function mapModelEvent(event: CanonicalModelEvent, runId: string): GatewayEvent[] {
   switch (event.type) {
     case "text_delta":
-      return [{ type: "assistant_text_delta", text: event.text }];
+      return [{ type: "assistant_text_delta", text: event.text, runId }];
     case "thinking_delta":
-      return [{ type: "assistant_thinking_delta", text: event.text }];
+      return [{ type: "assistant_thinking_delta", text: event.text, runId }];
     case "error":
       // Model-level errors are internal control flow until AgentLoop decides
       // whether they are recoverable. Surfacing them here duplicates the final
@@ -1866,6 +1895,25 @@ function safeGatewayPathPart(value: string): string {
 }
 
 const ATTACHMENT_PATH_NOTE_MARKER = "[Registered attachment files in this session:]";
+const READ_FILE_BINARY_ATTACHMENT_EXTENSIONS = new Set([
+  ".zip",
+  ".gz",
+  ".tar",
+  ".7z",
+  ".rar",
+  ".doc",
+  ".docx",
+  ".ppt",
+  ".pptx",
+  ".xls",
+  ".xlsx",
+  ".odt",
+  ".ods",
+  ".odp",
+  ".pages",
+  ".key",
+  ".numbers",
+]);
 
 async function buildAgentInputWithAttachments(
   message: string,
@@ -1920,12 +1968,41 @@ function buildAttachmentPathNote(
 
   if (lines.length === 0) return undefined;
   const guidance = hasDiagnostics
-    ? "Some attachments may not be directly visible; use read_file with the exact path only when needed."
+    ? attachmentDiagnosticsGuidance(attachments, allowedReadFiles)
     : "These are path references for reuse. If an image/PDF is already visible in this turn, do not call read_file just to view it.";
   return {
     type: "text",
     text: `\n\n${ATTACHMENT_PATH_NOTE_MARKER}\n${lines.join("\n")}\n${guidance}`,
   };
+}
+
+function attachmentDiagnosticsGuidance(
+  attachments: ChannelAttachment[],
+  allowedReadFiles: Set<string>,
+): string {
+  const hasInspectableAttachment = attachments.some((attachment) => {
+    if (!attachment.path) return false;
+    if (!safeAllowedAttachmentPath(attachment.path, allowedReadFiles)) return false;
+    return isReadFileInspectableAttachment(attachment);
+  });
+  if (!hasInspectableAttachment) {
+    return "Some attachments were not shown inline. These registered files are not directly inspectable with read_file; ask for a supported export or convert them before inspection.";
+  }
+  return "Some attachments were not shown inline. Use read_file with the exact path only for readable text, image, PDF, or notebook attachments; Office/archive/binary files need conversion before inspection.";
+}
+
+function isReadFileInspectableAttachment(attachment: ChannelAttachment): boolean {
+  const mimeType = attachment.mimeType?.toLowerCase() ?? "";
+  if (attachment.type === "image" || mimeType.startsWith("image/")) return true;
+  if (mimeType === "application/pdf") return true;
+  if (mimeType.startsWith("text/")) return true;
+  if (mimeType === "application/json" || mimeType.endsWith("+json")) return true;
+
+  const pathOrName = attachment.path || attachment.name || "";
+  const extension = extname(pathOrName).toLowerCase();
+  if (extension === ".pdf" || extension === ".ipynb") return true;
+  if (READ_FILE_BINARY_ATTACHMENT_EXTENSIONS.has(extension)) return false;
+  return true;
 }
 
 function safeAllowedAttachmentPath(path: string, allowedReadFiles: Set<string>): string | undefined {

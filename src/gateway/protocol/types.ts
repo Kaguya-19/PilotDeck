@@ -127,7 +127,15 @@ export type GatewayRecordAgentStatusMessageInput = {
   status: AgentStatusMessageInput;
 };
 
-export type GatewayEvent =
+type GatewayTurnScopedEventMetadata = {
+  /**
+   * Stable id of the active turn that produced this event. Turn-scoped events
+   * carry it so streaming clients can match deltas with lifecycle boundaries.
+   */
+  runId?: string;
+};
+
+export type GatewayEvent = GatewayTurnScopedEventMetadata & (
   | { type: "turn_started"; runId: string }
   | { type: "model_request_started"; model?: string; provider?: string }
   | { type: "assistant_text_delta"; text: string }
@@ -223,7 +231,8 @@ export type GatewayEvent =
         message?: string;
         raw?: string;
       };
-    };
+    }
+);
 
 export type GatewayActiveTurnSnapshotInput = {
   sessionKey: string;
@@ -452,8 +461,8 @@ export interface Gateway {
 
   /**
    * Skill-management RPCs. The gateway is the authoritative owner of
-   * `~/.pilotdeck/skills/` (user scope) and `<project>/.pilotdeck/skills/`
-   * (project scope). The Web UI's REST endpoints under `/api/skills/*`
+   * bundled read-only skills, `~/.pilotdeck/skills/` (user scope), and
+   * `<project>/.pilotdeck/skills/` (project scope). The Web UI's REST endpoints under `/api/skills/*`
    * are now thin shims that forward here, so a skill the agent loads
    * and a skill the UI shows always come from the same place.
    *

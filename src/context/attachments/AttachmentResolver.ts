@@ -35,7 +35,47 @@ const DEFAULT_MAX_FILE_BYTES = 1_000_000; // 1 MB
 const DEFAULT_MAX_IMAGE_BYTES = 5_242_880; // 5 MiB (legacy)
 const DEFAULT_BYTES_PER_PDF_PAGE = 102_400; // 100 KB (legacy fallback)
 
-const TEXT_EXTENSIONS = new Set([".txt", ".md", ".json", ".yaml", ".yml", ".ts", ".tsx", ".js", ".tsx", ".log"]);
+const TEXT_EXTENSIONS = new Set([
+  ".txt",
+  ".md",
+  ".json",
+  ".yaml",
+  ".yml",
+  ".csv",
+  ".tsv",
+  ".xml",
+  ".html",
+  ".css",
+  ".ts",
+  ".tsx",
+  ".js",
+  ".jsx",
+  ".py",
+  ".go",
+  ".rs",
+  ".java",
+  ".sh",
+  ".log",
+]);
+const BINARY_CONTAINER_EXTENSIONS = new Set([
+  ".zip",
+  ".gz",
+  ".tar",
+  ".7z",
+  ".rar",
+  ".doc",
+  ".docx",
+  ".ppt",
+  ".pptx",
+  ".xls",
+  ".xlsx",
+  ".odt",
+  ".ods",
+  ".odp",
+  ".pages",
+  ".key",
+  ".numbers",
+]);
 const IMAGE_MIME = new Map<string, string>([
   [".png", "image/png"],
   [".jpg", "image/jpeg"],
@@ -98,6 +138,19 @@ export class AttachmentResolver {
         ],
       };
     }
+    const ext = extname(absolute).toLowerCase();
+    if (!TEXT_EXTENSIONS.has(ext)) {
+      return {
+        blocks: [],
+        diagnostics: [
+          {
+            code: "attachment_unsupported",
+            severity: "warning",
+            message: unsupportedFileMessage(absolute, ext),
+          },
+        ],
+      };
+    }
     if (info.size > this.maxFileBytes) {
       return {
         blocks: [],
@@ -106,19 +159,6 @@ export class AttachmentResolver {
             code: "attachment_too_large",
             severity: "warning",
             message: `Attachment ${absolute} is ${info.size} bytes (limit ${this.maxFileBytes}); skipped.`,
-          },
-        ],
-      };
-    }
-    const ext = extname(absolute).toLowerCase();
-    if (!TEXT_EXTENSIONS.has(ext)) {
-      return {
-        blocks: [],
-        diagnostics: [
-          {
-            code: "attachment_unsupported",
-            severity: "info",
-            message: `File extension ${ext || "(none)"} not in text whitelist; skipped (use a more specific resolver).`,
           },
         ],
       };
@@ -268,6 +308,14 @@ export class AttachmentResolver {
       ],
     };
   }
+}
+
+function unsupportedFileMessage(absolute: string, ext: string): string {
+  const displayExt = ext || "(none)";
+  if (BINARY_CONTAINER_EXTENSIONS.has(ext)) {
+    return `Attachment ${absolute} has Office/archive/binary extension ${displayExt}; it was registered as a file path but not shown inline, and read_file cannot inspect this format directly.`;
+  }
+  return `File extension ${displayExt} is not in the inline text whitelist; skipped. If this is plain text, use read_file with the exact path; otherwise convert it before inspection.`;
 }
 
 function detectImageMime(buffer: Buffer): string | undefined {

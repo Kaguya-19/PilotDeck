@@ -497,6 +497,46 @@ PilotDeck 采用开放的插件架构，插件代码与开源核心严格隔离�
 
 ## 🙏 致谢
 
+### 🏆 社区贡献者
+
+感谢以下社区开发者在 PilotDeck 生态共创挑战赛中贡献的工具、Skill、MCP 与实践案例。
+
+#### 🧩 Skill & MCP
+
+| 作者 | 作品 | 类型 | 链接 | 简介 |
+|:---|:---|:---|:---|:---|
+| 盛夏de背影 / [@panda-lsy](https://github.com/panda-lsy) | **ChemVision 化学查询 Skill** | Skill | [GitHub](https://github.com/panda-lsy/chemvision-skill) · [ClawHub](https://clawhub.ai/panda-lsy/skills/chemvision-skill) · [ModelScope](https://www.modelscope.cn/skills/mcshengxia/chemvision) · [小红书](http://xhslink.com/o/7wjpZRCb2aO) · [个人博客](https://shengxia.me/#/posts/4) | PilotDeck 首个垂直学科 Skill，调用 PubChem / OPSIN 真实化学数据库，支持分子结构查询、安全信息与反应预测。 |
+| Butterbeer / [@AaronAust1n](https://github.com/AaronAust1n) | **china-productivity-skills 中文生产力 Skill 包** | Skill Collection | [GitHub](https://github.com/AaronAust1n/PilotDeck/tree/feat/china-productivity-skills) · [PR #335](https://github.com/OpenBMB/PilotDeck/pull/335) · [知乎](https://zhuanlan.zhihu.com/p/2057150697896931426) | 一次性补齐 13 个中文互联网 Skill，覆盖微信公众号、知乎、B站、豆瓣、掘金、微博热搜、arXiv、HN、GitHub Trending 等，可组合成 AIGC 情报雷达流水线。 |
+| Butterbeer / [@AaronAust1n](https://github.com/AaronAust1n) | **industry-landscape-research 行业研究 Skill** | Skill | [GitHub](https://github.com/AaronAust1n/PilotDeck/tree/feat/industry-landscape-research) · [PR #336](https://github.com/OpenBMB/PilotDeck/pull/336) | 8 步行业研究方法论 Skill，覆盖研究章程、赛道拆解、公司画像、估值追踪、分析框架、单位经济学与投资论点综合。 |
+
+#### 🛠️ 工具 & 部署
+
+| 作者 | 作品 | 类型 | 链接 | 简介 |
+|:---|:---|:---|:---|:---|
+| Andrew / [@umr2015](https://github.com/umr2015) | **PilotDeck-ReadyKit** | 部署工具 | [GitHub](https://github.com/umr2015/PilotDeck-ReadyKit) | Windows + Docker 一键部署包，PowerShell 脚本自动检查环境、生成配置、启动服务与健康验证，支持 Ollama / vLLM 本地模型接入。 |
+
+#### 📊 测评与反馈
+
+| 作者 | 作品 | 类型 | 链接 | 简介 |
+|:---|:---|:---|:---|:---|
+| 程序员暮闲 | **国产开源智能体 PilotDeck 实测** | 测评 | [B站](https://www.bilibili.com/video/BV1mjj46PEZb) · [小红书](https://www.xiaohongshu.com/explore/6a375641000000001702aa75) · [YouTube](https://www.youtube.com/watch?v=EP2mW6el5JM) | 全面覆盖 PilotDeck 安装、配置、项目管理、IM 接入、Skills、MCP、路由、记忆与定时任务等核心功能。 |
+| Butterbeer / [@AaronAust1n](https://github.com/AaronAust1n) | **PilotDeck vs Hermes vs OpenClaw 冷启动实测** | 横评 | [知乎](https://zhuanlan.zhihu.com/p/2057163316859081709) | 从技术人员冷启动视角横评三款产品，记录关键问题并给出分优先级的产品改进建议。 |
+
+#### 💡 创意分享
+
+| 作者 | 作品 | 类型 | 链接 | 简介 |
+|:---|:---|:---|:---|:---|
+| 熊有饭 | **用 PilotDeck 开发在线智能数据系统** | 实践案例 | [微信公众号](https://mp.weixin.qq.com/s/7p-A7TumCK2CEP3ouAmZsA) | 制造业真实落地案例，用 PilotDeck 将纸质不合格报告与卡顿 Excel 改造为在线智能图表系统，并接入 AI 助手实现自然语言查询。 |
+| Agent 折腾日志 | **Hermes 记忆系统升级：从 PilotDeck 偷师** | 技术分享 | [小红书](http://xhslink.com/o/2xEgrIPQyCK) | 研究 PilotDeck 记忆系统设计，并将相关思路应用到 Hermes 记忆系统升级中。 |
+
+#### 🎙️ VoxCPM 特色案例
+
+| 作者 | 作品 | 类型 | 链接 | 简介 |
+|:---|:---|:---|:---|:---|
+| 星辰 / [@maomao-2001](https://github.com/maomao-2001) | **ASR + LLM + TTS 实时对话项目** | VoxCPM 案例 | [B站](https://www.bilibili.com/video/BV1nFE36mEmc/) · [GitHub](https://github.com/maomao-2001) · [便携安装包](https://pan.quark.cn/s/e3c9253ba232)（提取码 TLpM） | 语音输入、大模型理解、语音输出的完整实时对话链路，使用 VoxCPM 做 TTS 引擎，Qwen3.5-9B 做 LLM。 |
+
+### 开源项目与参考
+
 感谢 OpenClaw、Claude Code、Codex、Cursor、Hermes 等 Agent OS 先行者的探索，为这一领域的发展提供了重要启发。
 
 PilotDeck 的建设离不开以下优秀开源项目的支持：
@@ -508,7 +548,6 @@ PilotDeck 的建设离不开以下优秀开源项目的支持：
 - [UltraRAG](https://github.com/OpenBMB/UltraRAG) — RAG 框架
 - [Anthropic Skills](https://github.com/anthropics/skills) — Agent 技能框架和内置技能（skill-creator）
 - [Vercel Labs Skills](https://github.com/vercel-labs/skills) — find-skills 技能
-- [MiniMax-AI Skills](https://github.com/MiniMax-AI/skills) — minimax-pdf 技能
 - [frontend-slides](https://github.com/zarazhangrui/frontend-slides) — 用编程 Agent 的前端能力创建精美网页幻灯片
 - [Karpathy Guidelines](https://x.com/karpathy/status/2015883857489522876) — LLM 编码行为准则
 - [Vite](https://github.com/vitejs/vite) — 前端构建工具

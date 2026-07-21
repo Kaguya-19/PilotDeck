@@ -207,10 +207,12 @@ export class SubAgentSession {
       if (tool.name === "ask_user_question") {
         continue; // Subagents have no elicitation channel.
       }
+      if (!wildcard && !allowedSet.has(tool.name)) {
+        continue;
+      }
       if (forceReadOnly && !tool.isReadOnly({} as never)) {
         continue; // S9 — read-only subagents reject side-effecting tools outright.
       }
-      if (!wildcard && !allowedSet.has(tool.name)) continue;
       scoped.register(tool as PilotDeckToolDefinition);
     }
     return scoped;

@@ -68,6 +68,7 @@ import {
   resolvePilotHome,
   resolveProjectStorageId,
   resolveRuntimeArtifactFallbackDir,
+  type PilotProxyConfig,
 } from "../pilot/index.js";
 import { createPilotConfigStoreSync, type PilotConfigStore } from "../pilot/config/PilotConfigStore.js";
 import type { PilotAgentModelSelection, PilotConfigSnapshot } from "../pilot/config/types.js";
@@ -91,13 +92,15 @@ import { SessionRouterStore } from "../router/session/SessionRouterStore.js";
 import type { RouterEventBus, RouterEvent } from "../router/protocol/events.js";
 import type { EdgeClawMemoryProvider } from "../context/index.js";
 import { loadBuiltinPlugins } from "../extension/plugins/builtin/loadBuiltinPlugins.js";
-import { SkillManager } from "../extension/skills/index.js";
+import { SkillManager, migrateLegacyBundledSkillCopies } from "../extension/skills/index.js";
 import { ExtensionWatchManager, type ExtensionWatchEvent } from "./ExtensionWatchManager.js";
 import { createTelemetryCollector, type TelemetryClient } from "../telemetry/index.js";
 
 export type CreateLocalGatewayOptions = {
   projectRoot?: string;
   pilotHome?: string;
+  /** Read-only skills shipped with this PilotDeck build. Auto-discovered when omitted. */
+  builtinSkillsRoot?: string;
   env?: Record<string, string | undefined>;
   permissionMode?: AgentRuntimeConfig["permissionMode"];
   /** Tools merged into every per-project ToolRegistry. */
@@ -240,6 +243,20 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
   const projectRoot = resolve(options.projectRoot ?? process.cwd());
   const pilotHome = options.pilotHome ?? resolvePilotHome(baseEnv);
   const env = options.pilotHome ? { ...baseEnv, PILOT_HOME: pilotHome } : baseEnv;
+  const builtinSkillsRoot = resolveBuiltinSkillsRoot(options.builtinSkillsRoot, env);
+  const legacySkillMigration = migrateLegacyBundledSkillCopies({ pilotHome, builtinSkillsRoot });
+  if (legacySkillMigration.migrated.length > 0) {
+    // eslint-disable-next-line no-console
+    console.log(
+      `[pilotdeck] Activated bundled skills directly; moved ${legacySkillMigration.migrated.length} ` +
+      `unchanged legacy ${legacySkillMigration.migrated.length === 1 ? "copy" : "copies"} to ` +
+      `${joinPath(pilotHome, "skill-backups", "legacy-bundled-v1")}.`,
+    );
+  }
+  for (const failure of legacySkillMigration.failures) {
+    // eslint-disable-next-line no-console
+    console.warn(`[pilotdeck] Could not migrate legacy skill '${failure.slug}': ${failure.message}`);
+  }
   const now = () => new Date();
   const telemetry = options.telemetry ?? createTelemetryCollector({ env, pilotHome });
   const ownsTelemetry = !options.telemetry;
@@ -247,6 +264,7 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
   let router: SessionRouter | undefined;
   const extensionWatchManager = new ExtensionWatchManager({
     pilotHome,
+    builtinSkillsRoot,
     onChange: (event) => {
       handleExtensionWatchEvent(event, registry, router);
     },
@@ -262,6 +280,7 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
   registry = new ProjectRuntimeRegistry({
     fallbackProjectRoot,
     pilotHome,
+    builtinSkillsRoot,
     env,
     permissionMode: options.permissionMode ?? "default",
     now,
@@ -341,7 +360,7 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
         }
       : undefined,
   });
-  const skillManager = new SkillManager({ pilotHome, env });
+  const skillManager = new SkillManager({ pilotHome, builtinSkillsRoot, env });
   const gateway = new InProcessGateway(router, {
     now,
     serverInfo: { mode: "in_process", projectKey: projectRoot },
@@ -487,9 +506,26 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
   };
 }
 
+function resolveBuiltinSkillsRoot(
+  configuredRoot: string | undefined,
+  env: Record<string, string | undefined>,
+): string {
+  const explicit = configuredRoot ?? env.PILOTDECK_BUNDLED_SKILLS_DIR;
+  if (explicit) return resolve(explicit);
+
+  const moduleDir = dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    joinPath(moduleDir, "..", "..", "skills"),
+    joinPath(moduleDir, "..", "..", "..", "skills"),
+    joinPath(process.cwd(), "skills"),
+  ];
+  return resolve(candidates.find((candidate) => existsSync(candidate)) ?? candidates[2]);
+}
+
 type ProjectRuntimeRegistryOptions = {
   fallbackProjectRoot: string;
   pilotHome: string;
+  builtinSkillsRoot?: string;
   env: Record<string, string | undefined>;
   permissionMode: AgentRuntimeConfig["permissionMode"];
   now: () => Date;
@@ -538,6 +574,9 @@ type ProjectRuntime = {
    */
   perSessionServerSpecs?: import("../mcp/protocol/types.js").PilotDeckMcpServerSpec[];
 };
+
+const DEFAULT_BROWSER_ACTION_TIMEOUT_MS = 30_000;
+const DEFAULT_BROWSER_NAVIGATION_TIMEOUT_MS = 90_000;
 
 class ProjectRuntimeRegistry {
   private readonly runtimes = new Map<string, ProjectRuntime>();
@@ -746,6 +785,7 @@ class ProjectRuntimeRegistry {
     const pluginRuntime = new PluginRuntime({
       projectRoot,
       pilotHome: this.options.pilotHome,
+      builtinSkillsRoot: this.options.builtinSkillsRoot,
       builtinPlugins: loadBuiltinPlugins(),
       builtinPluginsEnabled: snapshot.config.extension.builtinPluginsEnabled,
     });
@@ -971,7 +1011,11 @@ class ProjectRuntimeRegistry {
             sessionKey: context.sessionKey,
           });
           mkdirSyncFs(outDir, { recursive: true });
-          return { ...localSpec, cwd: outDir, args: [...(localSpec.args ?? []), `--output-dir=${outDir}`] };
+          return {
+            ...localSpec,
+            cwd: outDir,
+            args: buildBrowserUseArgs(localSpec.args ?? [], outDir, this.options.env, runtime.snapshot.config.proxy),
+          };
         }
         return spec;
       });
@@ -1483,4 +1527,91 @@ function readPositiveIntegerEnv(value: string | undefined): number | undefined {
   const parsed = Number.parseInt(value.trim(), 10);
   if (!Number.isFinite(parsed) || parsed <= 0) return undefined;
   return Math.floor(parsed);
+}
+
+export function buildBrowserUseArgs(
+  baseArgs: string[],
+  outputDir: string,
+  env: Record<string, string | undefined>,
+  configProxy?: PilotProxyConfig,
+): string[] {
+  let args = [...baseArgs];
+  args = appendCliArg(args, "--output-dir", outputDir);
+  args = appendCliArg(
+    args,
+    "--timeout-action",
+    String(
+      readPositiveIntegerEnv(env.PILOTDECK_BROWSER_TIMEOUT_ACTION_MS)
+        ?? readPositiveIntegerEnv(env.PILOTDECK_BROWSER_ACTION_TIMEOUT_MS)
+        ?? DEFAULT_BROWSER_ACTION_TIMEOUT_MS,
+    ),
+  );
+  args = appendCliArg(
+    args,
+    "--timeout-navigation",
+    String(
+      readPositiveIntegerEnv(env.PILOTDECK_BROWSER_TIMEOUT_NAVIGATION_MS)
+        ?? readPositiveIntegerEnv(env.PILOTDECK_BROWSER_NAVIGATION_TIMEOUT_MS)
+        ?? DEFAULT_BROWSER_NAVIGATION_TIMEOUT_MS,
+    ),
+  );
+
+  const proxy = resolveBrowserProxyServer(env, configProxy);
+  if (proxy) {
+    args = appendCliArg(args, "--proxy-server", proxy.server);
+    const proxyBypass = resolveBrowserProxyBypass(env, configProxy, proxy.source);
+    if (proxyBypass) {
+      args = appendCliArg(args, "--proxy-bypass", proxyBypass);
+    }
+  }
+  return args;
+}
+
+function appendCliArg(args: string[], flag: string, value: string): string[] {
+  if (args.includes(flag) || args.some((arg) => arg.startsWith(`${flag}=`))) {
+    return args;
+  }
+  return [...args, flag, value];
+}
+
+type BrowserProxySource = "browser-env" | "env" | "config";
+
+function resolveBrowserProxyServer(
+  env: Record<string, string | undefined>,
+  configProxy?: PilotProxyConfig,
+): { server: string; source: BrowserProxySource } | undefined {
+  const explicit = cleanEnvValue(env.PILOTDECK_BROWSER_PROXY_SERVER);
+  if (explicit) {
+    if (/^(0|false|off|none|direct)$/i.test(explicit)) return undefined;
+    return { server: explicit, source: "browser-env" };
+  }
+  if (/^(1|true|on|yes)$/i.test(cleanEnvValue(env.PILOTDECK_BROWSER_PROXY_FROM_ENV) ?? "")) {
+    const envProxy = (
+      cleanEnvValue(env.PILOTDECK_PROXY)
+      ?? cleanEnvValue(env.https_proxy)
+      ?? cleanEnvValue(env.HTTPS_PROXY)
+      ?? cleanEnvValue(env.http_proxy)
+      ?? cleanEnvValue(env.HTTP_PROXY)
+    );
+    if (envProxy) return { server: envProxy, source: "env" };
+  }
+  const configUrl = cleanEnvValue(configProxy?.url);
+  return configUrl ? { server: configUrl, source: "config" } : undefined;
+}
+
+function resolveBrowserProxyBypass(
+  env: Record<string, string | undefined>,
+  configProxy: PilotProxyConfig | undefined,
+  proxySource: BrowserProxySource,
+): string {
+  const explicit = cleanEnvValue(env.PILOTDECK_BROWSER_PROXY_BYPASS);
+  if (explicit) return explicit;
+  const noProxy = cleanEnvValue(env.no_proxy) ?? cleanEnvValue(env.NO_PROXY);
+  const configNoProxy = proxySource === "config" ? cleanEnvValue(configProxy?.noProxy) : undefined;
+  return [noProxy, configNoProxy, "localhost", "127.0.0.1", "host.docker.internal"].filter(Boolean).join(",");
+}
+
+function cleanEnvValue(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
 }

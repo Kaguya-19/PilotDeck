@@ -73,6 +73,7 @@
     --header-safe-area-top: env(safe-area-inset-top, 0px);
     --header-base-padding: 8px;
     --header-total-padding: calc(var(--header-safe-area-top) + var(--header-base-padding));
+    color-scheme: light;
   }
   
   /* Fallback for older iOS versions */
@@ -118,6 +119,7 @@
     --nav-divider-color: 0 0% 15% / 0.7;
     --nav-input-bg: 0 0% 15% / 0.5;
     --nav-input-focus-ring: 0 0% 96% / 0.12;
+    color-scheme: dark;
   }
 }
 
@@ -139,6 +141,31 @@
     height: 100%;
     margin: 0;
     padding: 0;
+    background: hsl(var(--background));
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--muted-foreground) / 0.35) hsl(var(--background));
+  }
+
+  html::-webkit-scrollbar,
+  body::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  html::-webkit-scrollbar-track,
+  body::-webkit-scrollbar-track {
+    background: hsl(var(--background));
+  }
+
+  html::-webkit-scrollbar-thumb,
+  body::-webkit-scrollbar-thumb {
+    background-color: hsl(var(--muted-foreground) / 0.35);
+    border-radius: 4px;
+  }
+
+  html::-webkit-scrollbar-thumb:hover,
+  body::-webkit-scrollbar-thumb:hover {
+    background-color: hsl(var(--muted-foreground) / 0.55);
   }
   
   /* Root element with safe area padding for PWA */
@@ -426,12 +453,13 @@
     --tw-ring-offset-color: rgb(31 41 55); /* gray-800 */
   }
   
-  /* Ensure textarea text is always visible in dark mode */
+  /* Ensure textarea text is always visible in the active theme */
   textarea {
-    color-scheme: light dark;
+    color-scheme: light;
   }
   
   .dark textarea {
+    color-scheme: dark;
     color: rgb(243 244 246) !important; /* gray-100 */
     -webkit-text-fill-color: rgb(243 244 246) !important;
     caret-color: rgb(243 244 246) !important;

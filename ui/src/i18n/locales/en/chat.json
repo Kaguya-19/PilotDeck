@@ -4,6 +4,10 @@
     "copied": "Copied",
     "copyCode": "Copy code"
   },
+  "workspace": {
+    "emptyTitle": "Ask PilotDeck about this project",
+    "emptyDescription": "Reference a workspace file with @ when you want it included."
+  },
   "copyMessage": {
     "copy": "Copy message",
     "copied": "Message copied",

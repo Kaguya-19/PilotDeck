@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { Dispatch, ReactNode, RefObject, SetStateAction } from 'react';
 import { useTranslation } from 'react-i18next';
 import { XCircle, GitBranch } from 'lucide-react';
@@ -16,7 +16,9 @@ import { getIntrinsicMessageKey } from '../chat/utils/messageKeys';
 import MessageRowV2 from './MessageRowV2';
 import SubagentDetailModal from './SubagentDetailModal';
 import ChatHistorySearchBar from './ChatHistorySearchBar';
+import { useRegisterChatHistorySearchControls } from './ChatHistorySearchController';
 import { useChatHistorySearch } from './useChatHistorySearch';
+import type { SearchableChatMessageInput } from './chatHistorySearchUtils';
 import { useSubagentMessages } from './useSubagentMessages';
 import { ProcessLiveStatus, ProcessRunHeader, StreamingThinkingPreview, type ProcessTraceStep } from './ProcessTrace';
 import { formatProcessDuration } from './processTraceUtils';
@@ -28,6 +30,7 @@ import {
   getWebFetchWaitingStep,
   shouldRenderLiveProcessGroup,
   shouldShowWebFetchWaitingHint,
+  splitLiveProcessGroupDetailMessages,
   type LiveProcessGroup,
   type RenderableMessageItem,
 } from './processGrouping';
@@ -293,7 +296,7 @@ function isForkedChatSession(session: ProjectSession | null): boolean {
   );
 }
 
-export default function MessagesPaneV2({
+function MessagesPaneV2({
   scrollContainerRef,
   onWheel,
   onTouchMove,
@@ -767,16 +770,23 @@ export default function MessagesPaneV2({
     const isLatestGroup = liveProcessGroups[liveProcessGroups.length - 1]?.id === group.id;
     const step = getLiveProcessGroupStep(group, t, group.isRunning && isLatestGroup ? liveStatusStep : null);
     const showWebFetchWaiting = shouldShowWebFetchWaitingHint(group, resolvedPlanModeActive);
+    const expanded = isProcessExpanded(group.id);
+    const { beforeStatusMessages, statusDetailMessages } = splitLiveProcessGroupDetailMessages(group);
     return (
       <Fragment key={group.id || `${group.afterOriginalIndex}-${index}`}>
+        {expanded && beforeStatusMessages.length > 0 ? (
+          <div className="pl-5">
+            {renderLiveProcessDetailMessages(beforeStatusMessages, `${group.id}-before-status`)}
+          </div>
+        ) : null}
         <ProcessLiveStatus
           step={step}
           compact
-          expanded={isProcessExpanded(group.id)}
+          expanded={expanded}
           onExpandedChange={(expanded) => handleProcessExpandedChange(group.id, expanded)}
         >
-          {group.detailMessages.length > 0
-            ? renderLiveProcessDetailMessages(group.detailMessages, group.id)
+          {statusDetailMessages.length > 0
+            ? renderLiveProcessDetailMessages(statusDetailMessages, group.id)
             : null}
         </ProcessLiveStatus>
         {showWebFetchWaiting ? (
@@ -936,13 +946,15 @@ export default function MessagesPaneV2({
     t,
   ]);
 
-  const keyedMessagesForSearch = useMemo(
-    () => keyedMessageItems.map((item) => ({
-      message: item.message,
-      messageKey: item.itemKey,
-    })),
-    [keyedMessageItems],
-  );
+  const keyedMessagesForSearch = useMemo<SearchableChatMessageInput[]>(() => {
+    return keyedMessageItems.map((item) => (
+      {
+        message: item.message,
+        messageKey: item.itemKey,
+        messageIndex: item.renderIndex,
+      }
+    ));
+  }, [keyedMessageItems]);
 
   const chatHistorySearch = useChatHistorySearch({
     scrollContainerRef,
@@ -953,6 +965,7 @@ export default function MessagesPaneV2({
     loadAllMessages,
     sessionId,
   });
+  useRegisterChatHistorySearchControls(chatHistorySearch);
 
   return (
     <div className="relative min-h-0 flex-1">
@@ -1178,6 +1191,8 @@ export default function MessagesPaneV2({
     </div>
   );
 }
+
+export default memo(MessagesPaneV2);
 
 function isSubagentActivity(activity: ChatMessage): boolean {
   const activityId = String(activity.activityId || activity.runId || '');

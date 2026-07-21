@@ -489,9 +489,15 @@ router.post('/models', async (req, res) => {
 });
 
 router.post('/test-connection', async (req, res) => {
-  const { providerType, baseUrl, apiKey, model } = req.body || {};
-  if (!baseUrl || !apiKey || !model) {
-    return res.status(400).json({ ok: false, error: 'baseUrl, apiKey, and model are required' });
+  const { providerId, providerType, baseUrl, apiKey, model } = req.body || {};
+  const normalizedProviderId = String(providerId || '').trim().toLowerCase();
+  const effectiveApiKey = typeof apiKey === 'string' ? apiKey.trim() : '';
+  const apiKeyRequired = normalizedProviderId !== 'ollama';
+  if (!baseUrl || !model || (apiKeyRequired && !effectiveApiKey)) {
+    return res.status(400).json({
+      ok: false,
+      error: apiKeyRequired ? 'baseUrl, apiKey, and model are required' : 'baseUrl and model are required',
+    });
   }
 
   // Accept V2 protocols ('openai' | 'openai-responses' | 'anthropic' | 'google')
@@ -514,7 +520,7 @@ router.post('/test-connection', async (req, res) => {
       fetchOptions = {
         method: 'POST',
         headers: {
-          'x-goog-api-key': apiKey,
+          'x-goog-api-key': effectiveApiKey,
           'content-type': 'application/json',
         },
         body: JSON.stringify({
@@ -528,7 +534,7 @@ router.post('/test-connection', async (req, res) => {
       fetchOptions = {
         method: 'POST',
         headers: {
-          'x-api-key': apiKey,
+          'x-api-key': effectiveApiKey,
           'anthropic-version': '2023-06-01',
           'content-type': 'application/json',
         },
@@ -544,7 +550,7 @@ router.post('/test-connection', async (req, res) => {
       fetchOptions = {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${apiKey}`,
+          ...(effectiveApiKey ? { Authorization: `Bearer ${effectiveApiKey}` } : {}),
           'content-type': 'application/json',
         },
         body: JSON.stringify({
@@ -560,7 +566,7 @@ router.post('/test-connection', async (req, res) => {
       fetchOptions = {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${apiKey}`,
+          ...(effectiveApiKey ? { Authorization: `Bearer ${effectiveApiKey}` } : {}),
           'content-type': 'application/json',
         },
         body: JSON.stringify({

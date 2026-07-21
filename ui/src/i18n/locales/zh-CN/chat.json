@@ -4,6 +4,10 @@
     "copied": "已复制",
     "copyCode": "复制代码"
   },
+  "workspace": {
+    "emptyTitle": "就这个项目询问 PilotDeck",
+    "emptyDescription": "需要把文件加入上下文时，请用 @ 引用工作区文件。"
+  },
   "copyMessage": {
     "copy": "复制消息",
     "copied": "消息已复制",

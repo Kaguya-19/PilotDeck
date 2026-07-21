@@ -48,6 +48,24 @@ test("read_file auto-pages large text files instead of failing", async () => {
   }
 });
 
+test("read_file rejects Office container files during validation", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "pilotdeck-read-office-"));
+  try {
+    await writeFile(join(projectRoot, "sample.docx"), Buffer.from("PK".padEnd(128, "x")));
+
+    const tool = createReadFileTool();
+    const result = await tool.validateInput?.({ file_path: "sample.docx" }, context(projectRoot));
+
+    assert.equal(result?.ok, false);
+    if (result?.ok === false) {
+      assert.equal(result.issues[0]?.path, "file_path");
+      assert.match(result.issues[0]?.message ?? "", /binary files are not supported/);
+    }
+  } finally {
+    await rm(projectRoot, { recursive: true, force: true });
+  }
+});
+
 test("read_file explicit limit reads a large file range without auto paging", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "pilotdeck-read-range-"));
   try {

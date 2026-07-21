@@ -236,11 +236,13 @@ function formatCommands(commands: ContributedCommand[]): string {
 function formatSkills(skills: ContributedSkill[]): string {
   const lines = [
     "<available-skills>",
-    "Use the read_skill tool to load the full content of any skill listed below.",
+    "Use the read_skill tool to load the full content of any skill listed below. Each entry includes the exact SKILL.md selected by the runtime.",
+    "Resolve relative references, scripts, and assets against the directory containing that SKILL.md.",
+    "Do not search the user's home directory to rediscover a skill or infer runtime/cache paths; use the listed file and paths or commands returned by the skill.",
   ];
   for (const skill of skills) {
     const description = skill.description ? ` — ${skill.description}` : "";
-    lines.push(`- ${skill.name}${description}`);
+    lines.push(`- ${skill.name}${description} (file: ${skill.path})`);
   }
   lines.push("</available-skills>");
   return lines.join("\n");
