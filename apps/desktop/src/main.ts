@@ -189,6 +189,7 @@ class RuntimeManager {
       PILOTDECK_GATEWAY_PORT: String(gatewayPort),
       PILOTDECK_GATEWAY_URL: `ws://127.0.0.1:${gatewayPort}/ws`,
       PILOTDECK_DESKTOP: "1",
+      PILOTDECK_DESKTOP_VERSION: app.getVersion(),
       PILOTDECK_SKIP_BROWSER_OPEN: "1",
       PILOTDECK_SKIP_DEFAULT_PROJECT: "1",
       PLAYWRIGHT_BROWSERS_PATH: playwrightBrowsersPath,

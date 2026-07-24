@@ -25,6 +25,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Set desktop build version
+        run: node apps/desktop/scripts/set-ci-version.mjs
+
       - name: Build Windows desktop artifact
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
@@ -34,5 +37,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: pilotdeck-desktop-windows
-          path: apps/desktop/dist-electron/*.exe
+          path: apps/desktop/dist-electron/*-setup.exe
           if-no-files-found: error
