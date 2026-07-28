@@ -22,10 +22,19 @@ pnpm --filter pilotdeck-desktop dist:win
 Platform release builds should run on matching GitHub Actions runners:
 
 - macOS DMG artifacts on `macos-latest`
-- Windows NSIS installer and portable executable artifacts on `windows-latest`
+- Windows NSIS installer artifacts on `windows-latest`
 
-The first packaging pass produces unsigned artifacts. Developer ID notarization
-and Windows Authenticode signing are separate hardening steps.
+macOS CI signs release artifacts when the repository provides these GitHub
+Secrets:
+
+- `MACOS_DEVELOPER_ID_APPLICATION_P12_BASE64`: base64-encoded `.p12` for
+  `Developer ID Application: Beijing ModelBest Technology Co., Ltd. (77Y5JFSH6H)`.
+- `MACOS_DEVELOPER_ID_APPLICATION_PASSWORD`: the `.p12` export password.
+- `MACOS_KEYCHAIN_PASSWORD`: optional password for the temporary CI keychain.
+
+If the certificate secret is not configured, macOS packaging falls back to the
+existing ad-hoc signing path. Apple notarization and Windows Authenticode
+signing remain separate hardening steps.
 
 The packaging script stages a production-only runtime in `.runtime/app` before
 calling `electron-builder`; the final app should not include the workspace
