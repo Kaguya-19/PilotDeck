@@ -640,9 +640,10 @@ function resolveNodeBinary(): string {
   if (!app.isPackaged) {
     return process.platform === "win32" ? "node.exe" : "node";
   }
+  const nodeRoot = path.join(process.resourcesPath, "node");
   const binary = process.platform === "win32"
-    ? path.join(process.resourcesPath, "node", "node.exe")
-    : path.join(process.resourcesPath, "node", "bin", "node");
+    ? path.join(nodeRoot, "node.exe")
+    : path.join(nodeRoot, "bin", "node");
   if (!fs.existsSync(binary)) {
     throw new Error(`Bundled Node runtime not found: ${binary}`);
   }
@@ -731,8 +732,8 @@ function withRuntimeCommandPath(
   const entries = [
     path.dirname(nodeBinary),
     ...(bundledGit?.pathEntries ?? []),
-    currentPath,
     path.join(runtimeRoot, "node_modules", ".bin"),
+    currentPath,
   ].filter(Boolean);
   const nextEnv: NodeJS.ProcessEnv = {
     ...env,

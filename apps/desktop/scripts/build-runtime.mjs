@@ -24,6 +24,12 @@ const desktopRoot = resolve(__dirname, "..");
 const repoRoot = resolve(desktopRoot, "..", "..");
 const defaultRuntimeRoot = resolve(desktopRoot, ".runtime", "app");
 const x64RuntimeRoot = resolve(desktopRoot, ".runtime", "app-x64");
+const bundledNodeBinary = resolve(
+  desktopRoot,
+  "resources",
+  "node",
+  process.platform === "win32" ? "node.exe" : "bin/node",
+);
 let runtimeRoot = defaultRuntimeRoot;
 let currentRuntimeArch = process.arch;
 const DESKTOP_BUILD = "260623";
@@ -84,12 +90,64 @@ function run(command, args, cwd, env = process.env) {
 
 const npmExecPath = process.env.npm_execpath ?? "";
 const isPnpmExecPath = npmExecPath.replaceAll("\\", "/").includes("/pnpm/");
-const packageManager = isPnpmExecPath
-  ? { command: process.execPath, args: [process.env.npm_execpath] }
+
+function resolvePnpmCliPath() {
+  if (isPnpmExecPath) return npmExecPath;
+  const lookup = spawnSync(process.platform === "win32" ? "where" : "which", ["pnpm"], {
+    encoding: "utf8",
+  });
+  if (lookup.status !== 0) return undefined;
+  const commandPath = lookup.stdout.split(/\r?\n/u).find(Boolean);
+  if (!commandPath) return undefined;
+  if (process.platform === "win32" && /\.(?:cmd|ps1)$/iu.test(commandPath)) {
+    const candidate = resolve(dirname(commandPath), "node_modules", "pnpm", "bin", "pnpm.cjs");
+    return existsSync(candidate) ? candidate : undefined;
+  }
+  return commandPath;
+}
+
+const pnpmCliPath = resolvePnpmCliPath();
+const packageManager = pnpmCliPath
+  ? { command: bundledNodeBinary, args: [pnpmCliPath] }
   : { command: process.platform === "win32" ? "pnpm.cmd" : "pnpm", args: [] };
 
+function getPathEnvKey(env) {
+  if (process.platform !== "win32") return "PATH";
+  return Object.keys(env).find((key) => key.toLowerCase() === "path") ?? "Path";
+}
+
+function withBundledNodeEnv(env = process.env) {
+  const pathKey = getPathEnvKey(env);
+  const currentPath = env[pathKey] || "";
+  return {
+    ...env,
+    [pathKey]: [dirname(bundledNodeBinary), currentPath].filter(Boolean).join(process.platform === "win32" ? ";" : ":"),
+    npm_node_execpath: bundledNodeBinary,
+    npm_config_node: bundledNodeBinary,
+  };
+}
+
+function assertBundledNodeRuntime() {
+  if (!existsSync(bundledNodeBinary)) {
+    throw new Error(`Desktop bundled Node runtime missing: ${bundledNodeBinary}`);
+  }
+  const result = spawnSync(
+    bundledNodeBinary,
+    [
+      "-e",
+      "const major=Number(process.versions.node.split('.')[0]); if (major !== 22) process.exit(2); import('node:sqlite').then(() => {}, () => process.exit(3));",
+    ],
+    { encoding: "utf8" },
+  );
+  if (result.status !== 0) {
+    throw new Error(
+      `Desktop bundled Node must be Node.js 22 with node:sqlite. Current check failed for ${bundledNodeBinary}: ${(result.stderr || result.stdout || `exit ${result.status}`).trim()}`,
+    );
+  }
+}
+
 function runPnpm(args, cwd = repoRoot, env = process.env) {
-  run(packageManager.command, [...packageManager.args, ...args], cwd, env);
+  run(packageManager.command, [...packageManager.args, ...args], cwd, withBundledNodeEnv(env));
 }
 
 function withBundledPlaywrightEnv(env = process.env) {
@@ -174,6 +232,11 @@ function prepareRuntimeTree(installEnv = process.env) {
   copyFiltered(resolve(repoRoot, "ui", "shared"), resolve(runtimeRoot, "ui", "shared"), skipBuildArtifact);
   copyFiltered(resolve(repoRoot, "ui", "public"), resolve(runtimeRoot, "ui", "public"), () => true);
   copyFiltered(resolve(repoRoot, "ui", "dist"), resolve(runtimeRoot, "ui", "dist"), () => true);
+  mkdirSync(resolve(runtimeRoot, "scripts"), { recursive: true });
+  cpSync(
+    resolve(repoRoot, "scripts", "check-node-runtime.mjs"),
+    resolve(runtimeRoot, "scripts", "check-node-runtime.mjs"),
+  );
   rewriteUiServerSourceImports(resolve(runtimeRoot, "ui", "server"));
   writeFileSync(
     resolve(runtimeRoot, "ui", "package.json"),
@@ -217,10 +280,10 @@ function installRuntimePlaywrightBrowser() {
   const mirrorMode = resolvePlaywrightMirrorMode(process.env);
   if (mirrorMode === "npmmirror") {
     run(
-      process.execPath,
+      bundledNodeBinary,
       [resolve(desktopRoot, "scripts", "download-playwright-browsers.mjs"), runtimeRoot],
       runtimeRoot,
-      withBundledPlaywrightEnv(),
+      withBundledNodeEnv(withBundledPlaywrightEnv()),
     );
     return;
   }
@@ -232,10 +295,10 @@ function installRuntimePlaywrightBrowser() {
     args.push("--no-shell");
   }
   run(
-    process.execPath,
+    bundledNodeBinary,
     args,
     runtimeRoot,
-    withBundledPlaywrightEnv(),
+    withBundledNodeEnv(withBundledPlaywrightEnv()),
   );
   pruneRuntimePlaywrightBrowsers(browserSet);
 }
@@ -410,6 +473,7 @@ function rewriteUiServerSourceImports(serverRoot) {
 }
 
 run(process.execPath, [resolve(desktopRoot, "scripts", "download-node.mjs")], desktopRoot);
+assertBundledNodeRuntime();
 if (process.platform === "win32") {
   run(process.execPath, [resolve(desktopRoot, "scripts", "download-git-bash.mjs")], desktopRoot);
 }
@@ -456,6 +520,7 @@ function verifyRuntime(root, label = "runtime") {
     resolve(runtimeRoot, "dist", "src", "cli", "pilotdeck.js"),
     resolve(runtimeRoot, "ui", "dist", "index.html"),
     resolve(runtimeRoot, "ui", "server", "index.js"),
+    resolve(runtimeRoot, "scripts", "check-node-runtime.mjs"),
     resolve(runtimeRoot, "node_modules", "express"),
     resolve(runtimeRoot, "node_modules", "react"),
     resolve(runtimeRoot, "node_modules", "ink"),
@@ -493,16 +558,16 @@ function verifyRuntime(root, label = "runtime") {
 
 function verifyRuntimeModuleImport(modulePath, label) {
   const result = spawnSync(
-    process.execPath,
+    bundledNodeBinary,
     ["--input-type=module", "-e", `await import(${JSON.stringify(`file://${modulePath}`)})`],
     {
       cwd: runtimeRoot,
       encoding: "utf8",
-      env: {
+      env: withBundledNodeEnv({
         ...process.env,
         NODE_PATH: resolve(runtimeRoot, "node_modules"),
         PILOTDECK_SKIP_CLI_MAIN: "1",
-      },
+      }),
     },
   );
   if (result.status !== 0) {
@@ -514,15 +579,15 @@ function verifyRuntimeModuleImport(modulePath, label) {
 
 function verifyRuntimeNativeModule(moduleName, label) {
   const result = spawnSync(
-    process.execPath,
+    bundledNodeBinary,
     ["-e", `require(${JSON.stringify(moduleName)})`],
     {
       cwd: runtimeRoot,
       encoding: "utf8",
-      env: {
+      env: withBundledNodeEnv({
         ...process.env,
         NODE_PATH: resolve(runtimeRoot, "node_modules"),
-      },
+      }),
     },
   );
   if (result.status !== 0) {
