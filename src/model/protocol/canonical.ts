@@ -20,6 +20,8 @@ export type CanonicalThinkingBlock = {
    * when the message is replayed; preserved verbatim.
    */
   signature?: string;
+  /** Provider-native reasoning_content that should be replayed when present. */
+  reasoningContent?: string;
 };
 
 export type CanonicalImageBlock = {
@@ -252,7 +254,7 @@ export type CanonicalModelEvent =
     }
   | { type: "message_start"; role: "assistant"; raw?: unknown }
   | { type: "text_delta"; text: string; raw?: unknown }
-  | { type: "thinking_delta"; text: string; signature?: string; raw?: unknown }
+  | { type: "thinking_delta"; text: string; signature?: string; reasoningContent?: string; raw?: unknown }
   | { type: "tool_call_start"; id: string; name: string; raw?: unknown }
   | { type: "tool_call_delta"; id: string; delta: string; raw?: unknown }
   | { type: "tool_call_end"; toolCall: CanonicalToolCall; wasRepaired?: boolean; raw?: unknown }

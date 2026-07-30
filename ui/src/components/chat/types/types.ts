@@ -3,6 +3,7 @@ import type {
   ProjectSession,
   SessionProvider,
 } from '../../../types/app';
+import type { ContentReference } from '../../../types/contentReference';
 
 export type Provider = SessionProvider;
 
@@ -18,7 +19,7 @@ export interface ChatImage {
 }
 
 export interface ChatAttachment {
-  kind?: 'file' | 'document-selection';
+  kind?: 'file' | 'document-selection' | 'content-reference';
   name: string;
   path?: string;
   size?: number;
@@ -32,6 +33,20 @@ export interface ChatAttachment {
   occurrenceIndex?: number | null;
   createdAt?: string;
   truncated?: boolean;
+  contentReference?: ContentReference;
+}
+
+export interface ChatFileArtifact {
+  id: string;
+  name: string;
+  path: string;
+  operation: 'created' | 'updated';
+  source: 'tool' | 'workspace_diff';
+  status: 'complete' | 'incomplete';
+  size: number;
+  sha256: string;
+  mimeType?: string;
+  createdAt: string;
 }
 
 export interface ChatFileArtifact {

@@ -55,7 +55,6 @@ import JSZip from 'jszip';
 import { readPermissionSettings } from './services/permissionSettings.js';
 import { getDefaultPtyShell } from './utils/defaultShell.js';
 import { getOpenUrlSpawnCommand } from './utils/processSpawn.js';
-import { isPathInsideOrEqual } from './utils/pathSafety.js';
 
 import { getProjects, getProjectCronJobsOverview, getSessions, renameProject, deleteSession, deleteProject, addProjectManually, extractProjectDirectory, clearProjectDirectoryCache, searchConversations } from './projects.js';
 import {
@@ -87,8 +86,8 @@ import settingsRoutes from './routes/settings.js';
 import configRoutes from './routes/config.js';
 import gatewayRoutes from './routes/gateway.js';
 import {
+    OFFICE_PREVIEW_SERVICE_BUILTIN,
     OFFICE_PREVIEW_SERVICE_LIBREOFFICE,
-    OFFICE_PREVIEW_SERVICE_NONE,
     convertOfficeDocumentToPdf,
     getConfiguredOfficePreviewService,
     getLibreOfficeCandidateStatuses,
@@ -96,6 +95,7 @@ import {
 } from './services/officePreview.js';
 import {
     SPREADSHEET_PREVIEW_EXTENSIONS,
+    getSpreadsheetInteractivePreview,
     getSpreadsheetPreviewManifest,
     getSpreadsheetSheetPreviewPdf,
 } from './services/spreadsheetPreview.js';
@@ -991,19 +991,11 @@ function resolvePathInProject(projectRoot, targetPath = '') {
         : path.resolve(projectRoot, targetPath);
     const normalizedRoot = path.resolve(projectRoot);
 
-    if (!isPathInsideOrEqual(normalizedRoot, resolved)) {
+    if (resolved !== normalizedRoot && !resolved.startsWith(normalizedRoot + path.sep)) {
         return { valid: false, error: 'Path must be under project root' };
     }
 
     return { valid: true, resolved };
-}
-
-function isProjectDescendant(projectRoot, targetPath) {
-    const normalizedRoot = path.resolve(projectRoot);
-    const resolved = path.isAbsolute(targetPath)
-        ? path.resolve(targetPath)
-        : path.resolve(projectRoot, targetPath);
-    return resolved !== normalizedRoot && isPathInsideOrEqual(normalizedRoot, resolved);
 }
 
 function createRouteRateLimiter({
@@ -1211,35 +1203,6 @@ function getSafeZipFilename(projectName) {
     return `${safeName}.zip`;
 }
 
-const WINDOWS_DRIVES_PATH = '__pilotdeck_windows_drives__';
-
-async function listWindowsDriveRoots() {
-    if (process.platform !== 'win32') {
-        return [];
-    }
-
-    const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
-    const drives = [];
-    await Promise.all(letters.map(async (letter) => {
-        const drivePath = `${letter}:\\`;
-        try {
-            await fs.promises.access(drivePath);
-            const stats = await fs.promises.stat(drivePath);
-            if (!stats.isDirectory()) {
-                return;
-            }
-            drives.push({
-                path: drivePath,
-                name: drivePath,
-                type: 'drive'
-            });
-        } catch {
-            // Drive letter is absent or inaccessible.
-        }
-    }));
-    return drives.sort((a, b) => a.name.localeCompare(b.name));
-}
-
 // Browse filesystem endpoint for project suggestions - uses existing getFileTree
 app.get('/api/browse-filesystem', authenticateToken, async (req, res) => {
     try {
@@ -1247,14 +1210,6 @@ app.get('/api/browse-filesystem', authenticateToken, async (req, res) => {
 
         console.log('[API] Browse filesystem request for path:', dirPath);
         console.log('[API] WORKSPACES_ROOT is:', WORKSPACES_ROOT);
-        if (process.platform === 'win32' && dirPath === WINDOWS_DRIVES_PATH) {
-            return res.json({
-                path: WINDOWS_DRIVES_PATH,
-                suggestions: await listWindowsDriveRoots(),
-                rootsPath: WINDOWS_DRIVES_PATH
-            });
-        }
-
         // Default to home directory if no path provided
         const defaultRoot = WORKSPACES_ROOT;
 
@@ -1329,8 +1284,7 @@ app.get('/api/browse-filesystem', authenticateToken, async (req, res) => {
 
         res.json({
             path: resolvedPath,
-            suggestions: suggestions,
-            rootsPath: process.platform === 'win32' ? WINDOWS_DRIVES_PATH : undefined
+            suggestions: suggestions
         });
 
     } catch (error) {
@@ -1400,7 +1354,8 @@ app.get('/api/projects/:projectName/file', authenticateToken, async (req, res) =
         const resolved = path.isAbsolute(filePath)
             ? path.resolve(filePath)
             : path.resolve(projectRoot, filePath);
-        if (!isProjectDescendant(projectRoot, resolved)) {
+        const normalizedRoot = path.resolve(projectRoot) + path.sep;
+        if (!resolved.startsWith(normalizedRoot)) {
             return res.status(403).json({ error: 'Path must be under project root' });
         }
 
@@ -1477,7 +1432,7 @@ app.get('/api/office-preview/status', authenticateToken, officePreviewStatusRate
                 candidates,
             },
             supportedServices: [
-                OFFICE_PREVIEW_SERVICE_NONE,
+                OFFICE_PREVIEW_SERVICE_BUILTIN,
                 OFFICE_PREVIEW_SERVICE_LIBREOFFICE,
             ],
         });
@@ -1525,10 +1480,10 @@ app.get('/api/projects/:projectName/files/preview/pdf', authenticateToken, offic
         }
 
         const officePreviewService = getConfiguredOfficePreviewService();
-        if (officePreviewService === OFFICE_PREVIEW_SERVICE_NONE) {
+        if (officePreviewService !== OFFICE_PREVIEW_SERVICE_LIBREOFFICE) {
             return res.status(409).json({
-                error: 'Office preview service is disabled',
-                code: 'OFFICE_PREVIEW_DISABLED',
+                error: 'LibreOffice preview service is not selected',
+                code: 'LIBREOFFICE_PREVIEW_NOT_SELECTED',
             });
         }
 
@@ -1578,14 +1533,15 @@ app.get('/api/projects/:projectName/files/preview/spreadsheet/manifest', authent
         if (!SPREADSHEET_PREVIEW_EXTENSIONS.has(extension)) {
             return res.status(400).json({ error: 'Unsupported spreadsheet preview format' });
         }
-        const officePreviewService = getConfiguredOfficePreviewService();
-        if (officePreviewService === OFFICE_PREVIEW_SERVICE_NONE) {
+        if (
+            extension !== 'xlsx'
+            && getConfiguredOfficePreviewService() !== OFFICE_PREVIEW_SERVICE_LIBREOFFICE
+        ) {
             return res.status(409).json({
-                error: 'Office preview service is disabled',
-                code: 'OFFICE_PREVIEW_DISABLED',
+                error: 'Legacy spreadsheet preview requires LibreOffice',
+                code: 'LIBREOFFICE_PREVIEW_NOT_SELECTED',
             });
         }
-
         const manifest = await getSpreadsheetPreviewManifest(resolvedResult.resolved, { force });
         res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
         return res.json(manifest);
@@ -1594,6 +1550,53 @@ app.get('/api/projects/:projectName/files/preview/spreadsheet/manifest', authent
         return res.status(error.statusCode || 500).json({
             error: error.message || 'Failed to read spreadsheet preview manifest',
             code: error.code || 'SPREADSHEET_PREVIEW_MANIFEST_FAILED',
+        });
+    }
+});
+
+app.get('/api/projects/:projectName/files/preview/spreadsheet/data', authenticateToken, officePreviewPdfRateLimiter, async (req, res) => {
+    try {
+        const { projectName } = req.params;
+        const { path: filePath } = req.query;
+        const force = req.query.force === '1' || req.query.force === 'true';
+
+        if (!filePath) {
+            return res.status(400).json({ error: 'Invalid file path' });
+        }
+
+        const projectRoot = await extractProjectDirectory(projectName).catch(() => null);
+        if (!projectRoot) {
+            return res.status(404).json({ error: 'Project not found' });
+        }
+        const resolvedResult = resolvePathInProject(projectRoot, filePath);
+        if (!resolvedResult.valid) {
+            return res.status(403).json({ error: resolvedResult.error });
+        }
+        const extension = getFileExtension(resolvedResult.resolved);
+        if (!SPREADSHEET_PREVIEW_EXTENSIONS.has(extension)) {
+            return res.status(400).json({ error: 'Unsupported spreadsheet preview format' });
+        }
+        if (
+            extension !== 'xlsx'
+            && getConfiguredOfficePreviewService() !== OFFICE_PREVIEW_SERVICE_LIBREOFFICE
+        ) {
+            return res.status(409).json({
+                error: 'Legacy spreadsheet preview requires LibreOffice',
+                code: 'LIBREOFFICE_PREVIEW_NOT_SELECTED',
+            });
+        }
+
+        const preview = await getSpreadsheetInteractivePreview(
+            resolvedResult.resolved,
+            { force },
+        );
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+        return res.json(preview);
+    } catch (error) {
+        console.error('Error generating interactive spreadsheet preview:', error);
+        return res.status(error.statusCode || 500).json({
+            error: error.message || 'Failed to generate interactive spreadsheet preview',
+            code: error.code || 'SPREADSHEET_INTERACTIVE_PREVIEW_FAILED',
         });
     }
 });
@@ -1621,10 +1624,10 @@ app.get('/api/projects/:projectName/files/preview/spreadsheet/sheet', authentica
             return res.status(400).json({ error: 'Unsupported spreadsheet preview format' });
         }
         const officePreviewService = getConfiguredOfficePreviewService();
-        if (officePreviewService === OFFICE_PREVIEW_SERVICE_NONE) {
+        if (officePreviewService !== OFFICE_PREVIEW_SERVICE_LIBREOFFICE) {
             return res.status(409).json({
-                error: 'Office preview service is disabled',
-                code: 'OFFICE_PREVIEW_DISABLED',
+                error: 'LibreOffice preview service is not selected',
+                code: 'LIBREOFFICE_PREVIEW_NOT_SELECTED',
             });
         }
 
@@ -1754,7 +1757,8 @@ app.put('/api/projects/:projectName/file', authenticateToken, async (req, res) =
         const resolved = path.isAbsolute(filePath)
             ? path.resolve(filePath)
             : path.resolve(projectRoot, filePath);
-        if (!isProjectDescendant(projectRoot, resolved)) {
+        const normalizedRoot = path.resolve(projectRoot) + path.sep;
+        if (!resolved.startsWith(normalizedRoot)) {
             return res.status(403).json({ error: 'Path must be under project root' });
         }
 
@@ -1822,7 +1826,8 @@ function validatePathInProject(projectRoot, targetPath) {
     const resolved = path.isAbsolute(targetPath)
         ? path.resolve(targetPath)
         : path.resolve(projectRoot, targetPath);
-    if (!isProjectDescendant(projectRoot, resolved)) {
+    const normalizedRoot = path.resolve(projectRoot) + path.sep;
+    if (!resolved.startsWith(normalizedRoot)) {
         return { valid: false, error: 'Path must be under project root' };
     }
     return { valid: true, resolved };

@@ -101,7 +101,7 @@ export function buildOpenAIResponsesRequest(
         type: "json_schema",
         name: request.outputSchema.name,
         description: request.outputSchema.description,
-        schema: request.outputSchema.schema,
+        schema: normalizeOpenAISchema(request.outputSchema.schema),
         strict: request.outputSchema.strict ?? true,
       },
     };

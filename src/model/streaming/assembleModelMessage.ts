@@ -19,6 +19,7 @@ export type ModelMessageAssemblerState = {
   content: CanonicalContentBlock[];
   textBuffer: string;
   thinkingBuffer: string;
+  thinkingReasoningContentBuffer: string;
   thinkingSignature?: string;
   usage: CanonicalUsage;
   finishReason?: CanonicalFinishReason;
@@ -51,6 +52,7 @@ export function createModelMessageAssemblerState(): ModelMessageAssemblerState {
     content: [],
     textBuffer: "",
     thinkingBuffer: "",
+    thinkingReasoningContentBuffer: "",
     usage: {},
     toolCalls: [],
   };
@@ -71,6 +73,9 @@ export function applyModelEventToAssembler(
       return;
     case "thinking_delta":
       state.thinkingBuffer += event.text;
+      if (event.reasoningContent !== undefined) {
+        state.thinkingReasoningContentBuffer += event.reasoningContent;
+      }
       if (event.signature !== undefined && event.signature.length > 0) {
         state.thinkingSignature = event.signature;
       }
@@ -186,16 +191,24 @@ function nextToolCallId(rawId: string | undefined, index: number, used: Set<stri
 }
 
 function flushTextBuffers(state: ModelMessageAssemblerState): void {
-  if (state.thinkingBuffer.length > 0 || state.thinkingSignature !== undefined) {
+  if (
+    state.thinkingBuffer.length > 0 ||
+    state.thinkingReasoningContentBuffer.length > 0 ||
+    state.thinkingSignature !== undefined
+  ) {
     const block: CanonicalThinkingBlock = {
       type: "thinking",
       text: state.thinkingBuffer,
     };
+    if (state.thinkingReasoningContentBuffer.length > 0) {
+      block.reasoningContent = state.thinkingReasoningContentBuffer;
+    }
     if (state.thinkingSignature !== undefined) {
       block.signature = state.thinkingSignature;
     }
     state.content.push(block);
     state.thinkingBuffer = "";
+    state.thinkingReasoningContentBuffer = "";
     state.thinkingSignature = undefined;
   }
 

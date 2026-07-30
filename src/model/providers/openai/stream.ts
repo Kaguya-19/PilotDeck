@@ -171,7 +171,7 @@ export function normalizeOpenAIStreamEvent(
       events.push(...splitThinkContent(delta.content, state, raw));
     }
 
-    const reasoning = delta.reasoning ?? delta.reasoning_content;
+    const reasoning = delta.reasoning_content ?? delta.reasoning;
     if (typeof reasoning === "string" && reasoning.length > 0) {
       const prev = state.reasoningSnapshot;
       let emit: string;
@@ -183,7 +183,7 @@ export function normalizeOpenAIStreamEvent(
         state.reasoningSnapshot = prev + reasoning;
       }
       if (emit.length > 0) {
-        events.push({ type: "thinking_delta", text: emit, raw });
+        events.push({ type: "thinking_delta", text: emit, reasoningContent: emit, raw });
       }
     }
 

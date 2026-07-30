@@ -235,6 +235,7 @@ export class AgentLoop {
     const MAX_JSON_SELF_CORRECT_RETRIES = 3;
     let jsonSelfCorrectCount = 0;
     let hasAttemptedToolCallRetry = false;
+    let hasAttemptedReasoningContentRetry = false;
     const largeFileRepair = new LargeFileRepair();
 
     /**
@@ -864,6 +865,21 @@ export class AgentLoop {
       await input.onDurableMessage?.(assistantMessage);
 
       if (assembled.error) {
+        if (
+          !hasAttemptedReasoningContentRetry &&
+          isMissingReasoningContentError(assembled.error)
+        ) {
+          hasAttemptedReasoningContentRetry = true;
+          messages = addEmptyReasoningContentMarkers(messages);
+          yield {
+            type: "turn_continued",
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            reason: "model_error",
+          };
+          continue;
+        }
+
         if (toolCalls.length > 0) {
           const projected = projectToolResults(
             toolCalls.map((call) =>
@@ -2425,6 +2441,37 @@ function textFromMessage(message: CanonicalMessage): string {
     .filter((block) => block.type === "text")
     .map((block) => block.text)
     .join("\n");
+}
+
+function isMissingReasoningContentError(error: CanonicalModelError): boolean {
+  return /\breasoning_content\b/i.test(error.message) &&
+    /thinking\s+mode/i.test(error.message) &&
+    /pass(?:ed)?\s+back/i.test(error.message);
+}
+
+function addEmptyReasoningContentMarkers(messages: CanonicalMessage[]): CanonicalMessage[] {
+  return messages.map((message, index) => {
+    if (index === messages.length - 1 && message.role === "assistant" && messageContent(message).length === 0) {
+      return message;
+    }
+    if (message.role !== "assistant" || hasReplayableReasoningContent(message)) {
+      return message;
+    }
+    return {
+      ...message,
+      content: [
+        { type: "thinking", text: "", reasoningContent: "" },
+        ...messageContent(message),
+      ],
+    };
+  });
+}
+
+function hasReplayableReasoningContent(message: CanonicalMessage): boolean {
+  return messageContent(message).some((block) =>
+    block.type === "thinking" &&
+    ((block.reasoningContent ?? block.text).length > 0 || block.reasoningContent === "")
+  );
 }
 
 function appendPlanModeReminder(messages: CanonicalMessage[]): CanonicalMessage[] {

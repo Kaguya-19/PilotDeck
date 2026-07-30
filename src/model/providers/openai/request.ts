@@ -4,6 +4,7 @@ import type {
   CanonicalMessage,
   CanonicalModelRequest,
   CanonicalPdfBlock,
+  CanonicalThinkingBlock,
   CanonicalToolChoice,
   CanonicalToolSchema,
   ModelDefinition,
@@ -99,7 +100,7 @@ export function buildOpenAIRequest(
         description: request.outputSchema.description,
         schema: googleOpenAICompatible
           ? normalizeGoogleOpenAIResponseSchema(request.outputSchema.schema)
-          : request.outputSchema.schema,
+          : normalizeOpenAISchema(request.outputSchema.schema),
         strict: request.outputSchema.strict ?? true,
       },
     };
@@ -135,7 +136,10 @@ export function buildOpenAIRequest(
   return body;
 }
 
-function toOpenAIMessages(message: CanonicalMessage, messageIndex: number): OpenAIMessage[] {
+function toOpenAIMessages(
+  message: CanonicalMessage,
+  messageIndex: number,
+): OpenAIMessage[] {
   if (message.role === "user") {
     return toOpenAIUserMessages(message);
   }
@@ -164,7 +168,9 @@ function toOpenAIMessages(message: CanonicalMessage, messageIndex: number): Open
       },
     }));
 
-  const thinkingBlocks = content.filter((block) => block.type === "thinking");
+  const thinkingBlocks = content.filter(
+    (block): block is CanonicalThinkingBlock => block.type === "thinking",
+  );
   const normalContent = content.filter(
     (block) =>
       block.type !== "tool_result" &&
@@ -182,10 +188,9 @@ function toOpenAIMessages(message: CanonicalMessage, messageIndex: number): Open
         : (message.role === "assistant" && thinkingBlocks.length > 0 ? "" : undefined),
       tool_calls: assistantToolCalls.length > 0 ? assistantToolCalls : undefined,
     };
-    // DeepSeek V4 requires reasoning_content to be passed back on assistant
-    // messages in multi-turn conversations; omitting it causes a 400 error.
-    if (message.role === "assistant" && thinkingBlocks.length > 0) {
-      msg.reasoning_content = thinkingBlocks.map((b) => b.text).join("\n");
+    const reasoningContent = toOpenAIReasoningContent(thinkingBlocks);
+    if (reasoningContent !== undefined) {
+      msg.reasoning_content = reasoningContent;
     }
     messages.push(msg);
   }
@@ -335,6 +340,20 @@ function toOpenAIContent(blocks: CanonicalContentBlock[]): string | unknown[] {
         return { type: "text", text: block.preview };
     }
   }).filter(Boolean);
+}
+
+function toOpenAIReasoningContent(
+  thinkingBlocks: CanonicalThinkingBlock[],
+): string | undefined {
+  const contexts = thinkingBlocks
+    .map((block) => block.reasoningContent ?? block.text)
+    .filter((text) => text.length > 0);
+
+  if (contexts.length === 0 && thinkingBlocks.length > 0) {
+    return "";
+  }
+
+  return contexts.length > 0 ? contexts.join("\n") : undefined;
 }
 
 function toOpenAITool(tool: CanonicalToolSchema, googleOpenAICompatible: boolean): OpenAITool {

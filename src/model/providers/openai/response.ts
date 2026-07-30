@@ -23,9 +23,15 @@ export function parseOpenAIResponse(raw: unknown, provider = "openai"): Canonica
   const content: CanonicalContentBlock[] = [];
   const idState = createResponseToolCallIdState(response);
 
-  const reasoningText = readReasoningText(message.reasoning_content) ?? readReasoningText(message.reasoning);
+  const reasoningText =
+    readReasoningText(message.reasoning_content) ??
+    readReasoningText(message.reasoning);
   if (reasoningText) {
-    content.push({ type: "thinking", text: reasoningText });
+    content.push({
+      type: "thinking",
+      text: reasoningText,
+      reasoningContent: reasoningText,
+    });
   }
   if (Array.isArray(message.reasoning_details)) {
     const reasoning = message.reasoning_details
@@ -33,7 +39,11 @@ export function parseOpenAIResponse(raw: unknown, provider = "openai"): Canonica
       .filter((text): text is string => Boolean(text))
       .join("\n");
     if (reasoning.length > 0) {
-      content.push({ type: "thinking", text: reasoning });
+      content.push({
+        type: "thinking",
+        text: reasoning,
+        reasoningContent: reasoning,
+      });
     }
   }
 
