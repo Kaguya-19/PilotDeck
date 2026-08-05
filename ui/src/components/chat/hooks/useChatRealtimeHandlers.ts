@@ -60,6 +60,7 @@ type LatestChatMessage = {
   isError?: boolean;
   success?: boolean;
   reason?: string;
+  runId?: string;
   provider?: string;
   content?: string;
   text?: string;
@@ -479,7 +480,10 @@ export function useChatRealtimeHandlers({
             updateActiveRunId(statusActiveRunId);
           }
 
-          if (isCurrentSession && Array.isArray(msg.activeTurnMessages) && msg.activeTurnMessages.length > 0) {
+          const activeTurnMessages = Array.isArray(msg.activeTurnMessages)
+            ? msg.activeTurnMessages as LatestChatMessage[]
+            : [];
+          if (isCurrentSession && activeTurnMessages.length > 0) {
             clearAccumulators();
             const slot = sessionStore.getSessionSlot?.(statusSessionId);
             const hasLiveStreaming = Boolean(slot?.realtimeMessages?.some((message) => (
@@ -494,13 +498,13 @@ export function useChatRealtimeHandlers({
                 .map((message) => message.toolId as string),
             );
             const activeTurnToolIds = new Set(
-              msg.activeTurnMessages
+              activeTurnMessages
                 .filter((message) => message?.kind === 'tool_use' && typeof message?.toolId === 'string')
                 .map((message) => message.toolId as string),
             );
             const hasReplayedCurrentTurnToolUse = activeTurnToolIds.size > 0
               && [...activeTurnToolIds].some((toolId) => replayedToolIds.has(toolId));
-            const volatileSignature = msg.activeTurnMessages
+            const volatileSignature = activeTurnMessages
               .filter((message) => ['thinking', 'stream_delta', 'stream_end'].includes(String(message?.kind)))
               .map((message) => `${message.kind}:${message.id || ''}:${message.content || ''}`)
               .join('||');
@@ -515,7 +519,7 @@ export function useChatRealtimeHandlers({
             const skipVolatileReplay =
               hasLiveStreaming || hasReplayedCurrentTurnToolUse || hasSeenSameVolatileReplay;
             const activeTurnMessagesToApply = getActiveTurnReplayMessagesToApply(
-              msg.activeTurnMessages,
+              activeTurnMessages,
               {
                 realtimeMessages: slot?.realtimeMessages || [],
                 serverMessages: slot?.serverMessages || [],
@@ -530,8 +534,12 @@ export function useChatRealtimeHandlers({
             }
           }
 
-          if (isCurrentSession && Array.isArray(msg.activitySnapshot)) {
-            const activities = msg.activitySnapshot.map((activity) => {
+          const hasActivitySnapshot = Array.isArray(msg.activitySnapshot);
+          const activitySnapshot = hasActivitySnapshot
+            ? msg.activitySnapshot as LatestChatMessage[]
+            : [];
+          if (isCurrentSession && hasActivitySnapshot) {
+            const activities = activitySnapshot.map((activity) => {
               const normalized = activity as NormalizedMessage;
               if (getExplicitSessionId(normalized)) return normalized;
               return { ...normalized, sessionId: statusSessionId };

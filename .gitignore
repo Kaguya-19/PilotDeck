@@ -193,6 +193,7 @@ package-lock.json
 
 # Test output
 test-results/
+playwright-report/
 
 # Local test drafts (force-add intentional new tests with git add -f)
 test/
