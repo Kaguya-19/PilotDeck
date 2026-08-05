@@ -1,12 +1,14 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { parse as parseYaml } from 'yaml';
 import {
     buildDefaultPilotDeckConfig,
     readPilotDeckConfigFile,
     sanitizeProviderCredentials,
     validatePilotDeckConfig,
+    writePilotDeckConfig,
 } from './pilotdeckConfig.js';
 
 const tempDirs = [];
@@ -221,5 +223,50 @@ describe('validatePilotDeckConfig gateway validation', () => {
 
         expect(config.model.providers.ollama).not.toHaveProperty('apiKey');
         expect(config.model.providers.ollama.url).toBe('http://localhost:11434/v1');
+    });
+});
+
+describe('writePilotDeckConfig bootstrap cleanup', () => {
+    it('removes sentinel providers and rewrites their router references', async () => {
+        const configPath = useTempConfig(null);
+
+        await writePilotDeckConfig({
+            schemaVersion: 1,
+            agent: { model: 'openai/gpt-test' },
+            model: {
+                providers: {
+                    legacyOpenRouter: {
+                        protocol: 'openai',
+                        url: 'https://placeholder.invalid/v1',
+                        apiKey: 'PLACEHOLDER_RUN_ONBOARDING_TO_REPLACE',
+                        models: { placeholder: {} },
+                    },
+                    openai: {
+                        protocol: 'openai',
+                        url: 'https://api.example.test/v1',
+                        apiKey: 'sk-real',
+                        models: { 'gpt-test': {} },
+                    },
+                },
+            },
+            router: {
+                scenarios: {
+                    default: 'openai/gpt-test',
+                    background: 'legacyOpenRouter/placeholder',
+                },
+                fallback: { default: ['legacyOpenRouter/placeholder'] },
+                tokenSaver: {
+                    judge: 'legacyOpenRouter/placeholder',
+                    tiers: { simple: { model: 'legacyOpenRouter/placeholder' } },
+                },
+            },
+        });
+
+        const saved = parseYaml(readFileSync(configPath, 'utf8'));
+        expect(saved.model.providers).not.toHaveProperty('legacyOpenRouter');
+        expect(saved.router.scenarios.background).toBe('openai/gpt-test');
+        expect(saved.router.fallback.default).toEqual(['openai/gpt-test']);
+        expect(saved.router.tokenSaver.judge).toBe('openai/gpt-test');
+        expect(saved.router.tokenSaver.tiers.simple.model).toBe('openai/gpt-test');
     });
 });
