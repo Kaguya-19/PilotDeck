@@ -47,6 +47,7 @@ describe('WebSocketProvider lifecycle', () => {
     });
 
     expect(MockWebSocket.instances).toHaveLength(2);
+    expect(hook.result.current.reconnectInfo.attempt).toBe(0);
     hook.unmount();
   });
 

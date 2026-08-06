@@ -14,12 +14,16 @@ concurrency:
 
 jobs:
   external:
-    name: External / ${{ matrix.group }}
+    name: External / ${{ matrix.provider }} / ${{ matrix.group }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
+        provider:
+          - openai
+          - anthropic
+          - google
         group:
           - model-protocol
           - agent-context-web
@@ -28,9 +32,12 @@ jobs:
     env:
       PILOT_HOME: ${{ runner.temp }}/pilotdeck-home
       PILOTDECK_RUN_EXTERNAL: '1'
+      PILOTDECK_EXTERNAL_PROVIDER: ${{ matrix.provider }}
       PILOTDECK_EXTERNAL_GROUP: ${{ matrix.group }}
       PILOTDECK_EXTERNAL_DOCKER_IMAGE: pilotdeck-nightly:${{ github.sha }}
-      PILOTDECK_E2E_CONFIG_B64: ${{ secrets.PILOTDECK_E2E_CONFIG_B64 }}
+      PILOTDECK_EXTERNAL_CONFIG_OPENAI_B64: ${{ secrets.PILOTDECK_EXTERNAL_CONFIG_OPENAI_B64 }}
+      PILOTDECK_EXTERNAL_CONFIG_ANTHROPIC_B64: ${{ secrets.PILOTDECK_EXTERNAL_CONFIG_ANTHROPIC_B64 }}
+      PILOTDECK_EXTERNAL_CONFIG_GOOGLE_B64: ${{ secrets.PILOTDECK_EXTERNAL_CONFIG_GOOGLE_B64 }}
       TAVILY_API_KEY: ${{ secrets.PILOTDECK_E2E_TAVILY_API_KEY }}
     steps:
       - name: Check out repository
@@ -54,8 +61,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ -z "${PILOTDECK_E2E_CONFIG_B64}" ]]; then
-            echo "PILOTDECK_E2E_CONFIG_B64 is required for ${PILOTDECK_EXTERNAL_GROUP}." >&2
+          case "${PILOTDECK_EXTERNAL_PROVIDER}" in
+            openai) config_b64="${PILOTDECK_EXTERNAL_CONFIG_OPENAI_B64}" ;;
+            anthropic) config_b64="${PILOTDECK_EXTERNAL_CONFIG_ANTHROPIC_B64}" ;;
+            google) config_b64="${PILOTDECK_EXTERNAL_CONFIG_GOOGLE_B64}" ;;
+            *) echo "Unsupported external provider: ${PILOTDECK_EXTERNAL_PROVIDER}" >&2; exit 1 ;;
+          esac
+          if [[ -z "${config_b64}" ]]; then
+            echo "Provider config secret is required for ${PILOTDECK_EXTERNAL_PROVIDER}." >&2
             exit 1
           fi
           if [[ "${PILOTDECK_EXTERNAL_GROUP}" == "agent-context-web" && -z "${TAVILY_API_KEY}" ]]; then
@@ -63,7 +76,7 @@ jobs:
             exit 1
           fi
           mkdir -p "${PILOT_HOME}"
-          printf '%s' "${PILOTDECK_E2E_CONFIG_B64}" | base64 --decode > "${PILOT_HOME}/pilotdeck.yaml"
+          printf '%s' "${config_b64}" | base64 --decode > "${PILOT_HOME}/pilotdeck.yaml"
           chmod 600 "${PILOT_HOME}/pilotdeck.yaml"
 
       - name: Build Docker image
@@ -77,7 +90,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: external-${{ matrix.group }}
+          name: external-${{ matrix.provider }}-${{ matrix.group }}
           path: artifacts/external
           if-no-files-found: ignore
           retention-days: 14

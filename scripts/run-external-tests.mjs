@@ -19,6 +19,11 @@ if (!group || !testFile) {
   fail(`PILOTDECK_EXTERNAL_GROUP must be one of: ${Object.keys(groups).join(', ')}`);
 }
 
+const provider = process.env.PILOTDECK_EXTERNAL_PROVIDER?.trim();
+if (!provider || !["openai", "anthropic", "google"].includes(provider)) {
+  fail('PILOTDECK_EXTERNAL_PROVIDER must be openai, anthropic, or google.');
+}
+
 const pilotHome = process.env.PILOT_HOME;
 if (!pilotHome || !existsSync(path.join(pilotHome, 'pilotdeck.yaml'))) {
   fail('PILOT_HOME must point to an isolated directory containing pilotdeck.yaml.');
@@ -47,7 +52,7 @@ const output = sanitize(`${result.stdout ?? ''}${result.stderr ?? ''}`);
 process.stdout.write(output);
 const artifactDir = path.join(process.cwd(), 'artifacts', 'external');
 mkdirSync(artifactDir, { recursive: true });
-writeFileSync(path.join(artifactDir, `${group}.log`), output, 'utf8');
+writeFileSync(path.join(artifactDir, `${provider}-${group}.log`), output, 'utf8');
 
 if (result.error) fail(result.error.message);
 process.exitCode = result.status ?? 1;
