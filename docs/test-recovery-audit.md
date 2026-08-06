@@ -494,3 +494,24 @@ Platform IM channels, desktop updater, Office integration and cross-platform
 installation remain deferred beyond this workflow. They require dedicated
 runners and test accounts and must not be reported as executed by either
 `pnpm check` or the browser smoke.
+
+## Current Batch Evidence
+
+The following public-entry tests and reverse-mutation proofs were added after
+the initial audit. `MUTATION_FAIL` means the current test passed, the exact
+reverse mutation compiled, and the named test produced one behavioral failure
+in an isolated copy. Items without that proof remain `CURRENT` and are not
+promoted by implication. For paths listed here, this evidence supersedes the
+older `CURRENT` marker in the historical row.
+
+| Current path | Public contract | Proof case | Status |
+| --- | --- | --- | --- |
+| `tests/adapters/wecom-lifecycle.spec.ts` | WeCom AI Bot subscribe, callback/permission pairing, heartbeat, close abort, reconnect and intentional stop | `wecom-close-abort` | `COVERED / MUTATION_FAIL` |
+| `tests/adapters/webhook-entrypoint.spec.ts` | Webhook health, route/HMAC validation, delivery/reply, duplicate suppression and port release | deterministic entry test | `COVERED` |
+| `tests/gateway/gateway-lifecycle-regressions.spec.ts` | busy-session rejection, abort unwind, active replay filtering, WebSocket close abort | `gateway-busy-session`, `gateway-abort-awaits-unwind`, `gateway-active-replay-pending-only`, `gateway-ws-close-abort` | `COVERED / MUTATION_FAIL` |
+| `tests/regressions/config-state-file-regressions.spec.ts` | config model conflict recovery, externally-owned router store, collision-resistant IDs, idempotent history and snapshot eviction | `config-model-conflict-soft-recovery`, `router-store-survives-shutdown`, `project-id-collision-resistance`, `file-history-idempotent-first-snapshot`, `file-history-snapshot-eviction` | `COVERED / MUTATION_FAIL` |
+| `tests/regressions/model-router-regressions.spec.ts` | nested message/tool clone isolation, Anthropic cache cap/transient retry, fallback suppression and zero-usage retry | `model-tool-result-clone-isolation`, `model-tool-call-clone-isolation`, `anthropic-cache-breakpoint-cap`, `anthropic-transient-retryability`, `router-fallback-hides-failed-attempt`, `router-zero-usage-retry` | `COVERED / MUTATION_FAIL` |
+| `tests/router/streaming-recovery.spec.ts` | deterministic SSE recovery order and continuation context | `router-stream-recovery-order` | `COVERED / MUTATION_FAIL` |
+| `tests/regressions/always-on-session-adapter-regressions.spec.ts` | bypass safety deny, terminal plan-state sync and transcript/TUI event pairing | `always-on-bypass-deny`, `always-on-plan-terminal-sync`, `tui-tool-event-pairing` | `COVERED / MUTATION_FAIL` |
+| `ui/src/components/chat/hooks/useChatComposerState.busySend.test.tsx` | queued attachment snapshot survives edits until the active turn completes | `ui-queued-attachment-snapshot` | `COVERED / MUTATION_FAIL` |
+| `ui/src/contexts/WebSocketContext.lifecycle.test.tsx` | token replacement isolates stale close callbacks from reconnect state | `ui-stale-websocket-close` | `COVERED / MUTATION_FAIL` |

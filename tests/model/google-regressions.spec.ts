@@ -3,8 +3,16 @@ import test from "node:test";
 
 import { DEFAULT_MODEL_CAPABILITIES } from "../../src/model/protocol/capabilities.js";
 import type { CanonicalModelRequest, ModelConfig } from "../../src/model/protocol/canonical.js";
+import { resolveGoogleEndpoint } from "../../src/model/providers/google/client.js";
 import { normalizeGoogleToolSchema } from "../../src/model/providers/google/schema.js";
 import { complete, streamModel } from "../../src/model/streaming/streamModel.js";
+
+test("Google custom base URLs retain the native v1beta endpoint", () => {
+  assert.deepEqual(resolveGoogleEndpoint("https://llm-center.modelbest.cn/llm"), {
+    baseUrl: "https://llm-center.modelbest.cn/llm/",
+    apiVersion: "v1beta",
+  });
+});
 
 test("Google tool schema flattens top-level object unions without leaking union keywords", () => {
   const normalized = normalizeGoogleToolSchema({
