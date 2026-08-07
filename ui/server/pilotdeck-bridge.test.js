@@ -219,6 +219,8 @@ describe('Always-On turn notification forwarding', () => {
     it('treats normal completion and top-level errors as terminal', () => {
         expect(isTerminalAlwaysOnTurnEvent({ type: 'turn_completed' })).toBe(true);
         expect(isTerminalAlwaysOnTurnEvent({ type: 'error', code: 'agent_aborted' })).toBe(true);
+        expect(isTerminalAlwaysOnTurnEvent({ type: 'error', code: 'session_busy', recoverable: true })).toBe(false);
+        expect(isTerminalAlwaysOnTurnEvent({ type: 'error', code: 'turn_failed', recoverable: false })).toBe(true);
         expect(isTerminalAlwaysOnTurnEvent({ type: 'assistant_text_delta', text: 'still running' })).toBe(false);
     });
 });

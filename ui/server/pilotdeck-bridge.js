@@ -2255,7 +2255,9 @@ export function getRouterStatsSummary() {
 }
 
 export function isTerminalAlwaysOnTurnEvent(event) {
-    return event?.type === 'turn_completed' || event?.type === 'error';
+    if (event?.type === 'turn_completed') return true;
+    if (event?.type !== 'error') return false;
+    return event.code === 'agent_aborted' || event.recoverable === false;
 }
 
 /**
