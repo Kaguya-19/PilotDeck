@@ -108,7 +108,13 @@ export function createCodexAuthRouter(dependencies = {}) {
     try {
       const result = await deps.pollCodexDeviceCode(device);
       if (result.status === 'pending') {
-        return res.json({ ok: true, pending: true });
+        return res.json({
+          ok: true,
+          pending: true,
+          ...(Number.isFinite(result.retryAfterMs) && result.retryAfterMs > 0
+            ? { retryAfterMs: result.retryAfterMs }
+            : {}),
+        });
       }
       await deps.exchangeCodexDeviceAuthorization(result);
       pending.delete(state);

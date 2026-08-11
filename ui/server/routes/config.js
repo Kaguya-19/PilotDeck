@@ -131,7 +131,7 @@ function isRecord(value) {
 function isCodexTransport(providerId, protocol, baseUrl) {
   return String(providerId || '').trim().toLowerCase() === CODEX_PROVIDER_ID
     && String(protocol || '').trim().toLowerCase() === CODEX_PROTOCOL
-    && String(baseUrl || '').trim() === CODEX_BASE_URL;
+    && String(baseUrl || '').trim().replace(/\/+$/, '') === CODEX_BASE_URL;
 }
 
 function containsMaskedValue(value) {

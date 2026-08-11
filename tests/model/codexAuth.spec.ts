@@ -193,6 +193,32 @@ test("uses Hermes-compatible refresh and device authorization requests", async (
   assert.equal(exchangeBody.get("code_verifier"), "code-verifier");
 });
 
+test("honors device authorization polling intervals longer than ten seconds", async () => {
+  const device = await requestCodexDeviceCode({
+    fetch: (async () => jsonResponse({
+      user_code: "ABCD-EFGH",
+      device_auth_id: "device-auth",
+      interval: 30,
+    })) as typeof fetch,
+  });
+
+  assert.equal(device.intervalMs, 30_000);
+});
+
+test("treats a rate-limited device poll as pending", async () => {
+  const result = await pollCodexDeviceCode(
+    { userCode: "ABCD-EFGH", deviceAuthId: "device-auth" },
+    {
+      fetch: (async () => new Response(JSON.stringify({ error: "rate_limited" }), {
+        status: 429,
+        headers: { "content-type": "application/json", "retry-after": "3" },
+      })) as typeof fetch,
+    },
+  );
+
+  assert.deepEqual(result, { status: "pending", retryAfterMs: 3_000 });
+});
+
 function jwt(claims: Record<string, unknown>): string {
   const header = Buffer.from(JSON.stringify({ alg: "none" })).toString("base64url");
   const payload = Buffer.from(JSON.stringify(claims)).toString("base64url");

@@ -59,9 +59,11 @@ export function buildCodexResponsesRequestHeaders(
   return {
     ...buildCodexRequestHeaders(accessToken, copyAllowedHeaders(extraHeaders, new Set([
       "accept",
+      "content-type",
       "openai-beta",
       "x-client-request-id",
     ]))),
+    "content-type": "application/json",
     accept: "text/event-stream",
     "OpenAI-Beta": "responses=experimental",
     "x-client-request-id": randomUUID(),

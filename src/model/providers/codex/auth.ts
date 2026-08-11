@@ -81,7 +81,7 @@ export type CodexDeviceCode = {
 };
 
 export type CodexDevicePollResult =
-  | { status: "pending" }
+  | { status: "pending"; retryAfterMs?: number }
   | {
       status: "authorized";
       authorizationCode: string;
@@ -344,7 +344,7 @@ export async function requestCodexDeviceCode(
     userCode,
     deviceAuthId,
     verificationUrl: CODEX_DEVICE_VERIFICATION_URL,
-    intervalMs: Math.max(1_000, Math.min(intervalSeconds, 10) * 1000),
+    intervalMs: Math.max(1_000, intervalSeconds * 1000),
   };
 }
 
@@ -364,10 +364,19 @@ export async function pollCodexDeviceCode(
   });
   const payload = await readJson(response);
   if (
-    (response.status === 403 || response.status === 404)
-    && (Object.keys(payload).length === 0 || isDeviceCodePending(payload))
+    response.status === 429
+    || (
+      (response.status === 403 || response.status === 404)
+      && (Object.keys(payload).length === 0 || isDeviceCodePending(payload))
+    )
   ) {
-    return { status: "pending" };
+    const retryAfterSeconds = readPositiveNumber(payload.retry_after)
+      ?? readPositiveNumber(payload.retryAfter)
+      ?? readRetryAfterHeader(response.headers.get("retry-after"));
+    return {
+      status: "pending",
+      ...(retryAfterSeconds ? { retryAfterMs: Math.max(1_000, retryAfterSeconds * 1000) } : {}),
+    };
   }
   if (!response.ok) {
     throw authEndpointError(response, payload, "Codex sign-in polling failed", "device_code_poll_failed");
@@ -616,6 +625,12 @@ function isDeviceCodePending(payload: Record<string, unknown>): boolean {
     || readString(payload.error)
     || readString(payload.code);
   return code === "authorization_pending" || code === "device_code_pending";
+}
+
+function readRetryAfterHeader(value: string | null): number | undefined {
+  if (!value) return undefined;
+  const seconds = Number(value.trim());
+  return Number.isFinite(seconds) && seconds > 0 ? seconds : undefined;
 }
 
 function authEndpointError(

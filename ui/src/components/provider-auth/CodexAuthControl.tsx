@@ -73,12 +73,20 @@ export default function CodexAuthControl({
     let timer: ReturnType<typeof setTimeout> | undefined;
 
     const poll = async () => {
+      let retryAfterMs = pending.intervalMs;
       try {
         const response = await authenticatedFetch("/api/codex-auth/device/poll", {
           method: "POST",
           body: JSON.stringify({ state: pending.state }),
         });
         const data = await response.json().catch(() => ({}));
+        if (typeof data.retryAfterMs === "number" && data.retryAfterMs > 0) {
+          retryAfterMs = data.retryAfterMs;
+        }
+        if (response.status === 429 && data?.pending) {
+          if (!cancelled) timer = setTimeout(poll, retryAfterMs);
+          return;
+        }
         if (!response.ok || data?.ok === false) {
           throw new Error(data?.error || t("pilotDeckConfig.panels.models.codexAuth.pollError"));
         }
@@ -101,7 +109,9 @@ export default function CodexAuthControl({
         }
         return;
       }
-      if (!cancelled) timer = setTimeout(poll, pending.intervalMs);
+      if (!cancelled) {
+        timer = setTimeout(poll, retryAfterMs);
+      }
     };
 
     timer = setTimeout(poll, pending.intervalMs);

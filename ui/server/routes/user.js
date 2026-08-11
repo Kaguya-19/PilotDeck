@@ -20,7 +20,7 @@ function providerAllowsMissingApiKey(providerId) {
 function isCodexTransport(providerId, provider) {
   return providerId === 'codex'
     && String(provider?.protocol || '').trim().toLowerCase() === 'openai-responses'
-    && String(provider?.url || '').trim() === CODEX_BASE_URL;
+    && String(provider?.url || '').trim().replace(/\/+$/, '') === CODEX_BASE_URL;
 }
 
 async function hasUsablePilotDeckConfig() {

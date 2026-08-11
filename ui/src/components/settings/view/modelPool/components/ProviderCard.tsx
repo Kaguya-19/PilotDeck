@@ -59,7 +59,7 @@ export default function ProviderCard({
   const isCodexProvider =
     catalogEntry?.id === "codex" &&
     draftProvider.protocol === "openai-responses" &&
-    draftProvider.url === catalogEntry.defaultUrl;
+    String(draftProvider.url || "").trim().replace(/\/+$/, "") === catalogEntry.defaultUrl;
   const effectiveUrl = draftProvider.url || catalogEntry?.defaultUrl || "";
   const enabledModels = Object.keys(draftProvider.models ?? {});
   const [newModelId, setNewModelId] = useState("");

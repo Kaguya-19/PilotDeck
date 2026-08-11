@@ -111,6 +111,7 @@ test("protects required Codex response headers from user overrides", () => {
     Accept: "application/json",
     "openai-beta": "user-beta",
     "X-Client-Request-Id": "user-request-id",
+    "content-type": "text/plain",
     "x-custom-header": "preserved",
   }));
 
@@ -118,6 +119,7 @@ test("protects required Codex response headers from user overrides", () => {
   assert.equal(headers.get("chatgpt-account-id"), "acct_required");
   assert.equal(headers.get("originator"), "codex_cli_rs");
   assert.equal(headers.get("accept"), "text/event-stream");
+  assert.equal(headers.get("content-type"), "application/json");
   assert.equal(headers.get("openai-beta"), "responses=experimental");
   assert.match(headers.get("x-client-request-id") ?? "", /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
   assert.equal(headers.get("x-custom-header"), "preserved");
