@@ -1,5 +1,10 @@
 # Historical Test Recovery Audit
 
+The forward-looking coverage and test expansion plan is maintained in
+[`docs/test-quality-roadmap.md`](test-quality-roadmap.md). This audit records
+historical contract mappings and evidence; the roadmap records future coverage
+targets and staged gate changes.
+
 ## Scope and Method
 
 This audit covers every deleted path under `tests/`, plus every deleted
