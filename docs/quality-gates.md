@@ -8,6 +8,11 @@ The phased coverage and regression plan is maintained in
 pure modules may target 100%, which stateful modules use thresholds and
 mutation proof, and which external paths remain nightly/deferred.
 
+Durable behavior contracts are recorded in
+[`docs/agent-notes/`](agent-notes/README.md). A code change that affects a
+Gateway, router, model, file safety, tool, or UI state invariant must update
+the relevant note together with its tests.
+
 ## Local Check
 
 Use Node.js 22 and the pnpm version declared in the root `package.json`:

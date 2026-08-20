@@ -12,6 +12,16 @@ Add a note when a change introduces or changes one of these contracts:
 - File/path safety, permission precedence or tool execution recovery.
 - UI state reconciliation, active-run identity or reconnect behavior.
 
+Current notes:
+
+- [Gateway protocol contracts](gateway-protocol-contracts.md)
+- [Model protocol contracts](model-protocol-contracts.md)
+- [Router and configuration contracts](router-and-config-contracts.md)
+- [Session and file safety](session-and-file-safety.md)
+- [Tool and permission contracts](tool-and-permission-contracts.md)
+- [UI state contracts](ui-state-contracts.md)
+- [Test evidence and gates](test-evidence-and-gates.md)
+
 Each note should include:
 
 1. Context and the invariant being protected.
