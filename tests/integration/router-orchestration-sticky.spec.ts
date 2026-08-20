@@ -55,6 +55,30 @@ test("auto-orchestrate applies the allowed tool set", async () => {
   assert.deepEqual(model.received[0]?.tools?.map(tool => tool.name), ["agent", "read_file"]);
 });
 
+test("auto-orchestrate applies an explicitly empty allowlist", async () => {
+  const model = scriptedModel(1);
+  const router = createRouterRuntime(orchestrationConfig({
+    allowedTools: [],
+    blockedTools: ["bash"],
+  }), { modelRuntime: model, judgeRuntime: judge("COMPLEX") });
+
+  await drain(router.stream(BASE_REQUEST, context("s1", "t1")));
+
+  assert.deepEqual(model.received[0]?.tools, []);
+});
+
+test("auto-orchestrate does not fall back when no allowlisted tool matches", async () => {
+  const model = scriptedModel(1);
+  const router = createRouterRuntime(orchestrationConfig({
+    allowedTools: ["missing_tool"],
+    blockedTools: undefined,
+  }), { modelRuntime: model, judgeRuntime: judge("COMPLEX") });
+
+  await drain(router.stream(BASE_REQUEST, context("s1", "t1")));
+
+  assert.deepEqual(model.received[0]?.tools, []);
+});
+
 test("auto-orchestrate never wraps a subagent request again", async () => {
   const model = scriptedModel(1);
   const router = createRouterRuntime(orchestrationConfig({ allowedTools: ["agent"] }), {

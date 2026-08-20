@@ -60,7 +60,6 @@ type LatestChatMessage = {
   isError?: boolean;
   success?: boolean;
   reason?: string;
-  runId?: string;
   provider?: string;
   content?: string;
   text?: string;

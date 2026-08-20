@@ -53,10 +53,10 @@ export function applyOrchestration(input: OrchestrationInput): OrchestrationResu
     };
   }
 
-  if (tools && config.allowedTools && config.allowedTools.length > 0) {
+  if (tools && config.allowedTools !== undefined) {
     const allowed = new Set(config.allowedTools.map(name => name.toLowerCase()));
     const filtered = tools.filter((tool: CanonicalToolSchema) => allowed.has(tool.name.toLowerCase()));
-    if (filtered.length > 0 && filtered.length !== tools.length) {
+    if (filtered.length !== tools.length) {
       mutations = {
         ...mutations,
         toolsStripped: {
@@ -66,8 +66,8 @@ export function applyOrchestration(input: OrchestrationInput): OrchestrationResu
           patterns: config.allowedTools,
         },
       };
-      tools = filtered;
     }
+    tools = filtered;
   } else if (tools && config.blockedTools && config.blockedTools.length > 0) {
     const blocked = new Set(config.blockedTools.map(name => name.toLowerCase()));
     const filtered = tools.filter((tool: CanonicalToolSchema) => !blocked.has(tool.name.toLowerCase()));
