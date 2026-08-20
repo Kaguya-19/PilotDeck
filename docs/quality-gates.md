@@ -1,6 +1,7 @@
 # Quality Gates
 
-PilotDeck uses one local command and one required CI status to keep the merge gate predictable.
+PilotDeck uses one local command and one stable aggregate CI status for visibility.
+CI currently runs on PRs but is not configured as a merge-required check.
 
 ## Local Check
 
@@ -14,7 +15,7 @@ corepack pnpm check
 `pnpm check` runs the root build and deterministic tests (including the
 real-process Gateway smoke), UI lint and strict type checking, UI unit tests,
 and the UI production build. Playwright and credentialed external tests remain
-outside this required gate.
+outside this deterministic check.
 
 The repository also exposes focused layers used by CI and for local diagnosis:
 
@@ -74,24 +75,27 @@ runs all groups on a schedule or manual dispatch and uploads only redacted logs.
 for pull requests targeting `main` and for pushes to `main`. The final
 `All checks pass` job uses `if: always()` and fails unless every upstream gate
 is successful. CI uses an isolated `PILOT_HOME` under the runner's temporary
-directory and never reads a developer's local PilotDeck configuration.
+directory and never reads a developer's local PilotDeck configuration. The
+workflow is informational for merging until repository administrators enable
+Branch Protection for it.
 
 Browser smoke is intentionally non-required during its stabilization period.
 The external nightly does not run for pull requests.
 
-The stable status-check name is:
+The stable aggregate status-check name, if enabled later, is:
 
 ```text
 CI / All checks pass
 ```
 
-## Branch Protection
+## Branch Protection (Deferred)
 
-A repository administrator should configure the `main` branch or its ruleset to:
+A repository administrator can later configure the `main` branch or its ruleset to:
 
 1. Require a pull request before merging.
 2. Require `CI / All checks pass` to pass before merging.
 3. Require branches to be up to date with `main` before merging.
 4. Dismiss stale approvals when new commits are pushed, if review approval is enabled.
 
-Branch protection is repository configuration and is not changed by this workflow.
+Branch protection is repository configuration and is intentionally not changed
+by this workflow at the current stage.

@@ -105,7 +105,7 @@ old parent checkout was runnable; historical parent checks remain
 
 ## Current Gate Layers
 
-- `pnpm check` is the required deterministic PR gate. It includes the 31
+- `pnpm check` is the deterministic PR validation command. It includes the 31
   recovered offline contracts and the real-process Gateway smoke, but no
   browser, model, public-network, Docker, or user-home dependency.
 - `pnpm --dir ui e2e` starts a repository-controlled fake provider, Gateway,
