@@ -16,6 +16,17 @@ real-process Gateway smoke), UI lint and strict type checking, UI unit tests,
 and the UI production build. Playwright and credentialed external tests remain
 outside this required gate.
 
+The repository also exposes focused layers used by CI and for local diagnosis:
+
+```bash
+corepack pnpm test:contract
+corepack pnpm test:artifact
+```
+
+`test:contract` exercises the Gateway wire/event contract. `test:artifact`
+loads only the compiled `dist` entry points and performs a plain Node Gateway
+smoke, so a source-only test pass cannot hide a packaging or export failure.
+
 Run the controlled browser smoke separately:
 
 ```bash
@@ -59,7 +70,11 @@ runs all groups on a schedule or manual dispatch and uploads only redacted logs.
 
 ## Continuous Integration
 
-`.github/workflows/ci.yml` runs the same gate for pull requests targeting `main` and for pushes to `main`. CI uses an isolated `PILOT_HOME` under the runner's temporary directory and never reads a developer's local PilotDeck configuration.
+`.github/workflows/ci.yml` runs static, unit, contract, build, and artifact gates
+for pull requests targeting `main` and for pushes to `main`. The final
+`All checks pass` job uses `if: always()` and fails unless every upstream gate
+is successful. CI uses an isolated `PILOT_HOME` under the runner's temporary
+directory and never reads a developer's local PilotDeck configuration.
 
 Browser smoke is intentionally non-required during its stabilization period.
 The external nightly does not run for pull requests.

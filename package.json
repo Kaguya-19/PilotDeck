@@ -15,6 +15,10 @@
   "scripts": {
     "check:runtime": "node scripts/check-node-runtime.mjs",
     "check": "pnpm run test && pnpm --dir ui run lint && pnpm --dir ui run typecheck && pnpm --dir ui run test && pnpm --dir ui run build",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test:contract": "pnpm run build && node --test --test-force-exit --test-timeout 60000 dist/tests/gateway/gateway-protocol-contract.spec.js dist/tests/gateway/gateway-server-smoke.spec.js",
+    "test:artifact": "pnpm run build && node scripts/test-artifact.mjs",
+    "test:coverage": "pnpm run build && node scripts/test-coverage.mjs",
     "test:regression-proof": "node scripts/verify-regression-proofs.mjs",
     "install:browser": "npx @playwright/mcp install-browser chrome-for-testing",
     "install:asr": "node scripts/install-asr.mjs",

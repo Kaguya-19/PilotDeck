@@ -15,6 +15,8 @@ These rules apply to human contributors and coding agents working in this reposi
 - Reproduce a bug on current `main` before fixing it, and add a regression test that fails for the original behavior.
 - Fix the complete bug class, including sibling call paths, while keeping the change scoped to the reported behavior.
 - Add or update contract tests whenever Gateway RPCs or streamed event fields change.
+- Keep protocol contract tests stable: normalize run/request IDs, timestamps, temporary paths, and secrets before comparing event or frame fixtures; snapshots must never write back automatically.
+- Verify compiled `dist` entry points with the artifact smoke when changing exports, startup, or packaging.
 - Do not delete, skip, or weaken a failing test to make a change pass. Do not include unrelated refactors.
 - Use Node.js 22 and the committed pnpm lockfile. Run `pnpm check` before handing off a change.
 
