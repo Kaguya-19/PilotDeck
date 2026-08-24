@@ -12,4 +12,4 @@ session key 由 account、conversation 和 peer 稳定生成；DM、附件、per
 
 ## 恢复与证据
 
-SSE 断线按退避重连，主动 stop 不得重连；逐行解析失败只记录当前事件。当前共享测试：`tests/adapters/im-permission-helper.spec.ts`、`tests/adapters/channel/feishu-render.test.ts`。Signal 账号链路：`DEFER_EXTERNAL`。
+SSE 断线按退避重连，主动 stop 不得重连；逐行解析失败只记录当前事件。当前共享测试：`tests/adapters/im-permission-helper.spec.ts`、`tests/adapters/im-renderers.spec.ts`。Signal 账号链路：`DEFER_EXTERNAL`。

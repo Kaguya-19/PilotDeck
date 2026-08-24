@@ -6,7 +6,7 @@ const trdDir = path.join(root, "docs", "trd");
 const failures = [];
 
 for (const [relative, patterns] of [
-  ["AGENTS.md", [/Gateway 是/, /bug 必须先/, /pnpm check/]],
+  ["AGENTS.md", [/Gateway (?:是|必须是)/, /bug 必须先/, /pnpm check/]],
   ["docs/test-quality-roadmap.zh.md", [/P0：/, /P1：/, /P6：/, /CURRENT_ONLY/]],
   ["docs/test-evidence-matrix.zh.md", [/证据等级/, /MUTATION_FAIL/, /DEFER_EXTERNAL/]],
 ]) {

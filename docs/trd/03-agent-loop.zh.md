@@ -23,7 +23,7 @@
 
 代码边界：`src/agent/loop/AgentLoop.ts`、`src/agent/turn/TurnRunner.ts`、`src/agent/protocol/events.ts`。
 
-映射 `tests/agent/loop/**`、`tests/model/**`、`tests/model/streaming/assembleModelMessage.test.ts`、`tests/agent/loop/core-lifecycle.spec.ts`、`tests/agent/session-lifecycle.spec.ts`、`tests/agent/turn-runner-contract.spec.ts` 和 `tests/gateway/map-agent-event-runid.spec.ts`。新增测试锁定正常文本、tool loop、pre-abort 和重复 completion 的单一终态；`pnpm test:p1-proof --case duplicate-terminal` 已产生 `MUTATION_FAIL`，其余恢复分支仍需 mutation 或 parent failure。
+映射 `tests/agent/loop/**`、`tests/model/**`、`tests/agent/loop/core-lifecycle.spec.ts`、`tests/agent/session-lifecycle.spec.ts`、`tests/agent/turn-runner-contract.spec.ts` 和 `tests/gateway/map-agent-event-runid.spec.ts`。新增测试锁定正常文本、tool loop、pre-abort 和重复 completion 的单一终态；`pnpm test:p1-proof --case duplicate-terminal` 已产生 `MUTATION_FAIL`，其余恢复分支仍需 mutation 或 parent failure。
 
 ## 验收
 

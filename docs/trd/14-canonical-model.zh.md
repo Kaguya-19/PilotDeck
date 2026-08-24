@@ -15,7 +15,7 @@
 
 ## 测试
 
-映射 `tests/model/**`、`tests/model/streaming/assembleModelMessage.test.ts` 和 malformed fixtures。纯协议目录目标 100% coverage，并为关键修复加入 mutation proof。
+映射 `tests/model/**` 和 malformed fixtures。纯协议目录目标 100% coverage，并为关键修复加入 mutation proof。
 
 ## 验收
 

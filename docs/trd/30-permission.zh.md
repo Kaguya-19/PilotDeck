@@ -15,7 +15,7 @@
 
 ## 测试
 
-映射 `tests/tool/builtin/bashPermissions.test.ts`、`tests/gateway/**`、adapter permission tests。补充 deny precedence、late response、close abort 和 mutation proof。
+映射 `tests/tool/bash-permission-security.spec.ts`、`tests/permission/**`、`tests/gateway/**` 和 adapter permission tests。补充 deny precedence、late response、close abort 和 mutation proof。
 
 ## 验收
 

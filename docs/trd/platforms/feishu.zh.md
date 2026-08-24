@@ -12,4 +12,4 @@ session key 由 tenant、chat 和 thread 稳定生成；入站文本、图片和
 
 ## 恢复与证据
 
-签名错误、过期事件和 API 限流返回明确失败；webhook 断开不主动伪造成功。当前测试：`tests/adapters/channel/feishu-render.test.ts`、`tests/adapters/feishu-permission-reply.spec.ts`。入口和真实租户链路：`DEFER_EXTERNAL`。
+签名错误、过期事件和 API 限流返回明确失败；webhook 断开不主动伪造成功。当前测试：`tests/adapters/im-renderers.spec.ts`、`tests/adapters/feishu-permission-reply.spec.ts`。入口和真实租户链路：`DEFER_EXTERNAL`。

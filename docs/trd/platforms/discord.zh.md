@@ -12,4 +12,4 @@ session key 由 guild、channel、thread 和 user 组成；消息、文件和回
 
 ## 恢复与证据
 
-sequence/heartbeat 失步触发重连，主动 stop 不重连。当前共享测试：`tests/adapters/im-permission-helper.spec.ts`、`tests/adapters/channel/feishu-render.test.ts`；bot token 链路：`DEFER_EXTERNAL`。
+sequence/heartbeat 失步触发重连，主动 stop 不重连。当前共享测试：`tests/adapters/im-permission-helper.spec.ts`、`tests/adapters/im-renderers.spec.ts`；bot token 链路：`DEFER_EXTERNAL`。
