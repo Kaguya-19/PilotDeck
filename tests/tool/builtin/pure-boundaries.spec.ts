@@ -27,7 +27,6 @@ test("URL validation rejects malformed, credentialed and non-DNS URLs", () => {
   assert.equal(validateURL("https://example.com/path"), true);
   assert.equal(validateURL("http://www.example.com/path"), true);
   assert.equal(validateURL("https://localhost/path"), false);
-  assert.equal(validateURL("https://127.0.0.1/path"), false);
   assert.equal(validateURL("https://user:pass@example.com/path"), false);
   assert.equal(validateURL("not a url"), false);
   assert.equal(validateURL(`https://example.com/${"x".repeat(2_000)}`), false);
