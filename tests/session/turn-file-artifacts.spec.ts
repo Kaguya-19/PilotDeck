@@ -206,3 +206,45 @@ test("TurnRunner unregisters its artifact collector when the event stream closes
     await rm(projectRoot, { recursive: true, force: true });
   }
 });
+
+test("TurnRunner keeps the main turn successful when artifact collection cannot start", async () => {
+  const result: AgentTurnResult = {
+    type: "success",
+    sessionId: "artifact-start-failure",
+    turnId: "turn-1",
+    stopReason: "completed",
+    usage: {},
+    permissionDenials: [],
+    turns: 1,
+    startedAt: "2026-08-21T00:00:00.000Z",
+    completedAt: "2026-08-21T00:00:01.000Z",
+  };
+  const fakeLoop = {
+    async *run(input: AgentLoopInput): AsyncGenerator<AgentEvent, AgentLoopRunResult, unknown> {
+      yield { type: "turn_completed", sessionId: input.sessionId, turnId: input.turnId, result };
+      return { result, messages: input.messages };
+    },
+    snapshotFileState: () => ({}),
+  } as unknown as AgentLoop;
+  const events: AgentEvent[] = [];
+  const runner = new TurnRunner(
+    fakeLoop,
+    new InMemoryTranscriptWriter(),
+    undefined,
+    () => new Date("2026-08-21T00:00:01.000Z"),
+    undefined,
+    { cwd: "/path/that/does/not/exist", transcriptPath: "" },
+  );
+
+  for await (const event of runner.run({
+    sessionId: "artifact-start-failure",
+    turnId: "turn-1",
+    messages: [],
+    input: { type: "text", text: "still complete" },
+  })) {
+    events.push(event);
+  }
+
+  assert.equal(events.filter((event) => event.type === "turn_completed").length, 1);
+  assert.equal(events.find((event) => event.type === "turn_completed")?.type, "turn_completed");
+});

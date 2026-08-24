@@ -1,5 +1,7 @@
 # Telemetry Receiver Contract (`analytics.v2`)
 
+客户端运行时契约见 [`../trd/50-telemetry-runtime.zh.md`](../trd/50-telemetry-runtime.zh.md)。
+
 ## Endpoint
 
 - Method: `POST`

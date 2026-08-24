@@ -85,3 +85,31 @@ test("mapAgentEvent preserves an aborted subagent completion", () => {
     durationMs: 10,
   });
 });
+
+test("mapAgentEvent pairs a tool result with its original call identity", () => {
+  const [finished] = mapAgentEvent({
+    type: "tool_result",
+    sessionId: "session-1",
+    turnId: "turn-1",
+    result: {
+      type: "success",
+      toolCallId: "call-1",
+      toolName: "read_file",
+      content: [{ type: "text", text: "hello" }],
+      startedAt: "2026-08-21T00:00:00.000Z",
+      completedAt: "2026-08-21T00:00:00.001Z",
+    },
+  }, "run-1");
+
+  assert.deepEqual(finished, {
+    type: "tool_call_finished",
+    toolCallId: "call-1",
+    toolName: "read_file",
+    ok: true,
+    resultPreview: "hello",
+    resultLineCount: 1,
+    resultBytes: 5,
+    resultPath: undefined,
+    runId: "run-1",
+  });
+});

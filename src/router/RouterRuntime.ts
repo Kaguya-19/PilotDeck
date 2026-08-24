@@ -866,9 +866,9 @@ export function createRouterRuntime(
               continue;
             }
           }
-          for (const queued of pending) {
-            yield queued;
-          }
+          // The terminal error path below replays buffered framing events and
+          // emits one canonical error. Do not flush `pending` here as well,
+          // otherwise a pre-content provider error is delivered twice.
           lastHasYieldedContent = hasYieldedContent;
           break outer;
         }

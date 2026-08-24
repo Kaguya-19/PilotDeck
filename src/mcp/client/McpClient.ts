@@ -116,13 +116,14 @@ export class McpClient {
 
   private async runConnect(): Promise<void> {
     this.status = "connecting";
-    const transport = this.buildTransport();
     const client = new Client(
       { name: "pilotdeck", version: "0.1.0" },
       { capabilities: { elicitation: {} } },
     );
     const handshakeMs = this.options.handshakeTimeoutMs ?? 10_000;
+    let transport: Transport;
     try {
+      transport = this.buildTransport();
       await withTimeout(
         client.connect(transport),
         handshakeMs,
@@ -143,11 +144,10 @@ export class McpClient {
             this.spec.id,
           );
     }
-    this.client = client;
-    this.transport = transport;
+      this.client = client;
+      this.transport = transport;
     this.status = "ready";
-    const instructions = (client.getServerCapabilities() as { instructions?: string } | undefined)
-      ?.instructions;
+    const instructions = client.getInstructions();
     this.serverInstructions =
       typeof instructions === "string"
         ? instructions

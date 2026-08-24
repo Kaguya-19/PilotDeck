@@ -1,5 +1,7 @@
 # 对话框改进后端 TRD
 
+细粒度接口和 UI 边界见 [`trd/43-web-api.zh.md`](trd/43-web-api.zh.md)、[`trd/45-ui-store-reducer.zh.md`](trd/45-ui-store-reducer.zh.md) 和 [`trd/46-ui-interaction.zh.md`](trd/46-ui-interaction.zh.md)。
+
 ## 1. 文档信息
 
 | 项目 | 内容 |

@@ -121,13 +121,19 @@ export function buildConversationChain(entries: AgentTranscriptEntry[]): Transcr
   return { chain: longestPath, leaves, roots, orphans, diagnostics };
 }
 
-function findLongestPath(node: TranscriptChainNode): AgentTranscriptEntry[] {
+function findLongestPath(node: TranscriptChainNode, visiting = new Set<string>()): AgentTranscriptEntry[] {
+  const entryId = node.entry.entryId;
+  if (entryId && visiting.has(entryId)) {
+    return [];
+  }
+  const nextVisiting = new Set(visiting);
+  if (entryId) nextVisiting.add(entryId);
   if (node.children.length === 0) {
     return [node.entry];
   }
   let best: AgentTranscriptEntry[] = [];
   for (const child of node.children) {
-    const childPath = findLongestPath(child);
+    const childPath = findLongestPath(child, nextVisiting);
     if (childPath.length > best.length) {
       best = childPath;
     }

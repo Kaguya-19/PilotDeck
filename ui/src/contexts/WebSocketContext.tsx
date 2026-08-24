@@ -134,7 +134,9 @@ const useWebSocketProviderState = (): WebSocketContextType => {
             const subs = subscribersRef.current;
             if (subs.size > 0) {
               subs.forEach((sub) => {
-                try { sub(reconnectMsg); } catch {}
+                try { sub(reconnectMsg); } catch {
+                  // A subscriber must not prevent other subscribers from receiving reconnect state.
+                }
               });
             }
             setLatestMessage(reconnectMsg);

@@ -138,3 +138,64 @@ test("permission failures are never reclassified as large-file recovery", () => 
     undefined,
   );
 });
+
+test("initial repair state has no pending work and exposes the bounded output recommendation", () => {
+  const repair = new LargeFileRepair();
+  assert.equal(repair.hasPendingRepair, false);
+  assert.equal(repair.recommendedMaxOutputTokens, 16_384);
+  assert.equal(repair.onInvalidToolInput(), undefined);
+  assert.equal(repair.onNoToolCalls(), undefined);
+});
+
+test("pre-draft risk handles required fields, truncation evidence and bounded retries", () => {
+  const repair = new LargeFileRepair();
+  const first = repair.analyzeToolResults(
+    [failure("write_file", "content is missing", { details: { issues: [{ path: "content", code: "required" }] } })],
+    NO_TRUNCATION,
+  );
+  assert.equal(first?.type, "continue");
+  assert.match(first?.type === "continue" ? first.prompt : "", /1\/5/);
+  assert.equal(repair.onInvalidToolInput()?.type, "continue");
+  assert.equal(repair.onNoToolCalls()?.type, "continue");
+
+  const other = new LargeFileRepair();
+  assert.equal(other.analyzeToolResults([failure("bash", "large file output")], NO_TRUNCATION), undefined);
+  const truncated = other.analyzeToolResults(
+    [failure("edit_file", "required parameter content is missing", { details: { issues: [{ code: "required", path: "content" }] } })],
+    { ...NO_TRUNCATION, outputTruncated: true },
+  );
+  assert.equal(truncated?.type, "continue");
+});
+
+test("repaired truncation starts pre/post recovery and stops after the recovery cap", () => {
+  const call = { id: "write-1", name: "write_file", input: { file_path: "x" } };
+  const pre = new LargeFileRepair();
+  const preDecision = pre.recoverFromRepairedTruncation([call]);
+  assert.equal(preDecision?.type, "continue");
+  assert.equal(preDecision?.type === "continue" && preDecision.strip, "assistant");
+  assert.equal(new LargeFileRepair().recoverFromRepairedTruncation([{ ...call, name: "read_file" }]), undefined);
+
+  const post = new LargeFileRepair();
+  post.analyzeToolResults([success("write_file", { filePath: "/workspace/a.txt" })], NO_TRUNCATION);
+  const postDecision = post.recoverFromRepairedTruncation([call]);
+  assert.equal(postDecision?.type, "continue");
+  assert.equal(postDecision?.type === "continue" && postDecision.strip, "assistant");
+  for (let index = 0; index < 10; index += 1) {
+    post.recoverFromRepairedTruncation([call]);
+  }
+  assert.equal(post.recoverFromRepairedTruncation([call]), undefined);
+});
+
+test("post-draft repair tracks the five most recent file paths without duplicates", () => {
+  const repair = new LargeFileRepair();
+  const paths = ["a", "b", "c", "d", "e", "f"];
+  for (const filePath of paths) {
+    repair.analyzeToolResults([success("write_file", { filePath })], NO_TRUNCATION);
+  }
+  const decision = repair.analyzeToolResults(
+    [failure("edit_file", "large artifact output")],
+    { ...NO_TRUNCATION, finishReason: "length" },
+  );
+  assert.equal(decision?.type, "continue");
+  assert.match(decision?.type === "continue" ? decision.prompt : "", /f, e, d, c, b/);
+});

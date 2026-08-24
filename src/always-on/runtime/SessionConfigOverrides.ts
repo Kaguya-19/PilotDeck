@@ -48,12 +48,12 @@ export class SessionConfigOverrides {
   private readonly map = new Map<string, SessionConfigOverride>();
 
   set(sessionKey: string, override: SessionConfigOverride): void {
-    this.map.set(sessionKey, { ...override });
+    this.map.set(sessionKey, cloneOverride(override));
   }
 
   get(sessionKey: string): SessionConfigOverride | undefined {
     const entry = this.map.get(sessionKey);
-    return entry ? { ...entry } : undefined;
+    return entry ? cloneOverride(entry) : undefined;
   }
 
   delete(sessionKey: string): void {
@@ -71,4 +71,19 @@ export class SessionConfigOverrides {
   clear(): void {
     this.map.clear();
   }
+}
+
+function cloneOverride(override: SessionConfigOverride): SessionConfigOverride {
+  const clone: SessionConfigOverride = { ...override };
+  if (override.permissionRules) {
+    clone.permissionRules = {
+      allow: override.permissionRules.allow ? [...override.permissionRules.allow] : undefined,
+      deny: override.permissionRules.deny ? [...override.permissionRules.deny] : undefined,
+      ask: override.permissionRules.ask ? [...override.permissionRules.ask] : undefined,
+    };
+  }
+  if (override.excludeTools) {
+    clone.excludeTools = [...override.excludeTools];
+  }
+  return clone;
 }

@@ -14,6 +14,13 @@
   },
   "scripts": {
     "check:runtime": "node scripts/check-node-runtime.mjs",
+    "check:docs": "node scripts/check-docs.mjs",
+    "check": "pnpm run check:docs && pnpm run test:unit && pnpm --dir ui run lint && pnpm --dir ui run typecheck && pnpm --dir ui run test && pnpm --dir ui run build && pnpm run test:artifact",
+    "test:unit": "pnpm test",
+    "test:contract": "pnpm run build && node --test --test-force-exit --test-timeout 60000 dist/tests/agent/loop/core-lifecycle.spec.js dist/tests/agent/session-lifecycle.spec.js dist/tests/agent/turn-runner-contract.spec.js dist/tests/gateway/execution-lifecycle.spec.js dist/tests/gateway/map-agent-event-runid.spec.js dist/tests/gateway/process-smoke.spec.js dist/tests/gateway/remote-gateway-contract.spec.js dist/tests/gateway/websocket-contract.spec.js dist/tests/model/request/anthropicCache.spec.js dist/tests/model/request/malformedMessages.spec.js dist/tests/model/request/openaiSchema.spec.js dist/tests/model/request/validateModelRequest.test.js dist/tests/model/streaming/assembleModelMessage.test.js dist/tests/session/session-title-generator.spec.js dist/tests/session/turn-runner-title-race.spec.js",
+    "test:artifact": "pnpm run build && node scripts/check-artifact.mjs",
+    "test:coverage": "node scripts/check-module-coverage.mjs",
+    "test:p1-proof": "node scripts/verify-p1-proofs.mjs",
     "install:browser": "npx @playwright/mcp install-browser chrome-for-testing",
     "install:asr": "node scripts/install-asr.mjs",
     "prebuild": "npm run check:runtime && node scripts/bootstrap-pilotdeck-config.mjs && cd src/context/memory/edgeclaw-memory-core && npm run build",

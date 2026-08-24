@@ -1,0 +1,50 @@
+# PilotDeck 测试证据矩阵
+
+状态：评审中　维护者：测试与各模块 owner
+
+## 证据等级
+
+| 等级 | 含义 | 可否替代历史失败证明 |
+| --- | --- | --- |
+| `CURRENT_ONLY` | 当前代码上的确定性测试通过 | 不可以 |
+| `PARENT_FAIL` | 修复父提交可复现失败，当前修复后通过 | 可以，需记录提交 |
+| `MUTATION_FAIL` | 精确反向变异后目标测试失败 | 可以，需记录 mutation |
+| `CONTRACT_ONLY` | 协议契约已固定，但尚无历史失败或变异证据 | 不可以 |
+| `ENTRY_SMOKE` | 通过公开进程/adapter/API/CLI 入口 | 不可以单独替代单测 |
+| `ARTIFACT_PASS` | 编译后的 dist/package 入口通过 | 不可以单独替代契约测试 |
+| `DEFER_EXTERNAL` | 依赖真实模型、网络、平台、浏览器或 Docker | 不进入普通 PR |
+
+## 现阶段映射
+
+| TRD | 代码边界 | 当前测试入口 | 当前证据 | 目标 gate |
+| --- | --- | --- | --- | --- |
+| 01 Gateway Wire | `src/gateway/protocol/**`、`src/gateway/server/GatewayWsConnection.ts`、`src/gateway/server/websocket.ts`、`src/gateway/server/staticAssets.ts` | `tests/gateway/websocket-contract.spec.ts`、`tests/gateway/remote-gateway-contract.spec.ts`、`tests/gateway/websocket-frame-boundaries.spec.ts`、`tests/gateway/static-assets.spec.ts` | `CURRENT_ONLY`，错误矩阵已扩展；`websocket.ts` 98.63% 行、`staticAssets.ts` 100% 行，`reloadConfigResult.ts` 行/分支/函数均 100% | `test:contract`、入口 smoke、mutation |
+| 02 Gateway Lifecycle | `src/gateway/client/InProcessGateway.ts`、`src/gateway/SessionRouter.ts`、`src/gateway/client/GatewayWsClient.ts`、`src/gateway/client/probeServer.ts`、`src/gateway/server/GatewayServer.ts`、`src/gateway/permission/**`、`src/gateway/elicitation/**` | `tests/gateway/execution-lifecycle.spec.ts`、`tests/gateway/active-turn-snapshot.spec.ts`、`tests/gateway/gateway-bridge-boundaries.spec.ts`、`tests/gateway/gateway-ws-client.spec.ts`、`tests/gateway/process-smoke.spec.ts`、`tests/gateway/gateway-server-boundaries.spec.ts`、`tests/gateway/in-process-optional-apis.spec.ts`、`tests/gateway/map-agent-event-boundaries.spec.ts`、`tests/gateway/in-process-telemetry-boundaries.spec.ts` | `GatewayWsClient.ts` 96.58% 行/97.14% 函数；`GatewayServer.ts` 97.66% 行/93.75% 函数；`SessionRouter.ts` 100% 行/100% 函数；`InProcessGateway.ts` 97.54% 行/84.49% 分支/91.67% 函数；`probeServer.ts` 100% 行/分支/函数，elicitation bus 100% 行，permission hook 99.43% 行。InProcess 的分支仍低于状态机目标，需继续补 submit timeout、attachment error、RPC dispatch 和 mutation proof | `test:contract`、process smoke、coverage、mutation |
+| 03-06 Agent Runtime | `src/agent/loop/**`、`src/agent/session/**`、`src/agent/turn/**`、`src/agent/protocol/events.ts` | `tests/agent/loop/core-lifecycle.spec.ts`、`tests/agent/loop/recovery-boundaries.spec.ts`、`tests/agent/session-lifecycle.spec.ts`、`tests/agent/turn-runner-contract.spec.ts`、`tests/agent/turn-runner-boundaries.spec.ts`、`tests/session/**` | `CURRENT_ONLY`；`AgentLoop.ts` 行覆盖 91.11%、函数覆盖 86.39%，`TurnRunner.ts` 行覆盖 98.10%、函数覆盖 72.34%；`ensureToolResultPairing.ts`、`filterIncompleteToolCalls.ts`、`builtinSubagentTypes.ts` 已达到 100% 行/函数。TurnRunner 已覆盖 accepted-input 失败、hook block、tool result、artifact collector、重复终态、title 并发和人工 title 优先，但私有 abort-link、异常收尾和部分深层 AgentLoop recovery 仍缺入口或 mutation 证据。`pnpm test:p1-proof` 已为部分终态/title/error/tool identity 契约产生 `MUTATION_FAIL`，尚无 `PARENT_FAIL` | `test:contract`、root unit、mutation |
+| 07-13 Context | `src/context/**` | `tests/context/**`、`tests/agent/loop/**`、`tests/context/compaction-boundaries.spec.ts` | `CURRENT_ONLY`；`AutoCompactionPolicy.ts`、`CachedMicroCompactionEngine.ts`、`stripMultimedia.ts` 行/函数均达到 100%，`NullContextRuntime.ts` 行 98.48%、函数 100%。仍有 `TokenAccountingRuntime`、`DefaultContextRuntime` 的分支缺口，尚无父提交或 mutation 失败证明 | root unit、coverage、mutation |
+| 14-19 Model | `src/model/**` | `tests/model/providers/google-and-responses.spec.ts`、`tests/model/request/**`、`tests/model/streaming/**`、`tests/model/streaming/parse-text-tool-calls.spec.ts`、`tests/model/normalizeUsage.spec.ts` | Google request/response/schema/stream 与 OpenAI Responses request/response/stream 直接测试已纳入 `test:coverage`；`parseTextToolCalls.ts` 已通过 Hermes/Qwen/DeepSeek/Mistral/Llama 及 malformed recovery 达到 92.55% 行、97.14% 函数。证据仍为 `CURRENT_ONLY`；OpenAI Chat、Anthropic 完整 adapter 分支、provider client 和 stream assembler 的异常矩阵仍需补齐 | contract、coverage、mutation、external nightly |
+| 20-24 Router | `src/router/**` | `tests/router/router-runtime.spec.ts`、`tests/router/router-core.spec.ts`、`tests/router/router-config.spec.ts`、`tests/router/tokenSaver.spec.ts`、`tests/router/scenario-and-policy.spec.ts`、`tests/router/token-stats-collector.spec.ts` | RouterRuntime 已纳入 `test:coverage`，入口测试覆盖 decision、sticky、cache-aware、media、fallback、retry、abort 和 stream，`RouterRuntime.ts` 行覆盖率 `93.73%`；`parseRouterConfig.ts` 已通过默认、partial、引用解析、冲突和 malformed diagnostic 达到 95.05% 行、100% 函数。证据仍为 `CURRENT_ONLY`，模型冲突、unavailable model 和 health skip mutation proof 仍缺 | unit、coverage、mutation、nightly |
+| 25-34 Tool/Extension | `src/tool/**`、`src/extension/**`、`src/mcp/**` | `tests/tool/tool-runtime.spec.ts`、`tests/tool/registry-scheduler.spec.ts`、`tests/tool/unavailable-tool.spec.ts`、`tests/tool/**`、`tests/extension/hooks-execution.spec.ts`、`tests/extension/plugins/plugin-contract-boundaries.spec.ts`、`tests/extension/**`、`tests/mcp/**`、`tests/permission/permission-runtime.spec.ts` | ToolRuntime 已覆盖成功、失败、取消、权限、hook、plan/ask、校验、恢复、审计和嵌套调用，并纳入 `test:coverage`；插件 manifest、marketplace/source 校验、目录发现、hook ownership、registry replace 和 MCP instruction truncation 已达到 100% 行覆盖。当前证据为 `CURRENT_ONLY`；`formatValidationError`、`validateToolInput`、`errorRecovery` 仍有低于 90% 的分支缺口，allowlist 反向 mutation 和真实 adapter 入口仍缺 | unit、coverage、mutation、entry smoke |
+| 35-41 Session/Automation | `src/session/**`、`src/always-on/**`、`src/cron/**`、`src/task/**` | `tests/session/**`、`tests/session/transcript-storage-boundaries.spec.ts`、`tests/session/session-lite-reader.spec.ts`、`tests/session/search-chat-history.spec.ts`、`tests/session/resume-agent-session.spec.ts`、`tests/always-on/run-history-service.spec.ts`、`tests/always-on/signal-watcher.spec.ts`、`tests/always-on/contracts-runtime.spec.ts`、`tests/always-on/chat-digest.spec.ts`、`tests/always-on/discovery-plan-status.spec.ts`、`tests/always-on/storage-boundaries.spec.ts`、`tests/always-on/tool-boundaries.spec.ts`、`tests/cron/cron-editing.spec.ts`、`tests/cron/cron-runtime-boundaries.spec.ts`、`tests/task/**` | Transcript Reader/Chain/Replay/JSONL writer 已纳入 `test:coverage`，行覆盖 `94.34%~100%`；`SessionLiteReader`、Always-On Chat History、ChatDigest、DiscoveryPlanStatus、run history、SignalWatcher 和 resume 已有直接确定性测试，session search 99%+ 行，Always-On plan/report/workspace tools 行覆盖 95%+，Always-On storage 五个 store 已通过临时目录测试达到 94.53%~100% 行覆盖。Cron 核心 runtime/fire/scheduler/store 和工具包装器行覆盖均达到 90%+；当前主要缺口是 Always-On manager/runtime/discovery scheduler/fire 的部分私有闭包和 dormancy signal 集成分支（函数覆盖分别约 77.78%、77.27%、78.95%、69.44%），以及 workspace provider 的少数失败回调。CronManager/StoreMigration 和这些 Always-On 深层分支仍需 mutation proof 或入口级补测 | unit、coverage、mutation、artifact |
+| 42-46 Adapter/Web/UI | `src/adapters/**`、`ui/server/**`、`ui/src/**` | `tests/adapters/feishu-permission-reply.spec.ts`、`tests/adapters/im-permission-helper.spec.ts`、`tests/gateway/weixin-*.spec.ts`、`tests/web/**`，以及 UI Vitest | `CURRENT_ONLY`；大多数平台 `start/stop`、session mapper、重连、附件和 webhook 入口仍没有确定性公开入口测试；UI 组件虽有较多 Vitest，但未建立全量源码 coverage 报告 | unit、entry smoke、browser |
+| 47-50 Runtime/Ops | `src/cli/**`、`src/pilot/**`、`src/network/**`、`src/telemetry/**` | `tests/cli/**`、`tests/pilot/config/config-runtime.spec.ts`、`tests/pilot/config/parseToolsConfig.spec.ts`、`tests/pilot/config/config-store.spec.ts`、`tests/network/fetch.spec.ts`、`tests/tool/builtin/pure-boundaries.spec.ts`、`tests/telemetry/telemetry-runtime.spec.ts`、`scripts/check-module-coverage.mjs` | Telemetry、网络、配置解析/reload、Router config 和文本工具调用解析已纳入 `test:coverage`；`parseMemoryConfig.ts` 99.30% 行、`parseToolsConfig.ts` 98.66% 行、`PilotConfigStore.ts` 96.82% 行、`fetch.ts` 99.29% 行，URL fetcher 93.54% 行。CLI server/built entry、UI 配置服务、network mutation 和 artifact 仍未纳入覆盖 gate，当前只能记为 `CURRENT_ONLY` 或 `CONTRACT_ONLY` | artifact、unit、coverage、nightly |
+
+## 尚未纳入覆盖门禁的代码边界
+
+下面这些不是“测试通过但覆盖率低”，而是当前 `scripts/check-module-coverage.mjs` 没有把对应源码纳入统计，必须单独建设测试后再加入 gate：
+
+| 优先级 | 代码边界 | 当前缺口 | 建议测试入口 |
+| --- | --- | --- | --- |
+| P0 | `src/adapters/channel/*Channel.ts`、`*SessionMapper.ts`、`src/adapters/channel/loadEnabledChannels.ts` | 除 Feishu/Weixin 的局部测试外，大多数平台没有公开 `start/stop`、session mapping、busy、重连和 cleanup 入口测试 | 使用 fake transport 为 Feishu、Weixin、Signal、WeCom 建入口契约；其他平台先补 mapper/render 纯函数 |
+| P0 | `src/adapters/web/**`、`src/web/server/**`、`src/web/client/**` | Webhook/API 路由、鉴权、重复投递、SSE、上传、浏览器 client 和 stop 后端口释放未形成根测试矩阵 | 本地随机端口 `start/stop` smoke，加 HMAC/错误/幂等测试 |
+| P1 | `src/always-on/web/DiscoveryPlanService.ts` | `AlwaysOnRunHistoryService` 已由 `tests/always-on/run-history-service.spec.ts` 覆盖 JSONL 合并、过滤、详情优先级、任务通知和 subagent transcript 恢复；DiscoveryPlanService 的 cycle archive/apply、权限错误隔离和 malformed input 仍缺完整 service 入口 | 使用临时存储、fake Gateway 和 workspace provider 补 service 入口测试 |
+| P1 | `src/context/extension/**`、`src/extension/contributions/**` | 插件 resolver、贡献合并和 reload 失败回滚没有独立 coverage；插件 manifest/discovery/registry 已覆盖 | fixture 驱动的扩展解析和生命周期测试，禁止缺 fixture 静默通过 |
+| P1 | `src/session/resume/**` | 恢复、损坏 transcript、取消和旧格式兼容主要由上层间接使用，缺直接契约 | 临时 JSONL/SQLite fixture，验证恢复边界、取消和跨 session 隔离 |
+| P1 | `src/cli/commands/gatewaySetup.ts`、`src/cli/ExtensionWatchManager.ts`、`src/router/customRouter/**` | `chatSearch` 和 custom router 已有直接 coverage；gateway setup、server/built 入口和 watch reload 仍没有统一离线入口测试 | 子进程/假端口/假文件 watcher smoke；验证 shutdown 和资源释放 |
+| P1 | `src/tool/builtin/**` 中 notebook 以及少数依赖运行时的工具 | filesystem、MCP resources、URL validation/cache/fetch、getCurrentTime 已由 `tests/tool/builtin/pure-boundaries.spec.ts` 使用 fake filesystem/transport 覆盖并纳入模块列表；notebook 和真实浏览器/外部工具链仍没有 coverage 证据 | 为 notebook 增加 fixture 驱动的纯解析/边界测试；真实浏览器链路保持 `DEFER_EXTERNAL` |
+| P1 | `ui/src/**` 与 `ui/server/**` | UI 有较多 Vitest，但没有全源码覆盖阈值；跨 session、重连、queued send 主要是局部 hook 测试 | 建立 Vitest coverage 报告和 reducer/store 入口矩阵；Playwright smoke 仍保持非阻塞 |
+| P2 | `src/adapters/channel/tui/**` 及桌面/Office/真实平台链路 | 依赖终端、浏览器、平台账号或桌面环境，不适合作为普通 PR 单测 | 登记 `DEFER_EXTERNAL`，使用专用 runner/nightly |
+
+## 状态更新规则
+
+测试补齐后只能从 `CURRENT_ONLY` 升级为 `PARENT_FAIL` 或 `MUTATION_FAIL`，不得因为测试数量增加直接写成历史回归已证明。每个升级必须记录测试路径、目标契约、失败证明命令和对应 CI/artifact 层。

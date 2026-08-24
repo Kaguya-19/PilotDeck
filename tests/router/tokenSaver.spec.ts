@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { CanonicalModelRequest, ModelRuntime } from "../../src/model/index.js";
-import { ModelProviderError } from "../../src/model/index.js";
+import { ModelProviderError, ModelRequestError } from "../../src/model/index.js";
 import { classifyAndRoute } from "../../src/router/index.js";
 
 test("records the normalized judge error when token-saver falls back", async () => {
@@ -171,6 +171,83 @@ test("aborts the judge request when its classification timeout expires", async (
     reason: "timeout",
     attempts: 1,
     code: "judge_timeout",
+  });
+});
+
+test("token saver fails open when disabled, misconfigured, or missing a user message", async () => {
+  const runtime = { complete: async () => ({ role: "assistant", content: [{ type: "text", text: "medium" }], finishReason: "stop" }) } as unknown as ModelRuntime;
+  assert.equal(await classifyAndRoute({ config: { ...config(), enabled: false }, messages: [], judgeRuntime: runtime }), undefined);
+  assert.equal(await classifyAndRoute({ config: { ...config(), defaultTier: "missing" }, messages: [], judgeRuntime: runtime }), undefined);
+  const result = await classifyAndRoute({
+    config: config(),
+    messages: [{ role: "assistant", content: [{ type: "text", text: "no user" }] }],
+    judgeRuntime: runtime,
+  });
+  assert.deepEqual(result, {
+    tier: "medium",
+    selection: { id: "main/main-model", provider: "main", model: "main-model" },
+    resolvedFrom: "default",
+  });
+});
+
+test("token saver sends a canonical judge request and parses a successful tier", async () => {
+  let request: CanonicalModelRequest | undefined;
+  const result = await classifyAndRoute({
+    config: config(),
+    previousTier: "low",
+    sessionId: "session",
+    messages: [{ role: "user", content: [{ type: "text", text: "classify me" }] }],
+    judgeRuntime: {
+      complete: async (nextRequest: CanonicalModelRequest) => {
+        request = nextRequest;
+        return { role: "assistant", content: [{ type: "text", text: "<tier>medium</tier>" }], finishReason: "stop" };
+      },
+    } as unknown as ModelRuntime,
+  });
+  assert.equal(result?.resolvedFrom, "judge");
+  assert.equal(request?.maxOutputTokens, 256);
+  assert.deepEqual(request?.thinking, { enabled: false });
+  assert.equal(request?.stream, false);
+  assert.match(request?.messages[0]?.content[0]?.type === "text" ? request.messages[0].content[0].text : "", /classify me/);
+});
+
+test("token saver retries empty and malformed judge responses before parse fallback", async () => {
+  for (const text of ["", "unknown-tier"]) {
+    let attempts = 0;
+    const result = await classifyAndRoute({
+      config: config(),
+      messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+      judgeRuntime: {
+        complete: async () => {
+          attempts += 1;
+          return { role: "assistant", content: [{ type: "text", text }], finishReason: "stop" };
+        },
+      } as unknown as ModelRuntime,
+    });
+    assert.equal(attempts, 3);
+    assert.equal(result?.failureReason, "parse_error");
+    assert.equal(result?.failure?.attempts, 3);
+  }
+});
+
+test("token saver does not retry a local model request validation error", async () => {
+  let attempts = 0;
+  const result = await classifyAndRoute({
+    config: config(),
+    messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+    judgeRuntime: {
+      complete: async () => {
+        attempts += 1;
+        throw new ModelRequestError("unsupported_model", "judge model is unavailable");
+      },
+    } as unknown as ModelRuntime,
+  });
+  assert.equal(attempts, 1);
+  assert.deepEqual(result?.failure, {
+    reason: "model_error",
+    attempts: 1,
+    code: "unsupported_model",
+    message: "judge model is unavailable",
   });
 });
 
