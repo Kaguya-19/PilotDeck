@@ -41,6 +41,12 @@ type AnthropicTool = {
   input_schema: Record<string, unknown>;
 };
 
+const ANTHROPIC_PROMPT_CACHE_TTL = "1h" as const;
+
+function createPromptCacheControl(): { type: "ephemeral"; ttl: "1h" } {
+  return { type: "ephemeral", ttl: ANTHROPIC_PROMPT_CACHE_TTL };
+}
+
 /**
  * Reserved tool name for Anthropic structured-output enforcement.
  * Exported so `extractStructuredOutput` and tests can recognize it.
@@ -92,7 +98,7 @@ export function buildAnthropicRequest(
     ),
     system: request.systemPrompt
       ? cacheBreakpoints
-        ? [{ type: "text", text: request.systemPrompt, cache_control: { type: "ephemeral" } }]
+        ? [{ type: "text", text: request.systemPrompt, cache_control: createPromptCacheControl() }]
         : request.systemPrompt
       : undefined,
     tools: tools.length > 0 ? tools : undefined,
@@ -132,7 +138,7 @@ function toAnthropicMessage(
 ): AnthropicMessage {
   const content = messageContent(message).map(toAnthropicContentBlock);
 
-  // A4: attach `cache_control: { type: "ephemeral" }` to the LAST content
+  // A4: attach `cache_control: { type: "ephemeral", ttl: "1h" }` to the LAST content
   // block of this message. Anthropic anchors the cache breakpoint at this
   // block, so the prefix up to and including it is cached. Caller
   // (`CachedMicroCompactionEngine`) chooses which messages to mark.
@@ -141,7 +147,7 @@ function toAnthropicMessage(
     if (last && typeof last === "object") {
       content[content.length - 1] = {
         ...(last as Record<string, unknown>),
-        cache_control: { type: "ephemeral" },
+        cache_control: createPromptCacheControl(),
       };
     }
   }
