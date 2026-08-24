@@ -81,7 +81,7 @@ export async function runChatSearchCli(argv: string[]): Promise<void> {
     .filter((token, index, all) => {
       if (token.startsWith("--")) return false;
       const prev = all[index - 1];
-      if (prev === "--project" || prev === "--limit" || prev === "--role" || prev === "--session") {
+      if (prev === "--project" || prev === "--limit" || prev === "--role" || prev === "--session" || prev === "--pilot-home") {
         return false;
       }
       return true;

@@ -72,7 +72,8 @@ export function buildAnthropicRequest(
   const tools: AnthropicTool[] = outputTool ? [outputTool, ...baseTools] : baseTools;
 
   // Anthropic allows at most 4 cache_control blocks per request.
-  // Reserve 1 for the system prompt; keep the 3 most recent message breakpoints.
+  // Reserve 1 for the system prompt; keep the 3 most recent message breakpoints
+  // so the newest stable prefix can be reused on the next request.
   const MAX_MESSAGE_BREAKPOINTS = 3;
   const trimmedBreakpoints = request.cacheBreakpoints
     ? request.cacheBreakpoints.length > MAX_MESSAGE_BREAKPOINTS

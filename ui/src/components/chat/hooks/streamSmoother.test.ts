@@ -57,6 +57,7 @@ describe('SmoothTextStream', () => {
 
     stream.append(text);
 
+    expect(emitted).toHaveLength(0);
     expect(emitted.length).toBe(0);
 
     scheduler.runNext();
@@ -124,6 +125,7 @@ describe('SmoothTextStream', () => {
     stream.append('hello world, next sentence.');
     scheduler.runNext();
 
+    expect(emitted[0].length).toBeLessThanOrEqual(12);
     expect(emitted[0]).toBe('he');
   });
 

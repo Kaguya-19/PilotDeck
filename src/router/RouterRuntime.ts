@@ -856,9 +856,40 @@ export function createRouterRuntime(
             transientRetryCount++;
             continue;
           }
-          for (const queued of pending) {
-            yield queued;
+          if (
+            hasYieldedContent &&
+            isMidStreamRateLimitError(outcome.error) &&
+            transientRetryCount < transientRetryMax
+          ) {
+            const partialText = extractPartialText(outcome.buffered);
+            if (partialText.length > 0) {
+              const midDelay = outcome.error.retryAfterMs != null
+                ? Math.min(outcome.error.retryAfterMs, transientMaxDelayMs)
+                : calculateLiteLLMRetryDelay(transientRetryCount, transientBaseDelayMs, transientMaxDelayMs);
+              console.warn(
+                `[PilotDeck] midStreamRetry: ${outcome.error.code} after partial content ` +
+                `(attempt ${transientRetryCount + 1}/${transientRetryMax}, delay=${Math.round(midDelay)}ms)`,
+              );
+              events.emit({
+                type: "pilotdeck_router_retry_progress",
+                sessionId: ctx.sessionId,
+                turnId: ctx.turnId,
+                attempt: transientRetryCount + 1,
+                maxAttempts: transientRetryMax,
+                delayMs: Math.round(midDelay),
+                reason: classifyRetryReason(outcome.error.code),
+                provider: attempt.provider,
+                model: attempt.model,
+              });
+              await abortableDelay(midDelay, ctx.abortSignal);
+              attemptRequest = buildLiteLLMContinuationRequest(attemptRequest, partialText);
+              transientRetryCount++;
+              continue;
+            }
           }
+          // The terminal error path below replays buffered framing events and
+          // emits one canonical error. Do not flush `pending` here as well,
+          // otherwise a pre-content provider error is delivered twice.
           lastHasYieldedContent = hasYieldedContent;
           break outer;
         }

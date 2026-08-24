@@ -66,7 +66,6 @@ export async function networkFetch(
     const timeout = options.timeoutMs && options.timeoutMs > 0
       ? setTimeout(() => controller.abort(new NetworkFetchError("network_timeout", `Network request timed out after ${options.timeoutMs}ms.`)), options.timeoutMs)
       : undefined;
-
     try {
       const response = await performFetch(input, {
         ...init,
