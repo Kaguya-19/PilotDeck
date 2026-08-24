@@ -226,8 +226,8 @@ export type CanonicalModelRequest = {
   outputSchema?: CanonicalOutputSchema;
   /**
    * A4: indices into `messages` whose final content block should be marked
-   * `cache_control: { type: "ephemeral" }` when lowered to Anthropic. Other
-   * providers ignore this. Set by `CachedMicroCompactionEngine`.
+   * `cache_control: { type: "ephemeral", ttl: "1h" }` when lowered to
+   * Anthropic. Other providers ignore this. Set by `CachedMicroCompactionEngine`.
    */
   cacheBreakpoints?: number[];
 };

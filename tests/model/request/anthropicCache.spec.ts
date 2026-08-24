@@ -43,9 +43,14 @@ test("Anthropic keeps the most recent message cache breakpoints", () => {
     .map(({ index }) => index);
 
   assert.deepEqual(marked, [3, 5, 7]);
+  for (const message of body.messages) {
+    for (const block of message.content as Array<Record<string, any>>) {
+      if (block.cache_control) assert.equal(block.cache_control.ttl, "1h");
+    }
+  }
   assert.deepEqual(body.system, [{
     type: "text",
     text: "Stable system prompt",
-    cache_control: { type: "ephemeral" },
+    cache_control: { type: "ephemeral", ttl: "1h" },
   }]);
 });

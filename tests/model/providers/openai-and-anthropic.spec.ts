@@ -162,7 +162,11 @@ test("Anthropic request projects content, structured output, tool choice and cac
     { role: "assistant", content: [{ type: "thinking", text: "plan", signature: "sig" }, { type: "tool_call", id: "call-1", name: "lookup", input: { q: "x" } }] },
     { role: "user", content: [{ type: "tool_result", toolCallId: "call-1", isError: true, content: [{ type: "text", text: "failed" }, { type: "image", source: "base64", data: "AQ==", mimeType: "image/png" }] }] },
   ]), anthropicModel);
-  assert.equal(body.system && Array.isArray(body.system) ? body.system[0].cache_control.type : "none", "ephemeral");
+  const systemBlock = body.system && Array.isArray(body.system)
+    ? body.system[0] as { cache_control?: { type?: string; ttl?: string } }
+    : undefined;
+  assert.equal(systemBlock?.cache_control?.type ?? "none", "ephemeral");
+  assert.equal(systemBlock?.cache_control?.ttl ?? "none", "1h");
   assert.equal(body.tools?.[0]?.name, ANTHROPIC_STRUCTURED_OUTPUT_TOOL_NAME);
   assert.equal(body.tool_choice?.name, ANTHROPIC_STRUCTURED_OUTPUT_TOOL_NAME);
   assert.deepEqual(body.thinking, { type: "enabled", budget_tokens: 2048 });
