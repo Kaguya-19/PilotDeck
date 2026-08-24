@@ -1,5 +1,3 @@
-import { isIP } from "node:net";
-
 /**
  * URL hygiene helpers for `web_fetch` (mirrors §5.2 W1, W2, W3, W7).
  */
@@ -22,7 +20,6 @@ export function validateURL(url: string): boolean {
   }
 
   if (parsed.username || parsed.password) return false;
-  if (isIP(parsed.hostname)) return false;
 
   const parts = parsed.hostname.split(".").filter((p) => p.length > 0);
   if (parts.length < 2) return false;
