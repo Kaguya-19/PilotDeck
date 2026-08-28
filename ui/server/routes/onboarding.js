@@ -2,8 +2,6 @@ import express from 'express';
 import { createHmac, randomBytes, randomUUID, timingSafeEqual } from 'crypto';
 import { constants as fsConstants, promises as fs } from 'fs';
 import path from 'path';
-import { addProjectManually } from '../projects.js';
-import { validateWorkspacePath, cloneGitHubRepository } from './projects.js';
 import { readPilotDeckConfigFile, withPilotDeckConfigWrite, writePilotDeckConfig } from '../services/pilotdeckConfig.js';
 import { reloadPilotDeckConfig } from '../services/pilotdeckConfigReloader.js';
 import { suppressNextWatchEvent } from '../services/pilotdeckConfigWatcher.js';
@@ -153,7 +151,7 @@ function getTest(req, res, testId = req.params.testId) {
 function deleteExpiredTests() { const now = Date.now(); for (const [id, record] of tests) if (record.expiresAt <= now) tests.delete(id); }
 setInterval(deleteExpiredTests, TEST_TTL_MS).unref();
 
-function modelTestRateLimiter(req, res, next) {
+export function modelTestRateLimiter(req, res, next) {
   const now = Date.now();
   const key = String(req.user?.id || req.ip || 'anonymous');
   const bucket = testRateBuckets.get(key);
@@ -166,7 +164,7 @@ function modelTestRateLimiter(req, res, next) {
   return apiError(res, 429, 'RATE_LIMITED', 'Too many connection tests.');
 }
 
-router.post('/model-connection-tests', modelTestRateLimiter, async (req, res) => {
+export async function modelConnectionTestsHandler(req, res) {
   const provider = resolveProvider(req.body || {});
   const requestedModels = Array.isArray(req.body?.models) ? req.body.models.map(text) : [];
   const models = [...new Set(requestedModels.filter(Boolean))];
@@ -188,7 +186,7 @@ router.post('/model-connection-tests', modelTestRateLimiter, async (req, res) =>
       let textProbe;
       try {
         textProbe = await probeModelConnection({
-          protocol: provider.protocol, baseUrl: provider.endpoint, apiKey, model: modelId, signal: requestAbort.signal,
+          protocol: provider.protocol, baseUrl: provider.endpoint, apiKey, model: modelId, signal: requestAbort.signal, retryPolicy: retry,
         });
       } catch (error) {
         if (requestAbort.signal.aborted) throw error;
@@ -201,7 +199,7 @@ router.post('/model-connection-tests', modelTestRateLimiter, async (req, res) =>
       let imageProbe;
       try {
         imageProbe = await probeModelConnection({
-          protocol: provider.protocol, baseUrl: provider.endpoint, apiKey, model: modelId, image: true, signal: requestAbort.signal,
+          protocol: provider.protocol, baseUrl: provider.endpoint, apiKey, model: modelId, image: true, signal: requestAbort.signal, retryPolicy: retry,
         });
       } catch (error) {
         if (requestAbort.signal.aborted) throw error;
@@ -234,9 +232,9 @@ router.post('/model-connection-tests', modelTestRateLimiter, async (req, res) =>
     requestAbort.cleanup();
     release();
   }
-});
+}
 
-router.put('/model-connection-tests/:testId/image-capabilities', (req, res) => {
+export function imageCapabilitiesHandler(req, res) {
   const record = getTest(req, res); if (!record) return;
   const supplied = Array.isArray(req.body?.models) ? req.body.models : [];
   const normalizedSupplied = supplied.map((model) => ({
@@ -255,7 +253,11 @@ router.put('/model-connection-tests/:testId/image-capabilities', (req, res) => {
   record.status = testStatus(record.models);
   record.error = aggregateError(record.models, record.status);
   return res.json(publicResult(record));
-});
+}
+
+router.post('/model-connection-tests', modelTestRateLimiter, modelConnectionTestsHandler);
+
+router.put('/model-connection-tests/:testId/image-capabilities', imageCapabilitiesHandler);
 
 router.put('/model-configuration', async (req, res) => {
   const record = getTest(req, res, text(req.body?.testId)); if (!record) return;
@@ -338,6 +340,8 @@ router.put('/model-configuration', async (req, res) => {
 });
 
 router.post('/workspaces', async (req, res) => {
+  const { addProjectManually } = await import('../projects.js');
+  const { validateWorkspacePath, cloneGitHubRepository } = await import('./projects.js');
   const type = text(req.body?.type);
   const requestedPath = text(req.body?.path);
   if (!hasOnlyKeys(req.body, ['type', 'path', 'githubUrl', 'modelConfigurationId']) || !['existing', 'new'].includes(type) || !requestedPath || !path.isAbsolute(requestedPath)) return apiError(res, 400, 'INVALID_REQUEST', 'type and an absolute path are required.');
