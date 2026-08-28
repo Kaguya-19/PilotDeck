@@ -254,7 +254,17 @@ function resolveProvider(
 ): WebSearchProvider {
   if (optionProvider) return optionProvider;
   if (optionApiKey?.trim()) return "glm";
-  if (readEnv(context, "TAVILY_API_KEY")) return "tavily";
+  const envProviders: Array<[string, WebSearchProvider]> = [
+    ["GLM_WEB_SEARCH_API_KEY", "glm"],
+    ["ZAI_API_KEY", "glm"],
+    ["TAVILY_API_KEY", "tavily"],
+    ["SERPER_API_KEY", "serper"],
+    ["BRAVE_API_KEY", "brave"],
+    ["CUSTOM_WEB_SEARCH_API_KEY", "custom"],
+  ];
+  for (const [name, provider] of envProviders) {
+    if (readEnv(context, name)) return provider;
+  }
   return "glm";
 }
 

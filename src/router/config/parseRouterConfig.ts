@@ -655,12 +655,7 @@ function parseStats(
       }
     }
   }
-  const baselineModel = optionalRef(
-    raw.baselineModel,
-    "router.stats.baselineModel",
-    modelConfig,
-    diagnostics,
-  );
+  const baselineModel = optionalBaselineModel(raw.baselineModel, modelConfig, diagnostics);
   return { enabled, modelPricing, baselineModel };
 }
 
@@ -711,6 +706,28 @@ function optionalRef(
     return undefined;
   }
   return consumeRef(raw, path, modelConfig, diagnostics);
+}
+
+function optionalBaselineModel(
+  raw: unknown,
+  modelConfig: ModelConfig,
+  diagnostics: RouterConfigDiagnostic[],
+): RouterModelRef | undefined {
+  const path = "router.stats.baselineModel";
+  if (raw === undefined) return undefined;
+  if (isRecord(raw) && typeof raw.provider === "string" && typeof raw.model === "string") {
+    const provider = raw.provider.trim();
+    const model = raw.model.trim();
+    if (provider && model) return consumeRef(`${provider}/${model}`, path, modelConfig, diagnostics);
+  }
+  if (typeof raw === "string") return optionalRef(raw, path, modelConfig, diagnostics);
+  diagnostics.push({
+    code: "ROUTER_REF_INVALID",
+    severity: "fatal",
+    path,
+    message: `${path} must be an object with provider and model.`,
+  });
+  return undefined;
 }
 
 function pricingNumber(value: unknown, path: string, diagnostics: RouterConfigDiagnostic[]): number | undefined {

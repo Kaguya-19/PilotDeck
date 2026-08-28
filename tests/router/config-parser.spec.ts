@@ -37,6 +37,19 @@ test("parses pricing unit without changing numeric pricing fields", () => {
   });
 });
 
+test("parses baselineModel object references", () => {
+  const result = parseRouterConfig({
+    stats: { baselineModel: { provider: "openai", model: "gpt-test" } },
+  }, modelConfig);
+
+  assert.equal(result.diagnostics.filter((item) => item.severity === "fatal").length, 0);
+  assert.deepEqual(result.config?.stats?.baselineModel, {
+    id: "openai/gpt-test",
+    provider: "openai",
+    model: "gpt-test",
+  });
+});
+
 test("rejects invalid pricing unit and values", () => {
   const result = parseRouterConfig({
     stats: {

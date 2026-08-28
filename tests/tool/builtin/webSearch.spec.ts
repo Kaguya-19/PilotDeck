@@ -158,6 +158,30 @@ test("web_search supports custom GET query mappings", async () => {
   assert.equal(result.data?.organic[0]?.title, "result");
 });
 
+test("web_search selects the provider-specific environment key when provider is omitted", async () => {
+  const cases: Array<{ provider: "serper" | "brave" | "custom"; env: Record<string, string>; url: string }> = [
+    { provider: "serper", env: { SERPER_API_KEY: "serper-env" }, url: "https://google.serper.dev/search" },
+    { provider: "brave", env: { BRAVE_API_KEY: "brave-env" }, url: "https://api.search.brave.com/res/v1/web/search?q=hello&count=8" },
+    { provider: "custom", env: { CUSTOM_WEB_SEARCH_API_KEY: "custom-env" }, url: "https://example.test/search" },
+  ];
+  for (const item of cases) {
+    let requestUrl = "";
+    const tool = createWebSearchTool({
+      endpoint: item.provider === "custom" ? "https://example.test/search" : undefined,
+      fetchImpl: async (url) => {
+        requestUrl = String(url);
+        return item.provider === "brave"
+          ? jsonResponse({ web: { results: [] } })
+          : item.provider === "serper"
+            ? jsonResponse({ organic: [] })
+            : jsonResponse({ results: [] });
+      },
+    });
+    await tool.execute({ query: "hello" }, { env: item.env, cwd: "/", projectRoot: "/", abortSignal: undefined } as any);
+    assert.equal(requestUrl, item.url);
+  }
+});
+
 test("web_search rejects non-HTTP(S) endpoints", async () => {
   const tool = createWebSearchTool({ provider: "tavily", apiKey: "tvly-key", endpoint: "ftp://example.test/search", fetchImpl: async () => jsonResponse({ results: [] }) });
 
