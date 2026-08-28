@@ -10,6 +10,10 @@ import { probeModelConnection } from '../services/modelConnectionProbe.js';
 const router = express.Router();
 const TEST_TTL_MS = 10 * 60 * 1000;
 const MAX_MODELS_PER_TEST = 10;
+const MAX_RETRIES_PER_PROBE = 10;
+const MAX_STREAM_RETRIES_PER_PROBE = 10;
+const MAX_RETRY_DELAY_MS = 60_000;
+const MAX_STREAM_IDLE_TIMEOUT_MS = 5 * 60_000;
 const TEST_RATE_WINDOW_MS = 60 * 1000;
 const TEST_RATE_MAX_REQUESTS = 5;
 const PROBE_GLOBAL_LIMIT = 3;
@@ -116,6 +120,10 @@ function retryPolicy(value) {
   for (const key of keys) {
     if (value[key] === undefined) continue;
     if (typeof value[key] !== 'number' || !Number.isInteger(value[key]) || value[key] < 0) return null;
+    if (key === 'maxRetries' && value[key] > MAX_RETRIES_PER_PROBE) return null;
+    if (key === 'maxStreamRetries' && value[key] > MAX_STREAM_RETRIES_PER_PROBE) return null;
+    if (key === 'streamIdleTimeoutMs' && value[key] > MAX_STREAM_IDLE_TIMEOUT_MS) return null;
+    if ((key === 'baseDelayMs' || key === 'maxDelayMs') && value[key] > MAX_RETRY_DELAY_MS) return null;
     output[key] = value[key];
   }
   if (output.baseDelayMs > output.maxDelayMs) return null;
@@ -268,13 +276,29 @@ export function imageCapabilitiesHandler(req, res) {
   }));
   const unknown = record.models.filter((model) => model.imageInput === 'unknown').map((model) => model.modelId).sort();
   const received = normalizedSupplied.map((model) => model.modelId).sort();
-  if (!hasOnlyKeys(req.body, ['models']) || !unknown.length || unknown.length !== received.length || unknown.some((id, index) => id !== received[index]) || normalizedSupplied.some((model) => !hasOnlyKeys(model, ['modelId', 'imageInput']) || !model.modelId || !['supported', 'unsupported'].includes(model?.imageInput))) {
+  const validPayload = hasOnlyKeys(req.body, ['models'])
+    && normalizedSupplied.every((model) => hasOnlyKeys(model, ['modelId', 'imageInput']) && model.modelId && ['supported', 'unsupported'].includes(model?.imageInput));
+  if (!validPayload) {
+    return apiError(res, 400, 'INVALID_REQUEST', 'models must provide exactly every unknown image capability.');
+  }
+  if (!unknown.length) {
+    const manualCapabilities = record.manualImageCapabilities;
+    const expected = manualCapabilities ? Object.keys(manualCapabilities).sort() : [];
+    const isReplay = expected.length > 0
+      && expected.length === received.length
+      && expected.every((id, index) => id === received[index])
+      && normalizedSupplied.every((model) => manualCapabilities[model.modelId] === model.imageInput);
+    if (isReplay) return res.json(publicResult(record));
+    return apiError(res, 400, 'INVALID_REQUEST', 'models must provide exactly every unknown image capability.');
+  }
+  if (unknown.length !== received.length || unknown.some((id, index) => id !== received[index])) {
     return apiError(res, 400, 'INVALID_REQUEST', 'models must provide exactly every unknown image capability.');
   }
   for (const model of record.models) {
     const suppliedModel = normalizedSupplied.find((item) => item.modelId === model.modelId);
     if (suppliedModel) { model.imageInput = suppliedModel.imageInput; model.error = null; }
   }
+  record.manualImageCapabilities = Object.fromEntries(normalizedSupplied.map((model) => [model.modelId, model.imageInput]));
   record.status = testStatus(record.models);
   record.error = aggregateError(record.models, record.status);
   return res.json(publicResult(record));

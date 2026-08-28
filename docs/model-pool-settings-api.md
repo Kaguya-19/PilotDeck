@@ -56,7 +56,7 @@ type ModelConnectionTestResult = {
 };
 ```
 
-`RetryPolicy` 当前要求五个字段全部存在，均为非负整数，且 `baseDelayMs <= maxDelayMs`。服务端最多接受 10 个模型，模型 ID trim 后必须非空且不能重复。
+`retryPolicy` 对象为必填；其字段可省略并使用服务端默认值。所有数值必须为非负整数，`maxRetries` 和 `maxStreamRetries` 最大为 10，`streamIdleTimeoutMs` 最大为 300000，`baseDelayMs` 和 `maxDelayMs` 最大为 60000，且 `baseDelayMs <= maxDelayMs`。服务端最多接受 10 个模型，模型 ID trim 后必须非空且不能重复。
 
 ## 3. 读取完整配置
 
@@ -245,7 +245,7 @@ providerId/modelId 重命名会在同一写入事务中改写 `agent.model`、`a
 }
 ```
 
-`maxRetries`、`maxStreamRetries`、`streamIdleTimeoutMs` 为核心字段；`baseDelayMs` 和 `maxDelayMs` 可省略并使用服务端默认值。
+`retryPolicy` 对象必须提供；其中所有字段均可省略并使用服务端默认值，并受上述非负整数和上限约束。
 
 预置 provider 只需 `providerId`；自定义 provider 还必须提供合法的 `protocol` 和 HTTP(S) `endpoint`。预置 provider 的协议和 endpoint 由服务端目录决定。Ollama 可以省略或传空 API key，其他 provider 必须传非空 API key。
 

@@ -488,7 +488,10 @@ describe('validatePilotDeckConfig router settings', () => {
         const validation = withRouter({
             enabled: false,
             tokenSaver: { judge: 'missing/model', subagent: { policy: 'invalid' } },
-            stats: { modelPricing: { invalid: { input: -1 } } },
+            stats: {
+                modelPricing: { invalid: { input: -1 } },
+                baselineModel: { provider: 'missing', model: 'model' },
+            },
         });
 
         expect(validation.valid).toBe(true);

@@ -25,7 +25,7 @@
 
 设置页面使用以下 `/api/config` 接口；实现复用 onboarding 的 provider 解析、限流、TTL、用户隔离、取消和 probe 逻辑。
 
-契约约定：路由沿用 UI API 的鉴权中间件，未认证请求不得进入处理器；单个模型 probe 超时为 10 秒，请求断开立即取消剩余模型并释放并发槽位。服务端最多同时运行 3 个 probe，单用户最多 1 个，测试创建接口按用户每分钟最多 5 次。创建测试不承诺幂等，`testId` 每次请求唯一；图片能力 PUT 对同一完整 payload 可重复提交，测试记录 TTL 为 10 分钟。
+契约约定：路由沿用 UI API 的鉴权中间件，未认证请求不得进入处理器；单个模型 probe 超时为 10 秒，请求断开立即取消剩余模型并释放并发槽位。服务端最多同时运行 3 个 probe，单用户最多 1 个，测试创建接口按用户每分钟最多 5 次。`retryPolicy` 对象必填，字段可省略并使用默认值；`maxRetries`、`maxStreamRetries` 最大为 10，`streamIdleTimeoutMs` 最大为 300000，`baseDelayMs` 和 `maxDelayMs` 最大为 60000，且基础延迟不得超过最大延迟。创建测试不承诺幂等，`testId` 每次请求唯一；图片能力 PUT 对同一完整 payload 可重复提交，测试记录 TTL 为 10 分钟。
 
 ### `POST /api/config/test-connections`
 

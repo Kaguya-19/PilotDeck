@@ -291,8 +291,8 @@ function validateOptionalSubagentDefault(config, warnings) {
 function validateRouterModelRefs(config, errors) {
   const router = config.router;
   if (!isRecord(router)) return;
-  validateBaselineModelRef(config, router.stats?.baselineModel, errors);
   if (router.enabled === false) return;
+  validateBaselineModelRef(config, router.stats?.baselineModel, errors);
 
   if (router.enabled !== undefined && typeof router.enabled !== 'boolean') {
     errors.push('router.enabled must be a boolean');

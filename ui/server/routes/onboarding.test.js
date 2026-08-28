@@ -110,6 +110,19 @@ describe('onboarding routes', () => {
     expect(slashProvider).toMatchObject({ status: 400, body: { code: 'INVALID_REQUEST' } });
   });
 
+  it('rejects retry policies that exceed bounded retry or delay limits', async () => {
+    const { request } = await createOnboardingApp();
+    const base = { providerId: 'openai', apiKey: 'key', models: ['model-a'], retryPolicy: retryPolicy() };
+    const tooManyRetries = await request('/api/v1/model-connection-tests', {
+      method: 'POST', body: JSON.stringify({ ...base, retryPolicy: { ...base.retryPolicy, maxRetries: 1_000_000_000 } }),
+    });
+    expect(tooManyRetries).toMatchObject({ status: 400, body: { code: 'INVALID_REQUEST' } });
+    const tooLongDelay = await request('/api/v1/model-connection-tests', {
+      method: 'POST', body: JSON.stringify({ ...base, retryPolicy: { ...base.retryPolicy, maxDelayMs: 60_001 } }),
+    });
+    expect(tooLongDelay).toMatchObject({ status: 400, body: { code: 'INVALID_REQUEST' } });
+  });
+
   it('treats Object prototype property names as custom providers', async () => {
     const probe = vi.fn().mockResolvedValue({ ok: true });
     const { request } = await createOnboardingApp({ probe });

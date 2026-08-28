@@ -445,6 +445,15 @@ describe('config model-pool connection test routes', () => {
     });
     expect(completed.status).toBe(200);
     expect(completed.body.status).toBe('passed');
+
+    const replayed = await requestStatus(`/api/config/test-connections/${tested.body.testId}/image-capabilities`, {
+      method: 'PUT',
+      headers: { 'x-user': 'settings-user' },
+      body: JSON.stringify({ models: [{ modelId: 'model-a', imageInput: 'unsupported' }] }),
+    });
+    expect(replayed.status).toBe(200);
+    expect(replayed.body).toEqual(completed.body);
+
     expect(probe).toHaveBeenCalledTimes(4);
     expect(probe).toHaveBeenNthCalledWith(1, expect.objectContaining({ retryPolicy: body.retryPolicy }));
   });
