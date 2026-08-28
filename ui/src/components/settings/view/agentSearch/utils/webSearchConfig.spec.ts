@@ -19,7 +19,11 @@ describe("webSearchConfigForProvider", () => {
         "tavily",
         glmEndpoint,
       ),
-    ).toEqual({ enabled: false, provider: "tavily" });
+    ).toEqual({
+      enabled: false,
+      provider: "tavily",
+      endpoint: "https://api.tavily.com/search",
+    });
   });
 
   it("restores the GLM default endpoint", () => {
@@ -42,6 +46,17 @@ describe("webSearchConfigForProvider", () => {
     ).toEqual({
       provider: "glm",
       endpoint: glmEndpoint,
+    });
+  });
+
+  it("uses the built-in endpoints for Serper and Brave", () => {
+    expect(webSearchConfigForProvider({}, "serper", glmEndpoint)).toEqual({
+      provider: "serper",
+      endpoint: "https://google.serper.dev/search",
+    });
+    expect(webSearchConfigForProvider({}, "brave", glmEndpoint)).toEqual({
+      provider: "brave",
+      endpoint: "https://api.search.brave.com/res/v1/web/search",
     });
   });
 });

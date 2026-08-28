@@ -411,7 +411,305 @@ describe('config model-list route', () => {
   });
 });
 
+describe('config model-pool connection test routes', () => {
+  it('runs batch text/image probes and accepts manual image capabilities', async () => {
+    const probe = vi.fn()
+      .mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({ ok: false, imageUnsupported: false, error: 'unknown' })
+      .mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({ ok: true });
+    const { requestStatus } = await createConfigApp({ probe });
+    const body = {
+      providerId: 'openai',
+      apiKey: 'key',
+      models: ['model-a', 'model-b'],
+      retryPolicy: retryPolicy(),
+    };
+
+    const tested = await requestStatus('/api/config/test-connections', {
+      method: 'POST',
+      headers: { 'x-user': 'settings-user' },
+      body: JSON.stringify(body),
+    });
+    expect(tested.status).toBe(200);
+    expect(tested.body.status).toBe('manual_input_required');
+    expect(tested.body.models).toEqual([
+      expect.objectContaining({ modelId: 'model-a', textInput: 'supported', imageInput: 'unknown' }),
+      expect.objectContaining({ modelId: 'model-b', textInput: 'supported', imageInput: 'supported' }),
+    ]);
+
+    const completed = await requestStatus(`/api/config/test-connections/${tested.body.testId}/image-capabilities`, {
+      method: 'PUT',
+      headers: { 'x-user': 'settings-user' },
+      body: JSON.stringify({ models: [{ modelId: 'model-a', imageInput: 'unsupported' }] }),
+    });
+    expect(completed.status).toBe(200);
+    expect(completed.body.status).toBe('passed');
+    expect(probe).toHaveBeenCalledTimes(4);
+    expect(probe).toHaveBeenNthCalledWith(1, expect.objectContaining({ retryPolicy: body.retryPolicy }));
+  });
+
+  it('isolates config test IDs by user', async () => {
+    const probe = vi.fn().mockResolvedValue({ ok: false, code: 'MODEL_NOT_FOUND', error: 'missing' });
+    const { requestStatus } = await createConfigApp({ probe });
+    const tested = await requestStatus('/api/config/test-connections', {
+      method: 'POST',
+      headers: { 'x-user': 'owner' },
+      body: JSON.stringify({ providerId: 'openai', apiKey: 'key', models: ['model-a'], retryPolicy: retryPolicy() }),
+    });
+    const otherUser = await requestStatus(`/api/config/test-connections/${tested.body.testId}/image-capabilities`, {
+      method: 'PUT',
+      headers: { 'x-user': 'other' },
+      body: JSON.stringify({ models: [{ modelId: 'model-a', imageInput: 'supported' }] }),
+    });
+    expect(otherUser.status).toBe(404);
+  });
+});
+
+describe('config model reference and rename routes', () => {
+  const baseConfig = {
+    agent: { model: 'old-provider/old-model', subagents: { default: 'old-provider/old-model' } },
+    memory: { model: 'old-provider/old-model' },
+    model: { providers: { 'old-provider': { protocol: 'openai', url: 'https://example.test/v1', apiKey: 'key', models: { 'old-model': {} } } } },
+    router: {
+      scenarios: { default: 'old-provider/old-model' },
+      fallback: { default: ['old-provider/old-model'] },
+      tokenSaver: { judge: 'old-provider/old-model', tiers: { fast: { model: 'old-provider/old-model' } } },
+      stats: { modelPricing: { 'old-provider/old-model': { input: 1, output: 2 } } },
+    },
+  };
+
+  it('returns references without exposing credentials', async () => {
+    const { requestStatus } = await createConfigApp({ config: baseConfig });
+    const response = await requestStatus('/api/config/model-references?providerId=old-provider&modelId=old-model');
+    expect(response.status).toBe(200);
+    expect(response.body.references).toHaveLength(8);
+    expect(JSON.stringify(response.body)).not.toContain('key');
+  });
+
+  it('supports provider-level reference lookup', async () => {
+    const { requestStatus } = await createConfigApp({ config: baseConfig });
+    const response = await requestStatus('/api/config/model-references?providerId=old-provider');
+    expect(response.status).toBe(200);
+    expect(response.body.modelId).toBeUndefined();
+    expect(response.body.references).toHaveLength(8);
+  });
+
+  it('atomically rewrites provider/model references and pricing keys', async () => {
+    const { requestStatus, writePilotDeckConfig } = await createConfigApp({ config: baseConfig });
+    const nextConfig = structuredClone(baseConfig);
+    nextConfig.model.providers = {
+      'new-provider': { ...nextConfig.model.providers['old-provider'], models: { 'new-model': {} } },
+    };
+    const response = await requestStatus('/api/config', {
+      method: 'PUT',
+      body: JSON.stringify({
+        config: nextConfig,
+        providerRenames: [{ from: 'old-provider', to: 'new-provider' }],
+        modelRenames: [{ providerId: 'new-provider', from: 'old-model', to: 'new-model' }],
+      }),
+    });
+    expect(response.status).toBe(200);
+    const saved = writePilotDeckConfig.mock.calls[0][0];
+    expect(saved.agent.model).toBe('new-provider/new-model');
+    expect(saved.router.tokenSaver.tiers.fast.model).toBe('new-provider/new-model');
+    expect(saved.router.stats.modelPricing).toEqual({ 'new-provider/new-model': { input: 1, output: 2 } });
+  });
+
+  it('rejects deletion while a model remains referenced', async () => {
+    const { requestStatus, writePilotDeckConfig } = await createConfigApp({ config: baseConfig });
+    const response = await requestStatus('/api/config', {
+      method: 'PUT',
+      body: JSON.stringify({ config: { ...baseConfig, model: { providers: {} } } }),
+    });
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe('MODEL_IN_USE');
+    expect(writePilotDeckConfig).not.toHaveBeenCalled();
+  });
+
+  it('rejects rename metadata that does not match the provider map', async () => {
+    const { requestStatus, writePilotDeckConfig } = await createConfigApp({ config: baseConfig });
+    const response = await requestStatus('/api/config', {
+      method: 'PUT',
+      body: JSON.stringify({
+        config: baseConfig,
+        providerRenames: [{ from: 'missing', to: 'new-provider' }],
+      }),
+    });
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe('RENAME_INVALID');
+    expect(writePilotDeckConfig).not.toHaveBeenCalled();
+  });
+});
+
 describe('config test-web-search route', () => {
+  it('probes GLM with its bearer header and request body', async () => {
+    let captured;
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      captured = { url: String(url), init };
+      return jsonResponse({ search_result: [{ title: 'result' }] });
+    }));
+
+    const { requestStatus } = await createConfigApp();
+    const data = await requestStatus('/api/config/test-web-search', {
+      method: 'POST',
+      body: JSON.stringify({ provider: 'glm', apiKey: 'glm-key' }),
+    });
+
+    expect(data.status).toBe(200);
+    expect(data.body).toMatchObject({ ok: true, organicCount: 1 });
+    expect(captured.url).toBe('https://api.z.ai/api/paas/v4/web_search');
+    expect(captured.init.headers.Authorization).toBe('Bearer glm-key');
+    expect(JSON.parse(captured.init.body)).toEqual({
+      search_engine: 'search-prime',
+      search_query: 'hello',
+      count: 3,
+      search_recency_filter: 'noLimit',
+    });
+  });
+
+  it('probes Tavily with api_key in the request body', async () => {
+    let captured;
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      captured = { url: String(url), init };
+      return jsonResponse({ results: [{ title: 'result' }] });
+    }));
+
+    const { requestStatus } = await createConfigApp();
+    const data = await requestStatus('/api/config/test-web-search', {
+      method: 'POST',
+      body: JSON.stringify({ provider: 'tavily', apiKey: 'tavily-key' }),
+    });
+
+    expect(data.status).toBe(200);
+    expect(data.body).toMatchObject({ ok: true, organicCount: 1 });
+    expect(captured.url).toBe('https://api.tavily.com/search');
+    expect(JSON.parse(captured.init.body)).toEqual({
+      api_key: 'tavily-key',
+      query: 'hello',
+      max_results: 3,
+      include_answer: true,
+      search_depth: 'basic',
+    });
+  });
+
+  it('probes custom POST providers using configured auth and result path', async () => {
+    let captured;
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      captured = { url: String(url), init };
+      return jsonResponse({ payload: [{ title: 'result' }] });
+    }));
+
+    const { requestStatus } = await createConfigApp();
+    const data = await requestStatus('/api/config/test-web-search', {
+      method: 'POST',
+      body: JSON.stringify({
+        provider: 'custom',
+        apiKey: 'custom-key',
+        endpoint: 'https://example.test/search',
+        customProvider: { method: 'POST', auth: 'bodyApiKey', apiKeyParam: 'key', resultsPath: 'payload' },
+      }),
+    });
+
+    expect(data.status).toBe(200);
+    expect(data.body).toMatchObject({ ok: true, organicCount: 1 });
+    expect(captured.url).toBe('https://example.test/search');
+    expect(JSON.parse(captured.init.body)).toEqual({ query: 'hello', key: 'custom-key' });
+  });
+
+  it('probes custom GET providers using query authentication', async () => {
+    let captured;
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      captured = { url: String(url), init };
+      return jsonResponse({ results: [{ title: 'result' }] });
+    }));
+
+    const { requestStatus } = await createConfigApp();
+    const data = await requestStatus('/api/config/test-web-search', {
+      method: 'POST',
+      body: JSON.stringify({
+        provider: 'custom',
+        apiKey: 'custom-key',
+        endpoint: 'https://example.test/search',
+        customProvider: { method: 'GET', auth: 'queryApiKey', queryParam: 'q', apiKeyParam: 'token' },
+      }),
+    });
+
+    expect(data.status).toBe(200);
+    expect(data.body).toMatchObject({ ok: true, organicCount: 1 });
+    expect(captured.url).toBe('https://example.test/search?q=hello&token=custom-key');
+    expect(captured.init.method).toBe('GET');
+    expect(captured.init.body).toBeUndefined();
+  });
+
+  it('rejects non-HTTP(S) endpoints before making an upstream request', async () => {
+    vi.stubGlobal('fetch', vi.fn());
+
+    const { requestStatus } = await createConfigApp();
+    const data = await requestStatus('/api/config/test-web-search', {
+      method: 'POST',
+      body: JSON.stringify({ provider: 'glm', apiKey: 'key', endpoint: 'ftp://example.test/search' }),
+    });
+
+    expect(data.status).toBe(400);
+    expect(data.body).toEqual({ ok: false, error: 'Invalid endpoint URL: ftp://example.test/search' });
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it('probes Serper with its API key header', async () => {
+    let captured;
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      captured = { url: String(url), init };
+      return jsonResponse({ organic: [{ title: 'result' }] });
+    }));
+
+    const { requestStatus } = await createConfigApp();
+    const data = await requestStatus('/api/config/test-web-search', {
+      method: 'POST',
+      body: JSON.stringify({ provider: 'serper', apiKey: 'serper-key' }),
+    });
+
+    expect(data.status).toBe(200);
+    expect(data.body).toMatchObject({ ok: true, organicCount: 1 });
+    expect(captured.url).toBe('https://google.serper.dev/search');
+    expect(captured.init.headers['X-API-KEY']).toBe('serper-key');
+    expect(JSON.parse(captured.init.body)).toEqual({ q: 'hello', num: 3 });
+  });
+
+  it('probes Brave with its subscription token header', async () => {
+    let captured;
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      captured = { url: String(url), init };
+      return jsonResponse({ web: { results: [{ title: 'result' }] } });
+    }));
+
+    const { requestStatus } = await createConfigApp();
+    const data = await requestStatus('/api/config/test-web-search', {
+      method: 'POST',
+      body: JSON.stringify({ provider: 'brave', apiKey: 'brave-key' }),
+    });
+
+    expect(data.status).toBe(200);
+    expect(data.body).toMatchObject({ ok: true, organicCount: 1 });
+    expect(captured.url).toBe('https://api.search.brave.com/res/v1/web/search?q=hello&count=3');
+    expect(captured.init.headers['X-Subscription-Token']).toBe('brave-key');
+    expect(captured.init.method).toBe('GET');
+  });
+
+  it('rejects an unsupported provider without making an upstream request', async () => {
+    vi.stubGlobal('fetch', vi.fn());
+
+    const { requestStatus } = await createConfigApp();
+    const data = await requestStatus('/api/config/test-web-search', {
+      method: 'POST',
+      body: JSON.stringify({ provider: 'zai', apiKey: 'key' }),
+    });
+
+    expect(data.status).toBe(400);
+    expect(data.body).toEqual({ ok: false, error: 'Unsupported web search provider.' });
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
   it('resolves a masked API key from the saved web-search config', async () => {
     const authorizationHeaders = [];
     vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
@@ -776,15 +1074,26 @@ describe('config routes invalid YAML fallback', () => {
   });
 });
 
-async function createConfigApp({ config = {} } = {}) {
-  const writePilotDeckConfig = vi.fn();
-  const writeRawPilotDeckYaml = vi.fn();
+async function createConfigApp({ config = {}, probe } = {}) {
+  const writePilotDeckConfig = vi.fn(async (nextConfig) => ({
+    config: nextConfig,
+    raw: stringifyYaml(nextConfig),
+    validation: { valid: true, errors: [], warnings: [] },
+  }));
+  const writeRawPilotDeckYaml = vi.fn(async (nextConfig) => ({
+    config: nextConfig,
+    raw: stringifyYaml(nextConfig),
+    validation: { valid: true, errors: [], warnings: [] },
+  }));
   vi.doMock('../services/pilotdeckConfigWatcher.js', () => ({
     suppressNextWatchEvent: vi.fn(),
   }));
   vi.doMock('../services/pilotdeckConfigReloader.js', () => ({
     reloadPilotDeckConfig: vi.fn(async () => undefined),
   }));
+  if (probe) {
+    vi.doMock('../services/modelConnectionProbe.js', () => ({ probeModelConnection: probe }));
+  }
   vi.doMock('../services/pilotdeckConfig.js', async () => {
     const actual = await vi.importActual('../services/pilotdeckConfig.js');
     return {
@@ -801,6 +1110,7 @@ async function createConfigApp({ config = {} } = {}) {
   const { default: configRoutes } = await import('./config.js');
   const app = express();
   app.use(express.json());
+  app.use((req, _res, next) => { req.user = { id: req.headers['x-user'] || 'one' }; next(); });
   app.use('/api/config', configRoutes);
 
   return {
@@ -816,8 +1126,8 @@ async function requestBodyJson(app, path, init = {}) {
   try {
     const { port } = server.address();
     const response = await nativeFetch(`http://127.0.0.1:${port}${path}`, {
-      headers: { 'Content-Type': 'application/json', ...(init.headers || {}) },
       ...init,
+      headers: { 'Content-Type': 'application/json', ...(init.headers || {}) },
     });
     return response.json();
   } finally {
@@ -862,8 +1172,8 @@ async function requestStatusJson(app, path, init = {}) {
   try {
     const { port } = server.address();
     const response = await nativeFetch(`http://127.0.0.1:${port}${path}`, {
-      headers: { 'Content-Type': 'application/json', ...(init.headers || {}) },
       ...init,
+      headers: { 'Content-Type': 'application/json', ...(init.headers || {}) },
     });
     return { status: response.status, body: await response.json() };
   } finally {
@@ -880,4 +1190,8 @@ function jsonResponse(payload, overrides = {}) {
     text: async () => JSON.stringify(payload),
     json: async () => payload,
   };
+}
+
+function retryPolicy() {
+  return { maxRetries: 2, maxStreamRetries: 3, streamIdleTimeoutMs: 30000, baseDelayMs: 1000, maxDelayMs: 60000 };
 }

@@ -130,7 +130,7 @@ export type PilotGatewayConfig = {
   maxPerSessionMcpInstances?: number;
 };
 
-export type PilotWebSearchProvider = "glm" | "tavily" | "custom";
+export type PilotWebSearchProvider = "glm" | "tavily" | "custom" | "serper" | "brave";
 export type PilotWebSearchCustomAuth = "bearer" | "bodyApiKey" | "queryApiKey" | "none";
 export type PilotWebSearchCustomMethod = "GET" | "POST";
 
