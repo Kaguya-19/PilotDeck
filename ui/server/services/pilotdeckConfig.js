@@ -248,6 +248,19 @@ function validateModelRef(config, ref, label, errors) {
   }
 }
 
+function validateRequiredModelRef(config, ref, label, errors) {
+  if (typeof ref !== 'string' || !normalizeString(ref)) {
+    errors.push(`${label} must use provider/model format`);
+    return;
+  }
+  const modelRef = normalizeString(ref);
+  if (!splitModelRef(modelRef)) {
+    errors.push(`${label} must use provider/model format`);
+    return;
+  }
+  validateModelRef(config, modelRef, label, errors);
+}
+
 function validateOptionalSubagentDefault(config, warnings) {
   const modelRef = normalizeString(config.agent?.subagents?.default);
   if (!modelRef || modelRef === 'inherit') return;
@@ -263,9 +276,13 @@ function validateRouterModelRefs(config, errors) {
   if (!isRecord(router)) return;
   if (router.enabled === false) return;
 
+  if (router.enabled !== undefined && typeof router.enabled !== 'boolean') {
+    errors.push('router.enabled must be a boolean');
+  }
+
   if (isRecord(router.scenarios)) {
     for (const [key, ref] of Object.entries(router.scenarios)) {
-      validateModelRef(config, ref, `router.scenarios.${key}`, errors);
+      validateRequiredModelRef(config, ref, `router.scenarios.${key}`, errors);
     }
   }
 
@@ -276,15 +293,82 @@ function validateRouterModelRefs(config, errors) {
     }
   }
 
+  validateRouterPricing(config, router.stats, errors);
   const tokenSaver = router.tokenSaver;
   if (!isRecord(tokenSaver)) return;
 
-  validateModelRef(config, tokenSaver.judge, 'router.tokenSaver.judge', errors);
+  if (tokenSaver.enabled !== undefined && typeof tokenSaver.enabled !== 'boolean') {
+    errors.push('router.tokenSaver.enabled must be a boolean');
+  }
+  if (tokenSaver.enabled === false) return;
+  validateRequiredModelRef(config, tokenSaver.judge, 'router.tokenSaver.judge', errors);
+
+  if (tokenSaver.defaultTier !== undefined && typeof tokenSaver.defaultTier !== 'string') {
+    errors.push('router.tokenSaver.defaultTier must be a string');
+  }
+  if (tokenSaver.tiers !== undefined && !isRecord(tokenSaver.tiers)) {
+    errors.push('router.tokenSaver.tiers must be a non-empty object');
+  }
 
   if (isRecord(tokenSaver.tiers)) {
+    if (Object.keys(tokenSaver.tiers).length === 0) {
+      errors.push('router.tokenSaver.tiers must be a non-empty object');
+    }
     for (const [key, tier] of Object.entries(tokenSaver.tiers)) {
-      if (!isRecord(tier)) continue;
-      validateModelRef(config, tier.model, `router.tokenSaver.tiers.${key}.model`, errors);
+      if (!isRecord(tier)) {
+        errors.push(`router.tokenSaver.tiers.${key} must be an object with model`);
+        continue;
+      }
+      validateRequiredModelRef(config, tier.model, `router.tokenSaver.tiers.${key}.model`, errors);
+      if (tier.description !== undefined && typeof tier.description !== 'string') {
+        errors.push(`router.tokenSaver.tiers.${key}.description must be a string`);
+      }
+    }
+    if (typeof tokenSaver.defaultTier === 'string' && !Object.prototype.hasOwnProperty.call(tokenSaver.tiers, tokenSaver.defaultTier)) {
+      errors.push(`router.tokenSaver.defaultTier="${tokenSaver.defaultTier}" must exist in router.tokenSaver.tiers`);
+    }
+  }
+
+  if (tokenSaver.subagent !== undefined) {
+    if (!isRecord(tokenSaver.subagent)) {
+      errors.push('router.tokenSaver.subagent must be an object');
+    } else if (!['skip', 'judge'].includes(tokenSaver.subagent.policy)) {
+      errors.push('router.tokenSaver.subagent.policy must be one of skip / judge');
+    }
+  }
+
+}
+
+function validateRouterPricing(config, stats, errors) {
+  if (stats === undefined) return;
+  if (!isRecord(stats)) {
+    errors.push('router.stats must be an object');
+    return;
+  }
+  if (stats.enabled !== undefined && typeof stats.enabled !== 'boolean') {
+    errors.push('router.stats.enabled must be a boolean');
+  }
+  if (stats.modelPricing === undefined) return;
+  if (!isRecord(stats.modelPricing)) {
+    errors.push('router.stats.modelPricing must be an object keyed by provider/model');
+    return;
+  }
+  for (const [key, pricing] of Object.entries(stats.modelPricing)) {
+    const label = `router.stats.modelPricing.${key}`;
+    if (!splitModelRef(key) || !resolveModel(config, key, { allowMissing: true })) {
+      errors.push(`${label} must reference a configured provider/model`);
+    }
+    if (!isRecord(pricing)) {
+      errors.push(`${label} must be an object`);
+      continue;
+    }
+    for (const field of ['input', 'output', 'cacheRead']) {
+      if (pricing[field] !== undefined && (typeof pricing[field] !== 'number' || !Number.isFinite(pricing[field]) || pricing[field] < 0)) {
+        errors.push(`${label}.${field} must be a finite non-negative number`);
+      }
+    }
+    if (pricing.unit !== undefined && !['$/百万 Token', '¥/百万 Token'].includes(pricing.unit)) {
+      errors.push(`${label}.unit must be one of $/百万 Token or ¥/百万 Token`);
     }
   }
 }
