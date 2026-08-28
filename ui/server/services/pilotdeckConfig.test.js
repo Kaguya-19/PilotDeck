@@ -431,6 +431,21 @@ describe('validatePilotDeckConfig router settings', () => {
         });
     });
 
+    it('validates router stats baselineModel against configured models', () => {
+        const valid = withRouter({
+            stats: { baselineModel: { provider: 'openai', model: 'gpt-test' } },
+        });
+        expect(valid.valid).toBe(true);
+
+        const invalid = withRouter({
+            stats: { baselineModel: { provider: 'openai', model: 'missing' } },
+        });
+        expect(invalid.valid).toBe(false);
+        expect(invalid.errors).toContain(
+            'router.stats.baselineModel="openai/missing" doesn\'t resolve to a configured provider/model',
+        );
+    });
+
     it('rejects invalid pricing values and units', () => {
         const validation = withRouter({
             stats: {
@@ -477,5 +492,45 @@ describe('validatePilotDeckConfig router settings', () => {
         });
 
         expect(validation.valid).toBe(true);
+    });
+});
+
+describe('validatePilotDeckConfig web search settings', () => {
+    const base = {
+        agent: { model: 'openai/gpt-test' },
+        model: {
+            providers: {
+                openai: {
+                    protocol: 'openai',
+                    url: 'https://api.example.test/v1',
+                    apiKey: 'test-key',
+                    models: { 'gpt-test': {} },
+                },
+            },
+        },
+    };
+
+    it('rejects an unknown provider and non-HTTP endpoint through common config validation', () => {
+        const validation = validatePilotDeckConfig({
+            ...base,
+            tools: { webSearch: { provider: 'zai', endpoint: 'ftp://example.test/search' } },
+        });
+        expect(validation.valid).toBe(false);
+        expect(validation.errors).toEqual(expect.arrayContaining([
+            expect.stringContaining('tools.webSearch.provider'),
+            expect.stringContaining('tools.webSearch.endpoint'),
+        ]));
+    });
+
+    it('accepts all supported built-in search providers', () => {
+        for (const provider of ['glm', 'tavily', 'custom', 'serper', 'brave']) {
+            const validation = validatePilotDeckConfig({
+                ...base,
+                tools: { webSearch: { provider, ...(provider === 'custom' ? { endpoint: 'https://search.example.test' } : {}) } },
+            });
+            expect(validation.errors).not.toEqual(expect.arrayContaining([
+                expect.stringContaining('tools.webSearch.provider'),
+            ]));
+        }
     });
 });

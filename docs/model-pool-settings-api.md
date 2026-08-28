@@ -245,6 +245,8 @@ providerId/modelId 重命名会在同一写入事务中改写 `agent.model`、`a
 }
 ```
 
+`maxRetries`、`maxStreamRetries`、`streamIdleTimeoutMs` 为核心字段；`baseDelayMs` 和 `maxDelayMs` 可省略并使用服务端默认值。
+
 预置 provider 只需 `providerId`；自定义 provider 还必须提供合法的 `protocol` 和 HTTP(S) `endpoint`。预置 provider 的协议和 endpoint 由服务端目录决定。Ollama 可以省略或传空 API key，其他 provider 必须传非空 API key。
 
 测试按模型依次执行文字和图片探测，返回 `200` 和完整测试记录：
@@ -305,6 +307,10 @@ providerId/modelId 重命名会在同一写入事务中改写 `agent.model`、`a
 
 同一完整补录 payload 可重复提交；接口不会创建新的测试记录。
 
+### 测试结果绑定
+
+保存模型池时可在 `PUT /api/config` 中提交 `modelTestBindings: [{ "testId": "<opaque id>" }]`。服务端核对当前用户、TTL、provider/endpoint/API key 和模型集合后，将通过结果写入对应模型的 `connectionTest` 元数据。仅当本次新增的模型被 agent、subagent、memory 或 router 引用时，才必须提交通过的绑定；缺少绑定时保存返回 `409 MODEL_TEST_REQUIRED`。已有模型修改连接参数继续兼容未绑定保存。
+
 ## 8. 兼容接口与明确缺口
 
 以下 onboarding 接口仍保留，但设置页面不应依赖：
@@ -312,10 +318,6 @@ providerId/modelId 重命名会在同一写入事务中改写 `agent.model`、`a
 - `POST /api/v1/model-connection-tests`
 - `PUT /api/v1/model-connection-tests/{testId}/image-capabilities`
 - `PUT /api/v1/model-configuration`
-
-当前仍未完成的模型池后端能力：
-
-- 将 `testId` 绑定到后续 `/api/config` 保存并由后端强制校验的独立字段或接口。当前 TRD 尚未确定该绑定字段形状，因此本轮暂缓。
 
 已实现：
 

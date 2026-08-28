@@ -69,6 +69,7 @@ export function findModelReferences(config, { providerId = '', modelId = '' } = 
       collectReference(references, `router.stats.modelPricing.${key}`, key);
     }
   }
+  collectReference(references, 'router.stats.baselineModel', router?.stats?.baselineModel);
 
   return references.filter((reference) => (
     (!providerId || reference.providerId === providerId)
@@ -126,6 +127,15 @@ export function rewriteModelReferences(config, { providerRenames = new Map(), mo
       pricing[renameRef(key, providerRenames, modelRenames)] = value;
     }
     router.stats.modelPricing = pricing;
+  }
+  if (isRecord(router?.stats?.baselineModel)) {
+    const baseline = router.stats.baselineModel;
+    const ref = parseModelRef(baseline);
+    if (ref) {
+      const renamedProvider = providerRenames.get(ref.providerId) || ref.providerId;
+      const renamedModel = modelRenames.get(`${ref.providerId}/${ref.modelId}`)?.modelId || ref.modelId;
+      router.stats.baselineModel = { ...baseline, provider: renamedProvider, model: renamedModel };
+    }
   }
   return config;
 }

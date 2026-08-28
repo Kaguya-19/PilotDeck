@@ -4,6 +4,7 @@ import os from 'os';
 import path from 'path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { parseGatewayConfig } from '../../../src/pilot/config/parseGatewayConfig.js';
+import { parseToolsConfig } from '../../../src/pilot/config/parseToolsConfig.js';
 
 // Source of truth: ~/.pilotdeck/pilotdeck.yaml. The disk format and the
 // "internal" config object are the same V2 schema — no more adapter layer.
@@ -261,6 +262,22 @@ function validateRequiredModelRef(config, ref, label, errors) {
   validateModelRef(config, modelRef, label, errors);
 }
 
+function validateBaselineModelRef(config, ref, errors) {
+  const label = 'router.stats.baselineModel';
+  if (ref === undefined) return;
+  if (!isRecord(ref)) {
+    errors.push(`${label} must be an object with provider and model`);
+    return;
+  }
+  const provider = normalizeString(ref.provider);
+  const model = normalizeString(ref.model);
+  if (!provider || !model) {
+    errors.push(`${label} must contain provider and model`);
+    return;
+  }
+  validateModelRef(config, `${provider}/${model}`, label, errors);
+}
+
 function validateOptionalSubagentDefault(config, warnings) {
   const modelRef = normalizeString(config.agent?.subagents?.default);
   if (!modelRef || modelRef === 'inherit') return;
@@ -274,6 +291,7 @@ function validateOptionalSubagentDefault(config, warnings) {
 function validateRouterModelRefs(config, errors) {
   const router = config.router;
   if (!isRecord(router)) return;
+  validateBaselineModelRef(config, router.stats?.baselineModel, errors);
   if (router.enabled === false) return;
 
   if (router.enabled !== undefined && typeof router.enabled !== 'boolean') {
@@ -386,6 +404,16 @@ function validateGatewayConfig(config, errors, warnings) {
   }
 }
 
+function validateToolsConfig(config, errors, warnings) {
+  const diagnostics = [];
+  parseToolsConfig(config.tools, diagnostics);
+  for (const diagnostic of diagnostics) {
+    const message = diagnostic.path ? `${diagnostic.path}: ${diagnostic.message}` : diagnostic.message;
+    if (diagnostic.severity === 'warning') warnings.push(message);
+    else errors.push(message);
+  }
+}
+
 export function validatePilotDeckConfig(config) {
   const normalized = normalizePilotDeckConfig(config);
   const errors = [];
@@ -416,6 +444,7 @@ export function validatePilotDeckConfig(config) {
   validateOptionalSubagentDefault(normalized, warnings);
   validateRouterModelRefs(normalized, errors);
   validateGatewayConfig(normalized, errors, warnings);
+  validateToolsConfig(normalized, errors, warnings);
 
   if (normalized.webui?.runtime?.contextWindow !== undefined) {
     warnings.push(

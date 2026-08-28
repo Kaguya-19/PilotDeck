@@ -138,7 +138,20 @@ function parseWebSearch(
         recoverable: false,
       });
     } else {
-      result.endpoint = raw.endpoint.trim();
+      const endpoint = raw.endpoint.trim();
+      try {
+        const parsed = new URL(endpoint);
+        if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("unsupported protocol");
+        result.endpoint = endpoint;
+      } catch {
+        diagnostics.push({
+          code: "TOOLS_WEB_SEARCH_ENDPOINT_INVALID",
+          severity: "fatal",
+          message: "tools.webSearch.endpoint must be an HTTP(S) URL.",
+          path: "tools.webSearch.endpoint",
+          recoverable: false,
+        });
+      }
     }
   }
 

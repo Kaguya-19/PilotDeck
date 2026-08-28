@@ -29,7 +29,7 @@
 
 ### `POST /api/config/test-connections`
 
-请求字段：`providerId`、`protocol`、`endpoint`、`apiKey`、`models[]`、`retryPolicy`。`models` 必须为非空、去重后不超过服务端限制的模型 ID 列表。
+请求字段：`providerId`、`protocol`、`endpoint`、`apiKey`、`models[]`、`retryPolicy`。`models` 必须为非空、去重后不超过服务端限制的模型 ID 列表。`retryPolicy` 的 `maxRetries`、`maxStreamRetries`、`streamIdleTimeoutMs` 为核心字段，`baseDelayMs` 和 `maxDelayMs` 可省略并使用服务端默认值。
 
 成功响应返回 `testId`、聚合 `status`、`testedAt` 和逐模型结果：
 
@@ -52,6 +52,12 @@
 ### `PUT /api/config/test-connections/:testId/image-capabilities`
 
 请求只包含本次测试中全部 `imageInput=unknown` 模型及 `supported/unsupported` 判断。缺少模型、增加非 unknown 模型、非法能力值、未知或过期 testId 均返回 4xx。补录后重新计算测试状态；全部模型文字通过且图片状态确定时，状态变为 `passed`。
+
+### 测试结果绑定与引用校验
+
+`PUT /api/config` 可携带 `modelTestBindings: [{ "testId": "test_xxx" }]`。服务端仅接受当前用户、未过期且状态为 `passed` 的测试记录，并核对 provider、协议、endpoint、API key 和模型集合后，将逐模型结果写入 `model.providers.<providerId>.models.<modelId>.connectionTest`。
+
+仅当本次相对旧配置新增的模型被 `agent`、`agent.subagents`、`memory` 或 `router` 引用时，才必须提交通过的 `modelTestBindings`，否则保存返回 `409 MODEL_TEST_REQUIRED`。已有模型修改连接参数继续兼容未绑定保存；provider/model 重命名按重命名元数据处理，不视为新增模型。
 
 ## provider/model 变更与引用同步
 
@@ -94,6 +100,7 @@ providerId 或 modelId 变更时，服务端必须原子改写以下路径中的
 - `router.tokenSaver.judge`
 - `router.tokenSaver.tiers.*.model`
 - `router.stats.modelPricing` 的 key
+- `router.stats.baselineModel.provider` / `router.stats.baselineModel.model`
 
 同步和模型池配置写入必须成功或全部失败，不能产生旧引用残留。`router.stats.modelPricing` 的价格值保持不变，仅改写其 provider/model key。
 
@@ -102,20 +109,20 @@ providerId 或 modelId 变更时，服务端必须原子改写以下路径中的
 - `GET /api/config/model-references` 已实现，返回配置路径、引用值和引用类型，不返回密钥。
 - `PUT /api/config` 已实现 provider/model 重命名后的引用同步，覆盖 agent、subagent、memory、router 和 pricing key；结构化配置与 raw YAML 均适用。
 - provider/model 删除时已在保存阶段执行后端引用检查，存在引用返回 `409 MODEL_IN_USE`，不能仅依赖查询接口或前端确认框。
-- 通用配置保存尚未绑定测试记录，不能仅凭前端状态证明只有测试通过模型可被引用；该项暂缓，待确定 `testId` 绑定字段后实现。
+- 通用配置保存已支持 `modelTestBindings`，并仅对新增且被引用的模型强制通过测试；已有模型修改未携带绑定时保留兼容行为。
 - `/api/v1/model-connection-tests*` 和 `/api/v1/model-configuration` 保留为 onboarding 兼容入口；设置页面不依赖这些路径。
 
 ## 错误与恢复
 
-使用 `INVALID_REQUEST`、`RATE_LIMITED`、`TEST_NOT_FOUND`、`TEST_EXPIRED`、`RENAME_INVALID`、`MODEL_IN_USE` 等稳定错误码。客户端断开必须取消当前 probe 并释放并发槽位；测试记录过期后不可补录。重命名和引用校验在现有配置写锁内完成，校验失败时不写入配置。
+使用 `INVALID_REQUEST`、`RATE_LIMITED`、`TEST_NOT_FOUND`、`TEST_EXPIRED`、`TEST_NOT_PASSED`、`CONFIGURATION_MISMATCH`、`MODEL_TEST_REQUIRED`、`RENAME_INVALID`、`MODEL_IN_USE` 等稳定错误码。客户端断开必须取消当前 probe 并释放并发槽位；测试记录过期后不可补录。重命名和引用校验在现有配置写锁内完成，校验失败时不写入配置。
 
 ## 源码与测试映射
 
-- 路由：`ui/server/routes/config.js:478-494`、`524-708`、`889-890`、`ui/server/routes/onboarding.js:164-258`
+- 路由：`ui/server/routes/config.js:325-390`、`478-494`、`524-708`、`889-890`、`ui/server/routes/onboarding.js:99-190`、`164-258`
 - 引用扫描/重写：`ui/server/services/modelReferences.js:40-134`
 - 探测：`ui/server/services/modelConnectionProbe.js:115-165`
 - 配置：`ui/server/services/pilotdeckConfig.js`、`src/model/config/parseModelConfig.ts`
-- 测试：`ui/server/routes/config.test.js:414-466`、`ui/server/routes/onboarding.test.js`
+- 测试：`ui/server/routes/config.test.js:414-500`、`ui/server/routes/onboarding.test.js`
 
 ## 验收
 

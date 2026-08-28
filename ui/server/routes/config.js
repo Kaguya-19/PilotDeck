@@ -36,6 +36,8 @@ import {
 } from '../services/modelReferences.js';
 import {
   imageCapabilitiesHandler,
+  connectionTestMatchesProvider,
+  getConnectionTestRecord,
   modelConnectionTestsHandler,
   modelTestRateLimiter,
 } from './onboarding.js';
@@ -325,6 +327,79 @@ function findDeletedModelReferences(previousConfig, nextConfig) {
   return null;
 }
 
+function bindModelConnectionTests(config, bindings, userId) {
+  if (bindings === undefined) return { config, bound: new Set() };
+  if (!Array.isArray(bindings) || bindings.some((item) => !item || typeof item !== 'object' || Array.isArray(item) || typeof item.testId !== 'string' || Object.keys(item).some((key) => key !== 'testId'))) {
+    return { error: { status: 400, code: 'INVALID_REQUEST', message: 'modelTestBindings must contain testId objects.' } };
+  }
+  const bound = new Set();
+  for (const binding of bindings) {
+    const result = getConnectionTestRecord(userId, binding.testId.trim());
+    if (result.reason === 'expired') return { error: { status: 410, code: 'TEST_EXPIRED', message: 'Connection test has expired.' } };
+    const record = result.record;
+    if (!record) return { error: { status: 404, code: 'TEST_NOT_FOUND', message: 'Connection test was not found.' } };
+    if (record.status !== 'passed') return { error: { status: 409, code: 'TEST_NOT_PASSED', message: 'Complete a passing connection test before saving.' } };
+    const provider = config?.model?.providers?.[record.provider.providerId];
+    if (!provider || !connectionTestMatchesProvider(record, { ...provider, providerId: record.provider.providerId })) {
+      return { error: { status: 409, code: 'CONFIGURATION_MISMATCH', message: 'Configuration does not match the tested provider.' } };
+    }
+    for (const tested of record.models) {
+      const model = provider.models?.[tested.modelId];
+      if (!model || typeof model !== 'object' || tested.textInput !== 'supported' || !['supported', 'unsupported'].includes(tested.imageInput)) {
+        return { error: { status: 409, code: 'CONFIGURATION_MISMATCH', message: 'Configuration does not match the tested models.' } };
+      }
+      model.connectionTest = {
+        status: 'passed',
+        textInput: tested.textInput,
+        imageInput: tested.imageInput,
+        testedAt: record.testedAt,
+      };
+      bound.add(`${record.provider.providerId}/${tested.modelId}`);
+    }
+  }
+  return { config, bound };
+}
+
+function isConfiguredModel(config, providerId, modelId) {
+  return isRecord(config?.model?.providers?.[providerId]?.models)
+    && Object.prototype.hasOwnProperty.call(config.model.providers[providerId].models, modelId);
+}
+
+function renamedSourceModelId(providerId, modelId, rawProviderRenames, rawModelRenames) {
+  const modelRename = Array.isArray(rawModelRenames)
+    ? rawModelRenames.find((entry) => entry?.providerId === providerId && entry?.to === modelId)
+    : null;
+  if (modelRename) {
+    const providerRename = Array.isArray(rawProviderRenames)
+      ? rawProviderRenames.find((entry) => entry?.to === providerId)
+      : null;
+    return {
+      providerId: providerRename?.from || providerId,
+      modelId: modelRename.from,
+    };
+  }
+  const providerRename = Array.isArray(rawProviderRenames)
+    ? rawProviderRenames.find((entry) => entry?.to === providerId)
+    : null;
+  return providerRename ? { providerId: providerRename.from, modelId } : null;
+}
+
+function validateNewReferencedModelBindings(previousConfig, nextConfig, bound, rawProviderRenames, rawModelRenames) {
+  const references = findModelReferences(nextConfig);
+  for (const reference of references) {
+    const [providerId, ...modelParts] = String(reference.value || '').split('/');
+    const modelId = modelParts.join('/');
+    const renamedSource = renamedSourceModelId(providerId, modelId, rawProviderRenames, rawModelRenames);
+    if (isConfiguredModel(previousConfig, providerId, modelId)
+      || (renamedSource && isConfiguredModel(previousConfig, renamedSource.providerId, renamedSource.modelId))) continue;
+    const key = `${providerId}/${modelId}`;
+    if (!bound.has(key)) {
+      return { providerId, modelId, reference };
+    }
+  }
+  return null;
+}
+
 function configRevision(raw) {
   return createHash('sha256').update(String(raw ?? '')).digest('hex');
 }
@@ -601,6 +676,26 @@ router.put('/', async (req, res) => {
         req.body?.modelRenames,
       );
       if (renamed.error) return res.status(400).json({ error: renamed.error, code: renamed.code });
+      const testBinding = bindModelConnectionTests(renamed.config, req.body?.modelTestBindings, req.user?.id || '');
+      if (testBinding.error) return res.status(testBinding.error.status).json({ code: testBinding.error.code, message: testBinding.error.message });
+      const invalidTestReference = diskRecord.parseError
+        ? null
+        : validateNewReferencedModelBindings(
+          diskRecord.config,
+          renamed.config,
+          testBinding.bound,
+          req.body?.providerRenames,
+          req.body?.modelRenames,
+        );
+      if (invalidTestReference) {
+        return res.status(409).json({
+          error: 'Referenced model must have a passing connection test.',
+          code: 'MODEL_TEST_REQUIRED',
+          providerId: invalidTestReference.providerId,
+          modelId: invalidTestReference.modelId,
+          reference: invalidTestReference.reference.path,
+        });
+      }
       const deletedReference = findDeletedModelReferences(diskRecord.config, renamed.config);
       if (deletedReference) {
         return res.status(409).json({
@@ -652,6 +747,26 @@ router.put('/', async (req, res) => {
         req.body?.modelRenames,
       );
       if (renamed.error) return res.status(400).json({ error: renamed.error, code: renamed.code });
+      const testBinding = bindModelConnectionTests(renamed.config, req.body?.modelTestBindings, req.user?.id || '');
+      if (testBinding.error) return res.status(testBinding.error.status).json({ code: testBinding.error.code, message: testBinding.error.message });
+      const invalidTestReference = diskRecord.parseError
+        ? null
+        : validateNewReferencedModelBindings(
+          diskRecord.config,
+          renamed.config,
+          testBinding.bound,
+          req.body?.providerRenames,
+          req.body?.modelRenames,
+        );
+      if (invalidTestReference) {
+        return res.status(409).json({
+          error: 'Referenced model must have a passing connection test.',
+          code: 'MODEL_TEST_REQUIRED',
+          providerId: invalidTestReference.providerId,
+          modelId: invalidTestReference.modelId,
+          reference: invalidTestReference.reference.path,
+        });
+      }
       const deletedReference = findDeletedModelReferences(diskRecord.config, renamed.config);
       if (deletedReference) {
         return res.status(409).json({

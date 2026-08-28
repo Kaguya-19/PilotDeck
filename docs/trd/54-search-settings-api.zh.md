@@ -27,7 +27,7 @@
 | `endpoint` | string | provider endpoint 覆盖值；内置 provider 可省略以使用默认值；必须为 HTTP(S) URL |
 | `customProvider` | object | `custom` provider 的请求和结果映射规则 |
 
-配置 parser 对未知字段产生 warning；未知 provider 等结构错误产生 fatal diagnostic。`apiKey` 可以省略，以支持运行时环境变量注入；`custom` 的 endpoint 和调用测试时的凭证要求由运行时及测试接口校验。`customProvider` 支持以下字段：
+配置 parser 对未知字段产生 warning；未知 provider 等结构错误产生 fatal diagnostic。`POST /api/config/validate` 和 `PUT /api/config` 均调用该 parser，因此非法 provider 或非 HTTP(S) endpoint 会在通用配置接口拒绝。`apiKey` 可以省略，以支持运行时环境变量注入；`custom` 的 endpoint 和调用测试时的凭证要求由运行时及测试接口校验。`customProvider` 支持以下字段：
 
 | 字段 | 类型 | 默认值/取值 |
 |---|---|---|

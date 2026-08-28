@@ -92,6 +92,12 @@ function sameKey(fingerprint, apiKey) {
   const candidate = keyFingerprint(apiKey);
   return fingerprint?.length === candidate.length && timingSafeEqual(fingerprint, candidate);
 }
+
+export function connectionTestMatchesProvider(record, provider) {
+  const endpoint = text(provider?.url).replace(/\/+$/, '');
+  if (!record || !provider || record.provider.protocol !== provider.protocol || record.provider.endpoint !== endpoint) return false;
+  return provider.providerId === 'ollama' || sameKey(record.keyFingerprint, text(provider.apiKey));
+}
 function hasOnlyKeys(value, keys) {
   return value && typeof value === 'object' && !Array.isArray(value)
     && Object.keys(value).every((key) => keys.includes(key));
@@ -99,9 +105,16 @@ function hasOnlyKeys(value, keys) {
 function retryPolicy(value) {
   const keys = ['maxRetries', 'maxStreamRetries', 'streamIdleTimeoutMs', 'baseDelayMs', 'maxDelayMs'];
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  if (Object.keys(value).length !== keys.length || keys.some((key) => !Object.prototype.hasOwnProperty.call(value, key))) return null;
-  const output = {};
+  if (Object.keys(value).some((key) => !keys.includes(key))) return null;
+  const output = {
+    maxRetries: 2,
+    maxStreamRetries: 2,
+    streamIdleTimeoutMs: 30_000,
+    baseDelayMs: 500,
+    maxDelayMs: 5_000,
+  };
   for (const key of keys) {
+    if (value[key] === undefined) continue;
     if (typeof value[key] !== 'number' || !Number.isInteger(value[key]) || value[key] < 0) return null;
     output[key] = value[key];
   }
@@ -143,10 +156,22 @@ function publicResult(record) {
   return { testId: record.id, status: record.status, manualInputRequired: record.status === 'manual_input_required', models: record.models, testedAt: record.testedAt, error: record.error || null };
 }
 function getTest(req, res, testId = req.params.testId) {
-  const record = tests.get(testId);
-  if (!record || record.userId !== req.user.id) { apiError(res, 404, 'TEST_NOT_FOUND', 'Connection test was not found.'); return null; }
-  if (record.expiresAt <= Date.now()) { tests.delete(record.id); apiError(res, 410, 'TEST_EXPIRED', 'Connection test has expired.'); return null; }
+  const result = getConnectionTestRecord(req.user.id, testId);
+  if (result.reason === 'expired') { apiError(res, 410, 'TEST_EXPIRED', 'Connection test has expired.'); return null; }
+  if (!result.record) { apiError(res, 404, 'TEST_NOT_FOUND', 'Connection test was not found.'); return null; }
+  const record = result.record;
   return record;
+}
+
+/** Return a connection test only when it belongs to the caller and is alive. */
+export function getConnectionTestRecord(userId, testId) {
+  const record = tests.get(String(testId || ''));
+  if (!record || record.userId !== userId) return { record: null, reason: 'not_found' };
+  if (record.expiresAt <= Date.now()) {
+    tests.delete(record.id);
+    return { record: null, reason: 'expired' };
+  }
+  return { record, reason: null };
 }
 function deleteExpiredTests() { const now = Date.now(); for (const [id, record] of tests) if (record.expiresAt <= now) tests.delete(id); }
 setInterval(deleteExpiredTests, TEST_TTL_MS).unref();

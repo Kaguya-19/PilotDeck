@@ -133,8 +133,9 @@
 - `router.tokenSaver.judge`
 - `router.tokenSaver.tiers.*.model`
 - `router.stats.modelPricing` 的 provider/model key
+- `router.stats.baselineModel.provider` / `router.stats.baselineModel.model`
 
-provider 仅修改展示名称而不修改 providerId 时，路由引用保持不变；model 仅修改展示名称而不修改 modelId 时，路由引用也保持不变。修改 providerId/modelId 时，旧引用不得残留，价格数值必须原样保留。
+provider 仅修改展示名称而不修改 providerId 时，路由引用保持不变；model 仅修改展示名称而不修改 modelId 时，路由引用也保持不变。修改 providerId/modelId 时，旧引用不得残留，价格数值必须原样保留；`router.stats.baselineModel` 的 provider/model 字段同步改写。
 
 删除 provider/model 前，设置侧可通过 `GET /api/config/model-references` 查询引用；即使未先查询，`PUT /api/config` 仍必须在服务端拒绝仍被路由引用的对象，并返回 `409 MODEL_IN_USE`。
 

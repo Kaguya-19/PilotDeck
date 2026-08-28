@@ -464,6 +464,133 @@ describe('config model-pool connection test routes', () => {
     });
     expect(otherUser.status).toBe(404);
   });
+
+  it('binds a passing test to model configuration during save', async () => {
+    const probe = vi.fn().mockResolvedValue({ ok: true });
+    const initial = {
+      agent: { model: 'openai/model-a' },
+      model: { providers: { openai: { protocol: 'openai', url: 'https://api.openai.com/v1', apiKey: 'key', models: { 'model-a': {} } } } },
+    };
+    const { requestStatus, writePilotDeckConfig } = await createConfigApp({ config: initial, probe });
+    const tested = await requestStatus('/api/config/test-connections', {
+      method: 'POST', headers: { 'x-user': 'settings-user' },
+      body: JSON.stringify({ providerId: 'openai', apiKey: 'key', models: ['model-a'], retryPolicy: { maxRetries: 1, maxStreamRetries: 1, streamIdleTimeoutMs: 1000 } }),
+    });
+    expect(tested.status).toBe(200);
+    expect(tested.body.status).toBe('passed');
+
+    const saved = await requestStatus('/api/config', {
+      method: 'PUT', headers: { 'x-user': 'settings-user' },
+      body: JSON.stringify({ config: initial, modelTestBindings: [{ testId: tested.body.testId }] }),
+    });
+    expect(saved.status).toBe(200);
+    expect(writePilotDeckConfig.mock.calls[0][0].model.providers.openai.models['model-a'].connectionTest).toMatchObject({ status: 'passed', textInput: 'supported', imageInput: 'supported' });
+  });
+
+  it('writes a passing binding for a newly referenced model', async () => {
+    const probe = vi.fn().mockResolvedValue({ ok: true });
+    const initial = {
+      agent: { model: 'openai/model-a' },
+      model: { providers: { openai: { protocol: 'openai', url: 'https://api.openai.com/v1', apiKey: 'key', models: { 'model-a': {} } } } },
+    };
+    const { requestStatus, writePilotDeckConfig } = await createConfigApp({ config: initial, probe });
+    const tested = await requestStatus('/api/config/test-connections', {
+      method: 'POST', headers: { 'x-user': 'settings-user' },
+      body: JSON.stringify({ providerId: 'openai', apiKey: 'key', models: ['model-b'], retryPolicy: { maxRetries: 1, maxStreamRetries: 1, streamIdleTimeoutMs: 1000 } }),
+    });
+    const next = {
+      ...initial,
+      agent: { model: 'openai/model-b' },
+      model: { providers: { openai: { ...initial.model.providers.openai, models: { 'model-a': {}, 'model-b': {} } } } },
+    };
+    const saved = await requestStatus('/api/config', {
+      method: 'PUT', headers: { 'x-user': 'settings-user' },
+      body: JSON.stringify({ config: next, modelTestBindings: [{ testId: tested.body.testId }] }),
+    });
+    expect(saved.status).toBe(200);
+    expect(writePilotDeckConfig.mock.calls[0][0].model.providers.openai.models['model-b'].connectionTest).toMatchObject({ status: 'passed' });
+  });
+
+  it('rejects a newly referenced model without a passing test binding', async () => {
+    const initial = {
+      agent: { model: 'openai/model-a' },
+      model: { providers: { openai: { protocol: 'openai', url: 'https://api.openai.com/v1', apiKey: 'key', models: { 'model-a': {} } } } },
+    };
+    const { requestStatus } = await createConfigApp({ config: initial });
+    const next = {
+      ...initial,
+      agent: { model: 'openai/model-b' },
+      model: { providers: { openai: { ...initial.model.providers.openai, models: { 'model-a': {}, 'model-b': {} } } } },
+    };
+    const response = await requestStatus('/api/config', {
+      method: 'PUT', headers: { 'x-user': 'settings-user' },
+      body: JSON.stringify({ config: next }),
+    });
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe('MODEL_TEST_REQUIRED');
+  });
+
+  it('requires a binding when a new model is referenced by router, memory, or pricing', async () => {
+    const initial = {
+      agent: { model: 'openai/model-a' },
+      model: { providers: { openai: { protocol: 'openai', url: 'https://api.openai.com/v1', apiKey: 'key', models: { 'model-a': {} } } } },
+    };
+    const { requestStatus } = await createConfigApp({ config: initial });
+    const next = {
+      ...initial,
+      memory: { model: 'openai/model-b' },
+      router: {
+        scenarios: { default: 'openai/model-b' },
+        stats: { modelPricing: { 'openai/model-b': { input: 1, output: 1 } }, baselineModel: { provider: 'openai', model: 'model-b' } },
+      },
+      model: { providers: { openai: { ...initial.model.providers.openai, models: { 'model-a': {}, 'model-b': {} } } } },
+    };
+    const response = await requestStatus('/api/config', {
+      method: 'PUT', headers: { 'x-user': 'settings-user' },
+      body: JSON.stringify({ config: next }),
+    });
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe('MODEL_TEST_REQUIRED');
+    expect(response.body.providerId).toBe('openai');
+    expect(response.body.modelId).toBe('model-b');
+  });
+
+  it('allows an unreferenced new model without a binding', async () => {
+    const initial = {
+      agent: { model: 'openai/model-a' },
+      model: { providers: { openai: { protocol: 'openai', url: 'https://api.openai.com/v1', apiKey: 'key', models: { 'model-a': {} } } } },
+    };
+    const { requestStatus, writePilotDeckConfig } = await createConfigApp({ config: initial });
+    const next = {
+      ...initial,
+      model: { providers: { openai: { ...initial.model.providers.openai, models: { 'model-a': {}, 'model-b': {} } } } },
+    };
+    const response = await requestStatus('/api/config', {
+      method: 'PUT',
+      body: JSON.stringify({ config: next }),
+    });
+    expect(response.status).toBe(200);
+    expect(writePilotDeckConfig).toHaveBeenCalled();
+  });
+
+  it('allows an existing model connection change without a binding', async () => {
+    const initial = {
+      agent: { model: 'openai/model-a' },
+      model: { providers: { openai: { protocol: 'openai', url: 'https://api.openai.com/v1', apiKey: 'key', models: { 'model-a': {} } } } },
+    };
+    const { requestStatus, writePilotDeckConfig } = await createConfigApp({ config: initial });
+    const next = {
+      ...initial,
+      model: { providers: { openai: { ...initial.model.providers.openai, url: 'https://api.example.test/v1', models: { 'model-a': {} } } } },
+    };
+    const response = await requestStatus('/api/config', {
+      method: 'PUT',
+      body: JSON.stringify({ config: next }),
+    });
+    expect(response.status).toBe(200);
+    expect(writePilotDeckConfig).toHaveBeenCalled();
+  });
+
 });
 
 describe('config model reference and rename routes', () => {
@@ -475,7 +602,10 @@ describe('config model reference and rename routes', () => {
       scenarios: { default: 'old-provider/old-model' },
       fallback: { default: ['old-provider/old-model'] },
       tokenSaver: { judge: 'old-provider/old-model', tiers: { fast: { model: 'old-provider/old-model' } } },
-      stats: { modelPricing: { 'old-provider/old-model': { input: 1, output: 2 } } },
+      stats: {
+        modelPricing: { 'old-provider/old-model': { input: 1, output: 2 } },
+        baselineModel: { provider: 'old-provider', model: 'old-model' },
+      },
     },
   };
 
@@ -483,7 +613,7 @@ describe('config model reference and rename routes', () => {
     const { requestStatus } = await createConfigApp({ config: baseConfig });
     const response = await requestStatus('/api/config/model-references?providerId=old-provider&modelId=old-model');
     expect(response.status).toBe(200);
-    expect(response.body.references).toHaveLength(8);
+    expect(response.body.references).toHaveLength(9);
     expect(JSON.stringify(response.body)).not.toContain('key');
   });
 
@@ -492,7 +622,7 @@ describe('config model reference and rename routes', () => {
     const response = await requestStatus('/api/config/model-references?providerId=old-provider');
     expect(response.status).toBe(200);
     expect(response.body.modelId).toBeUndefined();
-    expect(response.body.references).toHaveLength(8);
+    expect(response.body.references).toHaveLength(9);
   });
 
   it('atomically rewrites provider/model references and pricing keys', async () => {
@@ -514,6 +644,7 @@ describe('config model reference and rename routes', () => {
     expect(saved.agent.model).toBe('new-provider/new-model');
     expect(saved.router.tokenSaver.tiers.fast.model).toBe('new-provider/new-model');
     expect(saved.router.stats.modelPricing).toEqual({ 'new-provider/new-model': { input: 1, output: 2 } });
+    expect(saved.router.stats.baselineModel).toEqual({ provider: 'new-provider', model: 'new-model' });
   });
 
   it('rejects deletion while a model remains referenced', async () => {
@@ -525,6 +656,18 @@ describe('config model reference and rename routes', () => {
     expect(response.status).toBe(409);
     expect(response.body.code).toBe('MODEL_IN_USE');
     expect(writePilotDeckConfig).not.toHaveBeenCalled();
+  });
+
+  it('allows deletion of an unreferenced model', async () => {
+    const initial = structuredClone(baseConfig);
+    initial.model.providers['old-provider'].models.unused = {};
+    const { requestStatus, writePilotDeckConfig } = await createConfigApp({ config: initial });
+    const response = await requestStatus('/api/config', {
+      method: 'PUT',
+      body: JSON.stringify({ config: baseConfig }),
+    });
+    expect(response.status).toBe(200);
+    expect(writePilotDeckConfig).toHaveBeenCalled();
   });
 
   it('rejects rename metadata that does not match the provider map', async () => {
