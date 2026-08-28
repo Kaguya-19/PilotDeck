@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { PilotDeckConfig } from "../../modelPool/types";
 import {
   isWebSearchApiKeyRequired,
   webSearchConfigForProvider,
@@ -79,5 +80,17 @@ describe("isWebSearchApiKeyRequired", () => {
         customProvider: { auth: "bearer" },
       }),
     ).toBe(true);
+  });
+
+  it("keeps the shared config type in sync with built-in providers", () => {
+    const providers: Array<NonNullable<NonNullable<PilotDeckConfig["tools"]>["webSearch"]>["provider"]> = [
+      "glm",
+      "tavily",
+      "custom",
+      "serper",
+      "brave",
+    ];
+    expect(providers).toContain("serper");
+    expect(providers).toContain("brave");
   });
 });

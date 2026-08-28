@@ -60,3 +60,13 @@ test("allows a disabled token saver without child model settings", () => {
   assert.equal(result.diagnostics.filter((item) => item.severity === "fatal").length, 0);
   assert.deepEqual(result.config?.tokenSaver, { enabled: false });
 });
+
+test("skips auto-orchestrate tier validation when token saver is disabled", () => {
+  const result = parseRouterConfig({
+    tokenSaver: { enabled: false },
+    autoOrchestrate: { triggerTiers: ["simple"] },
+  }, modelConfig);
+
+  assert.equal(result.diagnostics.filter((item) => item.severity === "fatal").length, 0);
+  assert.deepEqual(result.config?.autoOrchestrate?.triggerTiers, ["simple"]);
+});

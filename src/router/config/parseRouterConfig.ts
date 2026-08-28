@@ -480,7 +480,7 @@ function parseAutoOrchestrate(
   if (raw.triggerTiers !== undefined) {
     if (Array.isArray(raw.triggerTiers) && raw.triggerTiers.every((entry) => typeof entry === "string")) {
       triggerTiers = raw.triggerTiers as string[];
-      if (tokenSaver) {
+      if (tokenSaver?.enabled) {
         for (const tier of triggerTiers) {
           if (!tokenSaver.tiers[tier]) {
             diagnostics.push({
