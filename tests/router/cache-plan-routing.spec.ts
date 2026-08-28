@@ -4,6 +4,7 @@ import test from "node:test";
 import type { CanonicalModelRequest, ModelRuntime, ModelRuntimeOptions } from "../../src/model/index.js";
 import { createRouterRuntime } from "../../src/router/RouterRuntime.js";
 import type { RouterConfig } from "../../src/router/config/schema.js";
+import { calculateInputCost, calculateCacheReadCost } from "../../src/router/utils/modelPricing.js";
 
 const capabilities = {
   supportsToolUse: true,
@@ -73,4 +74,13 @@ test("router drops cache plan when explicit routing changes provider or model", 
   assert.equal(materialized.cachePlan, undefined);
   assert.equal(materialized.cacheBreakpoints, undefined);
   await router.shutdown();
+});
+
+test("pricing unit is metadata and does not change cost calculations", () => {
+  const pricing = {
+    "primary/main": { input: 2, cacheRead: 0.5, unit: "¥/百万 Token" as const },
+  };
+
+  assert.equal(calculateInputCost(1_000_000, "primary", "main", pricing), 2);
+  assert.equal(calculateCacheReadCost(1_000_000, "primary", "main", pricing), 0.5);
 });
