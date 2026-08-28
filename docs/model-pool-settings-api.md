@@ -119,7 +119,7 @@ type ModelConnectionTestResult = {
 
 providerId/modelId 重命名会在同一写入事务中改写 `agent.model`、`agent.subagents.default`、`memory.model`、`router.scenarios.*`、`router.fallback.*[]`、`router.tokenSaver.judge`、`router.tokenSaver.tiers.*.model` 以及 `router.stats.modelPricing` 的 key。仅修改展示名称而不修改 ID 时不改写引用；价格数值保持不变。
 
-本接口当前不会要求 provider/model 必须携带某个 `testId`，也没有独立的测试结果绑定字段。因此“只有测试通过的模型才能被智能体、路由或记忆引用”仍是后续实现缺口。
+测试结果绑定规则见第 7 节。
 
 常见状态码：
 

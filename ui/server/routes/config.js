@@ -554,7 +554,7 @@ router.get('/model-references', (req, res) => {
   const providerId = typeof req.query?.providerId === 'string' ? req.query.providerId.trim() : '';
   const modelId = typeof req.query?.modelId === 'string' ? req.query.modelId.trim() : '';
   if (!providerId || !/^[a-z0-9][a-z0-9_-]{0,63}$/i.test(providerId)
-    || (modelId && /[\/\s]/.test(modelId))) {
+    || (modelId && /\s/.test(modelId))) {
     return res.status(400).json({ code: 'INVALID_REQUEST', message: 'providerId and modelId must be valid model identifiers.' });
   }
   try {

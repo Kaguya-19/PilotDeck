@@ -625,6 +625,34 @@ describe('config model reference and rename routes', () => {
     expect(response.body.references).toHaveLength(9);
   });
 
+  it('supports model IDs containing slashes', async () => {
+    const config = {
+      agent: { model: 'custom/anthropic/claude-sonnet-4-6' },
+      model: {
+        providers: {
+          custom: {
+            protocol: 'openai',
+            url: 'https://example.test/v1',
+            apiKey: 'key',
+            models: { 'anthropic/claude-sonnet-4-6': {} },
+          },
+        },
+      },
+    };
+    const { requestStatus } = await createConfigApp({ config });
+    const response = await requestStatus(
+      '/api/config/model-references?providerId=custom&modelId=anthropic%2Fclaude-sonnet-4-6',
+    );
+    expect(response.status).toBe(200);
+    expect(response.body.references).toEqual([
+      {
+        path: 'agent.model',
+        value: 'custom/anthropic/claude-sonnet-4-6',
+        kind: 'agent',
+      },
+    ]);
+  });
+
   it('atomically rewrites provider/model references and pricing keys', async () => {
     const { requestStatus, writePilotDeckConfig } = await createConfigApp({ config: baseConfig });
     const nextConfig = structuredClone(baseConfig);
