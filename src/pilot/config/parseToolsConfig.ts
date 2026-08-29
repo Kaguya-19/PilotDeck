@@ -94,6 +94,10 @@ function parseWebSearch(
     }
   }
 
+  if (result.enabled === false) {
+    return { enabled: false };
+  }
+
   if (raw.provider !== undefined) {
     if (
       raw.provider !== "glm"

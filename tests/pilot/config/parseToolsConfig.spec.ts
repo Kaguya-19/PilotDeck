@@ -4,25 +4,21 @@ import test from "node:test";
 import { parseToolsConfig } from "../../../src/pilot/config/parseToolsConfig.js";
 import type { PilotConfigDiagnostic } from "../../../src/pilot/config/types.js";
 
-test("web search can be explicitly disabled without discarding provider config", () => {
+test("disabled web search ignores inactive provider fields", () => {
   const diagnostics: PilotConfigDiagnostic[] = [];
 
   const config = parseToolsConfig({
     webSearch: {
       enabled: false,
-      provider: "tavily",
-      apiKey: "test-key",
-      endpoint: "https://example.test/search",
+      provider: "invalid",
+      apiKey: "",
+      endpoint: "not-a-url",
+      customProvider: { auth: "invalid" },
     },
   }, diagnostics);
 
   assert.deepEqual(config, {
-    webSearch: {
-      enabled: false,
-      provider: "tavily",
-      apiKey: "test-key",
-      endpoint: "https://example.test/search",
-    },
+    webSearch: { enabled: false },
   });
   assert.deepEqual(diagnostics, []);
 });
