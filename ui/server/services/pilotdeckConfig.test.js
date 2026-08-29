@@ -446,6 +446,14 @@ describe('validatePilotDeckConfig router settings', () => {
         );
     });
 
+    it('accepts legacy string baselineModel references', () => {
+        const validation = withRouter({
+            stats: { baselineModel: 'openai/gpt-test' },
+        });
+        expect(validation.valid).toBe(true);
+        expect(validation.errors).toEqual([]);
+    });
+
     it('rejects invalid pricing values and units', () => {
         const validation = withRouter({
             stats: {

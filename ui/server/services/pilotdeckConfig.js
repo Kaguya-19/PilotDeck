@@ -265,6 +265,15 @@ function validateRequiredModelRef(config, ref, label, errors) {
 function validateBaselineModelRef(config, ref, errors) {
   const label = 'router.stats.baselineModel';
   if (ref === undefined) return;
+  if (typeof ref === 'string') {
+    const modelRef = normalizeString(ref);
+    if (!splitModelRef(modelRef)) {
+      errors.push(`${label} must use provider/model format`);
+      return;
+    }
+    validateModelRef(config, modelRef, label, errors);
+    return;
+  }
   if (!isRecord(ref)) {
     errors.push(`${label} must be an object with provider and model`);
     return;

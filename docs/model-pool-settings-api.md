@@ -311,6 +311,8 @@ providerId/modelId 重命名会在同一写入事务中改写 `agent.model`、`a
 
 保存模型池时可在 `PUT /api/config` 中提交 `modelTestBindings: [{ "testId": "<opaque id>" }]`。服务端核对当前用户、TTL、provider/endpoint/API key 和模型集合后，将通过结果写入对应模型的 `connectionTest` 元数据。仅当本次新增的模型被 agent、subagent、memory 或 router 引用时，才必须提交通过的绑定；缺少绑定时保存返回 `409 MODEL_TEST_REQUIRED`。已有模型修改连接参数继续兼容未绑定保存。
 
+设置页在 Agent Model 页面选择尚未配置的模型时，会先调用 `POST /api/config/test-connections`；图片能力无法自动判定时提示用户补录，再将通过测试的 `testId` 随配置保存提交。已遮罩的 provider 密钥由设置测试接口从当前配置复用，不回显给客户端。
+
 ## 8. 兼容接口与明确缺口
 
 以下 onboarding 接口仍保留，但设置页面不应依赖：

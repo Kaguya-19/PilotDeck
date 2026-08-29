@@ -458,6 +458,37 @@ describe('config model-pool connection test routes', () => {
     expect(probe).toHaveBeenNthCalledWith(1, expect.objectContaining({ retryPolicy: body.retryPolicy }));
   });
 
+  it('reuses a saved provider key when the settings UI submits a masked key', async () => {
+    const probe = vi.fn().mockResolvedValue({ ok: true });
+    const { requestStatus } = await createConfigApp({
+      config: {
+        model: {
+          providers: {
+            openai: {
+              protocol: 'openai',
+              url: 'https://api.openai.com/v1',
+              apiKey: 'saved-secret',
+              models: {},
+            },
+          },
+        },
+      },
+      probe,
+    });
+    const response = await requestStatus('/api/config/test-connections', {
+      method: 'POST',
+      headers: { 'x-user': 'settings-user' },
+      body: JSON.stringify({
+        providerId: 'openai',
+        apiKey: '********',
+        models: ['model-a'],
+        retryPolicy: retryPolicy(),
+      }),
+    });
+    expect(response.status).toBe(200);
+    expect(probe).toHaveBeenCalledWith(expect.objectContaining({ apiKey: 'saved-secret' }));
+  });
+
   it('isolates config test IDs by user', async () => {
     const probe = vi.fn().mockResolvedValue({ ok: false, code: 'MODEL_NOT_FOUND', error: 'missing' });
     const { requestStatus } = await createConfigApp({ probe });

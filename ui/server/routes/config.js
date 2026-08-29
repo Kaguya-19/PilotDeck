@@ -1001,7 +1001,18 @@ router.post('/test-connection', async (req, res) => {
 
 // Settings model-pool routes reuse the onboarding probe lifecycle while
 // exposing the API under /api/config for the settings UI.
-router.post('/test-connections', modelTestRateLimiter, modelConnectionTestsHandler);
+async function configModelConnectionTestsHandler(req, res) {
+  if (req.body?.apiKey === MASKED_SECRET) {
+    const providerId = typeof req.body?.providerId === 'string' ? req.body.providerId.trim() : '';
+    const current = readPilotDeckConfigFile();
+    const savedKey = current.config?.model?.providers?.[providerId]?.apiKey;
+    if (typeof savedKey === 'string' && savedKey && savedKey !== MASKED_SECRET) {
+      req.body = { ...req.body, apiKey: savedKey };
+    }
+  }
+  return modelConnectionTestsHandler(req, res);
+}
+router.post('/test-connections', modelTestRateLimiter, configModelConnectionTestsHandler);
 router.put('/test-connections/:testId/image-capabilities', imageCapabilitiesHandler);
 
 /**
