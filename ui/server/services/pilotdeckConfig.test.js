@@ -82,22 +82,24 @@ describe('readPilotDeckConfigFile fallback behavior', () => {
 
 describe('validatePilotDeckConfig gateway validation', () => {
     it('accepts an omitted URL for catalog providers', () => {
-        const validation = validatePilotDeckConfig({
-            agent: { model: 'openai/gpt-test' },
-            model: {
-                providers: {
-                    openai: {
-                        protocol: 'openai',
-                        url: '',
-                        apiKey: 'key',
-                        models: { 'gpt-test': {} },
+        for (const providerId of ['openai', 'minimax']) {
+            const validation = validatePilotDeckConfig({
+                agent: { model: `${providerId}/gpt-test` },
+                model: {
+                    providers: {
+                        [providerId]: {
+                            protocol: 'openai',
+                            url: '',
+                            apiKey: 'key',
+                            models: { 'gpt-test': {} },
+                        },
                     },
                 },
-            },
-        });
+            });
 
-        expect(validation.valid).toBe(true);
-        expect(validation.errors).toEqual([]);
+            expect(validation.valid).toBe(true);
+            expect(validation.errors).toEqual([]);
+        }
     });
 
     it('migrates the legacy interactive spreadsheet mode to built-in preview', () => {

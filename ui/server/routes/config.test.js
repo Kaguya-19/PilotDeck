@@ -470,6 +470,21 @@ describe('config model-pool connection test routes', () => {
     expect(writePilotDeckConfig).toHaveBeenCalled();
   });
 
+  it('matches the UI catalog endpoint for MiniMax when provider url is empty', async () => {
+    const probe = vi.fn().mockResolvedValue({ ok: true });
+    const initial = {
+      agent: { model: 'minimax/model-a' },
+      model: { providers: { minimax: { protocol: 'openai', url: '', apiKey: 'key', models: {} } } },
+    };
+    const { requestStatus } = await createConfigApp({ config: initial, probe });
+    const tested = await requestStatus('/api/config/test-connections', {
+      method: 'POST',
+      body: JSON.stringify({ providerId: 'minimax', apiKey: 'key', models: ['model-a'], retryPolicy: retryPolicy() }),
+    });
+    expect(tested.status).toBe(200);
+    expect(probe).toHaveBeenCalledWith(expect.objectContaining({ baseUrl: 'https://api.minimax.io/v1' }));
+  });
+
   it('runs batch text/image probes and accepts manual image capabilities', async () => {
     const probe = vi.fn()
       .mockResolvedValueOnce({ ok: true })

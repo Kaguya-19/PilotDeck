@@ -39,7 +39,7 @@ const CATALOG_PROVIDER_DEFAULT_URLS = {
   deepseek: 'https://api.deepseek.com/v1',
   google: 'https://generativelanguage.googleapis.com',
   moonshot: 'https://api.moonshot.cn/v1',
-  minimax: 'https://api.minimaxi.com/v1',
+  minimax: 'https://api.minimax.io/v1',
   volc_ark: 'https://ark.cn-beijing.volces.com/api/v3',
   zhipu: 'https://api.z.ai/api/paas/v4',
   openrouter: 'https://openrouter.ai/api/v1',

@@ -33,7 +33,7 @@ const PRESETS = {
   deepseek: { protocol: 'openai', endpoint: 'https://api.deepseek.com/v1' },
   google: { protocol: 'google', endpoint: 'https://generativelanguage.googleapis.com' },
   moonshot: { protocol: 'openai', endpoint: 'https://api.moonshot.cn/v1' },
-  minimax: { protocol: 'openai', endpoint: 'https://api.minimaxi.com/v1' },
+  minimax: { protocol: 'openai', endpoint: 'https://api.minimax.io/v1' },
   volc_ark: { protocol: 'openai', endpoint: 'https://ark.cn-beijing.volces.com/api/v3' },
   zhipu: { protocol: 'openai', endpoint: 'https://api.z.ai/api/paas/v4' },
   openrouter: { protocol: 'openai', endpoint: 'https://openrouter.ai/api/v1' },
@@ -91,6 +91,11 @@ function apiError(res, status, code, message, modelId = undefined) {
   return res.status(status).json({ code, message, ...(modelId ? { modelId } : {}) });
 }
 function text(value) { return typeof value === 'string' ? value.trim() : ''; }
+function trimTrailingSlashes(value) {
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 47) end -= 1;
+  return value.slice(0, end);
+}
 function keyFingerprint(apiKey) { return createHmac('sha256', testKeySecret).update(apiKey).digest(); }
 function sameKey(fingerprint, apiKey) {
   const candidate = keyFingerprint(apiKey);
@@ -101,7 +106,7 @@ export function connectionTestMatchesProvider(record, provider) {
   const presetEndpoint = Object.hasOwn(PRESETS, provider?.providerId)
     ? PRESETS[provider.providerId].endpoint
     : '';
-  const endpoint = (text(provider?.url) || presetEndpoint).replace(/\/+$/, '');
+  const endpoint = trimTrailingSlashes(text(provider?.url) || presetEndpoint);
   if (!record || !provider || record.provider.protocol !== provider.protocol || record.provider.endpoint !== endpoint) return false;
   return provider.providerId === 'ollama' || sameKey(record.keyFingerprint, text(provider.apiKey));
 }
@@ -148,7 +153,7 @@ function resolveProvider(body, { allowPresetEndpointOverride = false } = {}) {
     }
   }
   const protocol = text(body.protocol).toLowerCase();
-  const endpoint = text(body.endpoint).replace(/\/+$/, '');
+  const endpoint = trimTrailingSlashes(text(body.endpoint));
   try {
     const url = new URL(endpoint);
     if (!/^[a-z0-9][a-z0-9_-]{0,63}$/i.test(providerId) || providerId === 'custom' || !PROTOCOLS.has(protocol) || !['http:', 'https:'].includes(url.protocol)) return null;
