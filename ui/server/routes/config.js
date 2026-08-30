@@ -1002,6 +1002,7 @@ router.post('/test-connection', async (req, res) => {
 // Settings model-pool routes reuse the onboarding probe lifecycle while
 // exposing the API under /api/config for the settings UI.
 async function configModelConnectionTestsHandler(req, res) {
+  req.allowPresetEndpointOverride = true;
   if (req.body?.apiKey === MASKED_SECRET) {
     const providerId = typeof req.body?.providerId === 'string' ? req.body.providerId.trim() : '';
     const current = readPilotDeckConfigFile();

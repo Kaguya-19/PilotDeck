@@ -84,3 +84,30 @@ test("pricing unit is metadata and does not change cost calculations", () => {
   assert.equal(calculateInputCost(1_000_000, "primary", "main", pricing), 2);
   assert.equal(calculateCacheReadCost(1_000_000, "primary", "main", pricing), 0.5);
 });
+
+test("router stats prefer an explicit baseline model over the scenario default", async () => {
+  const router = createRouterRuntime({
+    ...config,
+    stats: {
+      enabled: true,
+      filePath: `/tmp/pilotdeck-router-baseline-${process.pid}-${Math.random().toString(36).slice(2)}/stats.json`,
+      baselineModel: { provider: "baseline", model: "model" },
+      modelPricing: {
+        "primary/main": { input: 1 },
+        "baseline/model": { input: 3 },
+      },
+    },
+  }, { modelRuntime: runtime });
+  router.stats.observe({
+    sessionId: "baseline-test",
+    scenarioType: "default",
+    resolvedFrom: "scenario",
+    provider: "primary",
+    model: "main",
+    usage: { inputTokens: 1_000_000, outputTokens: 0 },
+    startedAt: new Date(0).toISOString(),
+    endedAt: new Date(1).toISOString(),
+  });
+  assert.equal(router.stats.snapshot().totalBaselineCost, 3);
+  await router.shutdown();
+});

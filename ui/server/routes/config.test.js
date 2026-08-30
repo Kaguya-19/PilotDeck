@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { validatePilotDeckConfig } from '../services/pilotdeckConfig.js';
+import { rewriteModelReferences } from '../services/modelReferences.js';
 
 const nativeFetch = globalThis.fetch;
 const tempDirs = [];
@@ -412,6 +413,48 @@ describe('config model-list route', () => {
 });
 
 describe('config model-pool connection test routes', () => {
+  it('uses a custom endpoint for catalog providers', async () => {
+    const probe = vi.fn().mockResolvedValue({ ok: true });
+    const { requestStatus } = await createConfigApp({ probe });
+    const response = await requestStatus('/api/config/test-connections', {
+      method: 'POST',
+      body: JSON.stringify({
+        providerId: 'openai',
+        endpoint: 'https://proxy.example/v1',
+        apiKey: 'key',
+        models: ['model-a'],
+        retryPolicy: retryPolicy(),
+      }),
+    });
+    expect(response.status).toBe(200);
+    expect(probe).toHaveBeenCalledWith(expect.objectContaining({ baseUrl: 'https://proxy.example/v1' }));
+  });
+
+  it('matches a connection test against a catalog default endpoint when provider url is empty', async () => {
+    const probe = vi.fn().mockResolvedValue({ ok: true });
+    const initial = {
+      agent: { model: 'openai/model-a' },
+      model: { providers: { openai: { protocol: 'openai', url: '', apiKey: 'key', models: {} } } },
+    };
+    const { requestStatus, writePilotDeckConfig } = await createConfigApp({ config: initial, probe });
+    const tested = await requestStatus('/api/config/test-connections', {
+      method: 'POST',
+      body: JSON.stringify({ providerId: 'openai', apiKey: 'key', models: ['model-a'], retryPolicy: retryPolicy() }),
+    });
+    expect(tested.status).toBe(200);
+    const next = {
+      ...initial,
+      model: { providers: { openai: { ...initial.model.providers.openai, models: { 'model-a': {} } } } },
+    };
+    const saved = await requestStatus('/api/config', {
+      method: 'PUT',
+      headers: { 'x-user': 'one' },
+      body: JSON.stringify({ config: next, modelTestBindings: [{ testId: tested.body.testId }] }),
+    });
+    expect(saved.status).toBe(200);
+    expect(writePilotDeckConfig).toHaveBeenCalled();
+  });
+
   it('runs batch text/image probes and accepts manual image capabilities', async () => {
     const probe = vi.fn()
       .mockResolvedValueOnce({ ok: true })
@@ -713,6 +756,16 @@ describe('config model reference and rename routes', () => {
     expect(saved.router.tokenSaver.tiers.fast.model).toBe('new-provider/new-model');
     expect(saved.router.stats.modelPricing).toEqual({ 'new-provider/new-model': { input: 1, output: 2 } });
     expect(saved.router.stats.baselineModel).toEqual({ provider: 'new-provider', model: 'new-model' });
+  });
+
+  it('rewrites legacy string baseline references', () => {
+    const config = structuredClone(baseConfig);
+    config.router.stats.baselineModel = 'old-provider/old-model';
+    rewriteModelReferences(config, {
+      providerRenames: new Map([['old-provider', 'new-provider']]),
+      modelRenames: new Map([['old-provider/old-model', { providerId: 'new-provider', modelId: 'new-model' }]]),
+    });
+    expect(config.router.stats.baselineModel).toBe('new-provider/new-model');
   });
 
   it('rejects deletion while a model remains referenced', async () => {

@@ -84,7 +84,8 @@ function renameRef(value, providerRenames, modelRenames) {
   const renamedModel = modelRenames.get(`${ref.providerId}/${ref.modelId}`)?.modelId || ref.modelId;
   const nextId = `${renamedProvider}/${renamedModel}`;
   if (typeof value === 'string') return nextId;
-  const next = { ...value, id: nextId };
+  const next = { ...value };
+  if (Object.hasOwn(value, 'id')) next.id = nextId;
   if (Object.hasOwn(value, 'provider')) next.provider = renamedProvider;
   if (Object.hasOwn(value, 'providerId')) next.providerId = renamedProvider;
   if (Object.hasOwn(value, 'model')) next.model = renamedModel;
@@ -128,14 +129,8 @@ export function rewriteModelReferences(config, { providerRenames = new Map(), mo
     }
     router.stats.modelPricing = pricing;
   }
-  if (isRecord(router?.stats?.baselineModel)) {
-    const baseline = router.stats.baselineModel;
-    const ref = parseModelRef(baseline);
-    if (ref) {
-      const renamedProvider = providerRenames.get(ref.providerId) || ref.providerId;
-      const renamedModel = modelRenames.get(`${ref.providerId}/${ref.modelId}`)?.modelId || ref.modelId;
-      router.stats.baselineModel = { ...baseline, provider: renamedProvider, model: renamedModel };
-    }
+  if (router?.stats?.baselineModel !== undefined) {
+    router.stats.baselineModel = renameRef(router.stats.baselineModel, providerRenames, modelRenames);
   }
   return config;
 }

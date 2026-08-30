@@ -98,7 +98,10 @@ function sameKey(fingerprint, apiKey) {
 }
 
 export function connectionTestMatchesProvider(record, provider) {
-  const endpoint = text(provider?.url).replace(/\/+$/, '');
+  const presetEndpoint = Object.hasOwn(PRESETS, provider?.providerId)
+    ? PRESETS[provider.providerId].endpoint
+    : '';
+  const endpoint = (text(provider?.url) || presetEndpoint).replace(/\/+$/, '');
   if (!record || !provider || record.provider.protocol !== provider.protocol || record.provider.endpoint !== endpoint) return false;
   return provider.providerId === 'ollama' || sameKey(record.keyFingerprint, text(provider.apiKey));
 }
@@ -129,10 +132,21 @@ function retryPolicy(value) {
   if (output.baseDelayMs > output.maxDelayMs) return null;
   return output;
 }
-function resolveProvider(body) {
+function resolveProvider(body, { allowPresetEndpointOverride = false } = {}) {
   const requested = text(body.providerId).toLowerCase();
   const providerId = Object.hasOwn(ALIASES, requested) ? ALIASES[requested] : requested;
-  if (Object.hasOwn(PRESETS, providerId)) return { providerId, ...PRESETS[providerId], custom: false };
+  if (Object.hasOwn(PRESETS, providerId)) {
+    const preset = PRESETS[providerId];
+    const requestedEndpoint = allowPresetEndpointOverride ? text(body.endpoint) : '';
+    if (!requestedEndpoint) return { providerId, ...preset, custom: false };
+    try {
+      const url = new URL(requestedEndpoint);
+      if (!['http:', 'https:'].includes(url.protocol)) return null;
+      return { providerId, ...preset, endpoint: url.toString().replace(/\/$/, ''), custom: false };
+    } catch {
+      return null;
+    }
+  }
   const protocol = text(body.protocol).toLowerCase();
   const endpoint = text(body.endpoint).replace(/\/+$/, '');
   try {
@@ -198,7 +212,7 @@ export function modelTestRateLimiter(req, res, next) {
 }
 
 export async function modelConnectionTestsHandler(req, res) {
-  const provider = resolveProvider(req.body || {});
+  const provider = resolveProvider(req.body || {}, { allowPresetEndpointOverride: req.allowPresetEndpointOverride === true });
   const requestedModels = Array.isArray(req.body?.models) ? req.body.models.map(text) : [];
   const models = [...new Set(requestedModels.filter(Boolean))];
   const retry = retryPolicy(req.body?.retryPolicy);

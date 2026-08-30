@@ -247,7 +247,7 @@ providerId/modelId 重命名会在同一写入事务中改写 `agent.model`、`a
 
 `retryPolicy` 对象必须提供；其中所有字段均可省略并使用服务端默认值，并受上述非负整数和上限约束。
 
-预置 provider 只需 `providerId`；自定义 provider 还必须提供合法的 `protocol` 和 HTTP(S) `endpoint`。预置 provider 的协议和 endpoint 由服务端目录决定。Ollama 可以省略或传空 API key，其他 provider 必须传非空 API key。
+预置 provider 只需 `providerId`；自定义 provider 还必须提供合法的 `protocol` 和 HTTP(S) `endpoint`。预置 provider 的协议由服务端目录决定，非空 `endpoint` 可覆盖目录默认地址，省略或传空时使用目录默认地址。Ollama 可以省略或传空 API key，其他 provider 必须传非空 API key。
 
 测试按模型依次执行文字和图片探测，返回 `200` 和完整测试记录：
 

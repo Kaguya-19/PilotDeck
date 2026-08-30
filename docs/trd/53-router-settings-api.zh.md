@@ -122,6 +122,8 @@
 
 `router.tokenSaver.tiers` 是非空对象，tier 名称由配置对象动态决定，因此新增/删除自定义 tier 是对该对象的读改写。价格 key 必须是已配置的 `provider/model`，价格值必须是有限非负数字；`cacheWrite` 仍无对应后端字段。`unit` 只保存单位元数据，现有 input/output/cacheRead 计算保持不变。
 
+统计基准模型 `router.stats.baselineModel` 在运行时优先于 `router.scenarios.default`，用于无路由基准成本计算；仅当未配置基准模型时才回退到场景默认模型。对象 `{ provider, model }` 与历史 `provider/model` 字符串均会解析为同一模型引用。
+
 `agent.subagents.default` 属于 agent 配置而非 router 配置。值为 `inherit` 或缺省时继承 `agent.model`；显式值若无法解析，保存校验返回 warning 并继续按继承运行，不升级为 fatal。`router.tokenSaver.subagent.policy=judge` 时子智能体进入 Token Saver 判定，`skip` 时绕过判定并允许继承 `agent.model`。
 
 ## 模型池变更时的引用同步
