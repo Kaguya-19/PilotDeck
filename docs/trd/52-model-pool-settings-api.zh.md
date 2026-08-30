@@ -61,7 +61,7 @@
 
 `PUT /api/config` 可携带 `modelTestBindings: [{ "testId": "test_xxx" }]`。服务端仅接受当前用户、未过期且状态为 `passed` 的测试记录，并核对 provider、协议、endpoint、API key 和模型集合后，将逐模型结果写入 `model.providers.<providerId>.models.<modelId>.connectionTest`。
 
-仅当本次相对旧配置新增的模型被 `agent`、`agent.subagents`、`memory` 或 `router` 引用时，才必须提交通过的 `modelTestBindings`，否则保存返回 `409 MODEL_TEST_REQUIRED`。已有模型修改连接参数继续兼容未绑定保存；provider/model 重命名按重命名元数据处理，不视为新增模型。
+仅当本次相对旧配置新增的模型被 `agent.model` 或 `router` 引用时，才必须提交通过的 `modelTestBindings`，否则保存返回 `409 MODEL_TEST_REQUIRED`。`agent.subagents.default` 和 `memory.model` 复用模型侧连接状态，不要求额外绑定，以兼容当前设置页保存流程。已有模型修改连接参数继续兼容未绑定保存；provider/model 重命名按重命名元数据处理，不视为新增模型。
 
 设置页在 Agent Model 页面选择尚未配置的模型时，先调用批量测试接口；图片能力为 `unknown` 时提示用户补录，完成后将通过测试的 `testId` 随 `PUT /api/config` 提交。设置测试接口收到遮罩密钥时，会从当前配置复用真实密钥，客户端不会获得该密钥。
 

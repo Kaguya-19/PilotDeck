@@ -420,7 +420,7 @@ describe('config model-pool connection test routes', () => {
       method: 'POST',
       body: JSON.stringify({
         providerId: 'openai',
-        endpoint: 'https://proxy.example/v1',
+        endpoint: 'https://proxy.example/v1///',
         apiKey: 'key',
         models: ['model-a'],
         retryPolicy: retryPolicy(),
@@ -641,6 +641,26 @@ describe('config model-pool connection test routes', () => {
     });
     expect(response.status).toBe(409);
     expect(response.body.code).toBe('MODEL_TEST_REQUIRED');
+  });
+
+  it('allows new subagent and memory references without separate test bindings', async () => {
+    const initial = {
+      agent: { model: 'openai/model-a' },
+      model: { providers: { openai: { protocol: 'openai', url: 'https://api.openai.com/v1', apiKey: 'key', models: { 'model-a': {} } } } },
+    };
+    const { requestStatus, writePilotDeckConfig } = await createConfigApp({ config: initial });
+    const next = {
+      ...initial,
+      agent: { model: 'openai/model-a', subagents: { default: 'openai/model-b' } },
+      memory: { enabled: true, model: 'openai/model-b' },
+      model: { providers: { openai: { ...initial.model.providers.openai, models: { 'model-a': {}, 'model-b': {} } } } },
+    };
+    const response = await requestStatus('/api/config', {
+      method: 'PUT',
+      body: JSON.stringify({ config: next }),
+    });
+    expect(response.status).toBe(200);
+    expect(writePilotDeckConfig).toHaveBeenCalled();
   });
 
   it('requires a binding when a new model is referenced by router, memory, or pricing', async () => {

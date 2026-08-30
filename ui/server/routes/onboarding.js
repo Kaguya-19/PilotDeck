@@ -147,7 +147,7 @@ function resolveProvider(body, { allowPresetEndpointOverride = false } = {}) {
     try {
       const url = new URL(requestedEndpoint);
       if (!['http:', 'https:'].includes(url.protocol)) return null;
-      return { providerId, ...preset, endpoint: url.toString().replace(/\/$/, ''), custom: false };
+      return { providerId, ...preset, endpoint: trimTrailingSlashes(url.toString()), custom: false };
     } catch {
       return null;
     }
@@ -157,7 +157,7 @@ function resolveProvider(body, { allowPresetEndpointOverride = false } = {}) {
   try {
     const url = new URL(endpoint);
     if (!/^[a-z0-9][a-z0-9_-]{0,63}$/i.test(providerId) || providerId === 'custom' || !PROTOCOLS.has(protocol) || !['http:', 'https:'].includes(url.protocol)) return null;
-    return { providerId, protocol, endpoint: url.toString().replace(/\/$/, ''), custom: true };
+    return { providerId, protocol, endpoint: trimTrailingSlashes(url.toString()), custom: true };
   } catch { return null; }
 }
 function parseCloneUrl(value) {
