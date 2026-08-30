@@ -246,7 +246,14 @@ export async function modelConnectionTestsHandler(req, res) {
       let imageProbe;
       try {
         imageProbe = await probeModelConnection({
-          protocol: provider.protocol, baseUrl: provider.endpoint, apiKey, model: modelId, image: true, signal: requestAbort.signal, retryPolicy: retry,
+          protocol: provider.protocol,
+          baseUrl: provider.endpoint,
+          endpointUrl: textProbe.endpointUrl,
+          apiKey,
+          model: modelId,
+          image: true,
+          signal: requestAbort.signal,
+          retryPolicy: retry,
         });
       } catch (error) {
         if (requestAbort.signal.aborted) throw error;

@@ -81,6 +81,25 @@ describe('readPilotDeckConfigFile fallback behavior', () => {
 });
 
 describe('validatePilotDeckConfig gateway validation', () => {
+    it('accepts an omitted URL for catalog providers', () => {
+        const validation = validatePilotDeckConfig({
+            agent: { model: 'openai/gpt-test' },
+            model: {
+                providers: {
+                    openai: {
+                        protocol: 'openai',
+                        url: '',
+                        apiKey: 'key',
+                        models: { 'gpt-test': {} },
+                    },
+                },
+            },
+        });
+
+        expect(validation.valid).toBe(true);
+        expect(validation.errors).toEqual([]);
+    });
+
     it('migrates the legacy interactive spreadsheet mode to built-in preview', () => {
         const validation = validatePilotDeckConfig({
             webui: {

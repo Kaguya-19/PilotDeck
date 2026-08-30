@@ -33,6 +33,8 @@
 
 预置 provider 的 `protocol` 使用服务端目录值；`endpoint` 非空时作为本次测试的有效地址并覆盖目录默认地址，空值时回退到目录默认地址。保存绑定时对 provider URL 使用同一有效地址规则，因此 provider 配置省略 URL 时仍可绑定目录默认地址；自定义 provider 必须提供合法 HTTP(S) 地址。
 
+逐模型测试先执行文字探测；图片探测复用文字探测实际选中的 endpoint（包括探测器内部的 fallback 结果），不会重新从 provider 根地址开始选择。
+
 成功响应返回 `testId`、聚合 `status`、`testedAt` 和逐模型结果：
 
 ```json

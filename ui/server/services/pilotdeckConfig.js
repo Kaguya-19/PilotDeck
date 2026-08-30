@@ -31,6 +31,20 @@ const MASK = '********';
 
 const SECRET_KEY_RE = /(api[_-]?key|token|secret|password|auth[_-]?token|access[_-]?token|bot[_-]?token|app[_-]?token|encoding[_-]?aes[_-]?key)$/i;
 const SECRET_EXACT_KEYS = new Set(['key', 'apiKey', 'api_key', 'authToken', 'accessToken']);
+const CATALOG_PROVIDER_DEFAULT_URLS = {
+  anthropic: 'https://api.anthropic.com',
+  openai: 'https://api.openai.com/v1',
+  'openai-responses': 'https://api.openai.com/v1',
+  dashscope: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+  deepseek: 'https://api.deepseek.com/v1',
+  google: 'https://generativelanguage.googleapis.com',
+  moonshot: 'https://api.moonshot.cn/v1',
+  minimax: 'https://api.minimaxi.com/v1',
+  volc_ark: 'https://ark.cn-beijing.volces.com/api/v3',
+  zhipu: 'https://api.z.ai/api/paas/v4',
+  openrouter: 'https://openrouter.ai/api/v1',
+  ollama: 'http://localhost:11434/v1',
+};
 let configWriteQueue = Promise.resolve();
 
 // Serialize every read-modify-write caller against the same local YAML file.
@@ -235,7 +249,9 @@ function validateProvider(id, provider, errors) {
   else if (protocol !== 'openai' && protocol !== 'openai-responses' && protocol !== 'anthropic' && protocol !== 'google') {
     errors.push(`model.providers.${id}.protocol must be "openai", "openai-responses", "anthropic", or "google"`);
   }
-  if (!normalizeString(provider.url)) errors.push(`model.providers.${id}.url is required`);
+  if (!normalizeString(provider.url) && !Object.hasOwn(CATALOG_PROVIDER_DEFAULT_URLS, id)) {
+    errors.push(`model.providers.${id}.url is required`);
+  }
   if (!allowsMissingApiKey(id) && !normalizeString(provider.apiKey)) {
     errors.push(`model.providers.${id}.apiKey is required`);
   }

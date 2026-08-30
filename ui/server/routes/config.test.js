@@ -430,6 +430,21 @@ describe('config model-pool connection test routes', () => {
     expect(probe).toHaveBeenCalledWith(expect.objectContaining({ baseUrl: 'https://proxy.example/v1' }));
   });
 
+  it('reuses the text probe endpoint for the image probe', async () => {
+    const probe = vi.fn()
+      .mockResolvedValueOnce({ ok: true, endpointUrl: 'https://fallback.example/chat/completions' })
+      .mockResolvedValueOnce({ ok: true });
+    const { requestStatus } = await createConfigApp({ probe });
+    const response = await requestStatus('/api/config/test-connections', {
+      method: 'POST',
+      body: JSON.stringify({ providerId: 'openai', apiKey: 'key', models: ['model-a'], retryPolicy: retryPolicy() }),
+    });
+    expect(response.status).toBe(200);
+    expect(probe).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      endpointUrl: 'https://fallback.example/chat/completions',
+    }));
+  });
+
   it('matches a connection test against a catalog default endpoint when provider url is empty', async () => {
     const probe = vi.fn().mockResolvedValue({ ok: true });
     const initial = {
