@@ -102,6 +102,7 @@ export class ImPermissionHelper {
     this.initialPromptPending.delete(chatId);
     this.retryPromptPending.delete(chatId);
     this.answering.delete(chatId);
+    this.finishDeferredClear(chatId);
   }
 
   confirmNextPrompt(
@@ -149,19 +150,30 @@ export class ImPermissionHelper {
 
   /** Clear state after a completed turn, without racing an answer delivery. */
   clearAfterTurn(chatId: string): void {
-    if (this.answering.has(chatId) && !this.inFlight.has(chatId) && !this.initialPromptPending.has(chatId) && !this.promptDelivering.has(chatId)) {
-      const answerToken = this.answerTokens.get(chatId);
-      if (answerToken !== undefined) {
-        this.deferredClears.add(chatId);
-        return;
-      }
+    const initialPromptSending = this.initialPromptPending.has(chatId);
+    if (
+      this.inFlight.has(chatId)
+      || this.promptDelivering.has(chatId)
+      || this.retryPromptPending.has(chatId)
+      || (!initialPromptSending && this.answering.has(chatId))
+    ) {
+      this.deferredClears.add(chatId);
+      return;
     }
     this.clear(chatId);
   }
 
   private finishDeferredClear(chatId: string): void {
     if (!this.deferredClears.has(chatId)) return;
-    if (this.pending.get(chatId)?.length) return;
+    if (
+      this.pending.get(chatId)?.length
+      || this.answering.has(chatId)
+      || this.inFlight.has(chatId)
+      || this.promptDelivering.has(chatId)
+      || this.initialPromptPending.has(chatId)
+      || this.nextPrompts.has(chatId)
+      || this.retryPromptPending.has(chatId)
+    ) return;
     this.deferredClears.delete(chatId);
     this.clearNow(chatId);
   }

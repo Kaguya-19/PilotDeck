@@ -536,6 +536,46 @@ test("ImPermissionHelper keeps queued requests when cleanup is deferred before n
   assert.equal(await helper.answerWithState("chat-1", "0", gateway).then((result) => result?.canAdvance), true);
 });
 
+test("ImPermissionHelper defers turn cleanup while permission decision is in flight", async () => {
+  const helper = new ImPermissionHelper();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const gateway = {
+    permissionDecide: async () => {
+      await gate;
+      return { delivered: true };
+    },
+  } as unknown as Gateway;
+  helper.capture("chat-1", "session-1", {
+    type: "permission_request", requestId: "request-1", toolName: "read_file", payload: {},
+  });
+  helper.confirmInitialPrompt("chat-1");
+  const answer = helper.answerWithState("chat-1", "1", gateway);
+  helper.clearAfterTurn("chat-1");
+  release();
+
+  const result = await answer;
+  assert.equal(result?.canAdvance, true);
+  assert.equal(helper.isAnswering("chat-1"), true);
+  assert.equal(helper.takeNextPrompt("chat-1", result?.answerToken), undefined);
+  assert.equal(helper.isAnswering("chat-1"), false);
+});
+
+test("ImPermissionHelper preserves an initial prompt retry across turn cleanup", async () => {
+  const helper = new ImPermissionHelper();
+  const gateway = { permissionDecide: async () => ({ delivered: true }) } as unknown as Gateway;
+  helper.capture("chat-1", "session-1", {
+    type: "permission_request", requestId: "request-1", toolName: "read_file", payload: {},
+  });
+  helper.confirmInitialPrompt("chat-1", false);
+  helper.clearAfterTurn("chat-1");
+
+  assert.equal((await helper.answerWithState("chat-1", "1", gateway))?.retryPrompt, true);
+  assert.match(helper.takeNextPrompt("chat-1") ?? "", /read_file/);
+  helper.confirmNextPrompt("chat-1", true, "request-1");
+  assert.equal((await helper.answerWithState("chat-1", "1", gateway))?.canAdvance, true);
+});
+
 test("ImPermissionHelper keeps new state intact when an old answer finishes after clear", async () => {
   const helper = new ImPermissionHelper();
   let releaseOld!: () => void;
