@@ -51,6 +51,21 @@ describe('onboarding routes', () => {
     expect(completed).toMatchObject({ status: 200, body: { status: 'passed', error: null, models: [{ modelId: 'model-a', imageInput: 'supported' }] } });
   });
 
+  it('matches equivalent provider endpoints after URL canonicalization', async () => {
+    const onboarding = await import('./onboarding.js');
+    const record = {
+      provider: { providerId: 'ollama', protocol: 'openai', endpoint: 'http://localhost:11434/v1' },
+      keyFingerprint: null,
+    };
+
+    expect(onboarding.connectionTestMatchesProvider(record, {
+      providerId: 'ollama',
+      protocol: 'openai',
+      url: 'HTTP://LOCALHOST:11434/v1///',
+      apiKey: '',
+    })).toBe(true);
+  });
+
   it('isolates test IDs by user and writes the tested model configuration', async () => {
     const writePilotDeckConfig = vi.fn(async (config) => ({ config }));
     const { request } = await createOnboardingApp({

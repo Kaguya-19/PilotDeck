@@ -96,6 +96,17 @@ function trimTrailingSlashes(value) {
   while (end > 0 && value.charCodeAt(end - 1) === 47) end -= 1;
   return value.slice(0, end);
 }
+function canonicalEndpoint(value) {
+  const candidate = trimTrailingSlashes(text(value));
+  if (!candidate) return '';
+  try {
+    const parsed = new URL(candidate);
+    if (!['http:', 'https:'].includes(parsed.protocol)) return '';
+    return trimTrailingSlashes(parsed.toString());
+  } catch {
+    return '';
+  }
+}
 function keyFingerprint(apiKey) { return createHmac('sha256', testKeySecret).update(apiKey).digest(); }
 function sameKey(fingerprint, apiKey) {
   const candidate = keyFingerprint(apiKey);
@@ -106,8 +117,9 @@ export function connectionTestMatchesProvider(record, provider) {
   const presetEndpoint = Object.hasOwn(PRESETS, provider?.providerId)
     ? PRESETS[provider.providerId].endpoint
     : '';
-  const endpoint = trimTrailingSlashes(text(provider?.url) || presetEndpoint);
-  if (!record || !provider || record.provider.protocol !== provider.protocol || record.provider.endpoint !== endpoint) return false;
+  const endpoint = canonicalEndpoint(text(provider?.url) || presetEndpoint);
+  const testedEndpoint = canonicalEndpoint(record?.provider?.endpoint);
+  if (!record || !provider || !endpoint || !testedEndpoint || record.provider.protocol !== provider.protocol || testedEndpoint !== endpoint) return false;
   return provider.providerId === 'ollama' || sameKey(record.keyFingerprint, text(provider.apiKey));
 }
 function hasOnlyKeys(value, keys) {
