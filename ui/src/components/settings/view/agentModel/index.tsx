@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { usePilotDeckConfig } from "../../../../hooks/usePilotDeckConfig";
 import { authenticatedFetch } from "../../../../utils/api";
@@ -20,6 +20,12 @@ export default function AgentModelSections({ title }: AgentModelSectionsProps) {
   const changeGeneration = useRef(0);
   const activeRequest = useRef<AbortController | null>(null);
   const parsedConfig = useMemo(() => safeParseYaml(raw), [raw]);
+
+  useEffect(() => () => {
+    changeGeneration.current += 1;
+    activeRequest.current?.abort();
+    activeRequest.current = null;
+  }, []);
 
   const onFormChange = async (next: PilotDeckConfig) => {
     const generation = ++changeGeneration.current;
