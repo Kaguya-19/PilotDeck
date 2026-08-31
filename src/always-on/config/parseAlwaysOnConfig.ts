@@ -151,6 +151,20 @@ export function parseAlwaysOnConfig(
     result.projects = parseProjects(raw.projects, diagnostics);
   }
 
+  // Older configurations used an enabled project as the sole activation
+  // signal. Preserve that behavior unless either new global switch is
+  // explicitly configured.
+  const hasEnabledProject = Object.values(result.projects).some((project) => project.enabled);
+  if (hasEnabledProject) {
+    if (raw.enabled === undefined) {
+      result.enabled = true;
+    }
+    const rawTrigger = isRecord(raw.trigger) ? raw.trigger : undefined;
+    if (raw.trigger === undefined || (rawTrigger && rawTrigger.enabled === undefined)) {
+      result.trigger.enabled = true;
+    }
+  }
+
   return result;
 }
 
