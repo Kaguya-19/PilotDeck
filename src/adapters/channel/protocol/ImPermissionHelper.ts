@@ -70,7 +70,10 @@ export class ImPermissionHelper {
     // queued prompt and clear the lock.
     if (this.promptDelivering.has(chatId) || this.initialPromptPending.has(chatId) || this.inFlight.has(chatId)) return undefined;
     const prompt = this.nextPrompts.get(chatId);
-    if (!prompt) return undefined;
+    if (!prompt) {
+      this.confirmAnswer(chatId);
+      return undefined;
+    }
     this.promptDelivering.add(chatId);
     return prompt.text;
   }
@@ -104,6 +107,7 @@ export class ImPermissionHelper {
     this.nextPrompts.delete(chatId);
     this.retryPromptPending.delete(chatId);
     this.answering.delete(chatId);
+    this.answerTokens.delete(chatId);
   }
 
   /** Release a completed answer when the adapter cannot deliver its reply. */
@@ -113,6 +117,18 @@ export class ImPermissionHelper {
     // the next inbound message decide the unseen request.
     this.promptDelivering.delete(chatId);
     if (this.nextPrompts.has(chatId)) this.retryPromptPending.add(chatId);
+    else this.confirmAnswer(chatId, answerToken);
+  }
+
+  /** Mark the confirmation message as delivered and release the final answer lock. */
+  confirmAnswer(chatId: string, answerToken?: number): void {
+    if (answerToken !== undefined && this.answerTokens.get(chatId) !== answerToken) return;
+    if (!this.answering.has(chatId) || this.inFlight.has(chatId) || this.initialPromptPending.has(chatId)) return;
+    if (this.promptDelivering.has(chatId) || this.nextPrompts.has(chatId)) return;
+    if ((this.pending.get(chatId)?.length ?? 0) > 0) return;
+    this.retryPromptPending.delete(chatId);
+    this.answering.delete(chatId);
+    this.answerTokens.delete(chatId);
   }
 
   async answer(chatId: string, text: string, gateway: Gateway): Promise<string | undefined> {
@@ -163,14 +179,19 @@ export class ImPermissionHelper {
       if ((this.generations.get(chatId) ?? 0) !== generation) return undefined;
       if (!decision.delivered) {
         const currentEntries = this.pending.get(chatId) ?? entries;
-        this.pending.set(chatId, [entry, ...currentEntries]);
-        this.nextPrompts.set(chatId, {
-          text: formatPermissionPrompt(entry),
-          requestId: entry.requestId,
-        });
-        this.retryPromptPending.add(chatId);
+        if (currentEntries.length > 0) {
+          this.pending.set(chatId, currentEntries);
+          this.nextPrompts.set(chatId, {
+            text: formatPermissionPrompt(currentEntries[0]!),
+            requestId: currentEntries[0]!.requestId,
+          });
+        } else {
+          this.pending.delete(chatId);
+          this.nextPrompts.delete(chatId);
+        }
+        this.retryPromptPending.delete(chatId);
         return {
-          text: "权限请求未送达，正在重试。",
+          text: "权限请求已失效，已跳过，继续处理。",
           canAdvance: false,
           retryPrompt: true,
           answerToken,
@@ -198,9 +219,6 @@ export class ImPermissionHelper {
     } finally {
       if ((this.generations.get(chatId) ?? 0) === generation) {
         this.inFlight.delete(chatId);
-        if ((this.pending.get(chatId)?.length ?? 0) === 0 && !this.nextPrompts.has(chatId)) {
-          this.answering.delete(chatId);
-        }
         this.generations.delete(chatId);
       } else if (!this.pending.has(chatId) && !this.inFlight.has(chatId) && !this.answering.has(chatId)) {
         this.generations.delete(chatId);

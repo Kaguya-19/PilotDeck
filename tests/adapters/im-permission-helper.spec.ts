@@ -57,6 +57,7 @@ test("ImPermissionHelper resolves pending permission requests in FIFO order", as
     { sessionKey: "session-1", requestId: "request-1", decision: "allow", remember: false },
     { sessionKey: "session-1", requestId: "request-2", decision: "deny", reason: "User denied permission from IM channel." },
   ]);
+  assert.equal(helper.takeNextPrompt("chat-1"), undefined);
   assert.equal(helper.hasPending("chat-1"), false);
 });
 
@@ -382,13 +383,13 @@ test("ImPermissionHelper restores the current request when permissionDecide fail
   assert.match(helper.takeNextPrompt("chat-1") ?? "", /write_file/);
 });
 
-test("ImPermissionHelper restores the current request when permissionDecide is not delivered", async () => {
+test("ImPermissionHelper drops stale requests when permissionDecide is not delivered", async () => {
   const helper = new ImPermissionHelper();
   const decisions: string[] = [];
   const gateway = {
     permissionDecide: async ({ requestId }: { requestId: string }) => {
       decisions.push(requestId);
-      return { delivered: false };
+      return { delivered: requestId !== "request-1" };
     },
   } as unknown as Gateway;
 
@@ -403,13 +404,34 @@ test("ImPermissionHelper restores the current request when permissionDecide is n
   const result = await helper.answerWithState("chat-1", "1", gateway);
   assert.equal(result?.canAdvance, false);
   assert.equal(result?.retryPrompt, true);
-  assert.match(result?.text ?? "", /未送达|重试/);
+  assert.match(result?.text ?? "", /失效|跳过/);
   assert.equal(helper.isAnswering("chat-1"), true);
 
-  const retryPrompt = helper.takeNextPrompt("chat-1");
-  assert.match(retryPrompt ?? "", /read_file/);
-  assert.doesNotMatch(retryPrompt ?? "", /write_file/);
+  const nextPrompt = helper.takeNextPrompt("chat-1");
+  assert.match(nextPrompt ?? "", /write_file/);
+  assert.doesNotMatch(nextPrompt ?? "", /read_file/);
   assert.deepEqual(decisions, ["request-1"]);
+  helper.confirmNextPrompt("chat-1", true, "request-2");
+  assert.equal(await helper.answerWithState("chat-1", "1", gateway).then((next) => next?.canAdvance), true);
+  assert.deepEqual(decisions, ["request-1", "request-2"]);
+  assert.equal(helper.takeNextPrompt("chat-1"), undefined);
+});
+
+test("ImPermissionHelper keeps the final answer locked until delivery is confirmed", async () => {
+  const helper = new ImPermissionHelper();
+  const gateway = { permissionDecide: async () => ({ delivered: true }) } as unknown as Gateway;
+  helper.capture("chat-1", "session-1", {
+    type: "permission_request", requestId: "request-1", toolName: "read_file", payload: {},
+  });
+  helper.confirmInitialPrompt("chat-1");
+
+  const answer = await helper.answerWithState("chat-1", "1", gateway);
+  assert.equal(answer?.canAdvance, true);
+  assert.equal(helper.isAnswering("chat-1"), true);
+  assert.equal(await helper.answerWithState("chat-1", "1", gateway), undefined);
+
+  assert.equal(helper.takeNextPrompt("chat-1"), undefined);
+  assert.equal(helper.isAnswering("chat-1"), false);
 });
 
 test("ImPermissionHelper queues permission requests captured during a decision", async () => {
@@ -462,6 +484,7 @@ test("ImPermissionHelper keeps new state intact when an old answer finishes afte
   const newAnswer = helper.answer("chat-1", "1", gateway);
 
   assert.equal(await newAnswer, "已允许一次，继续执行。");
+  assert.equal(helper.takeNextPrompt("chat-1"), undefined);
   assert.equal(helper.hasPending("chat-1"), false);
   releaseOld();
   assert.equal(await oldAnswer, undefined);

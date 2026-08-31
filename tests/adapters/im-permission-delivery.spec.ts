@@ -40,3 +40,26 @@ test("Home Assistant reports failed permission prompt delivery", async () => {
 
   assert.equal(await (channel as any).sendReply("conversation.chat", "permission prompt"), false);
 });
+
+test("Home Assistant waits for the service result before confirming delivery", async () => {
+  const channel = new HomeAssistantChannel();
+  let sentId: number | undefined;
+  (channel as any).ws = {
+    readyState: 1,
+    send: (raw: string) => {
+      sentId = JSON.parse(raw).id;
+    },
+  };
+
+  const delivery = (channel as any).sendReply("conversation.chat", "permission prompt");
+  await Promise.resolve();
+  assert.ok(sentId !== undefined);
+  const result = (channel as any).onRawMessage(JSON.stringify({
+    type: "result",
+    id: sentId,
+    success: false,
+    error: { code: "service_not_found" },
+  }));
+  await result;
+  assert.equal(await delivery, false);
+});
