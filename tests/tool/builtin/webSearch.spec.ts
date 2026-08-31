@@ -182,6 +182,34 @@ test("web_search selects the provider-specific environment key when provider is 
   }
 });
 
+test("web_search preserves Tavily precedence when multiple provider keys are set", async () => {
+  let requestUrl = "";
+  let requestBody = "";
+  const tool = createWebSearchTool({
+    fetchImpl: async (url, init) => {
+      requestUrl = String(url);
+      requestBody = String(init?.body ?? "");
+      return jsonResponse({ results: [] });
+    },
+  });
+
+  await tool.execute(
+    { query: "hello" },
+    {
+      env: {
+        TAVILY_API_KEY: "tavily-env",
+        GLM_WEB_SEARCH_API_KEY: "glm-env",
+      },
+      cwd: "/",
+      projectRoot: "/",
+      abortSignal: undefined,
+    } as any,
+  );
+
+  assert.equal(requestUrl, "https://api.tavily.com/search");
+  assert.equal(JSON.parse(requestBody).api_key, "tavily-env");
+});
+
 test("web_search rejects non-HTTP(S) endpoints", async () => {
   const tool = createWebSearchTool({ provider: "tavily", apiKey: "tvly-key", endpoint: "ftp://example.test/search", fetchImpl: async () => jsonResponse({ results: [] }) });
 

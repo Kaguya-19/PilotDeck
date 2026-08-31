@@ -385,9 +385,10 @@ function renamedSourceModelId(providerId, modelId, rawProviderRenames, rawModelR
 function validateNewReferencedModelBindings(previousConfig, nextConfig, bound, rawProviderRenames, rawModelRenames) {
   const references = findModelReferences(nextConfig);
   for (const reference of references) {
-    // Secondary references reuse the model-level connection state. The
-    // settings UI does not submit a separate test binding for these fields.
-    if (reference.path === 'agent.subagents.default' || reference.path === 'memory.model') continue;
+    // Connection tests are enforced when a model becomes the primary Agent
+    // model. Other settings references reuse the model-level test state and
+    // must not require each editor to submit a duplicate binding.
+    if (reference.path !== 'agent.model') continue;
     const [providerId, ...modelParts] = String(reference.value || '').split('/');
     const modelId = modelParts.join('/');
     const renamedSource = renamedSourceModelId(providerId, modelId, rawProviderRenames, rawModelRenames);

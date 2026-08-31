@@ -27,7 +27,7 @@
 | `endpoint` | string | provider endpoint 覆盖值；内置 provider 可省略以使用默认值；必须为 HTTP(S) URL |
 | `customProvider` | object | `custom` provider 的请求和结果映射规则 |
 
-配置 parser 对未知字段产生 warning；未知 provider 等结构错误产生 fatal diagnostic。`enabled: false` 时只保留禁用状态，其他搜索子字段视为不活跃配置并跳过解析和校验；配置文件中的原始 YAML 仍由通用配置保存层保留。搜索启用或未显式禁用时，`POST /api/config/validate` 和 `PUT /api/config` 均调用该 parser，因此非法 provider 或非 HTTP(S) endpoint 会在通用配置接口拒绝。`apiKey` 可以省略，以支持运行时环境变量注入；未显式设置 provider 时，运行时按 `GLM_WEB_SEARCH_API_KEY`、`ZAI_API_KEY`、`TAVILY_API_KEY`、`SERPER_API_KEY`、`BRAVE_API_KEY`、`CUSTOM_WEB_SEARCH_API_KEY` 顺序选择第一个有值的 provider。显式 provider 始终优先；`custom` 的 endpoint 和调用测试时的凭证要求由运行时及测试接口校验。`customProvider` 支持以下字段：
+配置 parser 对未知字段产生 warning；未知 provider 等结构错误产生 fatal diagnostic。`enabled: false` 时只保留禁用状态，其他搜索子字段视为不活跃配置并跳过解析和校验；配置文件中的原始 YAML 仍由通用配置保存层保留。搜索启用或未显式禁用时，`POST /api/config/validate` 和 `PUT /api/config` 均调用该 parser，因此非法 provider 或非 HTTP(S) endpoint 会在通用配置接口拒绝。`apiKey` 可以省略，以支持运行时环境变量注入；未显式设置 provider 时，运行时按 `TAVILY_API_KEY`、`GLM_WEB_SEARCH_API_KEY`、`ZAI_API_KEY`、`SERPER_API_KEY`、`BRAVE_API_KEY`、`CUSTOM_WEB_SEARCH_API_KEY` 顺序选择第一个有值的 provider，以保持既有 Tavily 环境变量行为。显式 provider 始终优先；`custom` 的 endpoint 和调用测试时的凭证要求由运行时及测试接口校验。`customProvider` 支持以下字段：
 
 | 字段 | 类型 | 默认值/取值 |
 |---|---|---|

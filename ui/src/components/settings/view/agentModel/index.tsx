@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { usePilotDeckConfig } from "../../../../hooks/usePilotDeckConfig";
 import { authenticatedFetch } from "../../../../utils/api";
@@ -17,9 +17,15 @@ export default function AgentModelSections({ title }: AgentModelSectionsProps) {
   const { t } = useTranslation("settings");
   const { raw, setRaw, save, loading, error } = usePilotDeckConfig();
   const [modelTestError, setModelTestError] = useState<string | null>(null);
+  const changeGeneration = useRef(0);
+  const activeRequest = useRef<AbortController | null>(null);
   const parsedConfig = useMemo(() => safeParseYaml(raw), [raw]);
 
   const onFormChange = async (next: PilotDeckConfig) => {
+    const generation = ++changeGeneration.current;
+    activeRequest.current?.abort();
+    const controller = new AbortController();
+    activeRequest.current = controller;
     try {
       setModelTestError(null);
       const currentRef = parsedConfig?.agent?.model;
@@ -27,11 +33,19 @@ export default function AgentModelSections({ title }: AgentModelSectionsProps) {
       const parsedNext = splitModelRef(nextRef);
       const currentProvider = currentRef ? splitModelRef(currentRef) : null;
       const nextProvider = parsedNext ? next.model?.providers?.[parsedNext.providerId] : undefined;
-      const previousProvider = parsedNext ? parsedConfig?.model?.providers?.[parsedNext.providerId] : undefined;
+      const nextModel = parsedNext ? nextProvider?.models?.[parsedNext.modelId] : undefined;
+      const hasPassingConnectionTest = Boolean(
+        nextModel
+        && typeof nextModel === "object"
+        && !Array.isArray(nextModel)
+        && (nextModel as Record<string, unknown>).connectionTest
+        && typeof (nextModel as Record<string, unknown>).connectionTest === "object"
+        && ((nextModel as Record<string, unknown>).connectionTest as Record<string, unknown>).status === "passed",
+      );
       const isNewReferencedModel = Boolean(
         parsedNext
         && (!currentProvider || currentRef !== nextRef)
-        && !Object.prototype.hasOwnProperty.call(previousProvider?.models ?? {}, parsedNext.modelId)
+        && !hasPassingConnectionTest
         && Object.prototype.hasOwnProperty.call(parsedConfig?.model?.providers ?? {}, parsedNext.providerId),
       );
       let modelTestBindings: Array<{ testId: string }> | undefined;
@@ -41,6 +55,7 @@ export default function AgentModelSections({ title }: AgentModelSectionsProps) {
         const protocol = nextProvider.protocol || catalog?.protocol || "openai";
         const response = await authenticatedFetch("/api/config/test-connections", {
           method: "POST",
+          signal: controller.signal,
           body: JSON.stringify({
             providerId: parsedNext.providerId,
             protocol,
@@ -64,6 +79,7 @@ export default function AgentModelSections({ title }: AgentModelSectionsProps) {
           }));
           const completed = await authenticatedFetch(`/api/config/test-connections/${result.testId}/image-capabilities`, {
             method: "PUT",
+            signal: controller.signal,
             body: JSON.stringify({ models: capabilities }),
           });
           const completedResult = await completed.json();
@@ -73,12 +89,16 @@ export default function AgentModelSections({ title }: AgentModelSectionsProps) {
         }
         modelTestBindings = [{ testId: result.testId }];
       }
+      if (generation !== changeGeneration.current) return;
       setRaw(configToYamlString(next));
       void save(modelTestBindings ? { modelTestBindings } : undefined);
     } catch (caught) {
+      if (generation !== changeGeneration.current || controller.signal.aborted) return;
       const message = caught instanceof Error ? caught.message : "Failed to save agent model config patch";
       setModelTestError(message);
       console.error("Failed to serialise agent model config patch", caught);
+    } finally {
+      if (activeRequest.current === controller) activeRequest.current = null;
     }
   };
 

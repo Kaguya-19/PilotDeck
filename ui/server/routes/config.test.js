@@ -700,7 +700,7 @@ describe('config model-pool connection test routes', () => {
     expect(writePilotDeckConfig).toHaveBeenCalled();
   });
 
-  it('requires a binding when a new model is referenced by router, memory, or pricing', async () => {
+  it('allows router and pricing references without separate model test bindings', async () => {
     const initial = {
       agent: { model: 'openai/model-a' },
       model: { providers: { openai: { protocol: 'openai', url: 'https://api.openai.com/v1', apiKey: 'key', models: { 'model-a': {} } } } },
@@ -719,10 +719,7 @@ describe('config model-pool connection test routes', () => {
       method: 'PUT', headers: { 'x-user': 'settings-user' },
       body: JSON.stringify({ config: next }),
     });
-    expect(response.status).toBe(409);
-    expect(response.body.code).toBe('MODEL_TEST_REQUIRED');
-    expect(response.body.providerId).toBe('openai');
-    expect(response.body.modelId).toBe('model-b');
+    expect(response.status).toBe(200);
   });
 
   it('allows an unreferenced new model without a binding', async () => {

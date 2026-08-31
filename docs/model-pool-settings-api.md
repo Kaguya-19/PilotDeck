@@ -309,11 +309,11 @@ providerId/modelId 重命名会在同一写入事务中改写 `agent.model`、`a
 
 ### 测试结果绑定
 
-保存模型池时可在 `PUT /api/config` 中提交 `modelTestBindings: [{ "testId": "<opaque id>" }]`。服务端核对当前用户、TTL、provider/endpoint/API key 和模型集合后，将通过结果写入对应模型的 `connectionTest` 元数据，并同步更新 `multimodal.input`（支持图片为 `["text", "image"]`，不支持图片为 `["text"]`）。仅当模型首次被 `agent.model` 或 router 引用且没有已通过的 `connectionTest` 时，才必须提交通过的绑定；先保存为未引用模型不能绕过后续首次引用时的测试要求。`agent.subagents.default` 和 `memory.model` 复用模型侧状态，不要求额外绑定。缺少必要绑定时保存返回 `409 MODEL_TEST_REQUIRED`。已有已引用模型修改连接参数继续兼容未绑定保存。
+保存模型池时可在 `PUT /api/config` 中提交 `modelTestBindings: [{ "testId": "<opaque id>" }]`。服务端核对当前用户、TTL、provider/endpoint/API key 和模型集合后，将通过结果写入对应模型的 `connectionTest` 元数据，并同步更新 `multimodal.input`（支持图片为 `["text", "image"]`，不支持图片为 `["text"]`）。仅当模型首次被 `agent.model` 引用且没有已通过的 `connectionTest` 时，才必须提交通过的绑定；路由、`agent.subagents.default` 和 `memory.model` 复用模型侧状态，不要求各自提交额外绑定。缺少必要绑定时保存返回 `409 MODEL_TEST_REQUIRED`。已有已引用模型修改连接参数继续兼容未绑定保存。
 
 provider URL 为空时，Memory LLM 选项和运行时环境变量使用 engine catalog 的默认 URL；显式 URL 优先。
 
-设置页在 Agent Model 页面选择尚未配置的模型时，会先调用 `POST /api/config/test-connections`；图片能力无法自动判定时提示用户补录，再将通过测试的 `testId` 随配置保存提交。已遮罩的 provider 密钥由设置测试接口从当前配置复用，不回显给客户端。
+设置页在 Agent Model 页面选择尚未被测试通过的模型时，会先调用 `POST /api/config/test-connections`；图片能力无法自动判定时提示用户补录，再将通过测试的 `testId` 随配置保存提交。已遮罩的 provider 密钥由设置测试接口从当前配置复用，不回显给客户端。
 
 ## 8. 兼容接口与明确缺口
 
