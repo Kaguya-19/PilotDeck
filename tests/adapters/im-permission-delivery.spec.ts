@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import { MattermostChannel } from "../../src/adapters/channel/mattermost/MattermostChannel.js";
 import { SlackChannel } from "../../src/adapters/channel/slack/SlackChannel.js";
+import { HomeAssistantChannel } from "../../src/adapters/channel/homeassistant/HomeAssistantChannel.js";
 
 test("Mattermost reports failed permission prompt delivery", async () => {
   const channel = new MattermostChannel();
@@ -26,4 +27,16 @@ test("Slack reports failed permission prompt delivery", async () => {
   };
 
   assert.equal(await (channel as any).sendReply({ channelId: "channel-1" }, "permission prompt"), false);
+});
+
+test("Home Assistant reports failed permission prompt delivery", async () => {
+  const channel = new HomeAssistantChannel();
+  (channel as any).ws = {
+    readyState: 1,
+    send: () => {
+      throw new Error("socket closed");
+    },
+  };
+
+  assert.equal(await (channel as any).sendReply("conversation.chat", "permission prompt"), false);
 });

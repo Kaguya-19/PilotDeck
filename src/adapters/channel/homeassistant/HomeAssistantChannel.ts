@@ -160,9 +160,15 @@ export class HomeAssistantChannel implements ChannelAdapter {
     }
   }
 
-  private sendJson(obj: Record<string, unknown>): void {
-    if (!this.ws || this.ws.readyState !== 1) return;
-    this.ws.send(JSON.stringify(obj));
+  private sendJson(obj: Record<string, unknown>): boolean {
+    if (!this.ws || this.ws.readyState !== 1) return false;
+    try {
+      this.ws.send(JSON.stringify(obj));
+      return true;
+    } catch (e) {
+      this.logger?.error?.(`homeassistant: send failed: ${e}`);
+      return false;
+    }
   }
 
   private nextId(): number {
@@ -330,7 +336,7 @@ export class HomeAssistantChannel implements ChannelAdapter {
       return false;
     }
     const title = this.notificationTitle ?? `Gateway · ${chatId}`;
-    this.sendJson({
+    return this.sendJson({
       id: this.nextId(),
       type: "call_service",
       domain: "persistent_notification",
@@ -341,6 +347,5 @@ export class HomeAssistantChannel implements ChannelAdapter {
         notification_id: `gw_${Date.now()}`,
       },
     });
-    return true;
   }
 }
