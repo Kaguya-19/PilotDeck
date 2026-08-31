@@ -195,10 +195,27 @@ export class SignalChannel implements ChannelAdapter {
     }
 
     if (this.permissions.hasPending(sessionChatId) && this.gateway) {
+      let answerToken: number | undefined;
       try {
-        const confirmation = await this.permissions.answer(sessionChatId, text, this.gateway);
-        if (confirmation) await this.sendReply(sessionChatId, confirmation);
+        const answer = await this.permissions.answerWithState(sessionChatId, text, this.gateway);
+        answerToken = answer?.answerToken;
+        if (answer?.text) {
+          const confirmationDelivered = await this.sendReply(sessionChatId, answer.text);
+          if (!confirmationDelivered) {
+            this.permissions.releaseAnswer(sessionChatId, answer.answerToken);
+            return;
+          }
+          if (!answer.canAdvance && !answer.retryPrompt) return;
+          const nextPrompt = this.permissions.takeNextPrompt(sessionChatId);
+          if (nextPrompt) {
+            const nextPromptRequestId = this.permissions.getPromptRequestId(sessionChatId);
+
+            const delivered = await this.sendReply(sessionChatId, nextPrompt);
+            this.permissions.confirmNextPrompt(sessionChatId, delivered, nextPromptRequestId);
+          }
+        }
       } catch (e) {
+        if (answerToken !== undefined) this.permissions.releaseAnswer(sessionChatId, answerToken);
         this.logger?.error?.(`signal: permission answer error: ${e}`);
       }
       return;
@@ -241,7 +258,7 @@ export class SignalChannel implements ChannelAdapter {
         }
         if (event.type === "permission_request") {
           const questionText = this.permissions.capture(chatId, sessionKey, event);
-          if (questionText) await this.sendReply(chatId, questionText);
+          if (questionText) this.permissions.confirmInitialPrompt(chatId, await this.sendReply(chatId, questionText), event.requestId);
           continue;
         }
         const fragment = renderSignalEvent(event);

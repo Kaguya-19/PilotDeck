@@ -206,6 +206,7 @@ type UploadedAttachmentRef = {
 4. 生效模式写入 turn metadata；会话恢复不继承下一轮临时覆盖。
 
 权限请求继续使用现有 `permission_request` / `permission_decide` 事件和 RPC。
+文本 IM 权限请求按 chat 维度 FIFO 串行处理；下一条提示发送成功前保持锁定，发送失败时保留待发送提示，不允许后续入站消息越过当前请求。
 
 ## 9. 模型目录与会话覆盖
 
