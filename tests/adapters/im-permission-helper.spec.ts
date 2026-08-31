@@ -517,6 +517,25 @@ test("ImPermissionHelper defers turn cleanup until the answer is delivered", asy
   assert.equal(helper.hasPending("chat-1"), false);
 });
 
+test("ImPermissionHelper keeps queued requests when cleanup is deferred before next prompt delivery", async () => {
+  const helper = new ImPermissionHelper();
+  const gateway = { permissionDecide: async () => ({ delivered: true }) } as unknown as Gateway;
+  helper.capture("chat-1", "session-1", {
+    type: "permission_request", requestId: "request-1", toolName: "read_file", payload: {},
+  });
+  helper.confirmInitialPrompt("chat-1");
+  helper.capture("chat-1", "session-1", {
+    type: "permission_request", requestId: "request-2", toolName: "write_file", payload: {},
+  });
+  const answer = await helper.answerWithState("chat-1", "1", gateway);
+  helper.clearAfterTurn("chat-1");
+
+  assert.match(helper.takeNextPrompt("chat-1", answer?.answerToken) ?? "", /write_file/);
+  helper.confirmNextPrompt("chat-1", true, "request-2", answer?.answerToken);
+  assert.equal(helper.hasPending("chat-1"), true);
+  assert.equal(await helper.answerWithState("chat-1", "0", gateway).then((result) => result?.canAdvance), true);
+});
+
 test("ImPermissionHelper keeps new state intact when an old answer finishes after clear", async () => {
   const helper = new ImPermissionHelper();
   let releaseOld!: () => void;

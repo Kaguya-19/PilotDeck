@@ -31,7 +31,7 @@ export class ImPermissionHelper {
   private readonly inFlight = new Set<string>();
   private readonly generations = new Map<string, number>();
   private readonly answerTokens = new Map<string, number>();
-  private readonly deferredClears = new Map<string, number>();
+  private readonly deferredClears = new Set<string>();
   private nextAnswerToken = 1;
 
   capture(chatId: string, sessionKey: string, event: GatewayEvent & { type: "permission_request" }): string | undefined {
@@ -122,7 +122,7 @@ export class ImPermissionHelper {
     this.retryPromptPending.delete(chatId);
     this.answering.delete(chatId);
     this.answerTokens.delete(chatId);
-    this.finishDeferredClear(chatId, answerToken);
+    this.finishDeferredClear(chatId);
   }
 
   /** Release a completed answer when the adapter cannot deliver its reply. */
@@ -144,7 +144,7 @@ export class ImPermissionHelper {
     this.retryPromptPending.delete(chatId);
     this.answering.delete(chatId);
     this.answerTokens.delete(chatId);
-    this.finishDeferredClear(chatId, answerToken);
+    this.finishDeferredClear(chatId);
   }
 
   /** Clear state after a completed turn, without racing an answer delivery. */
@@ -152,16 +152,16 @@ export class ImPermissionHelper {
     if (this.answering.has(chatId) && !this.inFlight.has(chatId) && !this.initialPromptPending.has(chatId) && !this.promptDelivering.has(chatId)) {
       const answerToken = this.answerTokens.get(chatId);
       if (answerToken !== undefined) {
-        this.deferredClears.set(chatId, answerToken);
+        this.deferredClears.add(chatId);
         return;
       }
     }
     this.clear(chatId);
   }
 
-  private finishDeferredClear(chatId: string, answerToken?: number): void {
-    const deferredToken = this.deferredClears.get(chatId);
-    if (deferredToken === undefined || answerToken !== deferredToken) return;
+  private finishDeferredClear(chatId: string): void {
+    if (!this.deferredClears.has(chatId)) return;
+    if (this.pending.get(chatId)?.length) return;
     this.deferredClears.delete(chatId);
     this.clearNow(chatId);
   }

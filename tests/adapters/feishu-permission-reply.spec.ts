@@ -244,6 +244,17 @@ test("Feishu keeps the next permission locked when confirmation delivery fails",
   assert.match(sent.find((message) => message.text.includes("工具 write_file 需要权限"))?.text ?? "", /write_file/);
 });
 
+test("Feishu reports explicit sender failures as undelivered", async () => {
+  const channel = new FeishuChannel({
+    connectionMode: "webhook",
+    send: async () => {
+      throw new Error("send unavailable");
+    },
+  });
+
+  assert.equal(await (channel as any).send({ chatId: "oc_send_failure", text: "permission prompt" }), false);
+});
+
 function createMockResponse(): { statusCode?: number; body?: string; writeHead(statusCode: number): void; end(body: string): void } {
   return {
     writeHead(statusCode: number) {

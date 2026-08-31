@@ -816,8 +816,13 @@ export class FeishuChannel implements ChannelAdapter {
 
   private async sendTextMessage(message: FeishuOutboundMessage): Promise<string | undefined | false> {
     if (this.explicitSend) {
-      await this.explicitSend(message);
-      return undefined;
+      try {
+        await this.explicitSend(message);
+        return undefined;
+      } catch (error) {
+        this.logger?.error?.(`feishu: custom send failed: ${error}`);
+        return false;
+      }
     }
     return this.sendRawMessage(message.chatId, "text", { text: message.text });
   }
