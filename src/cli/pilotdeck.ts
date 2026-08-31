@@ -61,7 +61,9 @@ async function main(argv = process.argv.slice(2)): Promise<void> {
     };
 
     function buildAlwaysOn(config: AlwaysOnConfig | undefined): AlwaysOnManager | undefined {
-      if (!config?.enabled) return undefined;
+      if (!config) return undefined;
+      const hasEnabledProject = Object.values(config.projects).some((p) => p.enabled);
+      if (!hasEnabledProject) return undefined;
       return createAlwaysOnManager({
         config,
         pilotHome,
