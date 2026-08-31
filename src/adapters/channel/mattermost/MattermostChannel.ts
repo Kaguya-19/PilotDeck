@@ -184,12 +184,12 @@ export class MattermostChannel implements ChannelAdapter {
             return;
           }
           if (!answer.canAdvance && !answer.retryPrompt) return;
-          const nextPrompt = this.permissions.takeNextPrompt(chatId);
+          const nextPrompt = this.permissions.takeNextPrompt(chatId, answer.answerToken);
           if (nextPrompt) {
-            const nextPromptRequestId = this.permissions.getPromptRequestId(chatId);
+            const nextPromptRequestId = this.permissions.getPromptRequestId(chatId, answer.answerToken);
 
             const delivered = await this.sendReply({ channelId, rootId }, nextPrompt);
-            this.permissions.confirmNextPrompt(chatId, delivered, nextPromptRequestId);
+            this.permissions.confirmNextPrompt(chatId, delivered, nextPromptRequestId, answer.answerToken);
           }
         }
       } catch (e) {
@@ -257,7 +257,7 @@ export class MattermostChannel implements ChannelAdapter {
 
     const chatId = ctx.rootId ? `${ctx.channelId}:${ctx.rootId}` : ctx.channelId;
     this.elicitation.clear(chatId);
-    this.permissions.clear(chatId);
+    this.permissions.clearAfterTurn(chatId);
 
     const finalText = replyText.trim();
     if (finalText) {

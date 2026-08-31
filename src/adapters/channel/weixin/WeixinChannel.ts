@@ -451,12 +451,12 @@ export class WeixinChannel implements ChannelAdapter {
             return;
           }
           if (!answer.canAdvance && !answer.retryPrompt) return;
-          const nextPrompt = this.permissions.takeNextPrompt(fromUser);
+          const nextPrompt = this.permissions.takeNextPrompt(fromUser, answer.answerToken);
           if (nextPrompt) {
-            const nextPromptRequestId = this.permissions.getPromptRequestId(fromUser);
+            const nextPromptRequestId = this.permissions.getPromptRequestId(fromUser, answer.answerToken);
             const delivered = await this.sendReply(fromUser, nextPrompt);
             if (!delivered) throw new Error("permission prompt delivery failed");
-            this.permissions.confirmNextPrompt(fromUser, true, nextPromptRequestId);
+            this.permissions.confirmNextPrompt(fromUser, true, nextPromptRequestId, answer.answerToken);
           }
           if (
             (trimmed === "1" || trimmed === "2")
@@ -771,7 +771,7 @@ export class WeixinChannel implements ChannelAdapter {
     if (isCurrentTurn()) {
       this.chatState.clearActiveRun(userId);
       this.elicitation.clear(userId);
-      this.permissions.clear(userId);
+      this.permissions.clearAfterTurn(userId);
       await liveReply.flushFinal();
     }
   }

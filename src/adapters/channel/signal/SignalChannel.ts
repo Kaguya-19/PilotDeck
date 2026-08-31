@@ -206,12 +206,12 @@ export class SignalChannel implements ChannelAdapter {
             return;
           }
           if (!answer.canAdvance && !answer.retryPrompt) return;
-          const nextPrompt = this.permissions.takeNextPrompt(sessionChatId);
+          const nextPrompt = this.permissions.takeNextPrompt(sessionChatId, answer.answerToken);
           if (nextPrompt) {
-            const nextPromptRequestId = this.permissions.getPromptRequestId(sessionChatId);
+            const nextPromptRequestId = this.permissions.getPromptRequestId(sessionChatId, answer.answerToken);
 
             const delivered = await this.sendReply(sessionChatId, nextPrompt);
-            this.permissions.confirmNextPrompt(sessionChatId, delivered, nextPromptRequestId);
+            this.permissions.confirmNextPrompt(sessionChatId, delivered, nextPromptRequestId, answer.answerToken);
           }
         }
       } catch (e) {
@@ -270,7 +270,7 @@ export class SignalChannel implements ChannelAdapter {
     }
 
     this.elicitation.clear(chatId);
-    this.permissions.clear(chatId);
+    this.permissions.clearAfterTurn(chatId);
 
     const finalText = replyText.trim();
     if (finalText) {

@@ -389,12 +389,12 @@ export class FeishuChannel implements ChannelAdapter {
           return;
         }
         if (!answer.canAdvance && !answer.retryPrompt) return;
-        const nextPrompt = this.permissions.takeNextPrompt(chatId);
+        const nextPrompt = this.permissions.takeNextPrompt(chatId, answer.answerToken);
         if (nextPrompt) {
-          const nextPromptRequestId = this.permissions.getPromptRequestId(chatId);
+          const nextPromptRequestId = this.permissions.getPromptRequestId(chatId, answer.answerToken);
 
           const delivered = await this.send({ chatId, text: nextPrompt });
-          this.permissions.confirmNextPrompt(chatId, delivered, nextPromptRequestId);
+          this.permissions.confirmNextPrompt(chatId, delivered, nextPromptRequestId, answer.answerToken);
         }
       }
     } catch (error) {
@@ -639,7 +639,7 @@ export class FeishuChannel implements ChannelAdapter {
 
       if (isCurrentTurn()) {
         this.elicitation.clear(chatId);
-        this.permissions.clear(chatId);
+        this.permissions.clearAfterTurn(chatId);
       }
       await liveReply.flushFinal();
     } finally {

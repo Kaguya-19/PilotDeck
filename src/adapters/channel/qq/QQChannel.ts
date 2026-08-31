@@ -150,11 +150,11 @@ export class QQChannel implements ChannelAdapter {
             return;
           }
           if (!answer.canAdvance && !answer.retryPrompt) return;
-          const nextPrompt = this.permissions.takeNextPrompt(chatKey);
+          const nextPrompt = this.permissions.takeNextPrompt(chatKey, answer.answerToken);
           if (nextPrompt) {
-            const nextPromptRequestId = this.permissions.getPromptRequestId(chatKey);
+            const nextPromptRequestId = this.permissions.getPromptRequestId(chatKey, answer.answerToken);
             const delivered = await this.sendReply(groupOpenId, nextPrompt);
-            this.permissions.confirmNextPrompt(chatKey, delivered, nextPromptRequestId);
+            this.permissions.confirmNextPrompt(chatKey, delivered, nextPromptRequestId, answer.answerToken);
           }
         }
       } catch (e) {
@@ -220,11 +220,11 @@ export class QQChannel implements ChannelAdapter {
             return;
           }
           if (!answer.canAdvance && !answer.retryPrompt) return;
-          const nextPrompt = this.permissions.takeNextPrompt(chatKey);
+          const nextPrompt = this.permissions.takeNextPrompt(chatKey, answer.answerToken);
           if (nextPrompt) {
-            const nextPromptRequestId = this.permissions.getPromptRequestId(chatKey);
+            const nextPromptRequestId = this.permissions.getPromptRequestId(chatKey, answer.answerToken);
             const delivered = await this.sendC2CReply(userOpenId, nextPrompt);
-            this.permissions.confirmNextPrompt(chatKey, delivered, nextPromptRequestId);
+            this.permissions.confirmNextPrompt(chatKey, delivered, nextPromptRequestId, answer.answerToken);
           }
         }
       } catch (e) {
@@ -283,7 +283,7 @@ export class QQChannel implements ChannelAdapter {
     }
 
     this.elicitation.clear(chatKey);
-    this.permissions.clear(chatKey);
+    this.permissions.clearAfterTurn(chatKey);
     const finalText = replyText.trim();
     if (finalText) {
       await this.sendC2CReplyChunked(userOpenId, finalText, msgId);
@@ -358,7 +358,7 @@ export class QQChannel implements ChannelAdapter {
     }
 
     this.elicitation.clear(chatKey);
-    this.permissions.clear(chatKey);
+    this.permissions.clearAfterTurn(chatKey);
     const finalText = replyText.trim();
     if (finalText) {
       await this.sendReplyChunked(groupOpenId, finalText, msgId);

@@ -163,12 +163,12 @@ export class BlueBubblesChannel implements ChannelAdapter {
             return;
           }
           if (!answer.canAdvance && !answer.retryPrompt) return;
-          const nextPrompt = this.permissions.takeNextPrompt(chatGuid);
+          const nextPrompt = this.permissions.takeNextPrompt(chatGuid, answer.answerToken);
           if (nextPrompt) {
-            const nextPromptRequestId = this.permissions.getPromptRequestId(chatGuid);
+            const nextPromptRequestId = this.permissions.getPromptRequestId(chatGuid, answer.answerToken);
 
             const delivered = await this.sendReply(chatGuid, nextPrompt);
-            this.permissions.confirmNextPrompt(chatGuid, delivered, nextPromptRequestId);
+            this.permissions.confirmNextPrompt(chatGuid, delivered, nextPromptRequestId, answer.answerToken);
           }
         }
       } catch (e) {
@@ -227,7 +227,7 @@ export class BlueBubblesChannel implements ChannelAdapter {
     }
 
     this.elicitation.clear(chatGuid);
-    this.permissions.clear(chatGuid);
+    this.permissions.clearAfterTurn(chatGuid);
 
     const finalText = replyText.trim();
     if (finalText) {

@@ -155,12 +155,12 @@ export class MatrixChannel implements ChannelAdapter {
             return;
           }
           if (!answer.canAdvance && !answer.retryPrompt) return;
-          const nextPrompt = this.permissions.takeNextPrompt(roomId);
+          const nextPrompt = this.permissions.takeNextPrompt(roomId, answer.answerToken);
           if (nextPrompt) {
-            const nextPromptRequestId = this.permissions.getPromptRequestId(roomId);
+            const nextPromptRequestId = this.permissions.getPromptRequestId(roomId, answer.answerToken);
 
             const delivered = await this.sendReply(roomId, nextPrompt);
-            this.permissions.confirmNextPrompt(roomId, delivered, nextPromptRequestId);
+            this.permissions.confirmNextPrompt(roomId, delivered, nextPromptRequestId, answer.answerToken);
           }
         }
       } catch (e) {
@@ -219,7 +219,7 @@ export class MatrixChannel implements ChannelAdapter {
     }
 
     this.elicitation.clear(roomId);
-    this.permissions.clear(roomId);
+    this.permissions.clearAfterTurn(roomId);
 
     const finalText = replyText.trim();
     if (finalText) {

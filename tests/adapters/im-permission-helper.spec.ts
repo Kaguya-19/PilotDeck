@@ -458,6 +458,65 @@ test("ImPermissionHelper queues permission requests captured during a decision",
   assert.match(helper.takeNextPrompt("chat-1") ?? "", /write_file/);
 });
 
+test("ImPermissionHelper queues a request captured after the final decision RPC", async () => {
+  const helper = new ImPermissionHelper();
+  const gateway = { permissionDecide: async () => ({ delivered: true }) } as unknown as Gateway;
+  helper.capture("chat-1", "session-1", {
+    type: "permission_request", requestId: "request-1", toolName: "read_file", payload: {},
+  });
+  helper.confirmInitialPrompt("chat-1");
+
+  const answer = await helper.answerWithState("chat-1", "1", gateway);
+  assert.ok(answer?.answerToken);
+  helper.capture("chat-1", "session-1", {
+    type: "permission_request", requestId: "request-2", toolName: "write_file", payload: {},
+  });
+
+  assert.match(helper.takeNextPrompt("chat-1", answer.answerToken) ?? "", /write_file/);
+  helper.confirmNextPrompt("chat-1", true, "request-2");
+  assert.equal(helper.isAnswering("chat-1"), false);
+});
+
+test("ImPermissionHelper rejects stale answer tokens when taking a replacement prompt", async () => {
+  const helper = new ImPermissionHelper();
+  const gateway = { permissionDecide: async () => ({ delivered: true }) } as unknown as Gateway;
+  helper.capture("chat-1", "session-1", {
+    type: "permission_request", requestId: "old", toolName: "read_file", payload: {},
+  });
+  helper.confirmInitialPrompt("chat-1");
+  const oldAnswer = await helper.answerWithState("chat-1", "1", gateway);
+  helper.clear("chat-1");
+
+  helper.capture("chat-1", "session-2", {
+    type: "permission_request", requestId: "new", toolName: "write_file", payload: {},
+  });
+  helper.confirmInitialPrompt("chat-1");
+  helper.capture("chat-1", "session-2", {
+    type: "permission_request", requestId: "new-next", toolName: "exec", payload: {},
+  });
+  const newAnswer = await helper.answerWithState("chat-1", "1", gateway);
+  assert.notEqual(oldAnswer?.answerToken, newAnswer?.answerToken);
+
+  assert.equal(helper.takeNextPrompt("chat-1", oldAnswer?.answerToken), undefined);
+  assert.match(helper.takeNextPrompt("chat-1", newAnswer?.answerToken) ?? "", /exec/);
+});
+
+test("ImPermissionHelper defers turn cleanup until the answer is delivered", async () => {
+  const helper = new ImPermissionHelper();
+  const gateway = { permissionDecide: async () => ({ delivered: true }) } as unknown as Gateway;
+  helper.capture("chat-1", "session-1", {
+    type: "permission_request", requestId: "request-1", toolName: "read_file", payload: {},
+  });
+  helper.confirmInitialPrompt("chat-1");
+  const answer = await helper.answerWithState("chat-1", "1", gateway);
+  helper.clearAfterTurn("chat-1");
+
+  assert.equal(helper.isAnswering("chat-1"), true);
+  helper.confirmAnswer("chat-1", answer?.answerToken);
+  assert.equal(helper.isAnswering("chat-1"), false);
+  assert.equal(helper.hasPending("chat-1"), false);
+});
+
 test("ImPermissionHelper keeps new state intact when an old answer finishes after clear", async () => {
   const helper = new ImPermissionHelper();
   let releaseOld!: () => void;

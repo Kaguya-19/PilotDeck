@@ -219,12 +219,12 @@ export class WhatsAppChannel implements ChannelAdapter {
             return;
           }
           if (!answer.canAdvance && !answer.retryPrompt) return;
-          const nextPrompt = this.permissions.takeNextPrompt(msg.chatId);
+          const nextPrompt = this.permissions.takeNextPrompt(msg.chatId, answer.answerToken);
           if (nextPrompt) {
-            const nextPromptRequestId = this.permissions.getPromptRequestId(msg.chatId);
+            const nextPromptRequestId = this.permissions.getPromptRequestId(msg.chatId, answer.answerToken);
 
             const delivered = await this.sendReply(msg.chatId, nextPrompt);
-            this.permissions.confirmNextPrompt(msg.chatId, delivered, nextPromptRequestId);
+            this.permissions.confirmNextPrompt(msg.chatId, delivered, nextPromptRequestId, answer.answerToken);
           }
         }
       } catch (e) {
@@ -283,7 +283,7 @@ export class WhatsAppChannel implements ChannelAdapter {
     }
 
     this.elicitation.clear(chatId);
-    this.permissions.clear(chatId);
+    this.permissions.clearAfterTurn(chatId);
     const finalText = replyText.trim();
     if (finalText) {
       await this.sendReply(chatId, finalText);

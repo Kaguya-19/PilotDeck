@@ -613,11 +613,11 @@ export class WeComChannel implements ChannelAdapter {
             return;
           }
           if (!answer.canAdvance && !answer.retryPrompt) return;
-          const nextPrompt = this.permissions.takeNextPrompt(interactionKey);
+          const nextPrompt = this.permissions.takeNextPrompt(interactionKey, answer.answerToken);
           if (nextPrompt) {
-            const nextPromptRequestId = this.permissions.getPromptRequestId(interactionKey);
+            const nextPromptRequestId = this.permissions.getPromptRequestId(interactionKey, answer.answerToken);
             const delivered = await this.sendReply(chatId, nextPrompt, { chatType, replyToMessageId: messageId });
-            this.permissions.confirmNextPrompt(interactionKey, delivered, nextPromptRequestId);
+            this.permissions.confirmNextPrompt(interactionKey, delivered, nextPromptRequestId, answer.answerToken);
           }
         }
       } catch (e) {
@@ -946,7 +946,7 @@ export class WeComChannel implements ChannelAdapter {
     }
 
     this.elicitation.clear(input.interactionKey);
-    this.permissions.clear(input.interactionKey);
+    this.permissions.clearAfterTurn(input.interactionKey);
     const finalText = replyText.trim();
     if (!finalText) return;
 

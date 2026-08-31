@@ -31,6 +31,7 @@ export class ImPermissionHelper {
   private readonly inFlight = new Set<string>();
   private readonly generations = new Map<string, number>();
   private readonly answerTokens = new Map<string, number>();
+  private readonly deferredClears = new Map<string, number>();
   private nextAnswerToken = 1;
 
   capture(chatId: string, sessionKey: string, event: GatewayEvent & { type: "permission_request" }): string | undefined {
@@ -64,21 +65,28 @@ export class ImPermissionHelper {
     return this.answering.has(chatId);
   }
 
-  takeNextPrompt(chatId: string): string | undefined {
+  takeNextPrompt(chatId: string, answerToken?: number): string | undefined {
     // Status replies from answer() are non-advancing. Do not let an inbound
     // reply during initial delivery or an in-flight decision consume the
     // queued prompt and clear the lock.
+    if (answerToken !== undefined && this.answerTokens.get(chatId) !== answerToken) return undefined;
     if (this.promptDelivering.has(chatId) || this.initialPromptPending.has(chatId) || this.inFlight.has(chatId)) return undefined;
-    const prompt = this.nextPrompts.get(chatId);
+    let prompt = this.nextPrompts.get(chatId);
     if (!prompt) {
-      this.confirmAnswer(chatId);
-      return undefined;
+      const entry = this.pending.get(chatId)?.[0];
+      if (!entry) {
+        this.confirmAnswer(chatId, answerToken);
+        return undefined;
+      }
+      prompt = { text: formatPermissionPrompt(entry), requestId: entry.requestId };
+      this.nextPrompts.set(chatId, prompt);
     }
     this.promptDelivering.add(chatId);
     return prompt.text;
   }
 
-  getPromptRequestId(chatId: string): string | undefined {
+  getPromptRequestId(chatId: string, answerToken?: number): string | undefined {
+    if (answerToken !== undefined && this.answerTokens.get(chatId) !== answerToken) return undefined;
     return this.nextPrompts.get(chatId)?.requestId;
   }
 
@@ -96,7 +104,13 @@ export class ImPermissionHelper {
     this.answering.delete(chatId);
   }
 
-  confirmNextPrompt(chatId: string, delivered: boolean | void = true, expectedRequestId?: string): void {
+  confirmNextPrompt(
+    chatId: string,
+    delivered: boolean | void = true,
+    expectedRequestId?: string,
+    answerToken?: number,
+  ): void {
+    if (answerToken !== undefined && this.answerTokens.get(chatId) !== answerToken) return;
     if (!this.promptDelivering.has(chatId)) return;
     if (expectedRequestId !== undefined && this.nextPrompts.get(chatId)?.requestId !== expectedRequestId) return;
     this.promptDelivering.delete(chatId);
@@ -108,6 +122,7 @@ export class ImPermissionHelper {
     this.retryPromptPending.delete(chatId);
     this.answering.delete(chatId);
     this.answerTokens.delete(chatId);
+    this.finishDeferredClear(chatId, answerToken);
   }
 
   /** Release a completed answer when the adapter cannot deliver its reply. */
@@ -129,6 +144,26 @@ export class ImPermissionHelper {
     this.retryPromptPending.delete(chatId);
     this.answering.delete(chatId);
     this.answerTokens.delete(chatId);
+    this.finishDeferredClear(chatId, answerToken);
+  }
+
+  /** Clear state after a completed turn, without racing an answer delivery. */
+  clearAfterTurn(chatId: string): void {
+    if (this.answering.has(chatId) && !this.inFlight.has(chatId) && !this.initialPromptPending.has(chatId) && !this.promptDelivering.has(chatId)) {
+      const answerToken = this.answerTokens.get(chatId);
+      if (answerToken !== undefined) {
+        this.deferredClears.set(chatId, answerToken);
+        return;
+      }
+    }
+    this.clear(chatId);
+  }
+
+  private finishDeferredClear(chatId: string, answerToken?: number): void {
+    const deferredToken = this.deferredClears.get(chatId);
+    if (deferredToken === undefined || answerToken !== deferredToken) return;
+    this.deferredClears.delete(chatId);
+    this.clearNow(chatId);
   }
 
   async answer(chatId: string, text: string, gateway: Gateway): Promise<string | undefined> {
@@ -227,6 +262,11 @@ export class ImPermissionHelper {
   }
 
   clear(chatId: string): void {
+    this.deferredClears.delete(chatId);
+    this.clearNow(chatId);
+  }
+
+  private clearNow(chatId: string): void {
     if (this.inFlight.has(chatId)) {
       this.generations.set(chatId, (this.generations.get(chatId) ?? 0) + 1);
     } else {
