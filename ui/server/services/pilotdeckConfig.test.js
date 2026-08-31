@@ -4,6 +4,8 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
     buildDefaultPilotDeckConfig,
+    buildMemoryLlmOptions,
+    buildRuntimeEnv,
     readPilotDeckConfigFile,
     resolveModel,
     sanitizeProviderCredentials,
@@ -81,6 +83,29 @@ describe('readPilotDeckConfigFile fallback behavior', () => {
 });
 
 describe('validatePilotDeckConfig gateway validation', () => {
+    it('uses catalog default URLs for memory and runtime settings', () => {
+        const config = {
+            agent: { model: 'deepseek/model-a' },
+            model: {
+                providers: {
+                    deepseek: {
+                        protocol: 'openai',
+                        url: '',
+                        apiKey: 'key',
+                        models: { 'model-a': {} },
+                    },
+                },
+            },
+            memory: { enabled: true, model: 'deepseek/model-a' },
+        };
+
+        expect(buildMemoryLlmOptions(config).baseUrl).toBe('https://api.deepseek.com/v1');
+        expect(buildRuntimeEnv(config)).toMatchObject({
+            PILOTDECK_API_BASE_URL: 'https://api.deepseek.com/v1',
+            PILOTDECK_MEMORY_BASE_URL: 'https://api.deepseek.com/v1',
+        });
+    });
+
     it('accepts an omitted URL for catalog providers', () => {
         for (const providerId of ['openai', 'minimax']) {
             const validation = validatePilotDeckConfig({

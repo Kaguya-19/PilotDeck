@@ -598,6 +598,7 @@ describe('config model-pool connection test routes', () => {
     });
     expect(saved.status).toBe(200);
     expect(writePilotDeckConfig.mock.calls[0][0].model.providers.openai.models['model-a'].connectionTest).toMatchObject({ status: 'passed', textInput: 'supported', imageInput: 'supported' });
+    expect(writePilotDeckConfig.mock.calls[0][0].model.providers.openai.models['model-a'].multimodal).toMatchObject({ input: ['text', 'image'] });
   });
 
   it('writes a passing binding for a newly referenced model', async () => {
@@ -641,6 +642,42 @@ describe('config model-pool connection test routes', () => {
     });
     expect(response.status).toBe(409);
     expect(response.body.code).toBe('MODEL_TEST_REQUIRED');
+  });
+
+  it('requires a test when an existing unreferenced model becomes the agent model', async () => {
+    const initial = stringifyYaml({
+      agent: { model: 'openai/model-a' },
+      model: { providers: { openai: { protocol: 'openai', url: 'https://api.openai.com/v1', apiKey: 'key', models: { 'model-a': {} } } } },
+    });
+    const { request } = await createDiskConfigApp(initial);
+    const added = stringifyYaml({
+      agent: { model: 'openai/model-a' },
+      model: { providers: { openai: { protocol: 'openai', url: 'https://api.openai.com/v1', apiKey: 'key', models: { 'model-a': {}, 'model-b': {} } } } },
+    });
+    const first = await request('/api/config', { method: 'PUT', body: JSON.stringify({ raw: added }) });
+    expect(first.status).toBe(200);
+
+    const referenced = stringifyYaml({
+      agent: { model: 'openai/model-b' },
+      model: { providers: { openai: { protocol: 'openai', url: 'https://api.openai.com/v1', apiKey: 'key', models: { 'model-a': {}, 'model-b': {} } } } },
+    });
+    const second = await request('/api/config', { method: 'PUT', body: JSON.stringify({ raw: referenced }) });
+    expect(second.status).toBe(409);
+    expect(second.body.code).toBe('MODEL_TEST_REQUIRED');
+  });
+
+  it('returns a user-facing error string for invalid test bindings', async () => {
+    const initial = {
+      agent: { model: 'openai/model-a' },
+      model: { providers: { openai: { protocol: 'openai', url: 'https://api.openai.com/v1', apiKey: 'key', models: { 'model-a': {} } } } },
+    };
+    const { requestStatus } = await createConfigApp({ config: initial });
+    const response = await requestStatus('/api/config', {
+      method: 'PUT',
+      body: JSON.stringify({ config: initial, modelTestBindings: [{ testId: 'missing-test' }] }),
+    });
+    expect(response.status).toBe(404);
+    expect(response.body).toMatchObject({ code: 'TEST_NOT_FOUND', error: 'Connection test was not found.' });
   });
 
   it('allows new subagent and memory references without separate test bindings', async () => {

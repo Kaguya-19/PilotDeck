@@ -5,6 +5,7 @@ import path from 'path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { parseGatewayConfig } from '../../../src/pilot/config/parseGatewayConfig.js';
 import { parseToolsConfig } from '../../../src/pilot/config/parseToolsConfig.js';
+import { lookupCatalogProvider } from '../../../src/model/catalog/index.js';
 
 // Source of truth: ~/.pilotdeck/pilotdeck.yaml. The disk format and the
 // "internal" config object are the same V2 schema — no more adapter layer.
@@ -547,6 +548,16 @@ function providerProtocolToMemoryApi(protocol) {
   return 'openai-completions';
 }
 
+function effectiveProviderUrl(providerId, provider) {
+  const configured = normalizeString(provider?.url);
+  if (configured) return configured;
+  const catalog = lookupCatalogProvider(providerId);
+  if (provider?.protocol === 'openai' && providerId === 'google') {
+    return 'https://generativelanguage.googleapis.com/v1beta/openai';
+  }
+  return catalog?.defaultUrl || '';
+}
+
 export function buildRuntimeEnv(config) {
   const normalized = normalizePilotDeckConfig(config);
   const main = resolveModel(normalized, normalized.agent.model, { allowMissing: true });
@@ -571,10 +582,11 @@ export function buildRuntimeEnv(config) {
   }
 
   if (main) {
-    env.PILOTDECK_API_BASE_URL = main.provider.url || '';
+    const mainUrl = effectiveProviderUrl(main.providerId, main.provider);
+    env.PILOTDECK_API_BASE_URL = mainUrl;
     env.PILOTDECK_API_KEY = main.provider.apiKey || '';
     env.PILOTDECK_MODEL = main.model;
-    env.OPENAI_BASE_URL = main.provider.url || '';
+    env.OPENAI_BASE_URL = mainUrl;
     env.OPENAI_API_KEY = main.provider.apiKey || '';
     env.OPENAI_MODEL = main.model;
     env.ANTHROPIC_API_KEY = main.provider.apiKey || '';
@@ -612,7 +624,7 @@ export function buildRuntimeEnv(config) {
   if (memory) {
     env.PILOTDECK_MEMORY_MODEL = memory.model;
     env.PILOTDECK_MEMORY_PROVIDER = memory.providerId;
-    env.PILOTDECK_MEMORY_BASE_URL = memory.provider.url || '';
+    env.PILOTDECK_MEMORY_BASE_URL = effectiveProviderUrl(memory.providerId, memory.provider);
     env.PILOTDECK_MEMORY_API_KEY = memory.provider.apiKey || '';
     env.PILOTDECK_MEMORY_API_TYPE = normalizeString(normalized.memory?.apiType)
       || providerProtocolToMemoryApi(memory.provider.protocol);
@@ -644,7 +656,7 @@ export function buildMemoryLlmOptions(config) {
     model: memory.model,
     apiType: normalizeString(normalized.memory?.apiType)
       || providerProtocolToMemoryApi(memory.provider.protocol),
-    baseUrl: memory.provider.url || '',
+    baseUrl: effectiveProviderUrl(memory.providerId, memory.provider),
     apiKey: memory.provider.apiKey || '',
     headers: isRecord(memory.provider.headers) ? memory.provider.headers : {},
   };

@@ -354,15 +354,13 @@ function bindModelConnectionTests(config, bindings, userId) {
         imageInput: tested.imageInput,
         testedAt: record.testedAt,
       };
+      const multimodal = isRecord(model.multimodal) ? { ...model.multimodal } : {};
+      multimodal.input = tested.imageInput === 'supported' ? ['text', 'image'] : ['text'];
+      model.multimodal = multimodal;
       bound.add(`${record.provider.providerId}/${tested.modelId}`);
     }
   }
   return { config, bound };
-}
-
-function isConfiguredModel(config, providerId, modelId) {
-  return isRecord(config?.model?.providers?.[providerId]?.models)
-    && Object.prototype.hasOwnProperty.call(config.model.providers[providerId].models, modelId);
 }
 
 function renamedSourceModelId(providerId, modelId, rawProviderRenames, rawModelRenames) {
@@ -393,10 +391,19 @@ function validateNewReferencedModelBindings(previousConfig, nextConfig, bound, r
     const [providerId, ...modelParts] = String(reference.value || '').split('/');
     const modelId = modelParts.join('/');
     const renamedSource = renamedSourceModelId(providerId, modelId, rawProviderRenames, rawModelRenames);
-    if (isConfiguredModel(previousConfig, providerId, modelId)
-      || (renamedSource && isConfiguredModel(previousConfig, renamedSource.providerId, renamedSource.modelId))) continue;
     const key = `${providerId}/${modelId}`;
-    if (!bound.has(key)) {
+    const previousProviderId = renamedSource?.providerId || providerId;
+    const previousModelId = renamedSource?.modelId || modelId;
+    const wasPreviouslyReferenced = findModelReferences(previousConfig, {
+      providerId: previousProviderId,
+      modelId: previousModelId,
+    }).some((previousReference) => (
+      previousReference.path !== 'agent.subagents.default'
+      && previousReference.path !== 'memory.model'
+    ));
+    const model = nextConfig?.model?.providers?.[providerId]?.models?.[modelId];
+    const hasPassingTest = isRecord(model?.connectionTest) && model.connectionTest.status === 'passed';
+    if (!wasPreviouslyReferenced && !hasPassingTest && !bound.has(key)) {
       return { providerId, modelId, reference };
     }
   }
@@ -680,7 +687,7 @@ router.put('/', async (req, res) => {
       );
       if (renamed.error) return res.status(400).json({ error: renamed.error, code: renamed.code });
       const testBinding = bindModelConnectionTests(renamed.config, req.body?.modelTestBindings, req.user?.id || '');
-      if (testBinding.error) return res.status(testBinding.error.status).json({ code: testBinding.error.code, message: testBinding.error.message });
+      if (testBinding.error) return res.status(testBinding.error.status).json({ error: testBinding.error.message, code: testBinding.error.code, message: testBinding.error.message });
       const invalidTestReference = diskRecord.parseError
         ? null
         : validateNewReferencedModelBindings(
@@ -751,7 +758,7 @@ router.put('/', async (req, res) => {
       );
       if (renamed.error) return res.status(400).json({ error: renamed.error, code: renamed.code });
       const testBinding = bindModelConnectionTests(renamed.config, req.body?.modelTestBindings, req.user?.id || '');
-      if (testBinding.error) return res.status(testBinding.error.status).json({ code: testBinding.error.code, message: testBinding.error.message });
+      if (testBinding.error) return res.status(testBinding.error.status).json({ error: testBinding.error.message, code: testBinding.error.code, message: testBinding.error.message });
       const invalidTestReference = diskRecord.parseError
         ? null
         : validateNewReferencedModelBindings(
