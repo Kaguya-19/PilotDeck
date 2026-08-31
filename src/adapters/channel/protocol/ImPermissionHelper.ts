@@ -153,7 +153,7 @@ export class ImPermissionHelper {
     else this.pending.set(chatId, entries);
     const deny = trimmed === "0";
     try {
-      await gateway.permissionDecide({
+      const decision = await gateway.permissionDecide({
         sessionKey: entry.sessionKey,
         requestId: entry.requestId,
         decision: deny ? "deny" : "allow",
@@ -161,6 +161,21 @@ export class ImPermissionHelper {
         ...(!deny ? { remember: trimmed === "2" } : {}),
       });
       if ((this.generations.get(chatId) ?? 0) !== generation) return undefined;
+      if (!decision.delivered) {
+        const currentEntries = this.pending.get(chatId) ?? entries;
+        this.pending.set(chatId, [entry, ...currentEntries]);
+        this.nextPrompts.set(chatId, {
+          text: formatPermissionPrompt(entry),
+          requestId: entry.requestId,
+        });
+        this.retryPromptPending.add(chatId);
+        return {
+          text: "权限请求未送达，正在重试。",
+          canAdvance: false,
+          retryPrompt: true,
+          answerToken,
+        };
+      }
       const remaining = this.pending.get(chatId) ?? entries;
       if (remaining.length > 0) {
         this.nextPrompts.set(chatId, {

@@ -382,6 +382,36 @@ test("ImPermissionHelper restores the current request when permissionDecide fail
   assert.match(helper.takeNextPrompt("chat-1") ?? "", /write_file/);
 });
 
+test("ImPermissionHelper restores the current request when permissionDecide is not delivered", async () => {
+  const helper = new ImPermissionHelper();
+  const decisions: string[] = [];
+  const gateway = {
+    permissionDecide: async ({ requestId }: { requestId: string }) => {
+      decisions.push(requestId);
+      return { delivered: false };
+    },
+  } as unknown as Gateway;
+
+  helper.capture("chat-1", "session-1", {
+    type: "permission_request", requestId: "request-1", toolName: "read_file", payload: {},
+  });
+  helper.confirmInitialPrompt("chat-1");
+  helper.capture("chat-1", "session-1", {
+    type: "permission_request", requestId: "request-2", toolName: "write_file", payload: {},
+  });
+
+  const result = await helper.answerWithState("chat-1", "1", gateway);
+  assert.equal(result?.canAdvance, false);
+  assert.equal(result?.retryPrompt, true);
+  assert.match(result?.text ?? "", /未送达|重试/);
+  assert.equal(helper.isAnswering("chat-1"), true);
+
+  const retryPrompt = helper.takeNextPrompt("chat-1");
+  assert.match(retryPrompt ?? "", /read_file/);
+  assert.doesNotMatch(retryPrompt ?? "", /write_file/);
+  assert.deepEqual(decisions, ["request-1"]);
+});
+
 test("ImPermissionHelper queues permission requests captured during a decision", async () => {
   const helper = new ImPermissionHelper();
   let release!: () => void;
