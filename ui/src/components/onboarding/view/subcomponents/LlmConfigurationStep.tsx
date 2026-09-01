@@ -60,6 +60,7 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
 
   const [testStatus, setTestStatus] = useState<TestStatus>('idle');
   const [testMessage, setTestMessage] = useState('');
+  const [connectionTestId, setConnectionTestId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [apiModels, setApiModels] = useState<ApiModelListItem[] | null>(null);
   const [modelListStatus, setModelListStatus] = useState<'idle' | 'loading' | 'error'>('idle');
@@ -237,31 +238,58 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
     setCustomProtocol('openai');
     setTestStatus('idle');
     setTestMessage('');
+    setConnectionTestId(null);
   }, []);
 
   const handleTest = useCallback(async () => {
     if (!canTest || !selectedProvider) return;
     setTestStatus('testing');
     setTestMessage('');
+    setConnectionTestId(null);
     try {
-      const res = await authenticatedFetch('/api/config/test-connection', {
+      const res = await authenticatedFetch('/api/config/test-connections', {
         method: 'POST',
         body: JSON.stringify({
-          providerType: effectiveProtocol,
           providerId: effectiveProviderId,
-          baseUrl: effectiveUrl,
+          protocol: effectiveProtocol,
+          endpoint: effectiveUrl,
           apiKey: apiKey.trim(),
-          model: effectiveModelId,
+          models: [effectiveModelId],
+          retryPolicy: {},
         }),
       });
       const data = await res.json();
-      if (data.ok) {
-        setTestStatus('success');
-        setTestMessage(data.message || 'Connected successfully.');
-      } else {
-        setTestStatus('error');
-        setTestMessage(data.error || 'Connection failed.');
+      if (!res.ok || data.status === 'failed') {
+        const errorMessage = typeof data.error === 'string' ? data.error : data.error?.message;
+        throw new Error(errorMessage || data.message || 'Connection failed.');
       }
+
+      let completed = data;
+      if (data.status === 'manual_input_required') {
+        const unknownModels = Array.isArray(data.models)
+          ? data.models.filter((model: { imageInput?: string }) => model.imageInput === 'unknown')
+          : [];
+        const capabilities = unknownModels.map((model: { modelId: string }) => ({
+          modelId: model.modelId,
+          imageInput: window.confirm(`Does ${model.modelId} support image input?`) ? 'supported' : 'unsupported',
+        }));
+        const capabilityResponse = await authenticatedFetch(`/api/config/test-connections/${data.testId}/image-capabilities`, {
+          method: 'PUT',
+          body: JSON.stringify({ models: capabilities }),
+        });
+        completed = await capabilityResponse.json();
+        if (!capabilityResponse.ok || completed.status !== 'passed') {
+          const errorMessage = typeof completed.error === 'string' ? completed.error : completed.error?.message;
+          throw new Error(errorMessage || 'Image capability confirmation failed.');
+        }
+      }
+
+      if (completed.status !== 'passed' || typeof completed.testId !== 'string') {
+        throw new Error('Connection test did not pass.');
+      }
+      setConnectionTestId(completed.testId);
+      setTestStatus('success');
+      setTestMessage('Connected successfully.');
     } catch (err) {
       setTestStatus('error');
       setTestMessage(err instanceof Error ? err.message : 'Connection failed.');
@@ -269,7 +297,7 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
   }, [canTest, selectedProvider, effectiveUrl, apiKey, effectiveModelId, effectiveProtocol, effectiveProviderId]);
 
   const handleSave = useCallback(async () => {
-    if (!selectedProvider) return;
+    if (!selectedProvider || !connectionTestId) return;
     setSaving(true);
     try {
       const { stringify: stringifyYaml, parse: parseYaml } = await import('yaml');
@@ -329,7 +357,10 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
 
       const saveRes = await authenticatedFetch('/api/config', {
         method: 'PUT',
-        body: JSON.stringify({ raw: stringifyYaml(existingConfig, { indent: 2, lineWidth: 0 }) }),
+        body: JSON.stringify({
+          raw: stringifyYaml(existingConfig, { indent: 2, lineWidth: 0 }),
+          modelTestBindings: [{ testId: connectionTestId }],
+        }),
       });
 
       if (!saveRes.ok) {
@@ -344,7 +375,7 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
     } finally {
       setSaving(false);
     }
-  }, [selectedProvider, effectiveUrl, effectiveModelId, apiKey, effectiveProtocol, effectiveProviderId, onSaved]);
+  }, [connectionTestId, selectedProvider, effectiveUrl, effectiveModelId, apiKey, effectiveProtocol, effectiveProviderId, onSaved]);
 
   return (
     <div className="mx-auto w-full max-w-xl space-y-8">

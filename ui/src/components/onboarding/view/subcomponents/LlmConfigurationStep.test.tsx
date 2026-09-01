@@ -93,4 +93,56 @@ describe('LlmConfigurationStep', () => {
     expect(screen.getByRole('button', { name: 'Fetch model list' })).toHaveProperty('disabled', true);
     expect(screen.getByRole('combobox', { name: 'Model' }).textContent).toContain('Kimi K2.6');
   });
+
+  it('creates a passing connection-test record and binds it when saving', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    mocks.authenticatedFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      if (url === '/api/config/provider') {
+        return { ok: true, json: async () => ({ exists: false, provider: null }) };
+      }
+      if (url === '/api/config/test-connections') {
+        return {
+          ok: true,
+          json: async () => ({
+            testId: 'test_luna',
+            status: 'passed',
+            models: [{ modelId: 'gpt-5.6-luna', textInput: 'supported', imageInput: 'supported', error: null }],
+          }),
+        };
+      }
+      if (url === '/api/config') {
+        if (init?.method === 'PUT') return { ok: true, json: async () => ({ raw: '' }) };
+        return { ok: true, json: async () => ({ raw: '' }) };
+      }
+      return { ok: true, json: async () => ({}) };
+    });
+
+    render(<LlmConfigurationStep onSaved={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /^Custom OpenAI/ }));
+    fireEvent.change(screen.getByLabelText('Provider ID'), { target: { value: 'modelbest' } });
+    fireEvent.change(screen.getByLabelText('Base URL'), { target: { value: 'https://llm-center.modelbest.co/v1' } });
+    fireEvent.change(screen.getByLabelText('API Key'), { target: { value: 'sk-test' } });
+    fireEvent.change(screen.getByLabelText('Model'), { target: { value: 'gpt-5.6-luna' } });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Test Connection' }));
+    await waitFor(() => expect(screen.getByText(/Connected successfully/)).toBeTruthy());
+    expect(calls.some((call) => call.url === '/api/config/test-connection')).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      const testCall = calls.find((call) => call.url === '/api/config/test-connections');
+      expect(testCall).toBeTruthy();
+      expect(JSON.parse(String(testCall?.init?.body))).toMatchObject({
+        providerId: 'modelbest',
+        protocol: 'openai',
+        endpoint: 'https://llm-center.modelbest.co/v1',
+        models: ['gpt-5.6-luna'],
+      });
+      const saveCall = calls.find((call) => call.url === '/api/config' && call.init?.method === 'PUT');
+      expect(JSON.parse(String(saveCall?.init?.body))).toMatchObject({
+        modelTestBindings: [{ testId: 'test_luna' }],
+      });
+    });
+  });
 });
