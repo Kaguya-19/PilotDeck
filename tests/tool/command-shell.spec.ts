@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { resolveDefaultCommandShell } from "../../src/runtime/commandShell.js";
 
 test("command shell prefers /bin/bash on Unix", () => {
@@ -62,7 +63,7 @@ test("command shell falls back to cmd then PowerShell 7 on Windows", () => {
   assert.equal(cmd.shell, "cmd.exe");
   assert.equal(cmd.kind, "cmd");
   assert.equal(cmd.windowsVerbatimArguments, true);
-  assert.deepEqual(cmd.args("echo ok"), ["/d", "/s", "/c", "echo ok"]);
+  assert.deepEqual(cmd.args("echo ok"), ["/d", "/s", "/c", '"echo ok"']);
 
   const pwsh = resolveDefaultCommandShell({
     platform: "win32",
@@ -94,4 +95,31 @@ test("command shell supports an explicit generic shell path", () => {
   assert.equal(shell.shell, "/opt/custom-shell");
   assert.equal(shell.kind, "custom");
   assert.deepEqual(shell.args("echo ok"), ["-c", "echo ok"]);
+});
+
+test("cmd shell executes a quoted executable path on Windows", { skip: process.platform !== "win32" }, async () => {
+  const commandShellPath = process.env.ComSpec ?? "cmd.exe";
+  const env = { ...process.env, PILOTDECK_SHELL_PATH: commandShellPath };
+  const shell = resolveDefaultCommandShell({
+    platform: "win32",
+    env,
+    commandAvailable: () => true,
+  });
+  const command = `"${process.execPath}" -e "process.stdout.write('pilotdeck-cmd-smoke')"`;
+  const child = spawn(shell.shell, shell.args(command), {
+    env,
+    windowsHide: true,
+    windowsVerbatimArguments: shell.windowsVerbatimArguments,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "";
+  child.stdout?.setEncoding("utf8");
+  child.stdout?.on("data", (chunk: string) => { stdout += chunk; });
+  const exitCode = await new Promise<number>((resolve, reject) => {
+    child.on("error", reject);
+    child.on("close", (code) => resolve(code ?? -1));
+  });
+
+  assert.equal(exitCode, 0);
+  assert.equal(stdout, "pilotdeck-cmd-smoke");
 });

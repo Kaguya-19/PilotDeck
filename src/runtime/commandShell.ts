@@ -108,7 +108,7 @@ function shellWithArgs(shell: string, kind: CommandShellKind): CommandShell {
     return {
       shell,
       kind,
-      args: (command) => ["/d", "/s", "/c", command],
+      args: (command) => ["/d", "/s", "/c", `"${command}"`],
       windowsVerbatimArguments: true,
     };
   }
