@@ -11,6 +11,7 @@ test("command shell prefers /bin/bash on Unix", () => {
 
   assert.equal(shell.shell, "/bin/bash");
   assert.equal(shell.kind, "bash");
+  assert.equal(shell.windowsVerbatimArguments, false);
   assert.deepEqual(shell.args("printf ok"), ["-c", "printf ok"]);
 });
 
@@ -60,6 +61,7 @@ test("command shell falls back to cmd then PowerShell 7 on Windows", () => {
   });
   assert.equal(cmd.shell, "cmd.exe");
   assert.equal(cmd.kind, "cmd");
+  assert.equal(cmd.windowsVerbatimArguments, true);
   assert.deepEqual(cmd.args("echo ok"), ["/d", "/s", "/c", "echo ok"]);
 
   const pwsh = resolveDefaultCommandShell({
@@ -70,6 +72,7 @@ test("command shell falls back to cmd then PowerShell 7 on Windows", () => {
   });
   assert.equal(pwsh.shell, "pwsh.exe");
   assert.equal(pwsh.kind, "pwsh");
+  assert.equal(pwsh.windowsVerbatimArguments, false);
   assert.deepEqual(pwsh.args("Write-Output ok"), ["-NoLogo", "-NoProfile", "-Command", "Write-Output ok"]);
 });
 

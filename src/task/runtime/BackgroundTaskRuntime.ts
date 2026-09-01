@@ -227,6 +227,7 @@ export class BackgroundTaskRuntime {
         env: spec.env,
         stdio: ["ignore", "pipe", "pipe"],
         detached: true,
+        windowsVerbatimArguments: shell.windowsVerbatimArguments,
       });
       child.unref();
     } catch (err) {

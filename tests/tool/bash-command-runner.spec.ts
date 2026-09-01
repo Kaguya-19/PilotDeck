@@ -33,6 +33,7 @@ test("foreground bash runner invokes the resolved shell explicitly", async () =>
   assert.equal(invocation?.options.cwd, "/tmp");
   assert.equal(invocation?.options.env, env);
   assert.equal(invocation?.options.detached, process.platform !== "win32");
+  assert.equal(invocation?.options.windowsVerbatimArguments, expected.windowsVerbatimArguments);
   assert.equal(result.exitCode, 0);
   assert.equal(result.stdout, "ok");
 });

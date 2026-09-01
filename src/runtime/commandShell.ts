@@ -7,6 +7,7 @@ export type CommandShell = {
   shell: string;
   args: (command: string) => string[];
   kind: CommandShellKind;
+  windowsVerbatimArguments: boolean;
 };
 
 export type CommandShellResolverOptions = {
@@ -104,12 +105,22 @@ function bashShell(shell: string): CommandShell {
 
 function shellWithArgs(shell: string, kind: CommandShellKind): CommandShell {
   if (kind === "cmd") {
-    return { shell, kind, args: (command) => ["/d", "/s", "/c", command] };
+    return {
+      shell,
+      kind,
+      args: (command) => ["/d", "/s", "/c", command],
+      windowsVerbatimArguments: true,
+    };
   }
   if (kind === "pwsh") {
-    return { shell, kind, args: (command) => ["-NoLogo", "-NoProfile", "-Command", command] };
+    return {
+      shell,
+      kind,
+      args: (command) => ["-NoLogo", "-NoProfile", "-Command", command],
+      windowsVerbatimArguments: false,
+    };
   }
-  return { shell, kind, args: (command) => ["-c", command] };
+  return { shell, kind, args: (command) => ["-c", command], windowsVerbatimArguments: false };
 }
 
 function findOnPath(

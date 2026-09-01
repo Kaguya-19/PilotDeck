@@ -40,6 +40,7 @@ export class NodeShellCommandRunner implements PilotDeckCommandRunner {
         env: options.env,
         detached: !isWindows,
         windowsHide: isWindows,
+        windowsVerbatimArguments: shell.windowsVerbatimArguments,
         stdio: ["ignore", "pipe", "pipe"],
       });
 

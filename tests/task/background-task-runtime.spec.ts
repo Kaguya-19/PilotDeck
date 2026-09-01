@@ -58,6 +58,7 @@ test("BackgroundTaskRuntime tracks output and emits one completion", async () =>
   assert.equal(invocation?.options.cwd, "/tmp");
   assert.equal(invocation?.options.env, env);
   assert.equal(invocation?.options.detached, true);
+  assert.equal(invocation?.options.windowsVerbatimArguments, expectedShell.windowsVerbatimArguments);
 
   child.stdout.write("hello\n");
   child.stderr.write("warning\n");
