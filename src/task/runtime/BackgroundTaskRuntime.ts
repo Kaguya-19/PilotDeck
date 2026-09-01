@@ -4,8 +4,8 @@
  * LocalShellTask behaviour (T1-T11).
  *
  * Process model:
- *   - `start(spec)` spawns a *detached* child via `spawn(command, { shell:
- *     true, detached: true })` and immediately calls `child.unref()` so the
+ *   - `start(spec)` spawns a *detached* child through the shared
+ *     Bash-preferred command-shell resolver and immediately calls `child.unref()` so the
  *     PilotDeck process can exit without waiting for the child. (T11)
  *   - stdout / stderr are piped into a `TaskOutputStore` (1 MB ring buffer
  *     + optional disk spill). The runtime never blocks on the stream — the
@@ -24,6 +24,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { TaskOutputStore } from "../storage/TaskOutputStore.js";
+import { resolveDefaultCommandShell } from "../../runtime/commandShell.js";
 import type {
   PilotDeckBackgroundBashTask,
   PilotDeckBackgroundTaskStatus,
@@ -220,10 +221,10 @@ export class BackgroundTaskRuntime {
 
     let child: ChildProcess;
     try {
-      child = this.options.spawn(spec.command, {
+      const shell = resolveDefaultCommandShell({ env: spec.env });
+      child = this.options.spawn(shell.shell, shell.args(spec.command), {
         cwd: spec.cwd,
         env: spec.env,
-        shell: true,
         stdio: ["ignore", "pipe", "pipe"],
         detached: true,
       });
