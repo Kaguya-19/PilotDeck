@@ -287,10 +287,20 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
         const unknownModels = Array.isArray(data.models)
           ? data.models.filter((model: { imageInput?: string }) => model.imageInput === 'unknown')
           : [];
-        const capabilities = unknownModels.map((model: { modelId: string }) => ({
-          modelId: model.modelId,
-          imageInput: window.confirm(`Does ${model.modelId} support image input?`) ? 'supported' : 'unsupported',
-        }));
+        const capabilities = unknownModels.map((model: { modelId: string }) => {
+          const choice = window.prompt(
+            `Does ${model.modelId} support image input? Enter yes or no. Cancel to leave this test failed.`,
+          );
+          if (choice === null) throw new Error('Image capability confirmation cancelled.');
+          const normalizedChoice = choice.trim().toLowerCase();
+          if (normalizedChoice !== 'yes' && normalizedChoice !== 'y' && normalizedChoice !== 'no' && normalizedChoice !== 'n') {
+            throw new Error('Image capability confirmation requires yes or no.');
+          }
+          return {
+            modelId: model.modelId,
+            imageInput: normalizedChoice === 'yes' || normalizedChoice === 'y' ? 'supported' : 'unsupported',
+          };
+        });
         if (connectionTestGeneration.current !== testGeneration) return;
         const capabilityResponse = await authenticatedFetch(`/api/config/test-connections/${data.testId}/image-capabilities`, {
           method: 'PUT',

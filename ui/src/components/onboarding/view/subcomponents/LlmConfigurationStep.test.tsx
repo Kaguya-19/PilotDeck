@@ -220,4 +220,40 @@ describe('LlmConfigurationStep', () => {
       expect(body.raw).not.toContain('ModelBest:');
     });
   });
+
+  it('keeps the test failed when manual image capability input is cancelled', async () => {
+    const calls: string[] = [];
+    const prompt = vi.spyOn(window, 'prompt').mockReturnValue(null);
+    mocks.authenticatedFetch.mockImplementation(async (url: string) => {
+      calls.push(url);
+      if (url === '/api/config/provider') {
+        return { ok: true, json: async () => ({ exists: false, provider: null }) };
+      }
+      if (url === '/api/config/test-connections') {
+        return {
+          ok: true,
+          json: async () => ({
+            testId: 'manual_test',
+            status: 'manual_input_required',
+            models: [{ modelId: 'gpt-5.6-luna', textInput: 'supported', imageInput: 'unknown', error: null }],
+          }),
+        };
+      }
+      return { ok: true, json: async () => ({ raw: '' }) };
+    });
+
+    render(<LlmConfigurationStep onSaved={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /^Custom OpenAI/ }));
+    fireEvent.change(screen.getByLabelText('Provider ID'), { target: { value: 'modelbest' } });
+    fireEvent.change(screen.getByLabelText('Base URL'), { target: { value: 'https://example.com/v1' } });
+    fireEvent.change(screen.getByLabelText('API Key'), { target: { value: 'sk-test' } });
+    fireEvent.change(screen.getByLabelText('Model'), { target: { value: 'gpt-5.6-luna' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Test Connection' }));
+
+    await waitFor(() => expect(screen.getByText(/cancelled/i)).toBeTruthy());
+    expect(prompt).toHaveBeenCalledTimes(1);
+    expect(calls).not.toContain('/api/config/test-connections/manual_test/image-capabilities');
+    expect(screen.getByRole('button', { name: 'Save' })).toHaveProperty('disabled', true);
+    prompt.mockRestore();
+  });
 });
