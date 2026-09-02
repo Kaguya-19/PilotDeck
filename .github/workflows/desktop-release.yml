@@ -47,7 +47,6 @@ jobs:
 
       - uses: actions/checkout@v7
         with:
-          ref: main
           fetch-depth: 0
 
       - name: Detect production changes since the last desktop release

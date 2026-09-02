@@ -201,8 +201,10 @@ class RuntimeManager {
       PILOTDECK_GATEWAY_URL: `ws://127.0.0.1:${gatewayPort}/ws`,
       PILOTDECK_DESKTOP: "1",
       PILOTDECK_DESKTOP_VERSION: app.getVersion(),
+      PILOTDECK_VERSION: app.getVersion(),
       PILOTDECK_DESKTOP_BUILD_TIME: buildMetadata.buildTime,
       PILOTDECK_COMMIT_SHA: buildMetadata.commitSha,
+      PILOTDECK_GIT_SHA: buildMetadata.commitSha,
       PILOTDECK_UPDATE_REPOSITORY:
         process.env.PILOTDECK_UPDATE_REPOSITORY || buildMetadata.repository || DEFAULT_UPDATE_REPOSITORY,
       PILOTDECK_DISABLE_LOCAL_AUTH: process.env.PILOTDECK_DISABLE_LOCAL_AUTH || "1",
