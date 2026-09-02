@@ -52,7 +52,7 @@ permissions:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  PILOTDECK_UPDATE_REPOSITORY: mssssss123/PilotDeck
+  PILOTDECK_UPDATE_REPOSITORY: ${{ github.repository }}
 
 jobs:
   macos:

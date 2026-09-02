@@ -41,7 +41,7 @@ const APP_ID = "cn.pilotdeck.desktop";
 const SENTINEL_API_KEY = "PLACEHOLDER_RUN_ONBOARDING_TO_REPLACE";
 const EXTERNAL_NAVIGATION_PROTOCOLS = new Set(["http:", "https:", "mailto:", "tel:"]);
 const PLAYWRIGHT_BROWSER_DIR = "playwright-browsers";
-const DEFAULT_UPDATE_REPOSITORY = "mssssss123/PilotDeck";
+const DEFAULT_UPDATE_REPOSITORY = "OpenBMB/PilotDeck";
 
 type BuildMetadata = {
   version?: string;

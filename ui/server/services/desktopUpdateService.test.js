@@ -3,11 +3,17 @@ import {
   compareVersions,
   isDesktopRelease,
   mapGitHubRelease,
+  normalizeRepository,
   normalizeDesktopReleaseVersion,
   parseVersionParts,
 } from './desktopUpdateService.js';
 
 describe('desktop release versions', () => {
+  it('defaults desktop updates to the upstream repository', () => {
+    expect(normalizeRepository()).toBe('OpenBMB/PilotDeck');
+    expect(normalizeRepository('https://github.com/mssssss123/PilotDeck.git')).toBe('mssssss123/PilotDeck');
+  });
+
   it('maps a dated desktop tag to the packaged semver', () => {
     expect(normalizeDesktopReleaseVersion('desktop-v2026.09.02')).toBe('2026.902.0');
     expect(normalizeDesktopReleaseVersion('desktop-v2026.09.02-r2')).toBe('2026.902.1');

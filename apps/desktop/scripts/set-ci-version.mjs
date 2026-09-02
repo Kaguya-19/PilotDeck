@@ -22,7 +22,7 @@ const version = process.env.PILOTDECK_DESKTOP_VERSION || buildDateVersion(releas
 const releaseTag = process.env.PILOTDECK_DESKTOP_RELEASE_TAG || buildReleaseTag(releaseDate, revision);
 const buildTime = process.env.PILOTDECK_DESKTOP_BUILD_TIME || new Date().toISOString();
 const commitSha = process.env.PILOTDECK_COMMIT_SHA || process.env.GITHUB_SHA || resolveGitCommit();
-const repository = process.env.PILOTDECK_UPDATE_REPOSITORY || process.env.GITHUB_REPOSITORY || "mssssss123/PilotDeck";
+const repository = process.env.PILOTDECK_UPDATE_REPOSITORY || process.env.GITHUB_REPOSITORY || "OpenBMB/PilotDeck";
 
 const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8"));
 packageJson.version = version;

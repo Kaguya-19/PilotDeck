@@ -40,6 +40,10 @@ Every release contains the DMG, Windows installer, `desktop-release.json`, and
 `SHA256SUMS`. The desktop updater ignores unrelated Web/server releases and only
 considers tags beginning with `desktop-v`.
 
+Release publishing and packaged updater metadata use the repository running the
+workflow. Production builds from upstream `main` therefore publish to and check
+`OpenBMB/PilotDeck`; fork workflows remain isolated to their own repository.
+
 ## Required GitHub Secrets
 
 Release builds deliberately fail when macOS code signing or notarization is
