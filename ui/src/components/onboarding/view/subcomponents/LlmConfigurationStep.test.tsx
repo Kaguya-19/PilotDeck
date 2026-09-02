@@ -145,4 +145,79 @@ describe('LlmConfigurationStep', () => {
       });
     });
   });
+
+  it('ignores a connection result when the form changes while testing', async () => {
+    let resolveTest!: (response: Response) => void;
+    const pendingTest = new Promise<Response>((resolve) => { resolveTest = resolve; });
+    mocks.authenticatedFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/config/provider') {
+        return { ok: true, json: async () => ({ exists: false, provider: null }) };
+      }
+      if (url === '/api/config/test-connections') return pendingTest;
+      if (url === '/api/config') return { ok: true, json: async () => ({ raw: '' }) };
+      return { ok: true, json: async () => ({}) };
+    });
+
+    render(<LlmConfigurationStep onSaved={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /^Custom OpenAI/ }));
+    fireEvent.change(screen.getByLabelText('Provider ID'), { target: { value: 'modelbest' } });
+    fireEvent.change(screen.getByLabelText('Base URL'), { target: { value: 'https://example.com/v1' } });
+    fireEvent.change(screen.getByLabelText('API Key'), { target: { value: 'sk-old' } });
+    fireEvent.change(screen.getByLabelText('Model'), { target: { value: 'gpt-5.6-luna' } });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Test Connection' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Testing...' })).toBeTruthy());
+    fireEvent.change(screen.getByLabelText('API Key'), { target: { value: 'sk-new' } });
+    resolveTest({
+      ok: true,
+      json: async () => ({
+        testId: 'stale_test',
+        status: 'passed',
+        models: [{ modelId: 'gpt-5.6-luna', textInput: 'supported', imageInput: 'supported', error: null }],
+      }),
+    } as Response);
+
+    await waitFor(() => expect(screen.queryByText(/Connected successfully/)).toBeNull());
+    expect(screen.getByRole('button', { name: 'Save' })).toHaveProperty('disabled', true);
+  });
+
+  it('normalizes custom provider IDs to lowercase for testing and saving', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    mocks.authenticatedFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      if (url === '/api/config/provider') {
+        return { ok: true, json: async () => ({ exists: false, provider: null }) };
+      }
+      if (url === '/api/config/test-connections') {
+        return {
+          ok: true,
+          json: async () => ({ testId: 'lowercase_test', status: 'passed', models: [] }),
+        };
+      }
+      if (url === '/api/config') {
+        if (init?.method === 'PUT') return { ok: true, json: async () => ({ raw: '' }) };
+        return { ok: true, json: async () => ({ raw: '' }) };
+      }
+      return { ok: true, json: async () => ({}) };
+    });
+
+    render(<LlmConfigurationStep onSaved={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /^Custom OpenAI/ }));
+    fireEvent.change(screen.getByLabelText('Provider ID'), { target: { value: 'ModelBest' } });
+    fireEvent.change(screen.getByLabelText('Base URL'), { target: { value: 'https://example.com/v1' } });
+    fireEvent.change(screen.getByLabelText('API Key'), { target: { value: 'sk-test' } });
+    fireEvent.change(screen.getByLabelText('Model'), { target: { value: 'gpt-5.6-luna' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Test Connection' }));
+
+    await waitFor(() => expect(screen.getByText(/Connected successfully/)).toBeTruthy());
+    const testCall = calls.find((call) => call.url === '/api/config/test-connections');
+    expect(JSON.parse(String(testCall?.init?.body))).toMatchObject({ providerId: 'modelbest' });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => {
+      const saveCall = calls.find((call) => call.url === '/api/config' && call.init?.method === 'PUT');
+      const body = JSON.parse(String(saveCall?.init?.body));
+      expect(body.raw).toContain('modelbest:');
+      expect(body.raw).not.toContain('ModelBest:');
+    });
+  });
 });

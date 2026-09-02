@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Check, ChevronDown, Loader2, Plus } from 'lucide-react';
 import { authenticatedFetch } from '../../../../utils/api';
 import {
@@ -61,6 +61,7 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
   const [testStatus, setTestStatus] = useState<TestStatus>('idle');
   const [testMessage, setTestMessage] = useState('');
   const [connectionTestId, setConnectionTestId] = useState<string | null>(null);
+  const connectionTestGeneration = useRef(0);
   const [saving, setSaving] = useState(false);
   const [apiModels, setApiModels] = useState<ApiModelListItem[] | null>(null);
   const [modelListStatus, setModelListStatus] = useState<'idle' | 'loading' | 'error'>('idle');
@@ -102,7 +103,7 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
   const effectiveProtocol: CatalogProviderProtocol = isCustomMode
     ? customProtocol
     : (selectedProvider?.protocol ?? 'openai');
-  const effectiveProviderId = isCustomMode ? customProviderId.trim() : (selectedProvider?.id ?? '');
+  const effectiveProviderId = isCustomMode ? customProviderId.trim().toLowerCase() : (selectedProvider?.id ?? '');
   const selectedProviderRequiresApiKey = requiresApiKey(selectedProvider);
   const modelListRequiresApiKey = selectedProvider?.modelListRequiresApiKey === true;
   const canFetchModels = Boolean(
@@ -118,6 +119,21 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
     effectiveProviderId &&
     (!isCustomMode || effectiveUrl.trim()),
   );
+
+  const connectionConfigSignature = JSON.stringify([
+    effectiveProviderId,
+    effectiveProtocol,
+    effectiveUrl.trim(),
+    effectiveModelId.trim(),
+    apiKey.trim(),
+  ]);
+
+  useEffect(() => {
+    connectionTestGeneration.current += 1;
+    setConnectionTestId(null);
+    setTestStatus('idle');
+    setTestMessage('');
+  }, [connectionConfigSignature]);
 
   useEffect(() => {
     setApiModels(null);
@@ -243,6 +259,7 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
 
   const handleTest = useCallback(async () => {
     if (!canTest || !selectedProvider) return;
+    const testGeneration = connectionTestGeneration.current;
     setTestStatus('testing');
     setTestMessage('');
     setConnectionTestId(null);
@@ -259,6 +276,7 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
         }),
       });
       const data = await res.json();
+      if (connectionTestGeneration.current !== testGeneration) return;
       if (!res.ok || data.status === 'failed') {
         const errorMessage = typeof data.error === 'string' ? data.error : data.error?.message;
         throw new Error(errorMessage || data.message || 'Connection failed.');
@@ -273,11 +291,13 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
           modelId: model.modelId,
           imageInput: window.confirm(`Does ${model.modelId} support image input?`) ? 'supported' : 'unsupported',
         }));
+        if (connectionTestGeneration.current !== testGeneration) return;
         const capabilityResponse = await authenticatedFetch(`/api/config/test-connections/${data.testId}/image-capabilities`, {
           method: 'PUT',
           body: JSON.stringify({ models: capabilities }),
         });
         completed = await capabilityResponse.json();
+        if (connectionTestGeneration.current !== testGeneration) return;
         if (!capabilityResponse.ok || completed.status !== 'passed') {
           const errorMessage = typeof completed.error === 'string' ? completed.error : completed.error?.message;
           throw new Error(errorMessage || 'Image capability confirmation failed.');
@@ -291,6 +311,7 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
       setTestStatus('success');
       setTestMessage('Connected successfully.');
     } catch (err) {
+      if (connectionTestGeneration.current !== testGeneration) return;
       setTestStatus('error');
       setTestMessage(err instanceof Error ? err.message : 'Connection failed.');
     }
