@@ -6,6 +6,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -22,6 +23,7 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const desktopRoot = resolve(__dirname, "..");
 const repoRoot = resolve(desktopRoot, "..", "..");
+const runtimePackageRoot = resolve(desktopRoot, "runtime");
 const defaultRuntimeRoot = resolve(desktopRoot, ".runtime", "app");
 const x64RuntimeRoot = resolve(desktopRoot, ".runtime", "app-x64");
 const desktopPackage = readJson(resolve(desktopRoot, "package.json"));
@@ -35,18 +37,6 @@ let runtimeRoot = defaultRuntimeRoot;
 let currentRuntimeArch = process.arch;
 const DESKTOP_BUILD = desktopPackage.version;
 const DESKTOP_PLAYWRIGHT_BROWSER = "chrome-for-testing";
-const runtimeOnlyBuiltDependencies = [
-  "@google/genai",
-  "bcrypt",
-  "better-sqlite3",
-  "electron-winstaller",
-  "esbuild",
-  "node-pty",
-  "protobufjs",
-  "sharp",
-  "unrs-resolver",
-];
-
 const uiServerDependencies = [
   "@octokit/rest",
   "bcrypt",
@@ -202,40 +192,62 @@ function addDependency(target, sources, name) {
   throw new Error(`Missing runtime dependency version for ${name}`);
 }
 
-function createRuntimePackageJson(rootPackage, uiPackage) {
+function createRuntimeDependencies(rootPackage, uiPackage) {
   const dependencies = {};
   for (const [name, version] of Object.entries(rootPackage.dependencies ?? {})) {
     if (!name.startsWith("@types/")) {
-      dependencies[name] = version;
+      dependencies[name] = name === "edgeclaw-memory-core"
+        ? "file:../../../src/context/memory/edgeclaw-memory-core"
+        : version;
     }
   }
   for (const name of uiServerDependencies) {
     addDependency(dependencies, [uiPackage, rootPackage], name);
   }
+  return dependencies;
+}
 
-  return {
-    name: "pilotdeck-desktop-runtime",
-    version: rootPackage.version,
-    private: true,
-    type: "module",
-    packageManager: rootPackage.packageManager,
-    pnpm: {
-      onlyBuiltDependencies: runtimeOnlyBuiltDependencies,
-    },
-    dependencies,
-  };
+function verifyRuntimePackageManifest(rootPackage, uiPackage, runtimePackage) {
+  const expected = createRuntimeDependencies(rootPackage, uiPackage);
+  const actual = runtimePackage.dependencies ?? {};
+  const dependencyNames = new Set([...Object.keys(expected), ...Object.keys(actual)]);
+  const mismatches = [...dependencyNames]
+    .sort()
+    .filter((name) => expected[name] !== actual[name])
+    .map((name) => `${name}: expected ${expected[name] ?? "<absent>"}, found ${actual[name] ?? "<absent>"}`);
+
+  if (mismatches.length > 0) {
+    throw new Error(
+      `Desktop runtime dependencies are out of sync with package.json files:\n${mismatches.join("\n")}`,
+    );
+  }
 }
 
 function prepareRuntimeTree(installEnv = process.env) {
   const rootPackage = readJson(resolve(repoRoot, "package.json"));
   const uiPackage = readJson(resolve(repoRoot, "ui", "package.json"));
-  rmSync(runtimeRoot, { recursive: true, force: true });
-  mkdirSync(runtimeRoot, { recursive: true });
-
-  writeFileSync(
-    resolve(runtimeRoot, "package.json"),
-    `${JSON.stringify(createRuntimePackageJson(rootPackage, uiPackage), null, 2)}\n`,
+  const runtimePackage = readJson(resolve(runtimePackageRoot, "package.json"));
+  verifyRuntimePackageManifest(rootPackage, uiPackage, runtimePackage);
+  const installRoot = resolve(
+    desktopRoot,
+    runtimeRoot === x64RuntimeRoot ? ".runtime-install-x64" : ".runtime-install",
   );
+  rmSync(installRoot, { recursive: true, force: true });
+  mkdirSync(installRoot, { recursive: true });
+  cpSync(resolve(runtimePackageRoot, "package.json"), resolve(installRoot, "package.json"));
+  cpSync(resolve(runtimePackageRoot, "pnpm-lock.yaml"), resolve(installRoot, "pnpm-lock.yaml"));
+  runPnpm([
+    "install",
+    "--prod",
+    "--ignore-workspace",
+    "--config.node-linker=hoisted",
+    "--frozen-lockfile",
+    "--prefer-offline",
+  ], installRoot, withBundledPlaywrightEnv(installEnv));
+  rmSync(runtimeRoot, { recursive: true, force: true });
+  mkdirSync(dirname(runtimeRoot), { recursive: true });
+  renameSync(installRoot, runtimeRoot);
+  rmSync(resolve(runtimeRoot, "pnpm-lock.yaml"), { force: true });
   copyFiltered(resolve(repoRoot, "dist"), resolve(runtimeRoot, "dist"), skipBuildArtifact);
   copyFiltered(resolve(repoRoot, "skills"), resolve(runtimeRoot, "skills"), skipBuildArtifact);
   copyFiltered(
@@ -262,15 +274,6 @@ function prepareRuntimeTree(installEnv = process.env) {
       type: "module",
     }, null, 2)}\n`,
   );
-
-  runPnpm([
-    "install",
-    "--prod",
-    "--ignore-workspace",
-    "--config.node-linker=hoisted",
-    "--no-frozen-lockfile",
-    "--prefer-offline",
-  ], runtimeRoot, withBundledPlaywrightEnv(installEnv));
 
   installRuntimePlaywrightBrowser();
 
@@ -368,7 +371,8 @@ function pruneRuntimeTree() {
   function visit(path) {
     if (path === playwrightBrowsersRoot) return;
 
-    const stat = statSync(path);
+    const stat = lstatSync(path);
+    if (stat.isSymbolicLink()) return;
     if (stat.isDirectory()) {
       const name = path.split(/[\\/]/).pop();
       if (pruneDirs.has(name)) {

@@ -37,8 +37,17 @@ jobs:
       revision: ${{ steps.detect.outputs.revision }}
       source_sha: ${{ steps.detect.outputs.source_sha }}
     steps:
+      - name: Require the main branch
+        shell: bash
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::Desktop releases must run from the main branch, not $GITHUB_REF."
+            exit 1
+          fi
+
       - uses: actions/checkout@v7
         with:
+          ref: main
           fetch-depth: 0
 
       - name: Detect production changes since the last desktop release

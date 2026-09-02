@@ -12,6 +12,8 @@ behavior is enabled only when Electron sets `PILOTDECK_DESKTOP=1`.
 - Browser deployments never receive the Electron preload bridge.
 - Desktop runtime files live under `apps/desktop` and are ignored by the Docker
   build context.
+- Desktop runtime production dependencies use the dedicated manifest and frozen
+  lockfile under `apps/desktop/runtime`; Web installs do not include this package.
 
 Pull requests that touch shared, UI, Docker, or desktop code run the Web
 regression workflow. Desktop-related pull requests also compile and test the
@@ -80,9 +82,19 @@ pnpm --filter pilotdeck-desktop dist:win
 Local macOS builds can use ad-hoc signing. Set
 `PILOTDECK_DESKTOP_REQUIRE_SIGNING=1` to enforce production signing locally.
 
+When a root or UI dependency used by the desktop runtime changes, update
+`apps/desktop/runtime/package.json`, then refresh its dedicated lockfile with:
+
+```bash
+pnpm --dir apps/desktop/runtime install --lockfile-only --ignore-workspace
+```
+
+The desktop build fails if the runtime manifest no longer matches the root and
+UI manifests, or if its committed lockfile is stale.
+
 ## Recovery
 
 If one platform fails, fix the credential or build issue and rerun the failed
-workflow. A release is created only after both signed platform artifacts are
-downloaded and verified. For a deliberate second release on the same Shanghai
+workflow. A release is created only after both platform artifacts are downloaded
+and verified. For a deliberate second release on the same Shanghai
 date, run the daily workflow manually and set revision `2` or higher.
