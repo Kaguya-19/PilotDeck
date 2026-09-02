@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Check, ChevronDown, Loader2, Plus } from 'lucide-react';
 import { authenticatedFetch } from '../../../../utils/api';
 import {
@@ -152,8 +152,10 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
     effectiveModelId.trim(),
     apiKey.trim(),
   ]);
+  const currentConnectionConfigSignature = useRef(connectionConfigSignature);
+  currentConnectionConfigSignature.current = connectionConfigSignature;
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     connectionTestAbortController.current?.abort();
     connectionTestAbortController.current = null;
     connectionTestGeneration.current += 1;
@@ -291,6 +293,7 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
   const handleTest = useCallback(async () => {
     if (!canTest || !selectedProvider) return;
     const testGeneration = connectionTestGeneration.current;
+    const testSignature = currentConnectionConfigSignature.current;
     const controller = new AbortController();
     connectionTestAbortController.current?.abort();
     connectionTestAbortController.current = controller;
@@ -311,7 +314,7 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
         signal: controller.signal,
       });
       const data = await res.json();
-      if (controller.signal.aborted || connectionTestGeneration.current !== testGeneration) return;
+      if (controller.signal.aborted || connectionTestGeneration.current !== testGeneration || currentConnectionConfigSignature.current !== testSignature) return;
       if (!res.ok || data.status === 'failed') {
         const errorMessage = typeof data.error === 'string' ? data.error : data.error?.message;
         throw new Error(errorMessage || data.message || 'Connection failed.');
@@ -336,21 +339,21 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
             imageInput: normalizedChoice === 'yes' || normalizedChoice === 'y' ? 'supported' : 'unsupported',
           };
         });
-        if (controller.signal.aborted || connectionTestGeneration.current !== testGeneration) return;
+        if (controller.signal.aborted || connectionTestGeneration.current !== testGeneration || currentConnectionConfigSignature.current !== testSignature) return;
         const capabilityResponse = await authenticatedFetch(`/api/config/test-connections/${data.testId}/image-capabilities`, {
           method: 'PUT',
           body: JSON.stringify({ models: capabilities }),
           signal: controller.signal,
         });
         completed = await capabilityResponse.json();
-        if (controller.signal.aborted || connectionTestGeneration.current !== testGeneration) return;
+        if (controller.signal.aborted || connectionTestGeneration.current !== testGeneration || currentConnectionConfigSignature.current !== testSignature) return;
         if (!capabilityResponse.ok || completed.status !== 'passed') {
           const errorMessage = typeof completed.error === 'string' ? completed.error : completed.error?.message;
           throw new Error(errorMessage || 'Image capability confirmation failed.');
         }
       }
 
-      if (controller.signal.aborted || connectionTestGeneration.current !== testGeneration) return;
+      if (controller.signal.aborted || connectionTestGeneration.current !== testGeneration || currentConnectionConfigSignature.current !== testSignature) return;
       if (completed.status !== 'passed' || typeof completed.testId !== 'string') {
         throw new Error('Connection test did not pass.');
       }
@@ -359,7 +362,7 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
       setTestMessage('Connected successfully.');
       if (connectionTestAbortController.current === controller) connectionTestAbortController.current = null;
     } catch (err) {
-      if (controller.signal.aborted || connectionTestGeneration.current !== testGeneration) return;
+      if (controller.signal.aborted || connectionTestGeneration.current !== testGeneration || currentConnectionConfigSignature.current !== testSignature) return;
       if (connectionTestAbortController.current === controller) connectionTestAbortController.current = null;
       setTestStatus('error');
       setTestMessage(err instanceof Error ? err.message : 'Connection failed.');
@@ -369,6 +372,7 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
   const handleSave = useCallback(async () => {
     if (!selectedProvider || !connectionTestId || customProviderIdError) return;
     const saveGeneration = connectionTestGeneration.current;
+    const saveSignature = currentConnectionConfigSignature.current;
     const saveConnectionTestId = connectionTestId;
     const providerId = effectiveProviderId;
     const modelId = effectiveModelId;
@@ -430,7 +434,7 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
       delete (existingConfig as Record<string, unknown>).agents;
       delete (existingConfig as Record<string, unknown>).version;
 
-      if (connectionTestGeneration.current !== saveGeneration) {
+      if (connectionTestGeneration.current !== saveGeneration || currentConnectionConfigSignature.current !== saveSignature) {
         throw new Error('Configuration changed while saving. Test the current configuration again.');
       }
 
