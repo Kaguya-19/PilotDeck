@@ -257,19 +257,20 @@ describe('LlmConfigurationStep', () => {
     prompt.mockRestore();
   });
 
-  it('does not write a stale snapshot when the form changes during save', async () => {
-    let resolveConfig!: (response: { ok: boolean; json: () => Promise<{ raw: string }> }) => void;
-    const pendingConfig = new Promise<{ ok: boolean; json: () => Promise<{ raw: string }> }>((resolve) => { resolveConfig = resolve; });
+  it('locks the form controls while save is in flight', async () => {
+    let resolveSave!: (response: { ok: boolean; json: () => Promise<{ raw: string }> }) => void;
+    const pendingSave = new Promise<{ ok: boolean; json: () => Promise<{ raw: string }> }>((resolve) => { resolveSave = resolve; });
     const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const onSaved = vi.fn();
     mocks.authenticatedFetch.mockImplementation(async (url: string, init?: RequestInit) => {
       calls.push({ url, init });
       if (url === '/api/config/provider') return { ok: true, json: async () => ({ exists: false, provider: null }) };
       if (url === '/api/config/test-connections') return { ok: true, json: async () => ({ testId: 'save_test', status: 'passed', models: [] }) };
-      if (url === '/api/config' && !init?.method) return pendingConfig;
+      if (url === '/api/config' && init?.method === 'PUT') return pendingSave;
       return { ok: true, json: async () => ({ raw: '' }) };
     });
 
-    render(<LlmConfigurationStep onSaved={vi.fn()} />);
+    render(<LlmConfigurationStep onSaved={onSaved} />);
     fireEvent.click(screen.getByRole('button', { name: /^Custom OpenAI/ }));
     fireEvent.change(screen.getByLabelText('Provider ID'), { target: { value: 'modelbest' } });
     fireEvent.change(screen.getByLabelText('Base URL'), { target: { value: 'https://example.com/v1' } });
@@ -279,13 +280,17 @@ describe('LlmConfigurationStep', () => {
     await waitFor(() => expect(screen.getByText(/Connected successfully/)).toBeTruthy());
 
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-    await waitFor(() => expect(calls.some((call) => call.url === '/api/config' && !call.init?.method)).toBe(true));
-    fireEvent.change(screen.getByLabelText('API Key'), { target: { value: 'sk-new' } });
-    resolveConfig({ ok: true, json: async () => ({ raw: '' }) });
+    await waitFor(() => expect(calls.some((call) => call.url === '/api/config' && call.init?.method === 'PUT')).toBe(true));
+    expect(screen.getByLabelText('Provider ID')).toHaveProperty('disabled', true);
+    expect(screen.getByLabelText('Base URL')).toHaveProperty('disabled', true);
+    expect(screen.getByLabelText('API Key')).toHaveProperty('disabled', true);
+    expect(screen.getByLabelText('Model')).toHaveProperty('disabled', true);
+    expect(onSaved).not.toHaveBeenCalled();
+    resolveSave({ ok: true, json: async () => ({ raw: '' }) });
 
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Save' })).toBeTruthy());
-    expect(calls.some((call) => call.url === '/api/config' && call.init?.method === 'PUT')).toBe(false);
-    expect(screen.getByRole('button', { name: 'Save' })).toHaveProperty('disabled', true);
+    await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(1));
+    const saveCall = calls.find((call) => call.url === '/api/config' && call.init?.method === 'PUT');
+    expect(JSON.parse(String(saveCall?.init?.body))).toMatchObject({ modelTestBindings: [{ testId: 'save_test' }] });
   });
 
   it('aborts an in-flight connection test when the form changes', async () => {

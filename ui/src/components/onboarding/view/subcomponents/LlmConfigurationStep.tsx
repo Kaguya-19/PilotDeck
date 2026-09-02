@@ -483,6 +483,7 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
               key={provider.id}
               type="button"
               onClick={() => handleProviderSelect(provider)}
+              disabled={saving}
               className={`relative rounded-lg border px-4 py-3 text-left text-sm transition-colors ${
                 selectedProvider?.id === provider.id
                   ? 'border-foreground bg-muted text-foreground'
@@ -498,6 +499,7 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
           <button
             type="button"
             onClick={() => handleProviderSelect(CUSTOM_PROVIDER)}
+            disabled={saving}
             className={`relative flex items-center gap-2 rounded-lg border border-dashed px-4 py-3 text-left text-sm transition-colors ${
               isCustomMode
                 ? 'border-foreground bg-muted text-foreground'
@@ -526,6 +528,7 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
                   id="custom-provider-id"
                   type="text"
                   value={customProviderId}
+                  disabled={saving}
                   onChange={(e) => { setCustomProviderId(e.target.value); setTestStatus('idle'); setTestMessage(''); }}
                   placeholder="e.g. my-llm"
                   className="w-full rounded-lg border border-border bg-background px-3 py-2.5 font-mono text-sm text-foreground placeholder:text-muted-foreground/50 focus:border-foreground/40 focus:outline-none"
@@ -548,6 +551,7 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
                     <select
                       id="custom-protocol"
                       value={customProtocol}
+                      disabled={saving}
                       onChange={(e) => { setCustomProtocol(e.target.value as CatalogProviderProtocol); setTestStatus('idle'); setTestMessage(''); }}
                       className="w-full appearance-none rounded-lg border border-border bg-background px-3 py-2.5 pr-8 text-sm text-foreground focus:border-foreground/40 focus:outline-none"
                     >
@@ -567,6 +571,7 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
                     id="custom-base-url"
                     type="text"
                     value={customUrl}
+                    disabled={saving}
                     onChange={(e) => { setCustomUrl(e.target.value); setTestStatus('idle'); setTestMessage(''); }}
                     placeholder="https://api.example.com/v1"
                     className="w-full rounded-lg border border-border bg-background px-3 py-2.5 font-mono text-sm text-foreground placeholder:text-muted-foreground/50 focus:border-foreground/40 focus:outline-none"
@@ -602,6 +607,7 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
               id="llm-api-key"
               type="password"
               value={apiKey}
+              disabled={saving}
               onChange={(e) => { setApiKey(e.target.value); setTestStatus('idle'); setTestMessage(''); }}
               placeholder={selectedProviderRequiresApiKey ? 'sk-...' : 'Not required for this provider'}
               className="w-full rounded-lg border border-border bg-background px-3 py-2.5 font-mono text-sm text-foreground placeholder:text-muted-foreground/50 focus:border-foreground/40 focus:outline-none"
@@ -620,6 +626,7 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
                 <select
                   id="llm-model"
                   value={selectedModelId}
+                  disabled={saving}
                   onChange={(e) => { setSelectedModelId(e.target.value); setCustomModelId(''); setTestStatus('idle'); setTestMessage(''); }}
                   className="w-full appearance-none rounded-lg border border-border bg-background px-3 py-2.5 pr-8 text-sm text-foreground focus:border-foreground/40 focus:outline-none"
                 >
@@ -634,6 +641,7 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
                 id="llm-model"
                 type="text"
                 value={customModelId}
+                disabled={saving}
                 onChange={(e) => { setCustomModelId(e.target.value); setTestStatus('idle'); setTestMessage(''); }}
                 placeholder="Enter model ID..."
                 className="w-full rounded-lg border border-border bg-background px-3 py-2.5 text-sm text-foreground placeholder:text-muted-foreground/50 focus:border-foreground/40 focus:outline-none"
@@ -650,7 +658,7 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
               <button
                 type="button"
                 onClick={handleFetchModels}
-                disabled={!canFetchModels || modelListStatus === 'loading'}
+                disabled={!canFetchModels || modelListStatus === 'loading' || saving}
                 className="mt-2 text-xs text-muted-foreground hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
               >
                 Fetch model list
@@ -667,6 +675,7 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
                 <input
                   type="text"
                   value={customModelId}
+                  disabled={saving}
                   onChange={(e) => { setCustomModelId(e.target.value); setTestStatus('idle'); setTestMessage(''); }}
                   placeholder="Or type a custom model ID..."
                   className="w-full rounded-lg border border-border/60 bg-background px-3 py-2 text-xs text-foreground placeholder:text-muted-foreground/40 focus:border-foreground/40 focus:outline-none"
@@ -683,6 +692,7 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
             <button
               type="button"
               onClick={() => setShowAdvanced(!showAdvanced)}
+              disabled={saving}
               className="text-xs text-muted-foreground hover:text-foreground"
             >
               {showAdvanced ? 'Hide' : 'Show'} advanced settings
@@ -697,6 +707,7 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
                     id="llm-url"
                     type="text"
                     value={customUrl}
+                    disabled={saving}
                     onChange={(e) => { setCustomUrl(e.target.value); setTestStatus('idle'); setTestMessage(''); }}
                     placeholder={selectedDefaultUrl}
                     className="w-full rounded-lg border border-border/60 bg-background px-3 py-2 text-xs text-foreground placeholder:text-muted-foreground/40 focus:border-foreground/40 focus:outline-none"
@@ -735,7 +746,7 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
             <button
               type="button"
               onClick={handleTest}
-              disabled={!canTest || testStatus === 'testing'}
+              disabled={!canTest || testStatus === 'testing' || saving}
               className="rounded-lg border border-border px-4 py-2.5 text-sm font-medium text-foreground transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40"
             >
               {testStatus === 'testing' ? (
