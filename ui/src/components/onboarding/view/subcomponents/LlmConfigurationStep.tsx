@@ -22,6 +22,25 @@ const MASKED_SECRET = '********';
 // (provider id, protocol, base URL) so the user can describe a provider that
 // isn't in the catalog.
 const CUSTOM_PROVIDER_ID = '__custom__';
+const RESERVED_CUSTOM_PROVIDER_IDS = new Set([
+  'anthropic',
+  'bailian',
+  'custom',
+  'dashscope',
+  'deepseek',
+  'gemini',
+  'google',
+  'kimi',
+  'minimax',
+  'moonshot',
+  'ollama',
+  'openai',
+  'openai-responses',
+  'openrouter',
+  'volc_ark',
+  'volcengine',
+  'zhipu',
+]);
 
 const CUSTOM_PROVIDER: CatalogProvider = {
   id: CUSTOM_PROVIDER_ID,
@@ -62,6 +81,7 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
   const [testMessage, setTestMessage] = useState('');
   const [connectionTestId, setConnectionTestId] = useState<string | null>(null);
   const connectionTestGeneration = useRef(0);
+  const connectionTestAbortController = useRef<AbortController | null>(null);
   const [saving, setSaving] = useState(false);
   const [apiModels, setApiModels] = useState<ApiModelListItem[] | null>(null);
   const [modelListStatus, setModelListStatus] = useState<'idle' | 'loading' | 'error'>('idle');
@@ -104,12 +124,16 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
     ? customProtocol
     : (selectedProvider?.protocol ?? 'openai');
   const effectiveProviderId = isCustomMode ? customProviderId.trim().toLowerCase() : (selectedProvider?.id ?? '');
+  const customProviderIdError = isCustomMode && RESERVED_CUSTOM_PROVIDER_IDS.has(effectiveProviderId)
+    ? 'This Provider ID is reserved for a catalog provider. Choose a different ID.'
+    : '';
   const selectedProviderRequiresApiKey = requiresApiKey(selectedProvider);
   const modelListRequiresApiKey = selectedProvider?.modelListRequiresApiKey === true;
   const canFetchModels = Boolean(
     selectedProvider
       && effectiveProviderId
       && effectiveUrl
+      && !customProviderIdError
       && (!modelListRequiresApiKey || hasUsableApiKey(apiKey)),
   );
   const canTest = Boolean(
@@ -117,6 +141,7 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
     (!selectedProviderRequiresApiKey || apiKey.trim()) &&
     effectiveModelId &&
     effectiveProviderId &&
+    !customProviderIdError &&
     (!isCustomMode || effectiveUrl.trim()),
   );
 
@@ -129,10 +154,16 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
   ]);
 
   useEffect(() => {
+    connectionTestAbortController.current?.abort();
+    connectionTestAbortController.current = null;
     connectionTestGeneration.current += 1;
     setConnectionTestId(null);
     setTestStatus('idle');
     setTestMessage('');
+    return () => {
+      connectionTestAbortController.current?.abort();
+      connectionTestAbortController.current = null;
+    };
   }, [connectionConfigSignature]);
 
   useEffect(() => {
@@ -260,6 +291,9 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
   const handleTest = useCallback(async () => {
     if (!canTest || !selectedProvider) return;
     const testGeneration = connectionTestGeneration.current;
+    const controller = new AbortController();
+    connectionTestAbortController.current?.abort();
+    connectionTestAbortController.current = controller;
     setTestStatus('testing');
     setTestMessage('');
     setConnectionTestId(null);
@@ -274,9 +308,10 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
           models: [effectiveModelId],
           retryPolicy: {},
         }),
+        signal: controller.signal,
       });
       const data = await res.json();
-      if (connectionTestGeneration.current !== testGeneration) return;
+      if (controller.signal.aborted || connectionTestGeneration.current !== testGeneration) return;
       if (!res.ok || data.status === 'failed') {
         const errorMessage = typeof data.error === 'string' ? data.error : data.error?.message;
         throw new Error(errorMessage || data.message || 'Connection failed.');
@@ -301,34 +336,45 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
             imageInput: normalizedChoice === 'yes' || normalizedChoice === 'y' ? 'supported' : 'unsupported',
           };
         });
-        if (connectionTestGeneration.current !== testGeneration) return;
+        if (controller.signal.aborted || connectionTestGeneration.current !== testGeneration) return;
         const capabilityResponse = await authenticatedFetch(`/api/config/test-connections/${data.testId}/image-capabilities`, {
           method: 'PUT',
           body: JSON.stringify({ models: capabilities }),
+          signal: controller.signal,
         });
         completed = await capabilityResponse.json();
-        if (connectionTestGeneration.current !== testGeneration) return;
+        if (controller.signal.aborted || connectionTestGeneration.current !== testGeneration) return;
         if (!capabilityResponse.ok || completed.status !== 'passed') {
           const errorMessage = typeof completed.error === 'string' ? completed.error : completed.error?.message;
           throw new Error(errorMessage || 'Image capability confirmation failed.');
         }
       }
 
+      if (controller.signal.aborted || connectionTestGeneration.current !== testGeneration) return;
       if (completed.status !== 'passed' || typeof completed.testId !== 'string') {
         throw new Error('Connection test did not pass.');
       }
       setConnectionTestId(completed.testId);
       setTestStatus('success');
       setTestMessage('Connected successfully.');
+      if (connectionTestAbortController.current === controller) connectionTestAbortController.current = null;
     } catch (err) {
-      if (connectionTestGeneration.current !== testGeneration) return;
+      if (controller.signal.aborted || connectionTestGeneration.current !== testGeneration) return;
+      if (connectionTestAbortController.current === controller) connectionTestAbortController.current = null;
       setTestStatus('error');
       setTestMessage(err instanceof Error ? err.message : 'Connection failed.');
     }
   }, [canTest, selectedProvider, effectiveUrl, apiKey, effectiveModelId, effectiveProtocol, effectiveProviderId]);
 
   const handleSave = useCallback(async () => {
-    if (!selectedProvider || !connectionTestId) return;
+    if (!selectedProvider || !connectionTestId || customProviderIdError) return;
+    const saveGeneration = connectionTestGeneration.current;
+    const saveConnectionTestId = connectionTestId;
+    const providerId = effectiveProviderId;
+    const modelId = effectiveModelId;
+    const protocol = effectiveProtocol;
+    const url = effectiveUrl;
+    const key = apiKey.trim();
     setSaving(true);
     try {
       const { stringify: stringifyYaml, parse: parseYaml } = await import('yaml');
@@ -342,8 +388,6 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
         }
       } catch { /* start fresh */ }
 
-      const providerId = effectiveProviderId;
-      const modelId = effectiveModelId;
       if (!providerId) throw new Error('Provider ID is required.');
 
       if (!existingConfig.schemaVersion) {
@@ -367,9 +411,9 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
 
       yamlProviders[providerId] = {
         ...existingProvider,
-        protocol: effectiveProtocol,
-        url: effectiveUrl,
-        apiKey: apiKey.trim(),
+        protocol,
+        url,
+        apiKey: key,
         timeoutMs: typeof existingProvider.timeoutMs === 'number' ? existingProvider.timeoutMs : 120000,
         models: {
           ...existingModels,
@@ -386,11 +430,15 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
       delete (existingConfig as Record<string, unknown>).agents;
       delete (existingConfig as Record<string, unknown>).version;
 
+      if (connectionTestGeneration.current !== saveGeneration) {
+        throw new Error('Configuration changed while saving. Test the current configuration again.');
+      }
+
       const saveRes = await authenticatedFetch('/api/config', {
         method: 'PUT',
         body: JSON.stringify({
           raw: stringifyYaml(existingConfig, { indent: 2, lineWidth: 0 }),
-          modelTestBindings: [{ testId: connectionTestId }],
+          modelTestBindings: [{ testId: saveConnectionTestId }],
         }),
       });
 
@@ -401,12 +449,13 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
 
       await onSaved();
     } catch (err) {
+      if (connectionTestGeneration.current !== saveGeneration) return;
       setTestStatus('error');
       setTestMessage(err instanceof Error ? err.message : 'Failed to save.');
     } finally {
       setSaving(false);
     }
-  }, [connectionTestId, selectedProvider, effectiveUrl, effectiveModelId, apiKey, effectiveProtocol, effectiveProviderId, onSaved]);
+  }, [apiKey, connectionTestId, customProviderIdError, effectiveModelId, effectiveProtocol, effectiveProviderId, effectiveUrl, onSaved, selectedProvider]);
 
   return (
     <div className="mx-auto w-full max-w-xl space-y-8">
@@ -482,6 +531,9 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
                 <p className="mt-1 text-[11px] text-muted-foreground">
                   Used as the YAML key. Lowercase, no spaces.
                 </p>
+                {customProviderIdError && (
+                  <p className="mt-1 text-[11px] text-destructive">{customProviderIdError}</p>
+                )}
               </div>
               <div className="grid grid-cols-3 gap-3">
                 <div className="col-span-1">

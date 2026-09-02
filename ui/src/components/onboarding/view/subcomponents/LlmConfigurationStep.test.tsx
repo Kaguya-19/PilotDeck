@@ -149,7 +149,7 @@ describe('LlmConfigurationStep', () => {
   it('ignores a connection result when the form changes while testing', async () => {
     let resolveTest!: (response: Response) => void;
     const pendingTest = new Promise<Response>((resolve) => { resolveTest = resolve; });
-    mocks.authenticatedFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+    mocks.authenticatedFetch.mockImplementation(async (url: string) => {
       if (url === '/api/config/provider') {
         return { ok: true, json: async () => ({ exists: false, provider: null }) };
       }
@@ -255,5 +255,82 @@ describe('LlmConfigurationStep', () => {
     expect(calls).not.toContain('/api/config/test-connections/manual_test/image-capabilities');
     expect(screen.getByRole('button', { name: 'Save' })).toHaveProperty('disabled', true);
     prompt.mockRestore();
+  });
+
+  it('does not write a stale snapshot when the form changes during save', async () => {
+    let resolveConfig!: (response: { ok: boolean; json: () => Promise<{ raw: string }> }) => void;
+    const pendingConfig = new Promise<{ ok: boolean; json: () => Promise<{ raw: string }> }>((resolve) => { resolveConfig = resolve; });
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    mocks.authenticatedFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      if (url === '/api/config/provider') return { ok: true, json: async () => ({ exists: false, provider: null }) };
+      if (url === '/api/config/test-connections') return { ok: true, json: async () => ({ testId: 'save_test', status: 'passed', models: [] }) };
+      if (url === '/api/config' && !init?.method) return pendingConfig;
+      return { ok: true, json: async () => ({ raw: '' }) };
+    });
+
+    render(<LlmConfigurationStep onSaved={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /^Custom OpenAI/ }));
+    fireEvent.change(screen.getByLabelText('Provider ID'), { target: { value: 'modelbest' } });
+    fireEvent.change(screen.getByLabelText('Base URL'), { target: { value: 'https://example.com/v1' } });
+    fireEvent.change(screen.getByLabelText('API Key'), { target: { value: 'sk-old' } });
+    fireEvent.change(screen.getByLabelText('Model'), { target: { value: 'gpt-5.6-luna' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Test Connection' }));
+    await waitFor(() => expect(screen.getByText(/Connected successfully/)).toBeTruthy());
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(calls.some((call) => call.url === '/api/config' && !call.init?.method)).toBe(true));
+    fireEvent.change(screen.getByLabelText('API Key'), { target: { value: 'sk-new' } });
+    resolveConfig({ ok: true, json: async () => ({ raw: '' }) });
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save' })).toBeTruthy());
+    expect(calls.some((call) => call.url === '/api/config' && call.init?.method === 'PUT')).toBe(false);
+    expect(screen.getByRole('button', { name: 'Save' })).toHaveProperty('disabled', true);
+  });
+
+  it('aborts an in-flight connection test when the form changes', async () => {
+    let rejectTest!: (error: Error) => void;
+    const pendingTest = new Promise<never>((_, reject) => { rejectTest = reject; });
+    const signals: AbortSignal[] = [];
+    mocks.authenticatedFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/config/provider') return { ok: true, json: async () => ({ exists: false, provider: null }) };
+      if (url === '/api/config/test-connections') {
+        if (init?.signal) signals.push(init.signal);
+        return pendingTest;
+      }
+      return { ok: true, json: async () => ({ raw: '' }) };
+    });
+
+    render(<LlmConfigurationStep onSaved={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /^Custom OpenAI/ }));
+    fireEvent.change(screen.getByLabelText('Provider ID'), { target: { value: 'modelbest' } });
+    fireEvent.change(screen.getByLabelText('Base URL'), { target: { value: 'https://example.com/v1' } });
+    fireEvent.change(screen.getByLabelText('API Key'), { target: { value: 'sk-old' } });
+    fireEvent.change(screen.getByLabelText('Model'), { target: { value: 'gpt-5.6-luna' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Test Connection' }));
+    await waitFor(() => expect(signals).toHaveLength(1));
+    fireEvent.change(screen.getByLabelText('API Key'), { target: { value: 'sk-new' } });
+    await waitFor(() => expect(signals[0]?.aborted).toBe(true));
+    rejectTest(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+  });
+
+  it('rejects custom provider IDs reserved for catalog aliases', async () => {
+    const calls: string[] = [];
+    mocks.authenticatedFetch.mockImplementation(async (url: string) => {
+      calls.push(url);
+      if (url === '/api/config/provider') return { ok: true, json: async () => ({ exists: false, provider: null }) };
+      return { ok: true, json: async () => ({ raw: '' }) };
+    });
+
+    render(<LlmConfigurationStep onSaved={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /^Custom OpenAI/ }));
+    fireEvent.change(screen.getByLabelText('Provider ID'), { target: { value: 'gemini' } });
+    fireEvent.change(screen.getByLabelText('Base URL'), { target: { value: 'https://example.com/v1' } });
+    fireEvent.change(screen.getByLabelText('API Key'), { target: { value: 'sk-test' } });
+    fireEvent.change(screen.getByLabelText('Model'), { target: { value: 'gpt-5.6-luna' } });
+
+    expect(screen.getByRole('button', { name: 'Test Connection' })).toHaveProperty('disabled', true);
+    expect(screen.getByText(/reserved/i)).toBeTruthy();
+    expect(calls).not.toContain('/api/config/test-connections');
   });
 });
