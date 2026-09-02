@@ -89,7 +89,7 @@ jobs:
     with:
       release_date: ${{ needs.detect.outputs.release_date }}
       revision: ${{ needs.detect.outputs.revision }}
-      require_signing: true
+      require_macos_signing: true
     secrets: inherit
 
   release:

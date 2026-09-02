@@ -28,8 +28,8 @@ known baseline failures; all other UI/server tests remain in the merge gate.
 the latest desktop release tag:
 
 - no production change: skip the release;
-- production change: build signed macOS and Windows installers and publish one
-  dated GitHub Release;
+- production change: build a signed and notarized macOS installer plus an
+  unsigned Windows installer, then publish one dated GitHub Release;
 - repeated manual release on the same date: use `-r2`, `-r3`, and so on.
 
 Release tags are `desktop-vYYYY.MM.DD`. The internal Electron version is a
@@ -42,7 +42,9 @@ considers tags beginning with `desktop-v`.
 
 ## Required GitHub Secrets
 
-Release builds deliberately fail when code signing is unavailable.
+Release builds deliberately fail when macOS code signing or notarization is
+unavailable. Windows packaging remains explicitly unsigned, matching the
+existing `desktopdev` release behavior.
 
 macOS:
 
@@ -57,14 +59,9 @@ The macOS universal job runs on GitHub's Apple Silicon `macos-latest` image and
 fails early if the host architecture is not arm64. This is required so both
 arm64 and Rosetta/x64 native dependencies are installed and tested.
 
-Windows:
-
-- `WINDOWS_CSC_LINK`
-- `WINDOWS_CSC_KEY_PASSWORD`
-
 The macOS certificate must be a Developer ID Application certificate. The
-Windows certificate must be usable by electron-builder for Authenticode
-signing. GitHub's automatic `GITHUB_TOKEN` is used to publish the Release.
+Windows installer does not require a signing certificate. GitHub's automatic
+`GITHUB_TOKEN` is used to publish the Release.
 
 ## Manual builds
 
