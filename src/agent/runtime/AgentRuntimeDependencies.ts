@@ -15,6 +15,12 @@ import type { TokenAccountingRuntime } from "../../context/index.js";
 import type { RouterRuntime } from "../../router/index.js";
 import type { AgentEvent, AgentEventEmitter } from "../protocol/events.js";
 import type { ModelProtocol } from "../../model/index.js";
+import type { ModelInvokerPort, ToolPort } from "../modules/protocol.js";
+
+export type AgentRuntimePorts = {
+  model?: ModelInvokerPort;
+  tools?: ToolPort;
+};
 
 /**
  * Narrow view of the router that the agent loop actually consumes. Tests can
@@ -85,6 +91,8 @@ export type AgentSubagentTranscriptHooks = {
 
 export type AgentRuntimeDependencies = {
   router: AgentRouterRuntime;
+  /** Optional modular ports. Legacy router/tools are adapted when omitted. */
+  ports?: AgentRuntimePorts;
   tools: {
     scheduler: PilotDeckToolScheduler;
     registry: ToolRegistry;

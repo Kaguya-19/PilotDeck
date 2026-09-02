@@ -24,8 +24,41 @@ export type { AgentRuntimeConfig } from "./runtime/AgentRuntimeConfig.js";
 export type {
   AgentLegacyModelRuntime,
   AgentRouterRuntime,
+  AgentRuntimePorts,
   AgentRuntimeDependencies,
 } from "./runtime/AgentRuntimeDependencies.js";
+export {
+  MODULE_PROTOCOL_VERSION,
+  InProcessModuleAdapter,
+  ModuleOperationHost,
+  validateModuleMessage,
+  createRouterModelInvokerPort,
+  createToolSchedulerPort,
+} from "./modules/index.js";
+export type {
+  AgentExecutionContext,
+  ModelExecutionContext,
+  ModelInvokerPort,
+  ModuleBinding,
+  ModuleCapabilities,
+  ModuleControlRequest,
+  ModuleError,
+  ModuleEvent,
+  ModuleExecuteProfile,
+  ModuleExecuteRequest,
+  ModuleHandshakeRequest,
+  ModuleMessage,
+  ModuleOperationSnapshot,
+  ModuleOperationState,
+  ModuleOutcome,
+  ModuleProtocolValidation,
+  ModuleResponse,
+  ModuleRetryability,
+  PreparedModelInvocation,
+  ToolPort,
+  InProcessModuleHandler,
+  InProcessModuleOptions,
+} from "./modules/index.js";
 export { TurnInputProcessor, type TurnInputProcessorResult } from "./turn/TurnInputProcessor.js";
 export {
   TurnRunner,

@@ -64,6 +64,9 @@ import { resolveOutputTokenRetryBump } from "./outputTokenRetry.js";
 import { projectToolResults } from "./projectToolResults.js";
 import { requiresPromptCapability } from "../../tool/userInteractionConstraints.js";
 import type { AgentRunMode } from "../protocol/input.js";
+import type { AgentExecutionContext, ModelInvokerPort, PreparedModelInvocation, ToolPort } from "../modules/protocol.js";
+import { createRouterModelInvokerPort, createToolSchedulerPort } from "../modules/adapters.js";
+import type { RouterDecision } from "../../router/index.js";
 import {
   ASK_MODE_DESCRIPTION_SUFFIX,
   isAskModeAllowedTool,
@@ -143,6 +146,8 @@ export type AgentLoopInput = {
     boundary: AgentControlBoundaryTranscriptEntry["boundary"];
     messages: CanonicalMessage[];
   }) => void | Promise<void>;
+  /** Host-owned execution identity. Gateway supplies runId; direct callers may omit it. */
+  execution?: Pick<AgentExecutionContext, "runId" | "operationId" | "idempotencyKey" | "operationDeadline">;
   /** Drain user guidance that should join this active turn before the next model request. */
   drainSteerMessages?: () => AgentSteerMessage[];
   /** Atomically drain pending guidance or close the inbox before terminal completion. */
@@ -173,6 +178,8 @@ export class AgentLoop {
     attemptMaxOutputTokens?: number;
     hardMaxOutputTokens?: number;
   }>();
+  private readonly modelPort: ModelInvokerPort;
+  private readonly toolPort: ToolPort;
 
   constructor(
     private readonly config: AgentRuntimeConfig,
@@ -182,6 +189,14 @@ export class AgentLoop {
     this.readFileState = cloneReadFileStateMap(seedState?.readFileState);
     this.writeSnapshots = cloneWriteSnapshotMap(seedState?.writeSnapshots);
     this.allowedReadFiles = new Set(seedState?.allowedReadFiles ?? []);
+    this.modelPort = dependencies.ports?.model ?? createRouterModelInvokerPort(dependencies.router, {
+      isMainAgent: !config.isSubagent,
+      projectPath: config.cwd,
+    });
+    this.toolPort = dependencies.ports?.tools ?? createToolSchedulerPort(
+      dependencies.tools.registry,
+      dependencies.tools.scheduler,
+    );
   }
 
   snapshotFileState(): AgentLoopSeedState {
@@ -362,6 +377,9 @@ export class AgentLoop {
 
     const stickyInfo = this.dependencies.router.invalidateSticky?.(input.sessionId);
     let previousTier: string | undefined = stickyInfo?.previousTier;
+    const executionRunId = input.execution?.runId
+      ?? this.dependencies.uuid?.()
+      ?? `${input.sessionId}:${input.turnId}`;
 
     const continueWithSyntheticPrompt = async (
       decision: LargeFileRepairDecision,
@@ -517,21 +535,14 @@ export class AgentLoop {
         provider: request.provider,
       };
 
-      // Split decide + execute so we can insert a post-routing compact pass
-      // when the routed model's context window differs from the agent's
-      // default model (the window used by the first tryAutoCompact above).
-      const decision = input.modelOverride ? {
-        provider: input.modelOverride.provider,
-        model: input.modelOverride.model,
-        scenarioType: "explicit" as const,
-        isSubagent: Boolean(this.config.isSubagent),
-        orchestrating: false,
-        resolvedFrom: "explicit" as const,
-        mutations: {},
-      } : await this.dependencies.router.decide({
-        request,
+      const modelContext = {
         sessionId: input.sessionId,
-        isMainAgent: !this.config.isSubagent,
+        turnId: input.turnId,
+          runId: executionRunId,
+          operationId: input.execution?.operationId,
+          idempotencyKey: input.execution?.idempotencyKey,
+        operationDeadline: input.execution?.operationDeadline,
+        abortSignal: input.abortSignal,
         metadata: stickyInfo
           ? {
             previousTier,
@@ -539,17 +550,35 @@ export class AgentLoop {
             previousModel: stickyInfo.previousModel,
           }
           : previousTier ? { previousTier } : undefined,
-      });
-      const routedLimits = this.getModelTokenLimits(decision.provider, decision.model);
-      const routedMaxOutputTokens = routedLimits?.maxOutputTokens;
+        modelOverride: input.modelOverride
+          ? { provider: input.modelOverride.provider, model: input.modelOverride.model }
+          : undefined,
+      };
+      let prepared = await this.modelPort.prepare({ request, context: modelContext });
+      let decision = prepared.opaque as RouterDecision | undefined;
+      if (!decision) {
+        decision = {
+          provider: prepared.provider,
+          model: prepared.model,
+          scenarioType: "explicit",
+          isSubagent: Boolean(this.config.isSubagent),
+          orchestrating: false,
+          resolvedFrom: "explicit",
+          mutations: {},
+        };
+      }
+      let routedProvider = prepared.provider;
+      let routedModel = prepared.model;
+      const routedLimits = this.getModelTokenLimits(routedProvider, routedModel);
+      let routedMaxOutputTokens = prepared.maxOutputTokens ?? routedLimits?.maxOutputTokens;
 
       let emittedContextBudget = false;
       if (ctx?.tryAutoCompact) {
-        const routedMaxCtx = this.currentMaxContextTokens(decision.provider, decision.model);
+        const routedMaxCtx = prepared.maxContextTokens ?? this.currentMaxContextTokens(routedProvider, routedModel);
         const currentBudgetMaxCtx = preRoutingMaxContextTokens;
         if (routedMaxCtx !== undefined && routedMaxCtx !== currentBudgetMaxCtx) {
           try {
-            const reservedOutputTokens = this.getReservedOutputTokens(decision.provider, decision.model);
+            const reservedOutputTokens = this.getReservedOutputTokens(routedProvider, routedModel);
             const recompact = await ctx.tryAutoCompact({
               sessionId: input.sessionId,
               turnId: input.turnId,
@@ -560,6 +589,7 @@ export class AgentLoop {
               budgetEvaluator: this.createBudgetEvaluator(input, {
                 decision,
                 baseRequest: request,
+                prepared,
                 maxContextTokens: routedMaxCtx,
                 reservedOutputTokens,
               }),
@@ -568,7 +598,20 @@ export class AgentLoop {
               messages = recompact.messages;
               this.tokenCalibrationByRoute.clear();
               request = await this.createModelRequest(messages, input);
-              request = this.applyTokenCapsToRequest(request, decision.provider, decision.model);
+              request = this.applyTokenCapsToRequest(request, routedProvider, routedModel);
+              prepared = await this.modelPort.prepare({ request, context: modelContext });
+              routedProvider = prepared.provider;
+              routedModel = prepared.model;
+              routedMaxOutputTokens = prepared.maxOutputTokens ?? this.getModelTokenLimits(routedProvider, routedModel)?.maxOutputTokens;
+              decision = prepared.opaque as RouterDecision | undefined ?? {
+                provider: routedProvider,
+                model: routedModel,
+                scenarioType: "explicit",
+                isSubagent: Boolean(this.config.isSubagent),
+                orchestrating: false,
+                resolvedFrom: "explicit",
+                mutations: {},
+              };
               await this.persistCompactSnapshot(input, recompact);
               yield {
                 type: "turn_continued",
@@ -605,8 +648,9 @@ export class AgentLoop {
           }
         }
       }
-      request = this.applyTokenCapsToRequest(request, decision.provider, decision.model);
-      this.clearAttemptOutputTokenCap(decision.provider, decision.model);
+      request = this.applyTokenCapsToRequest(request, routedProvider, routedModel);
+      prepared = { ...prepared, request };
+      this.clearAttemptOutputTokenCap(routedProvider, routedModel);
       if (pendingContextBudget && !emittedContextBudget) {
         yield {
           type: "context_budget",
@@ -616,20 +660,13 @@ export class AgentLoop {
         };
       }
 
-      const calibrationRequest = this.dependencies.router.materializeRequest
-        ? this.dependencies.router.materializeRequest(decision, request)
-        : { ...request, provider: decision.provider, model: decision.model };
+      const calibrationRequest = prepared.request;
       const requestInputEstimate = this.dependencies.tokenAccounting?.estimateRequestInput?.(calibrationRequest);
       const calibrationRequestFingerprint = requestFingerprint(calibrationRequest);
       const assembler = createModelMessageAssemblerState();
       let executedRequest: { provider: string; model: string; fingerprint?: string } | undefined;
       try {
-        for await (const event of this.dependencies.router.execute(decision, request, {
-          sessionId: input.sessionId,
-          turnId: input.turnId,
-          projectPath: this.config.cwd,
-          abortSignal: input.abortSignal,
-        })) {
+        for await (const event of this.modelPort.stream({ prepared, context: modelContext })) {
           if (event.type === "request_started") {
             executedRequest = {
               provider: event.provider,
@@ -1748,6 +1785,7 @@ export class AgentLoop {
           toolCalls,
           toolContext,
           input,
+          executionRunId,
         );
       } catch (error) {
         results = toolCalls.map((call) =>
@@ -2054,11 +2092,11 @@ export class AgentLoop {
     const promptBlockedToolNames = canPrompt
       ? new Set<string>()
       : new Set(
-          this.dependencies.tools.registry.list()
+          this.toolPort.list()
             .filter((tool) => requiresPromptCapability(tool, {}))
             .map((tool) => tool.name),
         );
-    let toolDefinitions = this.dependencies.tools.registry.list()
+    let toolDefinitions = this.toolPort.list()
       .filter((tool) => !promptBlockedToolNames.has(tool.name));
     if (input.allowPlanModeTools !== true) {
       toolDefinitions = toolDefinitions.filter(
@@ -2151,6 +2189,7 @@ export class AgentLoop {
     options: {
       decision?: import("../../router/index.js").RouterDecision;
       baseRequest?: CanonicalModelRequest;
+      prepared?: PreparedModelInvocation;
       maxContextTokens?: number;
       reservedOutputTokens: number;
     },
@@ -2164,7 +2203,7 @@ export class AgentLoop {
       let candidateRequest = await this.createModelRequest(candidateMessages, input, {
         emitInstructionEvents: false,
       });
-      if (options.decision && options.baseRequest) {
+      if (options.prepared && options.baseRequest) {
         const patchedBase = { ...options.baseRequest, messages: candidateRequest.messages };
         const materializedRequest = {
           ...patchedBase,
@@ -2173,12 +2212,13 @@ export class AgentLoop {
           cacheBreakpoints: candidateRequest.cacheBreakpoints,
           cachePlan: candidateRequest.cachePlan,
         };
-        candidateRequest = this.dependencies.router.materializeRequest
-          ? this.dependencies.router.materializeRequest(options.decision, materializedRequest)
+        const preparedDecision = options.prepared.opaque as RouterDecision | undefined;
+        candidateRequest = preparedDecision && this.dependencies.router.materializeRequest
+          ? this.dependencies.router.materializeRequest(preparedDecision, materializedRequest)
           : {
               ...materializedRequest,
-              provider: options.decision.provider,
-              model: options.decision.model,
+              provider: options.prepared.provider,
+              model: options.prepared.model,
             };
       }
       const snapshot = await tokenAccounting.evaluateRequestBudget(candidateRequest, {
@@ -2380,7 +2420,7 @@ export class AgentLoop {
     toolCalls: CanonicalToolCall[],
   ): { message: CanonicalMessage; toolCalls: CanonicalToolCall[] } {
     if (toolCalls.length === 0) return { message, toolCalls };
-    const validNames = new Set(this.dependencies.tools.registry.list().map((tool) => tool.name));
+    const validNames = new Set(this.toolPort.list().map((tool) => tool.name));
     const repairedById = new Map<string, string>();
     const repairedToolCalls = toolCalls.map((call) => {
       const repaired = repairToolName(call.name, validNames, this.config.toolAliases);
@@ -2681,13 +2721,21 @@ export class AgentLoop {
     toolCalls: CanonicalToolCall[],
     context: PilotDeckToolRuntimeContext,
     input: AgentLoopInput,
+    runId: string,
   ): AsyncGenerator<AgentEvent, PilotDeckToolResult[], unknown> {
     const activeSubagents = new Map<string, ActiveSubagentStatus>();
     let results: PilotDeckToolResult[] | undefined;
     let error: unknown;
     let settled = false;
 
-    const execution = this.dependencies.tools.scheduler.executeAll(toolCalls, context)
+    const executionContext: AgentExecutionContext = {
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      runId,
+      operationDeadline: input.execution?.operationDeadline,
+      abortSignal: input.abortSignal,
+    };
+    const execution = this.toolPort.executeAll(toolCalls, context, executionContext)
       .then((value) => {
         results = value;
       }, (err) => {

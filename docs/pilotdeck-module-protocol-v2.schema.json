@@ -1,0 +1,200 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pilotdeck.dev/schema/module-protocol-2.0.json",
+  "title": "PilotDeck Module Protocol v2.0",
+  "description": "Profile-based Module Protocol envelope. Fields are required only for the message profile that uses them.",
+  "oneOf": [
+    { "$ref": "#/$defs/executeRequest" },
+    { "$ref": "#/$defs/moduleCallRequest" },
+    { "$ref": "#/$defs/controlRequest" },
+    { "$ref": "#/$defs/handshakeRequest" },
+    { "$ref": "#/$defs/response" },
+    { "$ref": "#/$defs/event" },
+    { "$ref": "#/$defs/error" }
+  ],
+  "$defs": {
+    "id": { "type": "string", "minLength": 1 },
+    "payload": { "type": "object" },
+    "outcome": {
+      "type": "string",
+      "enum": ["completed", "failed", "cancelled", "result_unknown"]
+    },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["moduleInstanceId", "connectionGeneration"],
+      "properties": {
+        "moduleInstanceId": { "$ref": "#/$defs/id" },
+        "connectionGeneration": { "$ref": "#/$defs/id" }
+      }
+    },
+    "executeRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "messageId", "method", "runId", "operationId", "requestId", "payload"],
+      "properties": {
+        "kind": { "const": "request" },
+        "messageId": { "$ref": "#/$defs/id" },
+        "method": { "const": "execute" },
+        "runId": { "$ref": "#/$defs/id" },
+        "operationId": { "$ref": "#/$defs/id" },
+        "requestId": { "$ref": "#/$defs/id" },
+        "sessionId": { "$ref": "#/$defs/id" },
+        "turnId": { "$ref": "#/$defs/id" },
+        "idempotencyKey": { "$ref": "#/$defs/id" },
+        "operationDeadline": { "type": "string", "format": "date-time" },
+        "attemptDeadline": { "type": "string", "format": "date-time" },
+        "payload": { "$ref": "#/$defs/payload" }
+      }
+    },
+    "moduleCallRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "messageId", "method", "runId", "operationId", "requestId", "module", "payload"],
+      "properties": {
+        "kind": { "const": "request" },
+        "messageId": { "$ref": "#/$defs/id" },
+        "method": { "const": "module_call" },
+        "runId": { "$ref": "#/$defs/id" },
+        "operationId": { "$ref": "#/$defs/id" },
+        "requestId": { "$ref": "#/$defs/id" },
+        "module": { "enum": ["model", "capability", "permission", "checkpoint"] },
+        "payload": { "$ref": "#/$defs/payload" }
+      }
+    },
+    "controlRequest": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "messageId", "method", "runId", "operationId", "reason"],
+          "properties": {
+            "kind": { "const": "request" },
+            "messageId": { "$ref": "#/$defs/id" },
+            "method": { "const": "cancel" },
+            "runId": { "$ref": "#/$defs/id" },
+            "operationId": { "$ref": "#/$defs/id" },
+            "requestId": { "$ref": "#/$defs/id" },
+            "reason": { "type": "string", "minLength": 1 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "messageId", "method", "requestId"],
+          "properties": {
+            "kind": { "const": "request" },
+            "messageId": { "$ref": "#/$defs/id" },
+            "method": { "const": "status" },
+            "requestId": { "$ref": "#/$defs/id" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "messageId", "method", "streamId", "previousBinding", "lastAppliedSequence"],
+          "properties": {
+            "kind": { "const": "request" },
+            "messageId": { "$ref": "#/$defs/id" },
+            "method": { "const": "resume" },
+            "streamId": { "$ref": "#/$defs/id" },
+            "previousBinding": { "$ref": "#/$defs/binding" },
+            "lastAppliedSequence": { "type": "integer", "minimum": 0 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "messageId", "method", "streamId", "lastAppliedSequence"],
+          "properties": {
+            "kind": { "const": "request" },
+            "messageId": { "$ref": "#/$defs/id" },
+            "method": { "const": "ack" },
+            "streamId": { "$ref": "#/$defs/id" },
+            "lastAppliedSequence": { "type": "integer", "minimum": 0 }
+          }
+        }
+      ]
+    },
+    "handshakeRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "messageId", "method", "payload"],
+      "properties": {
+        "kind": { "const": "request" },
+        "messageId": { "$ref": "#/$defs/id" },
+        "method": { "enum": ["hello", "capabilities"] },
+        "payload": { "$ref": "#/$defs/payload" }
+      }
+    },
+    "response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "messageId", "inReplyTo", "ok"],
+      "properties": {
+        "kind": { "const": "response" },
+        "messageId": { "$ref": "#/$defs/id" },
+        "inReplyTo": { "$ref": "#/$defs/id" },
+        "requestId": { "$ref": "#/$defs/id" },
+        "ok": { "type": "boolean" },
+        "streamId": { "$ref": "#/$defs/id" },
+        "cursor": { "type": "integer", "minimum": 0 },
+        "replayedThroughSequence": { "type": "integer", "minimum": 0 },
+        "final": { "type": "boolean" },
+        "outcome": { "$ref": "#/$defs/outcome" },
+        "code": { "$ref": "#/$defs/id" },
+        "error": { "$ref": "#/$defs/payload" },
+        "payload": { "$ref": "#/$defs/payload" },
+        "protocolVersion": { "const": "2.0" },
+        "moduleId": { "$ref": "#/$defs/id" },
+        "moduleInstanceId": { "$ref": "#/$defs/id" },
+        "connectionGeneration": { "$ref": "#/$defs/id" },
+        "capabilitiesVersion": { "$ref": "#/$defs/id" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "final": { "const": true } }, "required": ["final"] },
+          "then": { "required": ["outcome"] }
+        }
+      ]
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "eventType", "streamId", "sequence", "runId", "operationId", "requestId", "final", "payload"],
+      "properties": {
+        "kind": { "const": "event" },
+        "messageId": { "$ref": "#/$defs/id" },
+        "eventType": { "$ref": "#/$defs/id" },
+        "streamId": { "$ref": "#/$defs/id" },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "runId": { "$ref": "#/$defs/id" },
+        "operationId": { "$ref": "#/$defs/id" },
+        "requestId": { "$ref": "#/$defs/id" },
+        "toolCallId": { "$ref": "#/$defs/id" },
+        "final": { "type": "boolean" },
+        "outcome": { "$ref": "#/$defs/outcome" },
+        "error": { "$ref": "#/$defs/payload" },
+        "payload": { "$ref": "#/$defs/payload" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "final": { "const": true } }, "required": ["final"] },
+          "then": { "required": ["outcome"] }
+        }
+      ]
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "messageId", "code", "message", "retryability"],
+      "properties": {
+        "kind": { "const": "error" },
+        "messageId": { "$ref": "#/$defs/id" },
+        "code": { "$ref": "#/$defs/id" },
+        "message": { "type": "string", "minLength": 1 },
+        "retryability": { "enum": ["safe", "unsafe", "retry_after_status"] }
+      }
+    }
+  }
+}
