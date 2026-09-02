@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Eye, EyeOff, FolderOpen, FolderPlus, Loader2, Plus, X } from 'lucide-react';
+import { Eye, EyeOff, FolderOpen, FolderPlus, HardDrive, Loader2, Plus, X } from 'lucide-react';
 import { Button, Input } from '../../../shared/view/ui';
 import { browseFilesystemFolders, createFolderInFilesystem } from '../data/workspaceApi';
 import { getParentPath, joinFolderPath } from '../utils/pathUtils';
@@ -20,6 +20,7 @@ export default function FolderBrowserModal({
   onFolderSelected,
 }: FolderBrowserModalProps) {
   const [currentPath, setCurrentPath] = useState('~');
+  const [rootsPath, setRootsPath] = useState<string | null>(null);
   const [folders, setFolders] = useState<FolderSuggestion[]>([]);
   const [loadingFolders, setLoadingFolders] = useState(false);
   const [showHiddenFolders, setShowHiddenFolders] = useState(false);
@@ -35,6 +36,7 @@ export default function FolderBrowserModal({
     try {
       const result = await browseFilesystemFolders(pathToLoad);
       setCurrentPath(result.path);
+      setRootsPath(result.rootsPath || null);
       setFolders(result.suggestions);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : 'Failed to load folders');
@@ -64,6 +66,12 @@ export default function FolderBrowserModal({
     () => currentPath === '/' && folders.some((folder) => /^[A-Za-z]:\\$/.test(folder.path)),
     [currentPath, folders],
   );
+  const parentPath = getParentPath(currentPath);
+  const driveRootsPath = rootsPath || '/';
+  const isDriveRootsView = isWindowsDrivePicker || (Boolean(rootsPath) && currentPath === driveRootsPath);
+  const showDriveRootsShortcut = Boolean(rootsPath) && !isDriveRootsView && parentPath !== driveRootsPath;
+  const canCreateFolder = !isDriveRootsView;
+  const canSelectCurrentFolder = !isDriveRootsView;
 
   const resetNewFolderState = () => {
     setShowNewFolderInput(false);
@@ -77,7 +85,7 @@ export default function FolderBrowserModal({
   };
 
   const handleCreateFolder = useCallback(async () => {
-    if (isWindowsDrivePicker) {
+    if (!canCreateFolder) {
       return;
     }
 
@@ -98,9 +106,7 @@ export default function FolderBrowserModal({
     } finally {
       setCreatingFolder(false);
     }
-  }, [currentPath, isWindowsDrivePicker, loadFolders, newFolderName]);
-
-  const parentPath = getParentPath(currentPath);
+  }, [canCreateFolder, currentPath, loadFolders, newFolderName]);
 
   if (!isOpen) {
     return null;
@@ -131,13 +137,15 @@ export default function FolderBrowserModal({
             </button>
             <button
               onClick={() => setShowNewFolderInput((previous) => !previous)}
+              disabled={!canCreateFolder}
               className={`rounded-md p-2 transition-colors ${
                 showNewFolderInput
                   ? 'bg-accent text-foreground'
-                  : 'text-muted-foreground hover:bg-accent hover:text-foreground'
+                  : canCreateFolder
+                    ? 'text-muted-foreground hover:bg-accent hover:text-foreground'
+                    : 'cursor-not-allowed text-muted-foreground/40'
               }`}
-              title="Create new folder"
-              disabled={isWindowsDrivePicker}
+              title={canCreateFolder ? 'Create new folder' : 'Choose a drive first'}
             >
               <Plus className="h-5 w-5" strokeWidth={1.75} />
             </button>
@@ -151,7 +159,7 @@ export default function FolderBrowserModal({
           </div>
         </div>
 
-        {showNewFolderInput && !isWindowsDrivePicker && (
+        {showNewFolderInput && canCreateFolder && (
           <div className="border-b border-border bg-muted/40 px-4 py-3">
             <div className="flex items-center gap-2">
               <Input
@@ -200,19 +208,30 @@ export default function FolderBrowserModal({
             </div>
           ) : (
             <div className="space-y-1">
+              {showDriveRootsShortcut && (
+                <button
+                  onClick={() => loadFolders(driveRootsPath)}
+                  className="flex w-full items-center gap-3 rounded-lg px-4 py-3 text-left hover:bg-accent hover:text-accent-foreground"
+                >
+                  <HardDrive className="h-5 w-5 text-muted-foreground" strokeWidth={1.75} />
+                  <span className="font-medium text-foreground">Drives</span>
+                </button>
+              )}
               {parentPath && (
                 <button
                   onClick={() => loadFolders(parentPath)}
                   className="flex w-full items-center gap-3 rounded-lg px-4 py-3 text-left hover:bg-accent hover:text-accent-foreground"
                 >
                   <FolderOpen className="h-5 w-5 text-muted-foreground" strokeWidth={1.75} />
-                  <span className="font-medium text-foreground">..</span>
+                  <span className="font-medium text-foreground">
+                    {parentPath === driveRootsPath ? 'Drives' : '..'}
+                  </span>
                 </button>
               )}
 
               {visibleFolders.length === 0 ? (
                 <div className="py-8 text-center text-muted-foreground">
-                  No subfolders found
+                  {isDriveRootsView ? 'No drives found' : 'No subfolders found'}
                 </div>
               ) : (
                 visibleFolders.map((folder) => (
@@ -221,7 +240,9 @@ export default function FolderBrowserModal({
                       onClick={() => loadFolders(folder.path)}
                       className="flex flex-1 items-center gap-3 rounded-lg px-4 py-3 text-left hover:bg-accent hover:text-accent-foreground"
                     >
-                      <FolderPlus className="h-5 w-5 text-muted-foreground" strokeWidth={1.75} />
+                      {folder.type === 'drive'
+                        ? <HardDrive className="h-5 w-5 text-muted-foreground" strokeWidth={1.75} />
+                        : <FolderPlus className="h-5 w-5 text-muted-foreground" strokeWidth={1.75} />}
                       <span className="font-medium text-foreground">
                         {folder.name}
                       </span>
@@ -255,7 +276,7 @@ export default function FolderBrowserModal({
             <Button
               variant="outline"
               onClick={() => onFolderSelected(currentPath, autoAdvanceOnSelect)}
-              disabled={isWindowsDrivePicker}
+              disabled={!canSelectCurrentFolder}
             >
               Use this folder
             </Button>
