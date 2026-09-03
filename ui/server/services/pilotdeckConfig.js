@@ -614,23 +614,14 @@ export function buildRuntimeEnv(config) {
   if (main) {
     const mainUrl = effectiveProviderUrl(main.providerId, main.provider);
     const mainApiKey = resolveConfiguredProviderApiKey(main.providerId, main.provider);
-    const configuredMainApiKey = normalizeString(main.provider.apiKey);
-    const usesEnvironmentApiKey = !configuredMainApiKey
-      || ENV_REFERENCE_PATTERN.test(configuredMainApiKey);
     env.PILOTDECK_API_BASE_URL = mainUrl;
     env.PILOTDECK_API_KEY = mainApiKey;
     env.PILOTDECK_MODEL = main.model;
     env.OPENAI_BASE_URL = mainUrl;
-    // Do not overwrite the environment variables that are themselves the
-    // credential source. Keeping them intact also allows switching between
-    // multiple env-backed catalog providers without cross-contaminating keys.
-    if (!usesEnvironmentApiKey) {
-      env.OPENAI_API_KEY = mainApiKey;
-      env.ANTHROPIC_API_KEY = mainApiKey;
-      env.GEMINI_API_KEY = mainApiKey;
-      env.GOOGLE_API_KEY = mainApiKey;
-      env.GOOGLE_GENERATIVE_AI_API_KEY = mainApiKey;
-    }
+    // Standard provider credential variables are user-controlled inputs. Do
+    // not replace them with the active provider's key: config reloads happen
+    // in the same process, so doing so destroys the original values and can
+    // send one provider's credential to another after a provider switch.
     env.OPENAI_MODEL = main.model;
     env.ANTHROPIC_MODEL = main.model;
     env.GEMINI_MODEL = main.model;

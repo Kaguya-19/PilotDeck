@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+    applyConfigToProcessEnv,
     buildDefaultPilotDeckConfig,
     buildMemoryLlmOptions,
     buildRuntimeEnv,
@@ -129,6 +130,55 @@ describe('validatePilotDeckConfig gateway validation', () => {
         });
         expect(buildRuntimeEnv(config)).not.toHaveProperty('OPENAI_API_KEY');
         expect(buildMemoryLlmOptions(config).apiKey).toBe('sk-from-env');
+    });
+
+    it('preserves provider environment keys across an explicit-key provider switch', () => {
+        const originalEnv = { ...process.env };
+        const openaiConfig = {
+            agent: { model: 'openai/gpt-test' },
+            model: {
+                providers: {
+                    openai: {
+                        protocol: 'openai',
+                        url: '',
+                        apiKey: 'openai-from-config',
+                        models: { 'gpt-test': {} },
+                    },
+                },
+            },
+            memory: { enabled: false },
+        };
+        const anthropicConfig = {
+            agent: { model: 'anthropic/claude' },
+            model: {
+                providers: {
+                    anthropic: {
+                        protocol: 'anthropic',
+                        url: '',
+                        models: { claude: {} },
+                    },
+                },
+            },
+            memory: { enabled: false },
+        };
+
+        try {
+            process.env.OPENAI_API_KEY = 'openai-from-env';
+            process.env.ANTHROPIC_API_KEY = 'anthropic-from-env';
+
+            applyConfigToProcessEnv(openaiConfig);
+            expect(process.env.OPENAI_API_KEY).toBe('openai-from-env');
+            expect(process.env.ANTHROPIC_API_KEY).toBe('anthropic-from-env');
+            expect(process.env.PILOTDECK_API_KEY).toBe('openai-from-config');
+
+            applyConfigToProcessEnv(anthropicConfig);
+            expect(process.env.PILOTDECK_API_KEY).toBe('anthropic-from-env');
+        } finally {
+            for (const key of Object.keys(process.env)) {
+                if (!(key in originalEnv)) delete process.env[key];
+            }
+            Object.assign(process.env, originalEnv);
+        }
     });
 
     it('accepts an omitted URL for catalog providers', () => {
