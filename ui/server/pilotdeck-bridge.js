@@ -1541,6 +1541,7 @@ export async function runChatViaGateway(
             channelKey,
             projectKey,
             message: command ?? '',
+            ...(options?.thinking ? { thinking: options.thinking } : {}),
             runMode,
             mode: resolvedMode,
             runId,
