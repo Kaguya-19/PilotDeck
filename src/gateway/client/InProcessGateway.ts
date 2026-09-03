@@ -2428,11 +2428,12 @@ async function buildAgentInputWithAttachments(
   projectRoot?: string,
   funasrInstallCommand?: string,
 ): Promise<AgentInput> {
-  const resolvedAttachments = await attachmentsToContentBlocks(attachments);
+  const allowedReadFileSet = new Set(allowedReadFiles);
+  const resolvedAttachments = await attachmentsToContentBlocks(attachments, allowedReadFileSet);
   const attachmentBlocks = resolvedAttachments.blocks;
   const pathNote = buildAttachmentPathNote(
     attachments,
-    new Set(allowedReadFiles),
+    allowedReadFileSet,
     resolvedAttachments.directContentPaths,
     resolvedAttachments.hasDiagnostics,
     projectRoot,
@@ -2479,7 +2480,9 @@ function buildAttachmentPathNote(
   }
 
   if (lines.length === 0) return undefined;
-  const guidance = hasDiagnostics || attachments.some(isAudioAttachment)
+  const guidance = hasDiagnostics
+    || attachments.some(isAudioAttachment)
+    || attachments.some((attachment) => !isReadFileInspectableAttachment(attachment))
     ? attachmentDiagnosticsGuidance(attachments, allowedReadFiles, projectRoot, installCommand)
     : "These are path references for reuse. If an image/PDF is already visible in this turn, do not call read_file just to view it.";
   return {
@@ -2524,7 +2527,9 @@ function isReadFileInspectableAttachment(attachment: ChannelAttachment): boolean
   if (mimeType === "application/json" || mimeType.endsWith("+json")) return true;
 
   const pathOrName = attachment.path || attachment.name || "";
-  const extension = extname(pathOrName).toLowerCase();
+  // Upload staging paths can be opaque IDs for legacy attachments. Prefer the
+  // original name so Office files still receive conversion guidance.
+  const extension = extname(attachment.name ?? "").toLowerCase() || extname(pathOrName).toLowerCase();
   if (extension === ".pdf" || extension === ".ipynb") return true;
   if (READ_FILE_BINARY_ATTACHMENT_EXTENSIONS.has(extension)) return false;
   return true;
@@ -2559,12 +2564,14 @@ async function collectRegisteredAttachmentReadFiles(
 
 async function attachmentsToContentBlocks(
   attachments: ChannelAttachment[] | undefined,
+  allowedReadFiles: Set<string>,
 ): Promise<{ blocks: CanonicalContentBlock[]; directContentPaths: Set<string>; hasDiagnostics: boolean }> {
   if (!attachments || attachments.length === 0) {
     return { blocks: [], directContentPaths: new Set<string>(), hasDiagnostics: false };
   }
   const blocks: CanonicalContentBlock[] = [];
   const resolverRequests: AttachmentRequest[] = [];
+  const resolverAttachments: ChannelAttachment[] = [];
   const resolverRequestPaths: Array<string | undefined> = [];
   const directContentPaths = new Set<string>();
   const diagnostics: string[] = [];
@@ -2596,26 +2603,47 @@ async function attachmentsToContentBlocks(
     }
     if (att.type === "image" || att.mimeType?.startsWith("image/")) {
       resolverRequests.push({ type: "image", path: att.path, mimeType: att.mimeType });
+      resolverAttachments.push(att);
       resolverRequestPaths.push(resolve(att.path));
     } else if (att.mimeType === "application/pdf" || att.path.toLowerCase().endsWith(".pdf")) {
       resolverRequests.push({ type: "pdf", path: att.path });
+      resolverAttachments.push(att);
       resolverRequestPaths.push(resolve(att.path));
     } else {
-      resolverRequests.push({ type: "file", path: att.path });
+      resolverRequests.push({ type: "file", path: att.path, name: att.name });
+      resolverAttachments.push(att);
       resolverRequestPaths.push(resolve(att.path));
     }
   }
 
   if (resolverRequests.length > 0) {
-    const resolved = await new AttachmentResolver().resolveAll(resolverRequests);
-    blocks.push(...resolved.blocks);
-    for (const diagnostic of resolved.diagnostics) {
-      if (diagnostic.severity === "error" || diagnostic.severity === "warning") {
-        diagnostics.push(diagnostic.message);
+    const resolver = new AttachmentResolver();
+    for (let index = 0; index < resolverRequests.length; index += 1) {
+      const request = resolverRequests[index];
+      const attachment = resolverAttachments[index];
+      if (!request || !attachment) continue;
+
+      const resolved = await resolver.resolve(request);
+      blocks.push(...resolved.blocks);
+      const isRegistered = Boolean(
+        attachment.path && safeAllowedAttachmentPath(attachment.path, allowedReadFiles),
+      );
+      let hasVisibleDiagnostic = false;
+      for (const diagnostic of resolved.diagnostics) {
+        const shouldSurface = diagnostic.severity === "error"
+          || diagnostic.severity === "warning"
+          || (
+            diagnostic.severity === "info"
+            && diagnostic.code === "attachment_unsupported"
+            && !isRegistered
+          );
+        if (shouldSurface) {
+          diagnostics.push(diagnostic.message);
+          hasVisibleDiagnostic = true;
+        }
       }
-    }
-    if (resolved.blocks.length > 0 && diagnostics.length === 0) {
-      for (const requestPath of resolverRequestPaths) {
+      if (resolved.blocks.length > 0 && !hasVisibleDiagnostic) {
+        const requestPath = resolverRequestPaths[index];
         if (requestPath) directContentPaths.add(requestPath);
       }
     }
