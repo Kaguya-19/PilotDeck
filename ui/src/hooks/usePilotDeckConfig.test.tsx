@@ -22,12 +22,14 @@ vi.mock("../contexts/WebSocketContext", () => ({
 
 type TestResponse = {
   ok: boolean;
+  status: number;
   json: () => Promise<unknown>;
 };
 
-function response(body: unknown, ok = true): TestResponse {
+function response(body: unknown, ok = true, status = ok ? 200 : 400): TestResponse {
   return {
     ok,
+    status,
     json: async () => body,
   };
 }
@@ -324,6 +326,44 @@ describe("usePilotDeckConfig saves", () => {
     );
     expect(result.current.raw).toBe("confirmed");
     expect(result.current.isDirty).toBe(false);
+  });
+
+  it("keeps the draft when a server failure makes the write result ambiguous", async () => {
+    mocks.authenticatedFetch.mockImplementation(
+      (url: string, options?: RequestInit) => {
+        if (url === "/api/config" && !options?.method) {
+          return Promise.resolve(response(configResponse("confirmed")));
+        }
+        if (url === "/api/config/validate") {
+          return Promise.resolve(
+            response({ valid: true, errors: [], warnings: [] }),
+          );
+        }
+        if (url === "/api/config" && options?.method === "PUT") {
+          return Promise.resolve(
+            response({ error: "Reload failed after write" }, false, 500),
+          );
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      },
+    );
+
+    const { result } = renderHook(() => usePilotDeckConfig(), {
+      wrapper: ConfigWrapper,
+    });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    let saveResult;
+    await act(async () => {
+      saveResult = await result.current.commitRaw("possibly saved draft");
+    });
+
+    expect(saveResult).toEqual({
+      ok: false,
+      error: "Reload failed after write",
+    });
+    expect(result.current.raw).toBe("possibly saved draft");
+    expect(result.current.isDirty).toBe(true);
   });
 
   it("shares one draft and save queue between settings consumers", async () => {

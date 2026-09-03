@@ -277,7 +277,10 @@ function usePilotDeckConfigState() {
     return unsub;
   }, [subscribe]);
 
-  const save = useCallback((options: ConfigSaveOptions = {}): Promise<ConfigSaveResult> => {
+  const enqueueSave = useCallback((
+    options: ConfigSaveOptions = {},
+    rollbackDraft?: string,
+  ): Promise<ConfigSaveResult> => {
     const draft = rawRef.current;
     const sequence = ++saveSequenceRef.current;
     pendingSaveCountRef.current += 1;
@@ -286,6 +289,7 @@ function usePilotDeckConfigState() {
     setMessage(null);
 
     const run = async (): Promise<ConfigSaveResult> => {
+      let confirmedUnwritten = false;
       try {
         const baseRevision = revisionRef.current;
         const response = await authenticatedFetch('/api/config', {
@@ -301,6 +305,9 @@ function usePilotDeckConfigState() {
               : {}),
           }),
         });
+        confirmedUnwritten = !response.ok
+          && response.status >= 400
+          && response.status < 500;
         const data = await response.json();
         if (!response.ok) {
           throw new Error(configSaveError(data));
@@ -346,6 +353,18 @@ function usePilotDeckConfigState() {
             );
           }
         }
+        // A 4xx response is an authoritative pre-write rejection from the
+        // config API. Network failures and 5xx responses are ambiguous because
+        // the server may already have committed the file before the response
+        // was lost or a reload step failed; keep that draft until it can be
+        // reconciled instead of replacing it with a stale snapshot.
+        if (
+          confirmedUnwritten
+          && rollbackDraft !== undefined
+          && rawRef.current === rollbackDraft
+        ) {
+          updateRaw(savedRawRef.current);
+        }
         return { ok: false, error: message };
       } finally {
         pendingSaveCountRef.current = Math.max(
@@ -364,7 +383,11 @@ function usePilotDeckConfigState() {
       () => undefined,
     );
     return result;
-  }, [applyResponse]);
+  }, [applyResponse, updateRaw]);
+
+  const save = useCallback((
+    options: ConfigSaveOptions = {},
+  ): Promise<ConfigSaveResult> => enqueueSave(options), [enqueueSave]);
 
   // Structured settings use optimistic updates for responsiveness, but a
   // rejected write must never leave that invalid draft in the shared config
@@ -375,13 +398,8 @@ function usePilotDeckConfigState() {
     options: ConfigSaveOptions = {},
   ): Promise<ConfigSaveResult> => {
     updateRaw(nextRaw);
-    return save(options).then((result) => {
-      if (!result.ok && rawRef.current === nextRaw) {
-        updateRaw(savedRawRef.current);
-      }
-      return result;
-    });
-  }, [save, updateRaw]);
+    return enqueueSave(options, nextRaw);
+  }, [enqueueSave, updateRaw]);
 
   const reloadConfig = useCallback(async () => {
     setSaving(true);

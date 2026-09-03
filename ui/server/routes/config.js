@@ -718,7 +718,9 @@ router.put('/', async (req, res) => {
         });
       }
       suppressNextWatchEvent();
-      saved = await writeRawPilotDeckYaml(renamed.config);
+      saved = await writeRawPilotDeckYaml(renamed.config, {
+        previousConfig: diskRecord.config,
+      });
     } else if (req.body?.config && typeof req.body.config === 'object') {
       if (diskRecord.parseError) {
         return res.status(400).json({
@@ -789,7 +791,9 @@ router.put('/', async (req, res) => {
         });
       }
       suppressNextWatchEvent();
-      saved = await writePilotDeckConfig(renamed.config);
+      saved = await writePilotDeckConfig(renamed.config, {
+        previousConfig: diskRecord.config,
+      });
     } else {
       return res.status(400).json({ error: 'raw YAML or config object is required' });
     }

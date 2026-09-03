@@ -1365,6 +1365,41 @@ describe('desktop bootstrap config writes', () => {
     );
     expect(readFileSync(configPath, 'utf8')).toBe(initial);
   });
+
+  it('repairs a legacy empty provider draft while saving an unrelated setting', async () => {
+    const initialConfig = {
+      schemaVersion: 1,
+      agent: { model: 'ollama/qwen' },
+      model: {
+        providers: {
+          ollama: {
+            protocol: 'openai',
+            url: 'http://localhost:11434/v1',
+            models: { qwen: {} },
+          },
+          provider1: {
+            protocol: 'openai',
+            url: '',
+            apiKey: '',
+            models: {},
+          },
+        },
+      },
+      tools: { webSearch: { enabled: true } },
+    };
+    const { request, configPath } = await createDiskConfigApp(stringifyYaml(initialConfig));
+    initialConfig.tools.webSearch.enabled = false;
+
+    const response = await request('/api/config', {
+      method: 'PUT',
+      body: JSON.stringify({ raw: stringifyYaml(initialConfig) }),
+    });
+
+    expect(response.status).toBe(200);
+    const saved = parseYaml(readFileSync(configPath, 'utf8'));
+    expect(saved.tools.webSearch.enabled).toBe(false);
+    expect(saved.model.providers).not.toHaveProperty('provider1');
+  });
 });
 
 describe('config write revisions', () => {

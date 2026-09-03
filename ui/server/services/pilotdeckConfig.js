@@ -6,6 +6,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { parseGatewayConfig } from '../../../src/pilot/config/parseGatewayConfig.js';
 import { parseToolsConfig } from '../../../src/pilot/config/parseToolsConfig.js';
 import { lookupCatalogProvider } from '../../../src/model/catalog/index.js';
+import { findModelReferences } from './modelReferences.js';
 
 // Source of truth: ~/.pilotdeck/pilotdeck.yaml. The disk format and the
 // "internal" config object are the same V2 schema — no more adapter layer.
@@ -253,7 +254,8 @@ function validateProvider(id, provider, errors) {
   if (!normalizeString(provider.url) && !Object.hasOwn(CATALOG_PROVIDER_DEFAULT_URLS, id)) {
     errors.push(`model.providers.${id}.url is required`);
   }
-  if (!allowsMissingApiKey(id) && !normalizeString(provider.apiKey)) {
+  const catalogApiKeyEnvVar = lookupCatalogProvider(id)?.apiKeyEnvVar;
+  if (!allowsMissingApiKey(id) && !normalizeString(provider.apiKey) && !catalogApiKeyEnvVar) {
     errors.push(`model.providers.${id}.apiKey is required`);
   }
   if (!isRecord(provider.models) || Object.keys(provider.models).length === 0) {
@@ -777,6 +779,35 @@ function isBootstrapPlaceholderProvider(providerId, provider) {
     || normalizeString(provider?.apiKey) === BOOTSTRAP_PLACEHOLDER_KEY;
 }
 
+// Older settings builds persisted a provider immediately when the user picked
+// "Add provider", before any credentials or models had been entered. Those
+// empty, unreferenced records are drafts rather than usable providers. Remove
+// them on the next successful write so upgrading users are not locked out of
+// every other settings page by the stricter all-provider validation.
+function purgeLegacyProviderDrafts(config, previousConfig) {
+  if (!isRecord(config)) return config;
+  const providers = config?.model?.providers;
+  const previousProviders = previousConfig?.model?.providers;
+  if (!isRecord(providers) || !isRecord(previousProviders)) return config;
+
+  for (const [providerId, provider] of Object.entries(providers)) {
+    if (!isRecord(provider)) continue;
+    const previousProvider = previousProviders[providerId];
+    const modelsAreEmpty = provider.models === undefined
+      || (isRecord(provider.models) && Object.keys(provider.models).length === 0);
+    if (
+      modelsAreEmpty
+      && !normalizeString(provider.apiKey)
+      && isRecord(previousProvider)
+      && JSON.stringify(provider) === JSON.stringify(previousProvider)
+      && findModelReferences(config, { providerId }).length === 0
+    ) {
+      delete providers[providerId];
+    }
+  }
+  return config;
+}
+
 // Keep the bootstrap provider until onboarding has selected a real, resolvable
 // agent model. Unrelated settings (for example Web Search) must remain writable
 // before onboarding is complete. Once a real model is selected, remove all
@@ -836,6 +867,13 @@ function finalizeBootstrapPlaceholder(config) {
       );
     }
   }
+  if (isRecord(router.stats?.modelPricing)) {
+    for (const ref of Object.keys(router.stats.modelPricing)) {
+      // Placeholder pricing cannot be assumed to match the newly selected
+      // model, so discard it instead of copying incorrect cost metadata.
+      if (referencesRemovedProvider(ref)) delete router.stats.modelPricing[ref];
+    }
+  }
   if (typeof router.stats?.baselineModel === 'string'
     && referencesRemovedProvider(router.stats.baselineModel)) {
     router.stats.baselineModel = agentModel;
@@ -870,11 +908,23 @@ function finalizeBootstrapPlaceholder(config) {
 // after running through validation. UI-internal === disk schema, so
 // there's no read-modify-write needed anymore (the previous translation
 // layer existed only to bridge an older internal schema).
-export async function writePilotDeckConfig(config) {
+export async function writePilotDeckConfig(config, { previousConfig } = {}) {
+  let previous = previousConfig;
+  if (!isRecord(previous)) {
+    try {
+      const diskRecord = readPilotDeckConfigFile();
+      if (!diskRecord.parseError) previous = diskRecord.config;
+    } catch {
+      // A missing/unreadable previous config is not a migration candidate.
+    }
+  }
   const sanitized = finalizeBootstrapPlaceholder(
     syncAgentModelWithRouter(
-      sanitizeProviderCredentials(
-        isRecord(config) ? deepMerge({}, config) : config,
+      purgeLegacyProviderDrafts(
+        sanitizeProviderCredentials(
+          isRecord(config) ? deepMerge({}, config) : config,
+        ),
+        previous,
       ),
     ),
   );
@@ -907,8 +957,8 @@ export async function writePilotDeckConfig(config) {
 // Kept as a thin alias for callers that supply an already-parsed YAML
 // object (Raw YAML editor path). Behaviour is identical to
 // writePilotDeckConfig now that internal === disk.
-export async function writeRawPilotDeckYaml(yamlObj) {
-  return writePilotDeckConfig(yamlObj);
+export async function writeRawPilotDeckYaml(yamlObj, options) {
+  return writePilotDeckConfig(yamlObj, options);
 }
 
 export function expandTilde(value) {

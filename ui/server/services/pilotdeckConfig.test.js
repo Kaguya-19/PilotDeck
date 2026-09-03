@@ -127,6 +127,29 @@ describe('validatePilotDeckConfig gateway validation', () => {
         }
     });
 
+    it('accepts an omitted API key when the catalog defines an environment fallback', () => {
+        const validation = validatePilotDeckConfig({
+            agent: { model: 'ollama/qwen' },
+            model: {
+                providers: {
+                    ollama: {
+                        protocol: 'openai',
+                        url: 'http://localhost:11434/v1',
+                        models: { qwen: {} },
+                    },
+                    anthropic: {
+                        protocol: 'anthropic',
+                        url: 'https://api.anthropic.com',
+                        models: { claude: {} },
+                    },
+                },
+            },
+        });
+
+        expect(validation.valid).toBe(true);
+        expect(validation.errors).toEqual([]);
+    });
+
     it('migrates the legacy interactive spreadsheet mode to built-in preview', () => {
         const validation = validatePilotDeckConfig({
             webui: {
@@ -484,6 +507,33 @@ describe('validatePilotDeckConfig gateway validation', () => {
         expect(result.config.model.providers).toHaveProperty('ollama');
     });
 
+    it('removes an unreferenced empty provider draft left by older settings builds', async () => {
+        useTempConfig(null);
+
+        const previousConfig = {
+            agent: { model: 'ollama/qwen3:0.6b' },
+            model: {
+                providers: {
+                    ollama: {
+                        protocol: 'openai',
+                        url: 'http://localhost:11434/v1',
+                        models: { 'qwen3:0.6b': {} },
+                    },
+                    provider1: {
+                        protocol: 'openai',
+                        url: '',
+                        apiKey: '',
+                        models: {},
+                    },
+                },
+            },
+        };
+        const result = await writePilotDeckConfig(previousConfig, { previousConfig });
+
+        expect(result.config.model.providers).toHaveProperty('ollama');
+        expect(result.config.model.providers).not.toHaveProperty('provider1');
+    });
+
     it('removes bootstrap providers and rewrites their references after selecting a real model', async () => {
         useTempConfig(null);
 
@@ -517,7 +567,13 @@ describe('validatePilotDeckConfig gateway validation', () => {
                     default: ['_placeholder/_placeholder'],
                     vision: ['_placeholder/_placeholder'],
                 },
-                stats: { baselineModel: '_placeholder/_placeholder' },
+                stats: {
+                    baselineModel: '_placeholder/_placeholder',
+                    modelPricing: {
+                        '_placeholder/_placeholder': { input: 99, output: 99 },
+                        'ollama/qwen3:0.6b': { input: 0, output: 0 },
+                    },
+                },
                 tokenSaver: {
                     judge: '_placeholder/_placeholder',
                     defaultTier: 'fast',
@@ -538,6 +594,9 @@ describe('validatePilotDeckConfig gateway validation', () => {
             vision: ['ollama/qwen3:0.6b'],
         });
         expect(result.config.router.stats.baselineModel).toBe('ollama/qwen3:0.6b');
+        expect(result.config.router.stats.modelPricing).toEqual({
+            'ollama/qwen3:0.6b': { input: 0, output: 0 },
+        });
         expect(result.config.router.tokenSaver.judge).toBe('ollama/qwen3:0.6b');
         expect(result.config.router.tokenSaver.tiers.fast.model).toBe('ollama/qwen3:0.6b');
     });
