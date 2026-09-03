@@ -64,7 +64,7 @@ describe('LlmConfigurationStep', () => {
     });
   });
 
-  it('uses DeepSeek bundled models until an API key is entered', async () => {
+  it('allows DeepSeek model fetching through its environment API key', async () => {
     render(<LlmConfigurationStep onSaved={vi.fn()} />);
 
     await waitFor(() => {
@@ -75,11 +75,14 @@ describe('LlmConfigurationStep', () => {
     fireEvent.click(screen.getByRole('button', { name: /^DeepSeek$/ }));
 
     expect(mocks.fetchRemoteDefaultModels).not.toHaveBeenCalled();
-    expect(screen.getByRole('button', { name: 'Fetch model list' })).toHaveProperty('disabled', true);
+    const fetchButton = screen.getByRole('button', { name: 'Fetch model list' });
+    expect(fetchButton).toHaveProperty('disabled', false);
     expect(screen.getByRole('combobox', { name: 'Model' }).textContent).toContain('DeepSeek V4 Pro');
+    fireEvent.click(fetchButton);
+    await waitFor(() => expect(mocks.fetchRemoteDefaultModels).toHaveBeenCalledWith('deepseek'));
   });
 
-  it('uses Kimi bundled models until an API key is entered', async () => {
+  it('allows Kimi model fetching through its environment API key', async () => {
     render(<LlmConfigurationStep onSaved={vi.fn()} />);
 
     await waitFor(() => {
@@ -90,8 +93,71 @@ describe('LlmConfigurationStep', () => {
     fireEvent.click(screen.getByRole('button', { name: /^Moonshot AI \(Kimi\)$/ }));
 
     expect(mocks.fetchRemoteDefaultModels).not.toHaveBeenCalled();
-    expect(screen.getByRole('button', { name: 'Fetch model list' })).toHaveProperty('disabled', true);
+    const fetchButton = screen.getByRole('button', { name: 'Fetch model list' });
+    expect(fetchButton).toHaveProperty('disabled', false);
     expect(screen.getByRole('combobox', { name: 'Model' }).textContent).toContain('Kimi K2.6');
+    fireEvent.click(fetchButton);
+    await waitFor(() => expect(mocks.fetchRemoteDefaultModels).toHaveBeenCalledWith('moonshot'));
+  });
+
+  it('tests a catalog provider with an empty form key so the server can use its environment key', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    mocks.authenticatedFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      if (url === '/api/config/provider') {
+        return { ok: true, json: async () => ({ exists: false, provider: null }) };
+      }
+      if (url === '/api/config/test-connections') {
+        return {
+          ok: true,
+          json: async () => ({
+            testId: 'env_test',
+            status: 'passed',
+            models: [{ modelId: 'deepseek/deepseek-v4-flash', textInput: 'supported', imageInput: 'supported', error: null }],
+          }),
+        };
+      }
+      return { ok: true, json: async () => ({}) };
+    });
+
+    render(<LlmConfigurationStep onSaved={vi.fn()} />);
+    const testButton = screen.getByRole('button', { name: 'Test Connection' });
+    expect(testButton).toHaveProperty('disabled', false);
+    fireEvent.click(testButton);
+
+    await waitFor(() => expect(screen.getByText(/Connected successfully/)).toBeTruthy());
+    const testCall = calls.find((call) => call.url === '/api/config/test-connections');
+    expect(JSON.parse(String(testCall?.init?.body))).toMatchObject({
+      providerId: 'openrouter',
+      apiKey: '',
+    });
+  });
+
+  it('restores an existing environment-backed provider even when its saved key is blank', async () => {
+    mocks.authenticatedFetch.mockImplementation(async (url: string) => {
+      if (url === '/api/config/provider') {
+        return {
+          ok: true,
+          json: async () => ({
+            exists: true,
+            provider: {
+              type: 'openai',
+              baseUrl: 'https://api.moonshot.cn/v1',
+              apiKey: '',
+              model: 'kimi-k2.6',
+            },
+          }),
+        };
+      }
+      return { ok: true, json: async () => ({}) };
+    });
+
+    render(<LlmConfigurationStep onSaved={vi.fn()} />);
+
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText('Uses MOONSHOT_API_KEY when empty')).toBeTruthy();
+    });
+    expect(screen.getByRole('button', { name: 'Test Connection' })).toHaveProperty('disabled', false);
   });
 
   it('creates a passing connection-test record and binds it when saving', async () => {

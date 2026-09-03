@@ -188,7 +188,9 @@ export default function ProviderCard({
         protocol,
         baseUrl: effectiveUrl,
         apiKey: draftProvider.apiKey ?? "",
-        providerId,
+        // A masked key still belongs to the saved provider until the rename is
+        // committed. Explicit and blank keys follow the provider ID being edited.
+        providerId: isMaskedKey ? providerId : trimmedProviderId,
       });
       setApiModels(models);
       setApiModelsStatus("idle");

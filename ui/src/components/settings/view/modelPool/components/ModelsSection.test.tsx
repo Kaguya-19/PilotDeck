@@ -5,11 +5,22 @@ import { findCatalogProviderById } from "../../../../../shared/catalogProviders"
 import ModelsSection from "./ModelsSection";
 import ProviderCard from "./ProviderCard";
 
+const mocks = vi.hoisted(() => ({
+  fetchProviderModels: vi.fn(),
+}));
+
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({ t: (key: string) => key }),
 }));
 
-afterEach(cleanup);
+vi.mock("../../../../../shared/modelListApi", () => ({
+  fetchProviderModels: mocks.fetchProviderModels,
+}));
+
+afterEach(() => {
+  cleanup();
+  vi.clearAllMocks();
+});
 
 describe("model provider drafts", () => {
   it("keeps a new custom provider local until it is explicitly saved", () => {
@@ -88,6 +99,33 @@ describe("model provider drafts", () => {
     expect(screen.queryByText(
       "pilotDeckConfig.panels.models.providerApiKeyRequired",
     )).toBeNull();
+  });
+
+  it("uses the edited catalog provider ID when fetching with an environment key", async () => {
+    mocks.fetchProviderModels.mockResolvedValue([]);
+
+    render(
+      <ProviderCard
+        providerId="openai"
+        provider={{ models: { "gpt-4.1": {} } }}
+        catalogEntry={findCatalogProviderById("openai")}
+        initialEditing
+        onSave={vi.fn(async () => ({ ok: true }))}
+        onRemove={vi.fn()}
+      />,
+    );
+
+    fireEvent.change(screen.getByDisplayValue("openai"), {
+      target: { value: "anthropic" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Fetch API models" }));
+
+    await waitFor(() => expect(mocks.fetchProviderModels).toHaveBeenCalledWith({
+      providerId: "anthropic",
+      protocol: "anthropic",
+      baseUrl: "https://api.anthropic.com",
+      apiKey: "",
+    }));
   });
 
   it("prevents duplicate saves while the first provider save is pending", async () => {

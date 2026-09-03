@@ -388,6 +388,39 @@ describe('config test-connection route', () => {
     ]);
     expect(authHeaders).toEqual([undefined, undefined]);
   });
+
+  it('does not reuse a masked saved key after the endpoint changes', async () => {
+    vi.stubGlobal('fetch', vi.fn());
+    const { requestStatus } = await createConfigApp({
+      config: {
+        model: {
+          providers: {
+            openai: {
+              protocol: 'openai',
+              url: 'https://api.openai.com/v1',
+              apiKey: 'saved-secret',
+              models: {},
+            },
+          },
+        },
+      },
+    });
+
+    const response = await requestStatus('/api/config/test-connection', {
+      method: 'POST',
+      body: JSON.stringify({
+        providerId: 'openai',
+        providerType: 'openai',
+        baseUrl: 'https://proxy.example/v1',
+        apiKey: '********',
+        model: 'gpt-test',
+      }),
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe('CREDENTIAL_SCOPE_MISMATCH');
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
 });
 
 describe('config model-list route', () => {
@@ -416,6 +449,72 @@ describe('config model-list route', () => {
       models: [{ id: 'claude-sonnet-4.6', displayName: 'Claude Sonnet 4.6' }],
     });
     expect(authHeaders).toEqual(['sk-from-env']);
+  });
+
+  it('allows a catalog model-list path on the provider origin', async () => {
+    const authHeaders = [];
+    vi.stubEnv('DEEPSEEK_API_KEY', 'deepseek-from-env');
+    vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
+      authHeaders.push(init?.headers?.Authorization);
+      return jsonResponse({ data: [{ id: 'deepseek-chat' }] });
+    }));
+
+    const { requestStatus } = await createConfigApp();
+    const response = await requestStatus('/api/config/models', {
+      method: 'POST',
+      body: JSON.stringify({
+        providerId: 'deepseek',
+        providerType: 'openai',
+        baseUrl: 'https://api.deepseek.com/models',
+        apiKey: '',
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(authHeaders).toEqual(['Bearer deepseek-from-env']);
+  });
+
+  it('keeps the Responses API protocol when resolving its environment key', async () => {
+    const authHeaders = [];
+    vi.stubEnv('OPENAI_API_KEY', 'responses-from-env');
+    vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
+      authHeaders.push(init?.headers?.Authorization);
+      return jsonResponse({ data: [{ id: 'gpt-4.1' }] });
+    }));
+
+    const { requestStatus } = await createConfigApp();
+    const response = await requestStatus('/api/config/models', {
+      method: 'POST',
+      body: JSON.stringify({
+        providerId: 'openai-responses',
+        providerType: 'openai-responses',
+        baseUrl: 'https://api.openai.com/v1',
+        apiKey: '',
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(authHeaders).toEqual(['Bearer responses-from-env']);
+  });
+
+  it('does not send a catalog environment key to another origin', async () => {
+    vi.stubEnv('OPENAI_API_KEY', 'openai-from-env');
+    vi.stubGlobal('fetch', vi.fn());
+
+    const { requestStatus } = await createConfigApp();
+    const response = await requestStatus('/api/config/models', {
+      method: 'POST',
+      body: JSON.stringify({
+        providerId: 'openai',
+        providerType: 'openai',
+        baseUrl: 'https://proxy.example/v1',
+        apiKey: '',
+      }),
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe('CREDENTIAL_SCOPE_MISMATCH');
+    expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
   it('preserves a non-JSON upstream authentication error status', async () => {
@@ -588,6 +687,79 @@ describe('config model-pool connection test routes', () => {
     });
     expect(response.status).toBe(200);
     expect(probe).toHaveBeenCalledWith(expect.objectContaining({ apiKey: 'saved-secret' }));
+  });
+
+  it('does not reuse a masked saved key after the provider endpoint changes', async () => {
+    const probe = vi.fn();
+    const { requestStatus } = await createConfigApp({
+      config: {
+        model: {
+          providers: {
+            openai: {
+              protocol: 'openai',
+              url: 'https://api.openai.com/v1',
+              apiKey: 'saved-secret',
+              models: {},
+            },
+          },
+        },
+      },
+      probe,
+    });
+
+    const response = await requestStatus('/api/config/test-connections', {
+      method: 'POST',
+      headers: { 'x-user': 'settings-user' },
+      body: JSON.stringify({
+        providerId: 'openai',
+        protocol: 'openai',
+        endpoint: 'https://proxy.example/v1',
+        apiKey: '********',
+        models: ['model-a'],
+        retryPolicy: retryPolicy(),
+      }),
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe('CREDENTIAL_SCOPE_MISMATCH');
+    expect(probe).not.toHaveBeenCalled();
+  });
+
+  it('uses the environment key instead of a saved literal when the submitted key is blank', async () => {
+    vi.stubEnv('OPENAI_API_KEY', 'sk-from-env');
+    const probe = vi.fn().mockResolvedValue({ ok: true });
+    const { requestStatus } = await createConfigApp({
+      config: {
+        model: {
+          providers: {
+            openai: {
+              protocol: 'openai',
+              url: 'https://api.openai.com/v1',
+              apiKey: 'saved-secret',
+              models: {},
+            },
+          },
+        },
+      },
+      probe,
+    });
+
+    const response = await requestStatus('/api/config/test-connections', {
+      method: 'POST',
+      headers: { 'x-user': 'settings-user' },
+      body: JSON.stringify({
+        providerId: 'openai',
+        protocol: 'openai',
+        endpoint: 'https://api.openai.com/v1',
+        apiKey: '',
+        models: ['model-a'],
+        retryPolicy: retryPolicy(),
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(probe).toHaveBeenCalledWith(expect.objectContaining({ apiKey: 'sk-from-env' }));
+    expect(probe).not.toHaveBeenCalledWith(expect.objectContaining({ apiKey: 'saved-secret' }));
   });
 
   it('tests and binds a provider that uses its catalog environment API key', async () => {
@@ -1273,6 +1445,67 @@ describe('config test-web-search route', () => {
 });
 
 describe('config provider rename secret preservation', () => {
+  it('does not preserve a masked provider key when its endpoint changes', async () => {
+    const initialConfig = {
+      schemaVersion: 1,
+      agent: { model: 'openai/gpt-test' },
+      model: {
+        providers: {
+          openai: {
+            protocol: 'openai',
+            url: 'https://api.openai.com/v1',
+            apiKey: 'sk-saved-secret',
+            models: { 'gpt-test': {} },
+          },
+        },
+      },
+    };
+    const { request, configPath } = await createDiskConfigApp(stringifyYaml(initialConfig));
+    const changed = structuredClone(initialConfig);
+    changed.model.providers.openai.url = 'https://proxy.example/v1';
+    changed.model.providers.openai.apiKey = '********';
+
+    const response = await request('/api/config', {
+      method: 'PUT',
+      body: JSON.stringify({ raw: stringifyYaml(changed) }),
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toContain('Enter the API key again');
+    expect(parseYaml(readFileSync(configPath, 'utf8'))).toEqual(initialConfig);
+  });
+
+  it('preserves a masked key when a catalog default URL is made explicit', async () => {
+    const initialConfig = {
+      schemaVersion: 1,
+      agent: { model: 'openai/gpt-test' },
+      model: {
+        providers: {
+          openai: {
+            protocol: 'openai',
+            url: '',
+            apiKey: 'sk-saved-secret',
+            models: { 'gpt-test': {} },
+          },
+        },
+      },
+    };
+    const { request, configPath } = await createDiskConfigApp(stringifyYaml(initialConfig));
+    const changed = structuredClone(initialConfig);
+    changed.model.providers.openai.url = 'https://api.openai.com/v1';
+    changed.model.providers.openai.apiKey = '********';
+
+    const response = await request('/api/config', {
+      method: 'PUT',
+      body: JSON.stringify({ raw: stringifyYaml(changed) }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(
+      parseYaml(readFileSync(configPath, 'utf8')).model.providers.openai.apiKey,
+    ).toBe('sk-saved-secret');
+  });
+
   it('restores masked provider secrets when only the provider ID changes', async () => {
     const initial = stringifyYaml({
       schemaVersion: 1,

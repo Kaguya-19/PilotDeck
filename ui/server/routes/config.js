@@ -28,6 +28,7 @@ import {
   buildProviderModelsEndpointCandidates,
   isExpectedProviderModelsResponseShape,
 } from '../../../src/model/providerEndpoint.js';
+import { lookupCatalogProvider } from '../../../src/model/catalog/index.js';
 import { NetworkFetchError, networkFetch } from '../../../src/network/fetch.js';
 import { probeModelConnection } from '../services/modelConnectionProbe.js';
 import {
@@ -65,20 +66,101 @@ const DEFAULT_TAVILY_WEB_SEARCH_ENDPOINT = 'https://api.tavily.com/search';
 const DEFAULT_SERPER_WEB_SEARCH_ENDPOINT = 'https://google.serper.dev/search';
 const DEFAULT_BRAVE_WEB_SEARCH_ENDPOINT = 'https://api.search.brave.com/res/v1/web/search';
 
-function resolveProviderRequestApiKey(providerId, submittedApiKey) {
+function normalizeProviderProtocol(value) {
+  const protocol = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (protocol === 'responses') return 'openai-responses';
+  if (protocol === 'openai-chat' || protocol === 'chat' || protocol === 'litellm') return 'openai';
+  return protocol;
+}
+
+function canonicalProviderEndpoint(value) {
+  const candidate = typeof value === 'string' ? value.trim() : '';
+  if (!candidate) return '';
+  try {
+    const parsed = new URL(candidate);
+    if (!['http:', 'https:'].includes(parsed.protocol)) return '';
+    return parsed.toString().replace(/\/+$/, '');
+  } catch {
+    return '';
+  }
+}
+
+function providerCredentialScopeMatches(providerId, provider, protocol, endpoint, allowOriginMatch) {
+  const catalog = lookupCatalogProvider(providerId);
+  const expectedProtocol = normalizeProviderProtocol(provider?.protocol || catalog?.protocol);
+  const expectedEndpoint = canonicalProviderEndpoint(provider?.url || catalog?.defaultUrl);
+  const requestedProtocol = normalizeProviderProtocol(protocol || catalog?.protocol);
+  const requestedEndpoint = canonicalProviderEndpoint(endpoint || catalog?.defaultUrl);
+  if (!expectedProtocol || !expectedEndpoint || !requestedProtocol || !requestedEndpoint) return false;
+  if (expectedProtocol !== requestedProtocol) return false;
+  if (expectedEndpoint === requestedEndpoint) return true;
+  if (!allowOriginMatch) return false;
+  return new URL(expectedEndpoint).origin === new URL(requestedEndpoint).origin;
+}
+
+function resolveProviderRequestApiKey({
+  providerId,
+  submittedApiKey,
+  protocol,
+  endpoint,
+  allowOriginMatch = false,
+}) {
   const normalizedProviderId = typeof providerId === 'string' ? providerId.trim() : '';
   const requested = typeof submittedApiKey === 'string' ? submittedApiKey.trim() : '';
-  let provider = requested && requested !== MASKED_SECRET
-    ? { apiKey: requested }
-    : null;
+  if (requested && requested !== MASKED_SECRET) {
+    return {
+      apiKey: resolveConfiguredProviderApiKey(normalizedProviderId, { apiKey: requested }),
+    };
+  }
 
-  if (!provider && normalizedProviderId) {
+  let savedProvider = null;
+  if (normalizedProviderId) {
     try {
       const record = readPilotDeckConfigFile();
-      provider = record.config?.model?.providers?.[normalizedProviderId] ?? null;
+      savedProvider = record.config?.model?.providers?.[normalizedProviderId] ?? null;
     } catch { /* Fall through to the catalog environment fallback. */ }
   }
-  return resolveConfiguredProviderApiKey(normalizedProviderId, provider);
+
+  if (requested === MASKED_SECRET) {
+    if (
+      !savedProvider
+      || !providerCredentialScopeMatches(
+        normalizedProviderId,
+        savedProvider,
+        protocol,
+        endpoint,
+        allowOriginMatch,
+      )
+    ) {
+      return {
+        error: 'Enter the provider API key again after changing its protocol or endpoint.',
+      };
+    }
+    return {
+      apiKey: resolveConfiguredProviderApiKey(normalizedProviderId, savedProvider),
+    };
+  }
+
+  // An explicitly blank key means "use this catalog provider's environment
+  // variable". Do not silently fall back to a previously saved literal key.
+  const environmentApiKey = resolveConfiguredProviderApiKey(normalizedProviderId, null);
+  if (!environmentApiKey) return { apiKey: '' };
+  const scopeProvider = savedProvider || lookupCatalogProvider(normalizedProviderId);
+  if (
+    !scopeProvider
+    || !providerCredentialScopeMatches(
+      normalizedProviderId,
+      scopeProvider,
+      protocol,
+      endpoint,
+      allowOriginMatch,
+    )
+  ) {
+    return {
+      error: 'Enter the provider API key explicitly after changing its protocol or endpoint.',
+    };
+  }
+  return { apiKey: environmentApiKey };
 }
 
 function imageSupportResultFromProbe(probe) {
@@ -198,15 +280,31 @@ function containsMaskedValue(value) {
   return Object.values(value).some(containsMaskedValue);
 }
 
-function modelProviderCredentialScope(provider) {
+function modelProviderCredentialScope(providerId, provider) {
+  const catalog = lookupCatalogProvider(providerId);
   return {
-    protocol: typeof provider?.protocol === 'string'
-      ? provider.protocol.trim().toLowerCase()
-      : '',
-    url: typeof provider?.url === 'string'
-      ? provider.url.trim().replace(/\/+$/, '')
-      : '',
+    protocol: normalizeProviderProtocol(provider?.protocol || catalog?.protocol),
+    endpoint: canonicalProviderEndpoint(provider?.url || catalog?.defaultUrl),
   };
+}
+
+function validateMaskedModelProviderKeyReuse(nextConfig, previousConfig) {
+  const nextProviders = nextConfig?.model?.providers;
+  const previousProviders = previousConfig?.model?.providers;
+  if (!isRecord(nextProviders) || !isRecord(previousProviders)) return null;
+
+  for (const [providerId, nextProvider] of Object.entries(nextProviders)) {
+    if (nextProvider?.apiKey !== MASKED_SECRET) continue;
+    const previousProvider = previousProviders[providerId];
+    if (!isRecord(previousProvider)) continue;
+    if (
+      JSON.stringify(modelProviderCredentialScope(providerId, nextProvider))
+      !== JSON.stringify(modelProviderCredentialScope(providerId, previousProvider))
+    ) {
+      return `Enter the API key again after changing provider ${providerId}'s protocol or URL.`;
+    }
+  }
+  return null;
 }
 
 function restoreRenamedProviderSecrets(nextConfig, previousConfig, rawRenames) {
@@ -242,8 +340,8 @@ function restoreRenamedProviderSecrets(nextConfig, previousConfig, rawRenames) {
 
     if (!containsMaskedValue(nextProvider)) continue;
     if (
-      JSON.stringify(modelProviderCredentialScope(previousProvider))
-      !== JSON.stringify(modelProviderCredentialScope(nextProvider))
+      JSON.stringify(modelProviderCredentialScope(from, previousProvider))
+      !== JSON.stringify(modelProviderCredentialScope(to, nextProvider))
     ) {
       return {
         error: `Enter provider credentials again when renaming ${from} to ${to} and changing its protocol or URL.`,
@@ -687,6 +785,13 @@ router.put('/', async (req, res) => {
         return res.status(400).json({ error: renamedProviders.error, ...(renamedProviders.code ? { code: renamedProviders.code } : {}) });
       }
       const renamedConfig = renamedProviders.config;
+      const maskedProviderKeyError = validateMaskedModelProviderKeyReuse(
+        renamedConfig,
+        diskRecord.rawYaml ?? {},
+      );
+      if (maskedProviderKeyError) {
+        return res.status(400).json({ error: maskedProviderKeyError });
+      }
       const maskedKeyError = validateMaskedWebSearchKeyReuse(renamedConfig, diskRecord.rawYaml ?? {});
       if (maskedKeyError) {
         return res.status(400).json({ error: maskedKeyError });
@@ -765,6 +870,13 @@ router.put('/', async (req, res) => {
         return res.status(400).json({ error: renamedProviders.error, ...(renamedProviders.code ? { code: renamedProviders.code } : {}) });
       }
       const renamedConfig = renamedProviders.config;
+      const maskedProviderKeyError = validateMaskedModelProviderKeyReuse(
+        renamedConfig,
+        diskRecord.config,
+      );
+      if (maskedProviderKeyError) {
+        return res.status(400).json({ error: maskedProviderKeyError });
+      }
       const maskedKeyError = validateMaskedWebSearchKeyReuse(renamedConfig, diskRecord.config);
       if (maskedKeyError) {
         return res.status(400).json({ error: maskedKeyError });
@@ -920,7 +1032,6 @@ router.get('/provider', (_req, res) => {
 
 router.post('/models', async (req, res) => {
   const { providerId, providerType, baseUrl, apiKey } = req.body || {};
-  const effectiveApiKey = resolveProviderRequestApiKey(providerId, apiKey);
   if (!baseUrl) {
     return res.status(400).json({ ok: false, error: 'baseUrl is required' });
   }
@@ -928,8 +1039,32 @@ router.post('/models', async (req, res) => {
   const normalizedType = String(providerType || '').toLowerCase();
   const isAnthropic = normalizedType === 'anthropic';
   const isGoogle = normalizedType === 'google';
+  const isOpenAIResponses = normalizedType === 'openai-responses' || normalizedType === 'responses';
   const normalizedBaseUrl = String(baseUrl).trim().replace(/\/+$/, '');
-  const protocol = isGoogle ? 'google' : isAnthropic ? 'anthropic' : 'openai';
+  const protocol = isGoogle
+    ? 'google'
+    : isAnthropic
+      ? 'anthropic'
+      : isOpenAIResponses
+        ? 'openai-responses'
+        : 'openai';
+  const credential = resolveProviderRequestApiKey({
+    providerId,
+    submittedApiKey: apiKey,
+    protocol,
+    endpoint: normalizedBaseUrl,
+    // Some providers expose their model list at a path beside, rather than
+    // below, the configured inference base URL.
+    allowOriginMatch: true,
+  });
+  if (credential.error) {
+    return res.status(400).json({
+      ok: false,
+      code: 'CREDENTIAL_SCOPE_MISMATCH',
+      error: credential.error,
+    });
+  }
+  const effectiveApiKey = credential.apiKey;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new NetworkFetchError('network_timeout', 'Model list request timed out after 10s.')), 10_000);
 
@@ -977,9 +1112,8 @@ router.post('/models', async (req, res) => {
 router.post('/test-connection', async (req, res) => {
   const { providerId, providerType, baseUrl, apiKey, model } = req.body || {};
   const normalizedProviderId = String(providerId || '').trim().toLowerCase();
-  const effectiveApiKey = resolveProviderRequestApiKey(providerId, apiKey);
   const apiKeyRequired = normalizedProviderId !== 'ollama';
-  if (!baseUrl || !model || (apiKeyRequired && !effectiveApiKey)) {
+  if (!baseUrl || !model) {
     return res.status(400).json({
       ok: false,
       error: apiKeyRequired ? 'baseUrl, apiKey, and model are required' : 'baseUrl and model are required',
@@ -1000,6 +1134,26 @@ router.post('/test-connection', async (req, res) => {
       : isOpenAIResponses
         ? 'openai-responses'
         : 'openai';
+  const credential = resolveProviderRequestApiKey({
+    providerId,
+    submittedApiKey: apiKey,
+    protocol,
+    endpoint: normalizedBaseUrl,
+  });
+  if (credential.error) {
+    return res.status(400).json({
+      ok: false,
+      code: 'CREDENTIAL_SCOPE_MISMATCH',
+      error: credential.error,
+    });
+  }
+  const effectiveApiKey = credential.apiKey;
+  if (apiKeyRequired && !effectiveApiKey) {
+    return res.status(400).json({
+      ok: false,
+      error: 'baseUrl, apiKey, and model are required',
+    });
+  }
 
   // Keep the long-standing response body while sharing the protocol request
   // construction and endpoint fallback logic with the versioned onboarding API.
@@ -1037,11 +1191,19 @@ router.post('/test-connection', async (req, res) => {
 // exposing the API under /api/config for the settings UI.
 async function configModelConnectionTestsHandler(req, res) {
   req.allowPresetEndpointOverride = true;
-  const effectiveApiKey = resolveProviderRequestApiKey(
-    req.body?.providerId,
-    req.body?.apiKey,
-  );
-  req.body = { ...req.body, apiKey: effectiveApiKey };
+  const credential = resolveProviderRequestApiKey({
+    providerId: req.body?.providerId,
+    submittedApiKey: req.body?.apiKey,
+    protocol: req.body?.protocol,
+    endpoint: req.body?.endpoint,
+  });
+  if (credential.error) {
+    return res.status(400).json({
+      code: 'CREDENTIAL_SCOPE_MISMATCH',
+      message: credential.error,
+    });
+  }
+  req.body = { ...req.body, apiKey: credential.apiKey };
   return modelConnectionTestsHandler(req, res);
 }
 router.post('/test-connections', modelTestRateLimiter, configModelConnectionTestsHandler);
