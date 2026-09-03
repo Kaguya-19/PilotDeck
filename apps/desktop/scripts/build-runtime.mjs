@@ -25,7 +25,6 @@ const desktopRoot = resolve(__dirname, "..");
 const repoRoot = resolve(desktopRoot, "..", "..");
 const runtimePackageRoot = resolve(desktopRoot, "runtime");
 const defaultRuntimeRoot = resolve(desktopRoot, ".runtime", "app");
-const x64RuntimeRoot = resolve(desktopRoot, ".runtime", "app-x64");
 const desktopPackage = readJson(resolve(desktopRoot, "package.json"));
 const bundledNodeBinary = resolve(
   desktopRoot,
@@ -34,7 +33,11 @@ const bundledNodeBinary = resolve(
   process.platform === "win32" ? "node.exe" : "bin/node",
 );
 let runtimeRoot = defaultRuntimeRoot;
-let currentRuntimeArch = process.arch;
+const targetRuntimeArch = (process.env.PILOTDECK_DESKTOP_NODE_ARCH || process.arch).trim().toLowerCase();
+if (!new Set(["arm64", "x64"]).has(targetRuntimeArch)) {
+  throw new Error(`Unsupported desktop runtime architecture: ${targetRuntimeArch}`);
+}
+let currentRuntimeArch = targetRuntimeArch;
 const DESKTOP_BUILD = desktopPackage.version;
 const DESKTOP_PLAYWRIGHT_BROWSER = "chrome-for-testing";
 const uiServerDependencies = [
@@ -228,10 +231,7 @@ function prepareRuntimeTree(installEnv = process.env) {
   const uiPackage = readJson(resolve(repoRoot, "ui", "package.json"));
   const runtimePackage = readJson(resolve(runtimePackageRoot, "package.json"));
   verifyRuntimePackageManifest(rootPackage, uiPackage, runtimePackage);
-  const installRoot = resolve(
-    desktopRoot,
-    runtimeRoot === x64RuntimeRoot ? ".runtime-install-x64" : ".runtime-install",
-  );
+  const installRoot = resolve(desktopRoot, ".runtime-install");
   rmSync(installRoot, { recursive: true, force: true });
   mkdirSync(installRoot, { recursive: true });
   cpSync(resolve(runtimePackageRoot, "package.json"), resolve(installRoot, "package.json"));
@@ -491,15 +491,6 @@ function rewriteUiServerSourceImports(serverRoot) {
 
 run(process.execPath, [resolve(desktopRoot, "scripts", "download-node.mjs")], desktopRoot);
 assertBundledNodeRuntime();
-if (
-  process.platform === "darwin" &&
-  process.env.PILOTDECK_DESKTOP_NODE_ARCH === "universal" &&
-  process.arch !== "arm64"
-) {
-  throw new Error(
-    "macOS universal desktop builds must run on an Apple Silicon host so arm64 and x64 native modules can both be staged and verified.",
-  );
-}
 if (process.platform === "win32") {
   run(process.execPath, [resolve(desktopRoot, "scripts", "download-git-bash.mjs")], desktopRoot);
 }
@@ -529,16 +520,16 @@ for (const file of sourceRequired) {
 
 function stageRuntime(root, env = process.env, options = {}) {
   runtimeRoot = root;
-  currentRuntimeArch = options.runtimeArch || process.arch;
+  currentRuntimeArch = options.runtimeArch || targetRuntimeArch;
   try {
     prepareRuntimeTree(env);
     pruneRuntimeTree();
   } finally {
-    currentRuntimeArch = process.arch;
+    currentRuntimeArch = targetRuntimeArch;
   }
 }
 
-function verifyRuntime(root, label = "runtime", runtimeArch = process.arch) {
+function verifyRuntime(root, label = "runtime", runtimeArch = targetRuntimeArch) {
   const previousRuntimeRoot = runtimeRoot;
   runtimeRoot = root;
 
@@ -638,33 +629,5 @@ function verifyRuntimeNativeModule(moduleName, label, runtimeArch) {
   }
 }
 
-function shouldStageX64Runtime() {
-  return process.platform === "darwin" && process.env.PILOTDECK_DESKTOP_NODE_ARCH === "universal";
-}
-
-function prepareRuntimePlaceholders() {
-  if (shouldStageX64Runtime()) return;
-  rmSync(x64RuntimeRoot, { recursive: true, force: true });
-  mkdirSync(x64RuntimeRoot, { recursive: true });
-  writeFileSync(resolve(x64RuntimeRoot, ".placeholder"), "not used for this build\n");
-}
-
-stageRuntime(defaultRuntimeRoot);
-verifyRuntime(defaultRuntimeRoot);
-
-if (shouldStageX64Runtime()) {
-  stageRuntime(
-    x64RuntimeRoot,
-    {
-      ...process.env,
-      npm_config_arch: "x64",
-      npm_config_target_arch: "x64",
-      npm_config_platform: "darwin",
-      npm_config_target_platform: "darwin",
-    },
-    { runtimeArch: "x64" },
-  );
-  verifyRuntime(x64RuntimeRoot, "x64 runtime", "x64");
-} else {
-  prepareRuntimePlaceholders();
-}
+stageRuntime(defaultRuntimeRoot, process.env, { runtimeArch: targetRuntimeArch });
+verifyRuntime(defaultRuntimeRoot, "runtime", targetRuntimeArch);

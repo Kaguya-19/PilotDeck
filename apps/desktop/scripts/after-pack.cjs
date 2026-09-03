@@ -153,22 +153,15 @@ module.exports = async function afterPack(context) {
   const desktopRoot = resolve(__dirname, "..");
   const resourcesDir = getResourcesDir(context);
   const source = resolve(desktopRoot, ".runtime", "app", "node_modules");
-  const x64Source = resolve(desktopRoot, ".runtime", "app-x64", "node_modules");
   const runtimeRoot = join(resourcesDir, "runtime");
-  const x64RuntimeRoot = join(resourcesDir, "runtime-x64");
   const nodeRoot = join(resourcesDir, "node");
   const target = copyRuntimeNodeModules(source, runtimeRoot, "runtime");
-  const x64Target = existsSync(join(x64RuntimeRoot, "package.json"))
-    ? copyRuntimeNodeModules(x64Source, x64RuntimeRoot, "x64 runtime")
-    : null;
   const runtimeSymlinks = materializeSymlinks(runtimeRoot);
-  const x64RuntimeSymlinks = existsSync(x64RuntimeRoot) ? materializeSymlinks(x64RuntimeRoot) : 0;
   const nodeSymlinks = materializeSymlinks(nodeRoot);
   console.log(
-    `[desktop] afterPack materialized ${runtimeSymlinks} runtime symlinks, ${x64RuntimeSymlinks} x64 runtime symlinks, and ${nodeSymlinks} node symlinks`,
+    `[desktop] afterPack materialized ${runtimeSymlinks} runtime symlinks and ${nodeSymlinks} node symlinks`,
   );
 
   verifyPackagedRuntime(target, context, "runtime");
-  if (x64Target) verifyPackagedRuntime(x64Target, context, "x64 runtime");
   ensureMacSigningFallback(context);
 };

@@ -6,6 +6,7 @@ import {
   normalizeRepository,
   normalizeDesktopReleaseVersion,
   parseVersionParts,
+  selectDesktopAsset,
 } from './desktopUpdateService.js';
 
 describe('desktop release versions', () => {
@@ -33,5 +34,28 @@ describe('desktop release versions', () => {
 
   it('exposes the normalized version from GitHub releases', () => {
     expect(mapGitHubRelease({ tag_name: 'desktop-v2026.09.02-r2' }).version).toBe('2026.902.1');
+  });
+
+  it('selects the native macOS installer for the current architecture', () => {
+    const release = {
+      assets: [
+        { name: 'PilotDeck-2026.903.0-mac-x64.dmg' },
+        { name: 'PilotDeck-2026.903.0-mac-arm64.dmg' },
+        { name: 'PilotDeck-2026.903.0-mac-universal.dmg' },
+      ],
+    };
+
+    expect(selectDesktopAsset(release, { platform: 'darwin', arch: 'arm64' })?.name)
+      .toBe('PilotDeck-2026.903.0-mac-arm64.dmg');
+    expect(selectDesktopAsset(release, { platform: 'darwin', arch: 'x64' })?.name)
+      .toBe('PilotDeck-2026.903.0-mac-x64.dmg');
+  });
+
+  it('never offers a macOS installer built only for another architecture', () => {
+    const release = {
+      assets: [{ name: 'PilotDeck-2026.903.0-mac-x64.dmg' }],
+    };
+
+    expect(selectDesktopAsset(release, { platform: 'darwin', arch: 'arm64' })).toBeNull();
   });
 });
