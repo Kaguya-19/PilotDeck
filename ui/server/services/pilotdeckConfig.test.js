@@ -11,6 +11,7 @@ import {
     resolveConfiguredProviderApiKey,
     resolveModel,
     sanitizeProviderCredentials,
+    serializePilotDeckConfigResponse,
     validatePilotDeckConfig,
     writePilotDeckConfig,
 } from './pilotdeckConfig.js';
@@ -82,6 +83,16 @@ describe('readPilotDeckConfigFile fallback behavior', () => {
         expect(record.parseError).toEqual(expect.any(String));
         expect(record.config.schemaVersion).toBe(1);
         expect(record.config.model.providers).toEqual({});
+    });
+
+    it('serializes a safe revision token with the masked disk snapshot', () => {
+        useTempConfig('schemaVersion: 1\nadapters:\n  feishu:\n    appSecret: super-secret\n');
+
+        const response = serializePilotDeckConfigResponse(readPilotDeckConfigFile());
+
+        expect(response.revision).toMatch(/^[a-f0-9]{64}$/);
+        expect(response.raw).toContain('appSecret: "********"');
+        expect(response.raw).not.toContain('super-secret');
     });
 });
 

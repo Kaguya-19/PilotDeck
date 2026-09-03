@@ -71,6 +71,50 @@ describe("usePilotDeckConfig saves", () => {
     });
   });
 
+  it.each(["watcher", "gateway-save"])(
+    "uses the revision from a clean %s update on the next save",
+    async (source) => {
+      const writeBodies: string[] = [];
+      mocks.authenticatedFetch.mockImplementation(
+        (url: string, options?: RequestInit) => {
+          if (url === "/api/config" && !options?.method) {
+            return Promise.resolve(response(configResponse("initial", "revision-initial")));
+          }
+          if (url === "/api/config/validate") {
+            return Promise.resolve(response({ valid: true, errors: [], warnings: [] }));
+          }
+          if (url === "/api/config" && options?.method === "PUT") {
+            writeBodies.push(String(options.body));
+            return Promise.resolve(response(configResponse("saved", "revision-saved")));
+          }
+          throw new Error(`Unexpected request: ${url}`);
+        },
+      );
+
+      const { result } = renderHook(() => usePilotDeckConfig(), { wrapper: ConfigWrapper });
+      await waitFor(() => expect(result.current.loading).toBe(false));
+
+      act(() => {
+        mocks.listener?.({
+          type: "config:reloaded",
+          source,
+          ...configResponse("updated", "revision-updated"),
+        });
+      });
+      expect(result.current.raw).toBe("updated");
+
+      act(() => result.current.setRaw("draft"));
+      await act(async () => {
+        await result.current.save();
+      });
+
+      expect(JSON.parse(writeBodies[0])).toMatchObject({
+        raw: "draft",
+        baseRevision: "revision-updated",
+      });
+    },
+  );
+
   it("serializes immediate saves and prevents an older response replacing the latest draft", async () => {
     const firstWrite = deferred<TestResponse>();
     const secondWrite = deferred<TestResponse>();

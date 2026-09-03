@@ -2,6 +2,7 @@ import fs from 'fs';
 import fsPromises from 'fs/promises';
 import os from 'os';
 import path from 'path';
+import { createHash } from 'crypto';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { parseGatewayConfig } from '../../../src/pilot/config/parseGatewayConfig.js';
 import { parseToolsConfig } from '../../../src/pilot/config/parseToolsConfig.js';
@@ -752,6 +753,55 @@ export function readPilotDeckConfigFile() {
   }
   const config = normalizePilotDeckConfig(parsed);
   return { exists: true, configPath, raw, config, rawYaml: parsed, parseError: null };
+}
+
+export function configRevision(raw) {
+  return createHash('sha256').update(String(raw ?? '')).digest('hex');
+}
+
+// Keep every config publisher on the same masked representation and revision.
+// The revision deliberately matches what the UI receives, not the secret-bearing
+// source file, so it can be sent back safely as an optimistic-lock token.
+export function serializePilotDeckConfigResponse(record, reloadResult = null) {
+  if (record.parseError) {
+    return {
+      exists: record.exists,
+      path: record.configPath,
+      raw: record.raw,
+      revision: configRevision(record.raw),
+      config: maskSecrets(record.config),
+      configDisabled: true,
+      parseError: record.parseError,
+      validation: {
+        valid: false,
+        errors: [`Invalid YAML: ${record.parseError}`],
+        warnings: [],
+      },
+      ...(reloadResult ? { reload: reloadResult } : {}),
+    };
+  }
+
+  const validation = validatePilotDeckConfig(record.config);
+  const maskedConfig = maskSecrets(record.config);
+  const hasDiskYaml = record.rawYaml
+    && typeof record.rawYaml === 'object'
+    && Object.keys(record.rawYaml).length > 0;
+  const raw = hasDiskYaml
+    ? rawYamlToMaskedString(record.rawYaml)
+    : configToYaml(maskedConfig);
+  return {
+    exists: record.exists,
+    path: record.configPath,
+    raw,
+    revision: configRevision(raw),
+    config: maskedConfig,
+    validation: {
+      valid: validation.valid,
+      errors: validation.errors,
+      warnings: validation.warnings,
+    },
+    ...(reloadResult ? { reload: reloadResult } : {}),
+  };
 }
 
 // Keep `router.scenarios.default` aligned with `agent.model` whenever we

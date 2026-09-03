@@ -2,7 +2,6 @@ import express from 'express';
 import fsPromises from 'fs/promises';
 import path from 'path';
 import { spawn } from 'child_process';
-import { createHash } from 'crypto';
 import { prepareBackgroundSpawnOptions } from '../utils/processSpawn.js';
 import { parse as parseYaml } from 'yaml';
 import {
@@ -16,6 +15,7 @@ import {
   rawYamlToMaskedString,
   readPilotDeckConfigFile,
   resolveConfiguredProviderApiKey,
+  serializePilotDeckConfigResponse,
   withPilotDeckConfigWrite,
   validatePilotDeckConfig,
   writePilotDeckConfig,
@@ -531,53 +531,6 @@ function validateNewReferencedModelBindings(previousConfig, nextConfig, bound, r
   return null;
 }
 
-function configRevision(raw) {
-  return createHash('sha256').update(String(raw ?? '')).digest('hex');
-}
-
-function serializeConfigResponse(record, reloadResult = null) {
-  if (record.parseError) {
-    return {
-      exists: record.exists,
-      path: record.configPath,
-      raw: record.raw,
-      revision: configRevision(record.raw),
-      config: maskSecrets(record.config),
-      configDisabled: true,
-      parseError: record.parseError,
-      validation: {
-        valid: false,
-        errors: [`Invalid YAML: ${record.parseError}`],
-        warnings: [],
-      },
-      ...(reloadResult ? { reload: reloadResult } : {}),
-    };
-  }
-
-  const validation = validatePilotDeckConfig(record.config);
-  const maskedConfig = maskSecrets(record.config);
-  // Prefer the disk's actual YAML for the "raw" view so non-ui-internal
-  // top-level segments (router/gateway/adapters/extension/cron/alwaysOn)
-  // survive the trip from disk → UI. Fall back to the lossy template
-  // only when there's no disk file yet (fresh install), so the editor
-  // still has something editable to render.
-  const hasDiskYaml = record.rawYaml && typeof record.rawYaml === 'object' && Object.keys(record.rawYaml).length > 0;
-  const raw = hasDiskYaml ? rawYamlToMaskedString(record.rawYaml) : configToYaml(maskedConfig);
-  return {
-    exists: record.exists,
-    path: record.configPath,
-    raw,
-    revision: configRevision(raw),
-    config: maskedConfig,
-    validation: {
-      valid: validation.valid,
-      errors: validation.errors,
-      warnings: validation.warnings,
-    },
-    ...(reloadResult ? { reload: reloadResult } : {}),
-  };
-}
-
 function broadcastConfigEvent(payload) {
   process.emit('pilotdeck:config-broadcast', payload);
 }
@@ -664,7 +617,7 @@ function isExpectedModelsJsonBody(protocol, responseText) {
 router.get('/', (_req, res) => {
   try {
     const record = readPilotDeckConfigFile();
-    res.json(serializeConfigResponse(record));
+    res.json(serializePilotDeckConfigResponse(record));
   } catch (error) {
     res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
   }
@@ -752,7 +705,7 @@ router.put('/', async (req, res) => {
       ? req.body.baseRevision.trim()
       : '';
     if (baseRevision) {
-      const currentRevision = serializeConfigResponse(diskRecord).revision;
+      const currentRevision = serializePilotDeckConfigResponse(diskRecord).revision;
       if (baseRevision !== currentRevision) {
         return res.status(409).json({
           error: 'Config changed since this settings draft was loaded. Refresh and apply the change again.',
@@ -936,9 +889,9 @@ router.put('/', async (req, res) => {
     void notifyGatewayConfigReload();
     // Re-read disk so the response's `raw` field comes from the actual
     // (lossless) file rather than the lossy round-trip output, and so
-    // `serializeConfigResponse` has a `rawYaml` to render the full view.
+    // `serializePilotDeckConfigResponse` has a `rawYaml` to render the full view.
     const freshRecord = readPilotDeckConfigFile();
-    const response = serializeConfigResponse(freshRecord, reloadResult);
+    const response = serializePilotDeckConfigResponse(freshRecord, reloadResult);
     broadcastConfigEvent({ source: 'ui-save', ...response, timestamp: new Date().toISOString() });
     res.json(response);
     } catch (error) {
@@ -975,7 +928,7 @@ router.post('/reload', async (_req, res) => {
     }
     const reloadResult = await reloadPilotDeckConfig(record.config);
     void notifyGatewayConfigReload();
-    const response = serializeConfigResponse(record, reloadResult);
+    const response = serializePilotDeckConfigResponse(record, reloadResult);
     broadcastConfigEvent({ source: 'ui-reload', ...response, timestamp: new Date().toISOString() });
     res.json(response);
   } catch (error) {

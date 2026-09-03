@@ -59,7 +59,7 @@ export type ConfigSaveResult =
   | { ok: true }
   | { ok: false; error: string };
 
-type ReloadSource = 'ui-save' | 'ui-reload' | 'watcher' | 'refresh';
+type ReloadSource = 'ui-save' | 'ui-reload' | 'gateway-save' | 'watcher' | 'refresh';
 
 type ReloadInfo = {
   source: ReloadSource;
@@ -226,10 +226,11 @@ function usePilotDeckConfigState() {
         timestamp?: string;
       };
       const source: ReloadSource = payload.source ?? 'watcher';
+      const changedOutsideEditor = source === 'watcher' || source === 'gateway-save';
 
       const keepLocalDraft = (
         isDirtyRef.current
-        && source === 'watcher'
+        && changedOutsideEditor
       ) || (
         source === 'ui-save'
         && payload.raw !== rawRef.current
@@ -240,9 +241,11 @@ function usePilotDeckConfigState() {
       );
 
       if (keepLocalDraft) {
-        if (source === 'watcher') {
+        if (changedOutsideEditor) {
           setExternalChangeNotice(
-            'Config was changed on disk by an external edit. Your unsaved draft is kept — click Refresh to discard and load the new version.',
+            source === 'gateway-save'
+              ? 'Config was changed by channel settings. Your unsaved draft is kept — click Refresh before applying more changes.'
+              : 'Config was changed on disk by an external edit. Your unsaved draft is kept — click Refresh to discard and load the new version.',
           );
         }
         setValidation(payload.validation);
@@ -268,8 +271,12 @@ function usePilotDeckConfigState() {
         },
         source,
       );
-      if (source === 'watcher') {
-        setExternalChangeNotice('Config was updated on disk — the new version is now loaded.');
+      if (changedOutsideEditor) {
+        setExternalChangeNotice(
+          source === 'gateway-save'
+            ? null
+            : 'Config was updated on disk — the new version is now loaded.',
+        );
       } else {
         setExternalChangeNotice(null);
       }
