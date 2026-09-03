@@ -13,6 +13,7 @@ const tempDirs = [];
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
   vi.resetModules();
   delete process.env.PILOT_HOME;
   delete process.env.PILOTDECK_CONFIG_PATH;
@@ -390,6 +391,33 @@ describe('config test-connection route', () => {
 });
 
 describe('config model-list route', () => {
+  it('uses the catalog environment API key fallback', async () => {
+    const authHeaders = [];
+    vi.stubEnv('ANTHROPIC_API_KEY', 'sk-from-env');
+    vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
+      authHeaders.push(init?.headers?.['x-api-key']);
+      return jsonResponse({ data: [{ id: 'claude-sonnet-4.6', display_name: 'Claude Sonnet 4.6' }] });
+    }));
+
+    const { requestStatus } = await createConfigApp();
+    const response = await requestStatus('/api/config/models', {
+      method: 'POST',
+      body: JSON.stringify({
+        providerId: 'anthropic',
+        providerType: 'anthropic',
+        baseUrl: 'https://api.anthropic.com',
+        apiKey: '',
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({
+      ok: true,
+      models: [{ id: 'claude-sonnet-4.6', displayName: 'Claude Sonnet 4.6' }],
+    });
+    expect(authHeaders).toEqual(['sk-from-env']);
+  });
+
   it('preserves a non-JSON upstream authentication error status', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({
       ...jsonResponse({}, { ok: false, status: 401, statusText: 'Unauthorized' }),
@@ -560,6 +588,53 @@ describe('config model-pool connection test routes', () => {
     });
     expect(response.status).toBe(200);
     expect(probe).toHaveBeenCalledWith(expect.objectContaining({ apiKey: 'saved-secret' }));
+  });
+
+  it('tests and binds a provider that uses its catalog environment API key', async () => {
+    vi.stubEnv('OPENAI_API_KEY', 'sk-from-env');
+    const probe = vi.fn().mockResolvedValue({ ok: true });
+    const initial = {
+      agent: { model: 'openai/model-a' },
+      model: {
+        providers: {
+          openai: {
+            protocol: 'openai',
+            url: 'https://api.openai.com/v1',
+            models: { 'model-a': {} },
+          },
+        },
+      },
+    };
+    const { requestStatus, writePilotDeckConfig } = await createConfigApp({
+      config: initial,
+      probe,
+    });
+    const tested = await requestStatus('/api/config/test-connections', {
+      method: 'POST',
+      headers: { 'x-user': 'settings-user' },
+      body: JSON.stringify({
+        providerId: 'openai',
+        apiKey: '',
+        models: ['model-a'],
+        retryPolicy: retryPolicy(),
+      }),
+    });
+
+    expect(tested.status).toBe(200);
+    expect(probe).toHaveBeenCalledWith(expect.objectContaining({ apiKey: 'sk-from-env' }));
+
+    const saved = await requestStatus('/api/config', {
+      method: 'PUT',
+      headers: { 'x-user': 'settings-user' },
+      body: JSON.stringify({
+        config: initial,
+        modelTestBindings: [{ testId: tested.body.testId }],
+      }),
+    });
+
+    expect(saved.status).toBe(200);
+    expect(writePilotDeckConfig.mock.calls[0][0].model.providers.openai.models['model-a'].connectionTest)
+      .toMatchObject({ status: 'passed' });
   });
 
   it('isolates config test IDs by user', async () => {

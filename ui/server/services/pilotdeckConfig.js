@@ -30,6 +30,7 @@ const CONFIG_VERSION = 1;
 const PILOT_HOME_DIR = process.env.PILOT_HOME || path.join(os.homedir(), '.pilotdeck');
 const DEFAULT_CONFIG_PATH = path.join(PILOT_HOME_DIR, 'pilotdeck.yaml');
 const MASK = '********';
+const ENV_REFERENCE_PATTERN = /^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/;
 
 const SECRET_KEY_RE = /(api[_-]?key|token|secret|password|auth[_-]?token|access[_-]?token|bot[_-]?token|app[_-]?token|encoding[_-]?aes[_-]?key)$/i;
 const SECRET_EXACT_KEYS = new Set(['key', 'apiKey', 'api_key', 'authToken', 'accessToken']);
@@ -577,6 +578,16 @@ function effectiveProviderUrl(providerId, provider) {
   return catalog?.defaultUrl || '';
 }
 
+export function resolveConfiguredProviderApiKey(providerId, provider, env = process.env) {
+  const configured = normalizeString(provider?.apiKey);
+  if (configured) {
+    const envReference = ENV_REFERENCE_PATTERN.exec(configured);
+    return envReference ? normalizeString(env[envReference[1]]) : configured;
+  }
+  const envName = lookupCatalogProvider(providerId)?.apiKeyEnvVar;
+  return envName ? normalizeString(env[envName]) : '';
+}
+
 export function buildRuntimeEnv(config) {
   const normalized = normalizePilotDeckConfig(config);
   const main = resolveModel(normalized, normalized.agent.model, { allowMissing: true });
@@ -602,17 +613,26 @@ export function buildRuntimeEnv(config) {
 
   if (main) {
     const mainUrl = effectiveProviderUrl(main.providerId, main.provider);
+    const mainApiKey = resolveConfiguredProviderApiKey(main.providerId, main.provider);
+    const configuredMainApiKey = normalizeString(main.provider.apiKey);
+    const usesEnvironmentApiKey = !configuredMainApiKey
+      || ENV_REFERENCE_PATTERN.test(configuredMainApiKey);
     env.PILOTDECK_API_BASE_URL = mainUrl;
-    env.PILOTDECK_API_KEY = main.provider.apiKey || '';
+    env.PILOTDECK_API_KEY = mainApiKey;
     env.PILOTDECK_MODEL = main.model;
     env.OPENAI_BASE_URL = mainUrl;
-    env.OPENAI_API_KEY = main.provider.apiKey || '';
+    // Do not overwrite the environment variables that are themselves the
+    // credential source. Keeping them intact also allows switching between
+    // multiple env-backed catalog providers without cross-contaminating keys.
+    if (!usesEnvironmentApiKey) {
+      env.OPENAI_API_KEY = mainApiKey;
+      env.ANTHROPIC_API_KEY = mainApiKey;
+      env.GEMINI_API_KEY = mainApiKey;
+      env.GOOGLE_API_KEY = mainApiKey;
+      env.GOOGLE_GENERATIVE_AI_API_KEY = mainApiKey;
+    }
     env.OPENAI_MODEL = main.model;
-    env.ANTHROPIC_API_KEY = main.provider.apiKey || '';
     env.ANTHROPIC_MODEL = main.model;
-    env.GEMINI_API_KEY = main.provider.apiKey || '';
-    env.GOOGLE_API_KEY = main.provider.apiKey || '';
-    env.GOOGLE_GENERATIVE_AI_API_KEY = main.provider.apiKey || '';
     env.GEMINI_MODEL = main.model;
   }
 
@@ -644,7 +664,10 @@ export function buildRuntimeEnv(config) {
     env.PILOTDECK_MEMORY_MODEL = memory.model;
     env.PILOTDECK_MEMORY_PROVIDER = memory.providerId;
     env.PILOTDECK_MEMORY_BASE_URL = effectiveProviderUrl(memory.providerId, memory.provider);
-    env.PILOTDECK_MEMORY_API_KEY = memory.provider.apiKey || '';
+    env.PILOTDECK_MEMORY_API_KEY = resolveConfiguredProviderApiKey(
+      memory.providerId,
+      memory.provider,
+    );
     env.PILOTDECK_MEMORY_API_TYPE = normalizeString(normalized.memory?.apiType)
       || providerProtocolToMemoryApi(memory.provider.protocol);
   }
@@ -676,7 +699,7 @@ export function buildMemoryLlmOptions(config) {
     apiType: normalizeString(normalized.memory?.apiType)
       || providerProtocolToMemoryApi(memory.provider.protocol),
     baseUrl: effectiveProviderUrl(memory.providerId, memory.provider),
-    apiKey: memory.provider.apiKey || '',
+    apiKey: resolveConfiguredProviderApiKey(memory.providerId, memory.provider),
     headers: isRecord(memory.provider.headers) ? memory.provider.headers : {},
   };
 }

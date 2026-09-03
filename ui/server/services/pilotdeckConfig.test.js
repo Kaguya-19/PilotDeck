@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
     buildDefaultPilotDeckConfig,
     buildMemoryLlmOptions,
@@ -16,6 +16,7 @@ import {
 const tempDirs = [];
 
 afterEach(() => {
+    vi.unstubAllEnvs();
     delete process.env.PILOTDECK_CONFIG_PATH;
     for (const dir of tempDirs.splice(0)) {
         rmSync(dir, { recursive: true, force: true });
@@ -104,6 +105,30 @@ describe('validatePilotDeckConfig gateway validation', () => {
             PILOTDECK_API_BASE_URL: 'https://api.deepseek.com/v1',
             PILOTDECK_MEMORY_BASE_URL: 'https://api.deepseek.com/v1',
         });
+    });
+
+    it('resolves catalog environment API keys for runtime and memory settings', () => {
+        vi.stubEnv('ANTHROPIC_API_KEY', ' sk-from-env ');
+        const config = {
+            agent: { model: 'anthropic/claude' },
+            model: {
+                providers: {
+                    anthropic: {
+                        protocol: 'anthropic',
+                        url: '',
+                        models: { claude: {} },
+                    },
+                },
+            },
+            memory: { enabled: true, model: 'anthropic/claude' },
+        };
+
+        expect(buildRuntimeEnv(config)).toMatchObject({
+            PILOTDECK_API_KEY: 'sk-from-env',
+            PILOTDECK_MEMORY_API_KEY: 'sk-from-env',
+        });
+        expect(buildRuntimeEnv(config)).not.toHaveProperty('OPENAI_API_KEY');
+        expect(buildMemoryLlmOptions(config).apiKey).toBe('sk-from-env');
     });
 
     it('accepts an omitted URL for catalog providers', () => {

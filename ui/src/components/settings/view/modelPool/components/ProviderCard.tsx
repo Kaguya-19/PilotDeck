@@ -12,10 +12,11 @@ import {
 import { Button } from "../../../../../shared/view/ui";
 import { isImeEnterEvent } from "../../../../../utils/ime";
 import { cn } from "../../../../../lib/utils";
-import type {
-  CatalogModel,
-  CatalogProvider,
-  CatalogProviderProtocol,
+import {
+  findCatalogProviderById,
+  type CatalogModel,
+  type CatalogProvider,
+  type CatalogProviderProtocol,
 } from "../../../../../shared/catalogProviders";
 import {
   fetchProviderModels,
@@ -62,15 +63,19 @@ export default function ProviderCard({
   const [showProviderAdvanced, setShowProviderAdvanced] = useState(false);
   const [providerIdDraft, setProviderIdDraft] = useState(providerId);
   const [providerIdError, setProviderIdError] = useState("");
-  const isMaskedKey = isMaskedSecret(draftProvider.apiKey);
-  const protocol = draftProvider.protocol ?? catalogEntry?.protocol ?? "openai";
-  const effectiveUrl = draftProvider.url || catalogEntry?.defaultUrl || "";
-  const enabledModels = Object.keys(draftProvider.models ?? {});
   const trimmedProviderId = providerIdDraft.trim();
-  const providerRequiresApiKey = trimmedProviderId === "ollama"
+  const effectiveCatalogEntry = catalogEntry?.id === trimmedProviderId
+    ? catalogEntry
+    : findCatalogProviderById(trimmedProviderId);
+  const isMaskedKey = isMaskedSecret(draftProvider.apiKey);
+  const protocol = draftProvider.protocol ?? effectiveCatalogEntry?.protocol ?? "openai";
+  const effectiveUrl = draftProvider.url || effectiveCatalogEntry?.defaultUrl || "";
+  const enabledModels = Object.keys(draftProvider.models ?? {});
+  const providerRequiresApiKeyInForm = trimmedProviderId === "ollama"
     ? false
-    : catalogEntry?.id === trimmedProviderId
-      ? catalogEntry.requiresApiKey !== false
+    : effectiveCatalogEntry
+      ? effectiveCatalogEntry.requiresApiKey !== false
+        && !effectiveCatalogEntry.apiKeyEnvVar
       : true;
   const [apiModels, setApiModels] = useState<ApiModelListItem[] | null>(null);
   const [apiModelsStatus, setApiModelsStatus] = useState<
@@ -79,7 +84,7 @@ export default function ProviderCard({
   const [apiModelsError, setApiModelsError] = useState("");
   const displayName = providerDisplayName(
     providerIdDraft || providerId,
-    catalogEntry,
+    effectiveCatalogEntry,
     t("pilotDeckConfig.panels.models.customProvider"),
   );
 
@@ -115,7 +120,7 @@ export default function ProviderCard({
       setProviderIdError(t("pilotDeckConfig.panels.models.providerUrlRequired"));
       return;
     }
-    if (providerRequiresApiKey && !draftProvider.apiKey?.trim()) {
+    if (providerRequiresApiKeyInForm && !draftProvider.apiKey?.trim()) {
       setProviderIdError(t("pilotDeckConfig.panels.models.providerApiKeyRequired"));
       return;
     }
@@ -169,9 +174,9 @@ export default function ProviderCard({
   };
 
   const visibleModels: Array<ApiModelListItem | CatalogModel> =
-    apiModels ?? catalogEntry?.models ?? [];
+    apiModels ?? effectiveCatalogEntry?.models ?? [];
   const canFetchModels = Boolean(
-    effectiveUrl && (!providerRequiresApiKey || draftProvider.apiKey),
+    effectiveUrl && (!providerRequiresApiKeyInForm || draftProvider.apiKey),
   );
 
   const refreshModels = async () => {
@@ -295,17 +300,17 @@ export default function ProviderCard({
           </span>
           <TextInput
             value={draftProvider.url}
-            placeholder={catalogEntry?.defaultUrl || "https://api.example.com/v1"}
+            placeholder={effectiveCatalogEntry?.defaultUrl || "https://api.example.com/v1"}
             monospace
             onChange={(v) => update({ url: v })}
           />
           <span className="mt-0.5 block text-[10px] text-muted-foreground/70">
             {t("pilotDeckConfig.panels.models.baseUrlHint")}
           </span>
-          {!draftProvider.url && catalogEntry && (
+          {!draftProvider.url && effectiveCatalogEntry && (
             <span className="mt-0.5 block text-[10px] text-muted-foreground/70">
               {t("pilotDeckConfig.panels.models.defaultsTo")}{" "}
-              <code className="font-mono">{catalogEntry.defaultUrl}</code>{" "}
+              <code className="font-mono">{effectiveCatalogEntry.defaultUrl}</code>{" "}
               {t("pilotDeckConfig.panels.models.fromCatalog")}
             </span>
           )}
@@ -321,13 +326,13 @@ export default function ProviderCard({
       <label className="block text-xs text-muted-foreground">
         <span className="mb-1 block">
           {t("pilotDeckConfig.panels.models.apiKey")}
-          {!providerRequiresApiKey
+          {!providerRequiresApiKeyInForm
             ? ` (${t("pilotDeckConfig.panels.models.optional")})`
             : ""}
         </span>
         <SecretTextInput
           value={draftProvider.apiKey}
-          emptyPlaceholder={providerRequiresApiKey ? "sk-..." : ""}
+          emptyPlaceholder={providerRequiresApiKeyInForm ? "sk-..." : ""}
           maskedPlaceholder={t("pilotDeckConfig.panels.models.maskedKeyPlaceholder")}
           onChange={(v) => update({ apiKey: v })}
         />

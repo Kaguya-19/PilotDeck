@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PilotDeckConfig } from "../types";
+import { findCatalogProviderById } from "../../../../../shared/catalogProviders";
 import ModelsSection from "./ModelsSection";
 import ProviderCard from "./ProviderCard";
 
@@ -56,6 +57,37 @@ describe("model provider drafts", () => {
     expect(screen.getByText(
       "pilotDeckConfig.panels.models.providerUrlRequired",
     )).toBeTruthy();
+  });
+
+  it("allows a catalog provider to use its environment API key fallback", async () => {
+    const onSave = vi.fn(async () => ({ ok: true }));
+
+    render(
+      <ProviderCard
+        providerId="anthropic"
+        provider={{
+          protocol: "anthropic",
+          url: "https://api.anthropic.com",
+          models: { "claude-sonnet-4.6": {} },
+        }}
+        catalogEntry={findCatalogProviderById("anthropic")}
+        initialEditing
+        onSave={onSave}
+        onRemove={vi.fn()}
+      />,
+    );
+
+    expect((screen.getByRole("button", {
+      name: "Fetch API models",
+    }) as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(screen.getByRole("button", {
+      name: "settingsPage.actions.save",
+    }));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText(
+      "pilotDeckConfig.panels.models.providerApiKeyRequired",
+    )).toBeNull();
   });
 
   it("prevents duplicate saves while the first provider save is pending", async () => {

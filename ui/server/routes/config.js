@@ -15,6 +15,7 @@ import {
   preserveMaskedSecrets,
   rawYamlToMaskedString,
   readPilotDeckConfigFile,
+  resolveConfiguredProviderApiKey,
   withPilotDeckConfigWrite,
   validatePilotDeckConfig,
   writePilotDeckConfig,
@@ -63,6 +64,22 @@ const DEFAULT_GLM_WEB_SEARCH_ENDPOINT = 'https://api.z.ai/api/paas/v4/web_search
 const DEFAULT_TAVILY_WEB_SEARCH_ENDPOINT = 'https://api.tavily.com/search';
 const DEFAULT_SERPER_WEB_SEARCH_ENDPOINT = 'https://google.serper.dev/search';
 const DEFAULT_BRAVE_WEB_SEARCH_ENDPOINT = 'https://api.search.brave.com/res/v1/web/search';
+
+function resolveProviderRequestApiKey(providerId, submittedApiKey) {
+  const normalizedProviderId = typeof providerId === 'string' ? providerId.trim() : '';
+  const requested = typeof submittedApiKey === 'string' ? submittedApiKey.trim() : '';
+  let provider = requested && requested !== MASKED_SECRET
+    ? { apiKey: requested }
+    : null;
+
+  if (!provider && normalizedProviderId) {
+    try {
+      const record = readPilotDeckConfigFile();
+      provider = record.config?.model?.providers?.[normalizedProviderId] ?? null;
+    } catch { /* Fall through to the catalog environment fallback. */ }
+  }
+  return resolveConfiguredProviderApiKey(normalizedProviderId, provider);
+}
 
 function imageSupportResultFromProbe(probe) {
   if (probe.ok) {
@@ -340,7 +357,12 @@ function bindModelConnectionTests(config, bindings, userId) {
     if (!record) return { error: { status: 404, code: 'TEST_NOT_FOUND', message: 'Connection test was not found.' } };
     if (record.status !== 'passed') return { error: { status: 409, code: 'TEST_NOT_PASSED', message: 'Complete a passing connection test before saving.' } };
     const provider = config?.model?.providers?.[record.provider.providerId];
-    if (!provider || !connectionTestMatchesProvider(record, { ...provider, providerId: record.provider.providerId })) {
+    const testedProvider = provider && {
+      ...provider,
+      providerId: record.provider.providerId,
+      apiKey: resolveConfiguredProviderApiKey(record.provider.providerId, provider),
+    };
+    if (!provider || !connectionTestMatchesProvider(record, testedProvider)) {
       return { error: { status: 409, code: 'CONFIGURATION_MISMATCH', message: 'Configuration does not match the tested provider.' } };
     }
     for (const tested of record.models) {
@@ -898,14 +920,7 @@ router.get('/provider', (_req, res) => {
 
 router.post('/models', async (req, res) => {
   const { providerId, providerType, baseUrl, apiKey } = req.body || {};
-  let effectiveApiKey = typeof apiKey === 'string' ? apiKey : '';
-  if ((!effectiveApiKey || effectiveApiKey === '********') && typeof providerId === 'string' && providerId.trim()) {
-    try {
-      const record = readPilotDeckConfigFile();
-      const provider = record.config?.model?.providers?.[providerId.trim()];
-      if (typeof provider?.apiKey === 'string') effectiveApiKey = provider.apiKey;
-    } catch { /* fall through to validation below */ }
-  }
+  const effectiveApiKey = resolveProviderRequestApiKey(providerId, apiKey);
   if (!baseUrl) {
     return res.status(400).json({ ok: false, error: 'baseUrl is required' });
   }
@@ -962,7 +977,7 @@ router.post('/models', async (req, res) => {
 router.post('/test-connection', async (req, res) => {
   const { providerId, providerType, baseUrl, apiKey, model } = req.body || {};
   const normalizedProviderId = String(providerId || '').trim().toLowerCase();
-  const effectiveApiKey = typeof apiKey === 'string' ? apiKey.trim() : '';
+  const effectiveApiKey = resolveProviderRequestApiKey(providerId, apiKey);
   const apiKeyRequired = normalizedProviderId !== 'ollama';
   if (!baseUrl || !model || (apiKeyRequired && !effectiveApiKey)) {
     return res.status(400).json({
@@ -1022,14 +1037,11 @@ router.post('/test-connection', async (req, res) => {
 // exposing the API under /api/config for the settings UI.
 async function configModelConnectionTestsHandler(req, res) {
   req.allowPresetEndpointOverride = true;
-  if (req.body?.apiKey === MASKED_SECRET) {
-    const providerId = typeof req.body?.providerId === 'string' ? req.body.providerId.trim() : '';
-    const current = readPilotDeckConfigFile();
-    const savedKey = current.config?.model?.providers?.[providerId]?.apiKey;
-    if (typeof savedKey === 'string' && savedKey && savedKey !== MASKED_SECRET) {
-      req.body = { ...req.body, apiKey: savedKey };
-    }
-  }
+  const effectiveApiKey = resolveProviderRequestApiKey(
+    req.body?.providerId,
+    req.body?.apiKey,
+  );
+  req.body = { ...req.body, apiKey: effectiveApiKey };
   return modelConnectionTestsHandler(req, res);
 }
 router.post('/test-connections', modelTestRateLimiter, configModelConnectionTestsHandler);
