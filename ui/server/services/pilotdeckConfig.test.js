@@ -8,6 +8,7 @@ import {
     buildMemoryLlmOptions,
     buildRuntimeEnv,
     readPilotDeckConfigFile,
+    resolveConfiguredProviderApiKey,
     resolveModel,
     sanitizeProviderCredentials,
     validatePilotDeckConfig,
@@ -202,7 +203,8 @@ describe('validatePilotDeckConfig gateway validation', () => {
         }
     });
 
-    it('accepts an omitted API key when the catalog defines an environment fallback', () => {
+    it('accepts an omitted API key when the catalog environment key is available', () => {
+        vi.stubEnv('ANTHROPIC_API_KEY', 'anthropic-from-env');
         const validation = validatePilotDeckConfig({
             agent: { model: 'ollama/qwen' },
             model: {
@@ -223,6 +225,59 @@ describe('validatePilotDeckConfig gateway validation', () => {
 
         expect(validation.valid).toBe(true);
         expect(validation.errors).toEqual([]);
+    });
+
+    it('rejects an omitted API key when the catalog environment key is unavailable', () => {
+        vi.stubEnv('ANTHROPIC_API_KEY', '');
+        const validation = validatePilotDeckConfig({
+            agent: { model: 'anthropic/claude' },
+            model: {
+                providers: {
+                    anthropic: {
+                        protocol: 'anthropic',
+                        url: 'https://api.anthropic.com',
+                        models: { claude: {} },
+                    },
+                },
+            },
+        });
+
+        expect(validation.valid).toBe(false);
+        expect(validation.errors).toContain('model.providers.anthropic.apiKey is required');
+    });
+
+    it('does not apply a catalog environment key to a custom provider endpoint', () => {
+        vi.stubEnv('OPENAI_API_KEY', 'openai-from-env');
+        const provider = {
+            protocol: 'openai',
+            url: 'https://proxy.example/v1',
+            models: { 'gpt-test': {} },
+        };
+        const validation = validatePilotDeckConfig({
+            agent: { model: 'openai/gpt-test' },
+            model: { providers: { openai: provider } },
+        });
+
+        expect(resolveConfiguredProviderApiKey('openai', provider)).toBe('');
+        expect(validation.valid).toBe(false);
+        expect(validation.errors).toContain('model.providers.openai.apiKey is required');
+    });
+
+    it('accepts an explicit environment reference for a custom provider endpoint', () => {
+        vi.stubEnv('PROXY_API_KEY', 'proxy-from-env');
+        const provider = {
+            protocol: 'openai',
+            url: 'https://proxy.example/v1',
+            apiKey: '${PROXY_API_KEY}',
+            models: { 'gpt-test': {} },
+        };
+        const validation = validatePilotDeckConfig({
+            agent: { model: 'openai/gpt-test' },
+            model: { providers: { openai: provider } },
+        });
+
+        expect(resolveConfiguredProviderApiKey('openai', provider)).toBe('proxy-from-env');
+        expect(validation.valid).toBe(true);
     });
 
     it('migrates the legacy interactive spreadsheet mode to built-in preview', () => {

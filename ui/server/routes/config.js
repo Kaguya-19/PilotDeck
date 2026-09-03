@@ -145,7 +145,7 @@ function resolveProviderRequestApiKey({
   // variable". Do not silently fall back to a previously saved literal key.
   const environmentApiKey = resolveConfiguredProviderApiKey(normalizedProviderId, null);
   if (!environmentApiKey) return { apiKey: '' };
-  const scopeProvider = savedProvider || lookupCatalogProvider(normalizedProviderId);
+  const scopeProvider = lookupCatalogProvider(normalizedProviderId);
   if (
     !scopeProvider
     || !providerCredentialScopeMatches(

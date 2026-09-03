@@ -762,6 +762,42 @@ describe('config model-pool connection test routes', () => {
     expect(probe).not.toHaveBeenCalledWith(expect.objectContaining({ apiKey: 'saved-secret' }));
   });
 
+  it('does not send a catalog environment key to a saved custom endpoint', async () => {
+    vi.stubEnv('OPENAI_API_KEY', 'sk-from-env');
+    const probe = vi.fn();
+    const { requestStatus } = await createConfigApp({
+      config: {
+        model: {
+          providers: {
+            openai: {
+              protocol: 'openai',
+              url: 'https://proxy.example/v1',
+              models: {},
+            },
+          },
+        },
+      },
+      probe,
+    });
+
+    const response = await requestStatus('/api/config/test-connections', {
+      method: 'POST',
+      headers: { 'x-user': 'settings-user' },
+      body: JSON.stringify({
+        providerId: 'openai',
+        protocol: 'openai',
+        endpoint: 'https://proxy.example/v1',
+        apiKey: '',
+        models: ['model-a'],
+        retryPolicy: retryPolicy(),
+      }),
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe('CREDENTIAL_SCOPE_MISMATCH');
+    expect(probe).not.toHaveBeenCalled();
+  });
+
   it('tests and binds a provider that uses its catalog environment API key', async () => {
     vi.stubEnv('OPENAI_API_KEY', 'sk-from-env');
     const probe = vi.fn().mockResolvedValue({ ok: true });

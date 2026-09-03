@@ -2,7 +2,11 @@ import express from 'express';
 import { userDb } from '../database/db.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { getSystemGitConfig } from '../utils/gitConfig.js';
-import { readPilotDeckConfigFile } from '../services/pilotdeckConfig.js';
+import {
+  readPilotDeckConfigFile,
+  resolveConfiguredProviderApiKey,
+  resolveConfiguredProviderUrl,
+} from '../services/pilotdeckConfig.js';
 import { spawn } from 'child_process';
 
 const router = express.Router();
@@ -32,8 +36,8 @@ function hasUsablePilotDeckConfig() {
   const provider = record.config?.model?.providers?.[providerId];
   if (!provider || typeof provider !== 'object') return false;
 
-  const hasUrl = typeof provider.url === 'string' && provider.url.trim();
-  const apiKey = typeof provider.apiKey === 'string' ? provider.apiKey.trim() : '';
+  const hasUrl = Boolean(resolveConfiguredProviderUrl(providerId, provider));
+  const apiKey = resolveConfiguredProviderApiKey(providerId, provider);
   const hasRequiredCredential = providerAllowsMissingApiKey(providerId)
     ? apiKey !== PLACEHOLDER_API_KEY
     : Boolean(apiKey) && apiKey !== PLACEHOLDER_API_KEY;

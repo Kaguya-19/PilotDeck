@@ -6,6 +6,10 @@ import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { parseGatewayConfig } from '../../../src/pilot/config/parseGatewayConfig.js';
 import { parseToolsConfig } from '../../../src/pilot/config/parseToolsConfig.js';
 import { lookupCatalogProvider } from '../../../src/model/catalog/index.js';
+import {
+  resolveCatalogProviderApiKeyEnvVar,
+  resolveCatalogProviderDefaultUrl,
+} from '../../../src/model/config/providerCredentialScope.js';
 import { findModelReferences } from './modelReferences.js';
 
 // Source of truth: ~/.pilotdeck/pilotdeck.yaml. The disk format and the
@@ -255,8 +259,7 @@ function validateProvider(id, provider, errors) {
   if (!normalizeString(provider.url) && !Object.hasOwn(CATALOG_PROVIDER_DEFAULT_URLS, id)) {
     errors.push(`model.providers.${id}.url is required`);
   }
-  const catalogApiKeyEnvVar = lookupCatalogProvider(id)?.apiKeyEnvVar;
-  if (!allowsMissingApiKey(id) && !normalizeString(provider.apiKey) && !catalogApiKeyEnvVar) {
+  if (!allowsMissingApiKey(id) && !resolveConfiguredProviderApiKey(id, provider)) {
     errors.push(`model.providers.${id}.apiKey is required`);
   }
   if (!isRecord(provider.models) || Object.keys(provider.models).length === 0) {
@@ -568,14 +571,12 @@ function providerProtocolToMemoryApi(protocol) {
   return 'openai-completions';
 }
 
-function effectiveProviderUrl(providerId, provider) {
+export function resolveConfiguredProviderUrl(providerId, provider) {
   const configured = normalizeString(provider?.url);
   if (configured) return configured;
   const catalog = lookupCatalogProvider(providerId);
-  if (provider?.protocol === 'openai' && providerId === 'google') {
-    return 'https://generativelanguage.googleapis.com/v1beta/openai';
-  }
-  return catalog?.defaultUrl || '';
+  const protocol = normalizeString(provider?.protocol) || catalog?.protocol;
+  return resolveCatalogProviderDefaultUrl(providerId, protocol) || '';
 }
 
 export function resolveConfiguredProviderApiKey(providerId, provider, env = process.env) {
@@ -584,7 +585,10 @@ export function resolveConfiguredProviderApiKey(providerId, provider, env = proc
     const envReference = ENV_REFERENCE_PATTERN.exec(configured);
     return envReference ? normalizeString(env[envReference[1]]) : configured;
   }
-  const envName = lookupCatalogProvider(providerId)?.apiKeyEnvVar;
+  const catalog = lookupCatalogProvider(providerId);
+  const protocol = normalizeString(provider?.protocol) || catalog?.protocol;
+  const url = resolveConfiguredProviderUrl(providerId, provider);
+  const envName = resolveCatalogProviderApiKeyEnvVar(providerId, protocol, url);
   return envName ? normalizeString(env[envName]) : '';
 }
 
@@ -612,7 +616,7 @@ export function buildRuntimeEnv(config) {
   }
 
   if (main) {
-    const mainUrl = effectiveProviderUrl(main.providerId, main.provider);
+    const mainUrl = resolveConfiguredProviderUrl(main.providerId, main.provider);
     const mainApiKey = resolveConfiguredProviderApiKey(main.providerId, main.provider);
     env.PILOTDECK_API_BASE_URL = mainUrl;
     env.PILOTDECK_API_KEY = mainApiKey;
@@ -654,7 +658,7 @@ export function buildRuntimeEnv(config) {
   if (memory) {
     env.PILOTDECK_MEMORY_MODEL = memory.model;
     env.PILOTDECK_MEMORY_PROVIDER = memory.providerId;
-    env.PILOTDECK_MEMORY_BASE_URL = effectiveProviderUrl(memory.providerId, memory.provider);
+    env.PILOTDECK_MEMORY_BASE_URL = resolveConfiguredProviderUrl(memory.providerId, memory.provider);
     env.PILOTDECK_MEMORY_API_KEY = resolveConfiguredProviderApiKey(
       memory.providerId,
       memory.provider,
@@ -689,7 +693,7 @@ export function buildMemoryLlmOptions(config) {
     model: memory.model,
     apiType: normalizeString(normalized.memory?.apiType)
       || providerProtocolToMemoryApi(memory.provider.protocol),
-    baseUrl: effectiveProviderUrl(memory.providerId, memory.provider),
+    baseUrl: resolveConfiguredProviderUrl(memory.providerId, memory.provider),
     apiKey: resolveConfiguredProviderApiKey(memory.providerId, memory.provider),
     headers: isRecord(memory.provider.headers) ? memory.provider.headers : {},
   };
