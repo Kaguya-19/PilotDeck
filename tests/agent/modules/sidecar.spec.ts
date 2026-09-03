@@ -4,6 +4,7 @@ import test from "node:test";
 
 import { AgentLoopSidecarServer, type SidecarExecutionFactory } from "../../../src/agent/modules/sidecar.js";
 import type { AgentLoop } from "../../../src/agent/loop/AgentLoop.js";
+import type { PilotDeckToolDefinition } from "../../../src/tool/index.js";
 
 test("sidecar server round-trips host module calls and emits one terminal event", async () => {
   const input = new PassThrough();
@@ -81,4 +82,156 @@ test("sidecar server round-trips host module calls and emits one terminal event"
   assert.equal(lines.some((message) => message.kind === "request" && message.method === "module_call"), true);
   const terminal = lines.find((message) => message.kind === "event" && message.final === true);
   assert.equal(terminal?.outcome, "completed");
+});
+
+test("sidecar abort releases a pending module call", async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const lines: Record<string, unknown>[] = [];
+  let buffered = "";
+  output.on("data", (chunk: Buffer) => {
+    buffered += chunk.toString("utf8");
+    for (const line of buffered.split("\n").slice(0, -1)) {
+      const message = JSON.parse(line) as Record<string, unknown>;
+      lines.push(message);
+      if (message.kind === "request" && message.method === "module_call") {
+        input.write(`${JSON.stringify({
+          kind: "request",
+          messageId: "cancel-1",
+          method: "cancel",
+          runId: "run-1",
+          operationId: "op-1",
+          requestId: "request-1",
+          reason: "test",
+        })}\n`);
+        input.end();
+      }
+    }
+    buffered = buffered.slice(buffered.lastIndexOf("\n") + 1);
+  });
+  const factory: SidecarExecutionFactory = ({ callModule }) => ({
+    loop: {
+      async *run() {
+        await callModule({ runId: "run-1", operationId: "op-1", requestId: "module-1", module: "model", payload: {} });
+        return { result: { type: "success" }, messages: [] };
+      },
+    } as unknown as AgentLoop,
+    input: {} as never,
+  });
+  const serving = new AgentLoopSidecarServer(factory).serve(input, output);
+  input.write(`${JSON.stringify({ kind: "request", messageId: "execute-1", method: "execute", runId: "run-1", operationId: "op-1", requestId: "request-1", payload: {} })}\n`);
+  await serving;
+  const terminal = lines.find((message) => message.kind === "event" && message.final === true);
+  assert.equal(terminal?.outcome, "cancelled");
+});
+
+test("sidecar maps max_turns to a failed protocol outcome with the original result", async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const lines: Record<string, unknown>[] = [];
+  let buffered = "";
+  output.on("data", (chunk: Buffer) => {
+    buffered += chunk.toString("utf8");
+    for (const line of buffered.split("\n").slice(0, -1)) lines.push(JSON.parse(line) as Record<string, unknown>);
+    buffered = buffered.slice(buffered.lastIndexOf("\n") + 1);
+  });
+  const factory: SidecarExecutionFactory = () => ({
+    loop: {
+      async *run() {
+        return {
+          result: {
+            type: "max_turns",
+            sessionId: "session-1",
+            turnId: "turn-1",
+            stopReason: "max_turns",
+            usage: { inputTokens: 1 },
+            permissionDenials: [],
+            turns: 2,
+            startedAt: "2026-09-02T00:00:00.000Z",
+            completedAt: "2026-09-02T00:00:00.001Z",
+            errors: [{ code: "agent_max_turns_reached", message: "limit" }],
+          },
+          messages: [],
+        };
+      },
+    } as unknown as AgentLoop,
+    input: {} as never,
+  });
+  const serving = new AgentLoopSidecarServer(factory).serve(input, output);
+  input.write(`${JSON.stringify({ kind: "request", messageId: "execute-1", method: "execute", runId: "run-1", operationId: "op-1", requestId: "request-1", payload: {} })}\n`);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  input.end();
+  await serving;
+  const terminal = lines.find((message) => message.kind === "event" && message.final === true);
+  assert.equal(terminal?.outcome, "failed");
+  assert.equal(terminal?.code, "AGENT_MAX_TURNS_REACHED");
+  assert.deepEqual((terminal?.payload as Record<string, unknown>)?.result, {
+    type: "max_turns",
+    sessionId: "session-1",
+    turnId: "turn-1",
+    stopReason: "max_turns",
+    usage: { inputTokens: 1 },
+    permissionDenials: [],
+    turns: 2,
+    startedAt: "2026-09-02T00:00:00.000Z",
+    completedAt: "2026-09-02T00:00:00.001Z",
+    errors: [{ code: "agent_max_turns_reached", message: "limit" }],
+  });
+});
+
+test("sidecar aborts a generic execution at its deadline", async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const lines: Record<string, unknown>[] = [];
+  let buffered = "";
+  output.on("data", (chunk: Buffer) => {
+    buffered += chunk.toString("utf8");
+    for (const line of buffered.split("\n").slice(0, -1)) lines.push(JSON.parse(line) as Record<string, unknown>);
+    buffered = buffered.slice(buffered.lastIndexOf("\n") + 1);
+  });
+  const factory: SidecarExecutionFactory = ({ abortSignal }) => ({
+    loop: {
+      async *run() {
+        await new Promise<void>((resolve) => abortSignal.addEventListener("abort", () => resolve(), { once: true }));
+        return { result: { type: "success", sessionId: "s", turnId: "t", stopReason: "completed", usage: {}, permissionDenials: [], turns: 1, startedAt: "now", completedAt: "now" }, messages: [] };
+      },
+    } as unknown as AgentLoop,
+    input: {} as never,
+  });
+  const serving = new AgentLoopSidecarServer(factory).serve(input, output);
+  input.write(`${JSON.stringify({ kind: "request", messageId: "execute-1", method: "execute", runId: "run-1", operationId: "op-1", requestId: "request-1", operationDeadline: new Date(Date.now() + 20).toISOString(), payload: {} })}\n`);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  input.end();
+  await serving;
+  const terminal = lines.find((message) => message.kind === "event" && message.final === true);
+  assert.equal(terminal?.outcome, "failed");
+  assert.equal(terminal?.code, "DEADLINE_EXCEEDED");
+});
+
+test("sidecar tool port runs concurrency-safe calls in parallel and preserves order", async () => {
+  const started: number[] = [];
+  const tools: PilotDeckToolDefinition[] = ["one", "two"].map((name) => ({
+    name,
+    description: name,
+    kind: "custom",
+    inputSchema: { type: "object" },
+    isReadOnly: () => true,
+    isConcurrencySafe: () => true,
+    execute: async () => ({ content: [{ type: "text", text: name }] }),
+  }));
+  const { createSidecarPorts } = await import("../../../src/agent/modules/sidecar.js");
+  const ports = createSidecarPorts(async (request) => {
+    started.push(Date.now());
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    const name = String(request.payload.name);
+    return { kind: "response", messageId: `response-${name}`, inReplyTo: "call", ok: true, payload: { type: "success", toolCallId: String(request.payload.toolCallId), toolName: name, content: [], startedAt: "now", completedAt: "now" } };
+  }, { tools });
+  const results = await ports.tools.executeAll(
+    [{ id: "call-1", name: "one", input: {} }, { id: "call-2", name: "two", input: {} }],
+    { sessionId: "s", turnId: "t", cwd: "/tmp", permissionMode: "default", permissionContext: { mode: "default", rules: { allow: [], deny: [], ask: [] }, cwd: "/tmp", additionalWorkingDirectories: [], canPrompt: false, bypassAvailable: false } },
+    { sessionId: "s", turnId: "t", runId: "run-1" },
+  );
+  assert.equal(results[0]?.toolName, "one");
+  assert.equal(results[1]?.toolName, "two");
+  assert.equal(started.length, 2);
 });

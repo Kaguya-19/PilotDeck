@@ -3,7 +3,7 @@ import type { Writable, Readable } from "node:stream";
 import type { AgentLoop, AgentLoopInput } from "../loop/AgentLoop.js";
 import type { AgentEvent } from "../protocol/events.js";
 import type { CanonicalModelEvent } from "../../model/index.js";
-import type { PilotDeckToolDefinition, PilotDeckToolResult, PilotDeckToolRuntimeContext, PilotDeckToolCall } from "../../tool/index.js";
+import type { PilotDeckToolDefinition, PilotDeckToolResult, PilotDeckToolRuntimeContext, PilotDeckToolCall, PilotDeckToolErrorCode } from "../../tool/index.js";
 import type { ModelInvokerPort, PreparedModelInvocation, ToolPort } from "./protocol.js";
 import {
   MODULE_PROTOCOL_VERSION,
@@ -22,7 +22,7 @@ export type SidecarModuleCall = Omit<ModuleCallRequest, "kind" | "messageId" | "
 
 export type SidecarModuleCallClient = (request: SidecarModuleCall) => Promise<ModuleResponse>;
 
-/** Build the two AgentLoop ports that call host-owned StaffDeck modules. */
+/** Build AgentLoop ports backed by host-owned modules over the sidecar stream. */
 export function createSidecarPorts(
   callModule: SidecarModuleCallClient,
   options: { tools?: PilotDeckToolDefinition[]; uuid?: () => string } = {},
@@ -42,7 +42,11 @@ export function createSidecarPorts(
           module: "model",
           payload: { request: prepared.request, context },
         });
-        if (!response.ok) throw new Error(String(response.error?.message ?? response.code ?? "Model module failed"));
+        if (!response.ok) {
+          const failure = new Error(String(response.error?.message ?? response.code ?? "Model module failed")) as Error & { code?: string };
+          failure.code = response.code;
+          throw failure;
+        }
         const events = response.payload?.events;
         if (!Array.isArray(events)) return;
         for (const event of events) yield event as CanonicalModelEvent;
@@ -50,38 +54,87 @@ export function createSidecarPorts(
     },
     tools: {
       list: () => options.tools ?? [],
-      async executeAll(calls: PilotDeckToolCall[], _context: PilotDeckToolRuntimeContext, execution): Promise<PilotDeckToolResult[]> {
-        const results: PilotDeckToolResult[] = [];
-        for (const call of calls) {
+      async executeAll(calls: PilotDeckToolCall[], context: PilotDeckToolRuntimeContext, execution): Promise<PilotDeckToolResult[]> {
+        const resultSlots = new Array<PilotDeckToolResult | undefined>(calls.length);
+        const concurrent: Array<{ index: number; call: PilotDeckToolCall }> = [];
+        const sequential: Array<{ index: number; call: PilotDeckToolCall }> = [];
+        const toolsByName = new Map((options.tools ?? []).map((tool) => [tool.name, tool]));
+        for (let index = 0; index < calls.length; index++) {
+          const call = calls[index]!;
+          const tool = toolsByName.get(call.name);
+          if (tool?.isConcurrencySafe(call.input)) concurrent.push({ index, call });
+          else sequential.push({ index, call });
+        }
+        const execute = async (call: PilotDeckToolCall): Promise<PilotDeckToolResult> => {
           const response = await callModule({
             runId: execution.runId,
             operationId: execution.operationId ?? execution.turnId,
             idempotencyKey: execution.idempotencyKey,
             requestId: `tool-${uuid()}`,
             module: "capability",
-            payload: { name: call.name, arguments: call.input, toolCallId: call.id },
+            payload: {
+              name: call.name,
+              arguments: call.input,
+              toolCallId: call.id,
+              context: serializeToolContext(context),
+              execution: serializeExecutionContext(execution),
+            },
           });
           const payload = response.payload;
           if (response.ok && payload && typeof payload === "object" && "type" in payload) {
-            results.push(payload as unknown as PilotDeckToolResult);
-            continue;
+            return payload as unknown as PilotDeckToolResult;
           }
-          results.push({
+          return {
             type: "error",
             toolCallId: call.id,
             toolName: call.name,
             error: {
-              code: "tool_execution_failed",
+              code: asToolErrorCode(response.code),
               message: String(response.error?.message ?? "Capability module failed."),
+              ...(response.code || response.error ? {
+                details: {
+                  ...(response.code ? { moduleCode: response.code } : {}),
+                  ...(response.error ? { moduleError: response.error } : {}),
+                },
+              } : {}),
             },
             content: [{ type: "text", text: String(response.error?.message ?? "Capability module failed.") }],
             startedAt: new Date().toISOString(),
             completedAt: new Date().toISOString(),
-          });
+          };
+        };
+        await Promise.all(concurrent.map(async ({ index, call }) => {
+          resultSlots[index] = await execute(call);
+        }));
+        for (const { index, call } of sequential) {
+          resultSlots[index] = await execute(call);
         }
-        return results;
+        return resultSlots as PilotDeckToolResult[];
       },
     },
+  };
+}
+
+function serializeToolContext(context: PilotDeckToolRuntimeContext): Record<string, unknown> {
+  return {
+    sessionId: context.sessionId,
+    turnId: context.turnId,
+    cwd: context.cwd,
+    permissionMode: context.permissionMode,
+    permissionContext: context.permissionContext,
+    runMode: context.runMode,
+    currentToolCallId: context.currentToolCallId,
+    maxResultBytes: context.maxResultBytes,
+  };
+}
+
+function serializeExecutionContext(execution: { runId: string; turnId: string; operationId?: string; idempotencyKey?: string; operationDeadline?: string }): Record<string, unknown> {
+  return {
+    runId: execution.runId,
+    turnId: execution.turnId,
+    operationId: execution.operationId,
+    idempotencyKey: execution.idempotencyKey,
+    operationDeadline: execution.operationDeadline,
   };
 }
 
@@ -115,7 +168,8 @@ export class AgentLoopSidecarServer {
   readonly moduleInstanceId: string;
   readonly connectionGeneration: string;
   private readonly uuid: () => string;
-  private readonly pendingCalls = new Map<string, (response: ModuleResponse) => void>();
+  private readonly pendingCalls = new Map<string, { resolve: (response: ModuleResponse) => void; reject: (error: unknown) => void }>();
+  private readonly moduleFailures = new Map<string, { code?: string; message: string; retryability?: string }>();
   private readonly abortControllers = new Map<string, AbortController>();
   private readonly activeExecutions = new Set<Promise<void>>();
   private writeChain = Promise.resolve();
@@ -163,7 +217,7 @@ export class AgentLoopSidecarServer {
         const resolve = this.pendingCalls.get(message.inReplyTo);
         if (resolve) {
           this.pendingCalls.delete(message.inReplyTo);
-          resolve(message);
+          resolve.resolve(message);
         }
         continue;
       }
@@ -210,6 +264,17 @@ export class AgentLoopSidecarServer {
   private async handleExecute(request: ModuleExecuteRequest, output: Writable): Promise<void> {
     const controller = new AbortController();
     this.abortControllers.set(request.operationId, controller);
+    let deadlineExceeded = false;
+    const deadlineAt = earliestDeadline(request.operationDeadline, request.attemptDeadline);
+    let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+    if (deadlineAt !== undefined) {
+      const abortForDeadline = () => {
+        deadlineExceeded = true;
+        controller.abort({ code: "DEADLINE_EXCEEDED", message: "Module execution deadline exceeded." });
+      };
+      if (deadlineAt <= Date.now()) abortForDeadline();
+      else deadlineTimer = setTimeout(abortForDeadline, Math.min(2_147_483_647, deadlineAt - Date.now()));
+    }
     const streamId = this.nextId("stream");
     await this.send(output, {
       kind: "response",
@@ -226,7 +291,7 @@ export class AgentLoopSidecarServer {
       const execution = await this.factory({
         request,
         abortSignal: controller.signal,
-        callModule: (call) => this.callModule(output, call),
+          callModule: (call) => this.callModule(output, call, controller.signal),
       });
       const iterator = execution.loop.run(execution.input);
       let next = await iterator.next();
@@ -247,11 +312,23 @@ export class AgentLoopSidecarServer {
         next = await iterator.next();
       }
       const result = next.value;
-      const outcome = result.result.type === "aborted" ? "cancelled" : result.result.type === "error" ? "failed" : "completed";
+      const outcome = deadlineExceeded
+        ? "failed"
+        : moduleOutcomeFromAgentResult(result.result);
+      const moduleFailure = this.moduleFailures.get(request.operationId);
+      const terminalError = deadlineExceeded
+        ? { code: "DEADLINE_EXCEEDED", message: "Module execution deadline exceeded." }
+        : moduleFailure
+          ? moduleFailure
+        : result.result.type === "max_turns"
+          ? { code: "AGENT_MAX_TURNS_REACHED", message: result.result.errors?.[0]?.message ?? "AgentLoop maximum turn limit reached." }
+          : result.result.type === "error"
+            ? result.result.errors?.[0]
+            : undefined;
       await this.send(output, {
         kind: "event",
         messageId: this.nextId("final"),
-        eventType: "agent.execute.completed",
+        eventType: `agent.execute.${outcome}`,
         streamId,
         sequence: sequence++,
         runId: request.runId,
@@ -259,25 +336,31 @@ export class AgentLoopSidecarServer {
         requestId: request.requestId,
         final: true,
         outcome,
+        ...(terminalError ? { code: terminalError.code, error: terminalError } : {}),
         payload: { result: result.result, messages: result.messages },
       });
       finalSent = true;
     } catch (error) {
+      const outcome = deadlineExceeded ? "failed" : controller.signal.aborted ? "cancelled" : "failed";
+      const serialized = serializeExecutionError(error);
       await this.send(output, {
         kind: "event",
         messageId: this.nextId("failed"),
-        eventType: "agent.execute.failed",
+        eventType: `agent.execute.${outcome}`,
         streamId,
         sequence: sequence++,
         runId: request.runId,
         operationId: request.operationId,
         requestId: request.requestId,
         final: true,
-        outcome: controller.signal.aborted ? "cancelled" : "failed",
-        payload: { error: error instanceof Error ? error.message : String(error) },
+        outcome,
+        ...(serialized.code ? { code: serialized.code } : {}),
+        error: serialized,
+        payload: { error: serialized },
       });
       finalSent = true;
     } finally {
+      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
       if (!finalSent) {
         await this.send(output, {
           kind: "event",
@@ -294,10 +377,11 @@ export class AgentLoopSidecarServer {
         });
       }
       this.abortControllers.delete(request.operationId);
+      this.moduleFailures.delete(request.operationId);
     }
   }
 
-  private async callModule(output: Writable, call: SidecarModuleCall): Promise<ModuleResponse> {
+  private async callModule(output: Writable, call: SidecarModuleCall, abortSignal?: AbortSignal): Promise<ModuleResponse> {
     const messageId = this.nextId("module-call");
     const request: ModuleCallRequest = {
       kind: "request",
@@ -305,9 +389,27 @@ export class AgentLoopSidecarServer {
       method: "module_call",
       ...call,
     };
-    const response = new Promise<ModuleResponse>((resolve) => this.pendingCalls.set(messageId, resolve));
+    const response = new Promise<ModuleResponse>((resolve, reject) => {
+      const entry = { resolve, reject };
+      this.pendingCalls.set(messageId, entry);
+      if (abortSignal?.aborted) {
+        this.pendingCalls.delete(messageId);
+        reject(new SidecarAbortError());
+      } else {
+        abortSignal?.addEventListener("abort", () => {
+          if (this.pendingCalls.delete(messageId)) reject(new SidecarAbortError());
+        }, { once: true });
+      }
+    });
     await this.send(output, request);
-    return response;
+    const result = await response;
+    if (!result.ok) {
+      this.moduleFailures.set(call.operationId ?? "", {
+        ...(result.code ? { code: result.code } : {}),
+        message: String(result.error?.message ?? result.code ?? "Module call failed."),
+      });
+    }
+    return result;
   }
 
   private handshake(inReplyTo: string, method: "hello" | "capabilities"): ModuleResponse {
@@ -338,6 +440,57 @@ export class AgentLoopSidecarServer {
   }
 }
 
+function earliestDeadline(...values: Array<string | undefined>): number | undefined {
+  const deadlines = values
+    .map((value) => value ? Date.parse(value) : Number.NaN)
+    .filter((value) => Number.isFinite(value));
+  return deadlines.length > 0 ? Math.min(...deadlines) : undefined;
+}
+
+function serializeExecutionError(error: unknown): Record<string, unknown> {
+  if (error && typeof error === "object") {
+    const record = error as Record<string, unknown>;
+    return {
+      ...(typeof record.code === "string" ? { code: record.code } : {}),
+      message: typeof record.message === "string" ? record.message : String(error),
+      ...(Array.isArray(record.errors) ? { errors: record.errors } : {}),
+    };
+  }
+  return { message: error instanceof Error ? error.message : String(error) };
+}
+
+class SidecarAbortError extends Error {
+  constructor() {
+    super("Sidecar module call aborted.");
+    this.name = "SidecarAbortError";
+  }
+}
+
+function asToolErrorCode(value: unknown): PilotDeckToolErrorCode {
+  const codes: PilotDeckToolErrorCode[] = [
+    "tool_not_found",
+    "tool_unavailable",
+    "invalid_tool_input",
+    "permission_denied",
+    "permission_cancelled",
+    "permission_required",
+    "tool_execution_failed",
+    "tool_aborted",
+    "tool_timeout",
+    "result_too_large",
+    "path_not_allowed",
+    "file_not_found",
+    "file_conflict",
+    "unsupported_tool",
+    "setup_required",
+    "plan_mode_violation",
+    "ask_mode_violation",
+  ];
+  return typeof value === "string" && codes.includes(value as PilotDeckToolErrorCode)
+    ? value as PilotDeckToolErrorCode
+    : "tool_execution_failed";
+}
+
 function defaultCapabilities(): ModuleCapabilities {
   return {
     capabilitiesVersion: "1",
@@ -352,5 +505,5 @@ function defaultCapabilities(): ModuleCapabilities {
 }
 
 export function moduleOutcomeFromAgentResult(result: { type: string }): ModuleOutcome {
-  return result.type === "aborted" ? "cancelled" : result.type === "error" ? "failed" : "completed";
+  return result.type === "aborted" ? "cancelled" : result.type === "success" ? "completed" : "failed";
 }
