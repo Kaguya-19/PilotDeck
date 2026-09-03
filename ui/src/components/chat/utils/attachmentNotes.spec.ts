@@ -85,7 +85,9 @@ describe('attachment path notes', () => {
 
   it.each([
     '请解释 <attachment path="/tmp/demo.txt"> 这段 XML',
+    '请解释 <attachment path="/tmp/demo.txt">example</attachment> 这段 XML',
     '正文中提到了 [PDF attachment:，但这不是附件元数据',
+    '请解释 [PDF attachment: /tmp/demo.pdf, 42 bytes, estimated 1 page. Use read_file on this registered attachment path to inspect it.] 这段文本',
     '请解释 [Attachment diagnostics] 这个标题',
     '请解释 [Registered attachment files in this session:] 这个标题',
   ])('preserves attachment-like user text: %s', (content) => {
@@ -95,7 +97,26 @@ describe('attachment path notes', () => {
     });
   });
 
-  it('restores generated attachments that follow a content reference block', () => {
+  it('restores a trailing generated inline attachment', () => {
+    const filePath = '/tmp/file-0-notes.txt';
+    const parsed = parseUserAttachmentNote([
+      '总结文件',
+      `<attachment path="${filePath}">\nhello\n</attachment>`,
+      '\n\n[Registered attachment files in this session:]\n',
+      `- notes.txt: ${filePath}`,
+    ].join(''));
+
+    expect(parsed).toEqual({
+      content: '总结文件',
+      attachments: [{
+        name: 'notes.txt',
+        path: filePath,
+        mimeType: 'text/plain',
+      }],
+    });
+  });
+
+  it('restores an upload and content reference from the projected production order', () => {
     const reference = createTextContentReference({
       id: 'reference-1',
       createdAt: '2026-08-16T09:00:00.000Z',
@@ -108,6 +129,7 @@ describe('attachment path notes', () => {
     const filePath = '/tmp/file-0-report';
     const parsed = parseUserAttachmentNote([
       '比较两个文件',
+      buildAttachmentPathNote([{ name: 'report.pdf', path: filePath }]),
       formatContentReferencePromptBlock([reference]),
       `[PDF attachment: ${filePath}, 42 bytes, estimated 1 page. Use read_file on this registered attachment path to inspect it.]`,
       '\n\n[Registered attachment files in this session:]\n',

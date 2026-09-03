@@ -45,7 +45,7 @@ test("registered plain-text attachments with non-whitelisted names are described
 test("registered Office attachments receive conversion guidance without raw diagnostics", async () => {
   const root = await mkdtemp(join(tmpdir(), "pilotdeck-attachment-guidance-"));
   try {
-    const docxPath = join(root, "sample.docx");
+    const docxPath = join(root, "opaque-upload-id");
     await writeFile(docxPath, Buffer.from("PK".padEnd(128, "x")));
 
     let capturedInput: AgentInput | undefined;

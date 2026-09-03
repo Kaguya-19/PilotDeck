@@ -6,13 +6,17 @@ import { tmpdir } from "node:os";
 
 import { AttachmentResolver } from "../../src/context/attachments/AttachmentResolver.js";
 
-test("Office attachments are registered as non-inline information before size checks", async () => {
+test("Office attachments use their original name when the stored path is opaque", async () => {
   const root = await mkdtemp(join(tmpdir(), "pilotdeck-attachment-resolver-"));
   try {
-    const filePath = join(root, "sample.docx");
+    const filePath = join(root, "opaque-upload-id");
     await writeFile(filePath, Buffer.from("PK".padEnd(128, "x")));
 
-    const result = await new AttachmentResolver({ maxFileBytes: 1 }).resolve({ type: "file", path: filePath });
+    const result = await new AttachmentResolver({ maxFileBytes: 1 }).resolve({
+      type: "file",
+      path: filePath,
+      name: "sample.docx",
+    });
 
     assert.equal(result.blocks.length, 0);
     assert.equal(result.diagnostics.length, 1);

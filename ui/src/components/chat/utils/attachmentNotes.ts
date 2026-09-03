@@ -163,11 +163,16 @@ function appendUniqueAttachment(
   attachments.push(candidate);
 }
 
-function generatedDiagnosticsBlockStart(value: string): number | null {
+function generatedDiagnosticsBlockStart(value: string, end: number): number | null {
   const marker = '[Attachment diagnostics]';
-  for (let index = value.indexOf(marker); index >= 0; index = value.indexOf(marker, index + marker.length)) {
-    const suffix = value.slice(index + marker.length);
-    if (/^\s*-\s+(?:Attachment|Image|PDF attachment|File extension|Cannot determine image mime type)\b/u.test(suffix)) {
+  const diagnosticLine = /^\s*-\s+(?:Attachment|Image|PDF attachment|File extension|Cannot determine image mime type)\b/u;
+  for (let index = value.lastIndexOf(marker, end - 1);
+    index >= 0;
+    index = value.lastIndexOf(marker, index - 1)) {
+    const lines = value.slice(index + marker.length, end)
+      .split(/\r?\n/)
+      .filter((line) => line.trim().length > 0);
+    if (lines.length > 0 && lines.every((line) => diagnosticLine.test(line))) {
       return index;
     }
   }
@@ -180,9 +185,9 @@ function parseGeneratedAttachmentBlocks(value: string): {
 } | null {
   const attachments: AttachmentPathNoteFile[] = [];
   const seen = new Set<string>();
-  const starts: number[] = [];
+  const registeredPaths = new Set<string>();
   const registeredMarker = '[Registered attachment files in this session:]';
-  const registeredIndex = value.lastIndexOf(registeredMarker);
+  let registeredIndex = value.lastIndexOf(registeredMarker);
   if (registeredIndex >= 0) {
     const registeredLines = value.slice(registeredIndex + registeredMarker.length).split(/\r?\n/);
     let foundRegisteredAttachment = false;
@@ -191,37 +196,72 @@ function parseGeneratedAttachmentBlocks(value: string): {
       const candidate = parsed
         ? attachmentFromGeneratedPath(parsed.path, parsed.name)
         : null;
-      if (candidate) foundRegisteredAttachment = true;
+      if (candidate) {
+        foundRegisteredAttachment = true;
+        registeredPaths.add(candidate.path);
+      }
       appendUniqueAttachment(attachments, seen, candidate);
     }
-    if (foundRegisteredAttachment) starts.push(registeredIndex);
+    if (!foundRegisteredAttachment) registeredIndex = -1;
   }
 
+  const diagnosticsEnd = registeredIndex >= 0 ? registeredIndex : value.length;
+  const diagnosticsStart = generatedDiagnosticsBlockStart(value, diagnosticsEnd);
+  if (diagnosticsStart !== null) {
+    const officeDiagnosticPattern = /Attachment\s+(.+?)\s+has Office\/archive\/binary extension\s+[^;]+;/giu;
+    const diagnosticBlock = value.slice(diagnosticsStart, diagnosticsEnd);
+    for (const match of diagnosticBlock.matchAll(officeDiagnosticPattern)) {
+      appendUniqueAttachment(attachments, seen, attachmentFromGeneratedPath(match[1] ?? ''));
+    }
+  }
+
+  const embeddedBlocks: Array<{
+    start: number;
+    end: number;
+    attachment: AttachmentPathNoteFile;
+  }> = [];
   const inlineAttachmentPattern = /<attachment\s+path="([^"]+)">[\s\S]*?<\/attachment>/giu;
   for (const match of value.matchAll(inlineAttachmentPattern)) {
     const candidate = attachmentFromGeneratedPath(match[1] ?? '');
-    if (candidate && match.index !== undefined) starts.push(match.index);
-    appendUniqueAttachment(attachments, seen, candidate);
+    if (candidate && match.index !== undefined) {
+      embeddedBlocks.push({
+        start: match.index,
+        end: match.index + match[0].length,
+        attachment: candidate,
+      });
+    }
   }
 
   const pdfAttachmentPattern = /\[PDF attachment:\s*(.+?),\s*\d+\s+bytes,\s*estimated\s+\d+\s+pages?\.\s*Use read_file on this registered attachment path to inspect it\.\]/giu;
   for (const match of value.matchAll(pdfAttachmentPattern)) {
     const candidate = attachmentFromGeneratedPath(match[1] ?? '');
-    if (candidate && match.index !== undefined) starts.push(match.index);
-    appendUniqueAttachment(attachments, seen, candidate);
+    if (candidate && match.index !== undefined) {
+      embeddedBlocks.push({
+        start: match.index,
+        end: match.index + match[0].length,
+        attachment: candidate,
+      });
+    }
   }
 
-  const officeDiagnosticPattern = /Attachment\s+(.+?)\s+has Office\/archive\/binary extension\s+[^;]+;/giu;
-  for (const match of value.matchAll(officeDiagnosticPattern)) {
-    appendUniqueAttachment(attachments, seen, attachmentFromGeneratedPath(match[1] ?? ''));
+  let generatedStart = diagnosticsStart
+    ?? (registeredIndex >= 0 ? registeredIndex : value.length);
+  let foundGeneratedBlock = diagnosticsStart !== null || registeredIndex >= 0;
+  const acceptedEmbeddedBlocks: typeof embeddedBlocks = [];
+  for (const block of embeddedBlocks.sort((left, right) => right.start - left.start)) {
+    if (block.end > generatedStart) continue;
+    if (value.slice(block.end, generatedStart).trim().length > 0) continue;
+    if (registeredIndex >= 0 && !registeredPaths.has(block.attachment.path)) continue;
+    acceptedEmbeddedBlocks.push(block);
+    generatedStart = block.start;
+    foundGeneratedBlock = true;
+  }
+  for (const block of acceptedEmbeddedBlocks.reverse()) {
+    appendUniqueAttachment(attachments, seen, block.attachment);
   }
 
-  const diagnosticsStart = generatedDiagnosticsBlockStart(value);
-  if (diagnosticsStart !== null) starts.push(diagnosticsStart);
-  if (starts.length === 0) return null;
-
-  const start = Math.min(...starts);
-  return { content: value.slice(0, start).trimEnd(), attachments };
+  if (!foundGeneratedBlock) return null;
+  return { content: value.slice(0, generatedStart).trimEnd(), attachments };
 }
 
 export function parseUserAttachmentNote(content: unknown): {
@@ -229,12 +269,11 @@ export function parseUserAttachmentNote(content: unknown): {
   attachments: ChatAttachment[];
 } {
   const rawText = typeof content === 'string' ? content : '';
-  // The bounded client-authored note is authoritative and already hides all
-  // following canonical blocks. Parsing generated blocks as well can mistake
-  // legacy terminator fixtures for additional attachments.
-  const generated = rawText.includes(ATTACHMENT_NOTE_MARKER)
-    ? null
-    : parseGeneratedAttachmentBlocks(rawText);
+  const hasClientAttachmentNote = rawText.includes(ATTACHMENT_NOTE_MARKER);
+  // Strip trailing gateway-authored blocks before parsing content references.
+  // The client-authored note remains authoritative for attachment names when
+  // present, so generated attachments are merged only for legacy/channel input.
+  const generated = parseGeneratedAttachmentBlocks(rawText);
   const parsedContentReferences = parseContentReferencePromptBlock(generated?.content ?? rawText);
   const parsedSelections = parseDocumentSelectionPromptBlock(parsedContentReferences.content);
   const text = parsedSelections.content;
@@ -243,7 +282,9 @@ export function parseUserAttachmentNote(content: unknown): {
     ...parsedSelections.references.map(documentSelectionToAttachment),
     ...parsedContentReferences.references.map(contentReferenceToAttachment),
   ];
-  const generatedAttachments = (generated?.attachments.map(toChatAttachment) ?? [])
+  const generatedAttachments = (hasClientAttachmentNote
+    ? []
+    : generated?.attachments.map(toChatAttachment) ?? [])
     .filter((attachment) => !isImageAttachmentMime(attachment.mimeType));
   if (markerIndex < 0) {
     return {

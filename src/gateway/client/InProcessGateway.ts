@@ -2610,7 +2610,7 @@ async function attachmentsToContentBlocks(
       resolverAttachments.push(att);
       resolverRequestPaths.push(resolve(att.path));
     } else {
-      resolverRequests.push({ type: "file", path: att.path });
+      resolverRequests.push({ type: "file", path: att.path, name: att.name });
       resolverAttachments.push(att);
       resolverRequestPaths.push(resolve(att.path));
     }
