@@ -15,7 +15,7 @@ type AgentModelSectionsProps = {
 
 export default function AgentModelSections({ title }: AgentModelSectionsProps) {
   const { t } = useTranslation("settings");
-  const { raw, setRaw, save, loading, error } = usePilotDeckConfig();
+  const { raw, commitRaw, loading, error } = usePilotDeckConfig();
   const [modelTestError, setModelTestError] = useState<string | null>(null);
   const changeGeneration = useRef(0);
   const activeRequest = useRef<AbortController | null>(null);
@@ -96,8 +96,10 @@ export default function AgentModelSections({ title }: AgentModelSectionsProps) {
         modelTestBindings = [{ testId: result.testId }];
       }
       if (generation !== changeGeneration.current) return;
-      setRaw(configToYamlString(next));
-      void save(modelTestBindings ? { modelTestBindings } : undefined);
+      void commitRaw(
+        configToYamlString(next),
+        modelTestBindings ? { modelTestBindings } : undefined,
+      );
     } catch (caught) {
       if (generation !== changeGeneration.current || controller.signal.aborted) return;
       const message = caught instanceof Error ? caught.message : "Failed to save agent model config patch";

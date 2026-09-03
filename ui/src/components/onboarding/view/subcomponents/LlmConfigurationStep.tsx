@@ -105,8 +105,7 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
 
         const p = data.provider;
         const existingKeyIsUsable = hasUsableApiKey(p.apiKey);
-        if (!existingKeyIsUsable) return;
-        setApiKey(p.apiKey);
+        if (existingKeyIsUsable) setApiKey(p.apiKey);
         if (p.baseUrl) {
           const match = findCatalogProviderByUrl(p.baseUrl);
           if (match) {
@@ -128,17 +127,19 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
     ? 'This Provider ID is reserved for a catalog provider. Choose a different ID.'
     : '';
   const selectedProviderRequiresApiKey = requiresApiKey(selectedProvider);
+  const hasEnvironmentApiKeyFallback = Boolean(!isCustomMode && selectedProvider?.apiKeyEnvVar);
+  const apiKeyInputRequired = selectedProviderRequiresApiKey && !hasEnvironmentApiKeyFallback;
   const modelListRequiresApiKey = selectedProvider?.modelListRequiresApiKey === true;
   const canFetchModels = Boolean(
     selectedProvider
       && effectiveProviderId
       && effectiveUrl
       && !customProviderIdError
-      && (!modelListRequiresApiKey || hasUsableApiKey(apiKey)),
+      && (!modelListRequiresApiKey || hasUsableApiKey(apiKey) || hasEnvironmentApiKeyFallback),
   );
   const canTest = Boolean(
     selectedProvider &&
-    (!selectedProviderRequiresApiKey || apiKey.trim()) &&
+    (!selectedProviderRequiresApiKey || hasUsableApiKey(apiKey) || hasEnvironmentApiKeyFallback) &&
     effectiveModelId &&
     effectiveProviderId &&
     !customProviderIdError &&
@@ -601,7 +602,7 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
           {/* API Key */}
           <div>
             <label htmlFor="llm-api-key" className="mb-1 block text-sm font-medium text-foreground">
-              API Key{selectedProviderRequiresApiKey ? '' : ' (optional)'}
+              API Key{apiKeyInputRequired ? '' : ' (optional)'}
             </label>
             <input
               id="llm-api-key"
@@ -609,7 +610,11 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
               value={apiKey}
               disabled={saving}
               onChange={(e) => { setApiKey(e.target.value); setTestStatus('idle'); setTestMessage(''); }}
-              placeholder={selectedProviderRequiresApiKey ? 'sk-...' : 'Not required for this provider'}
+              placeholder={hasEnvironmentApiKeyFallback
+                ? `Uses ${selectedProvider?.apiKeyEnvVar} when empty`
+                : apiKeyInputRequired
+                  ? 'sk-...'
+                  : 'Not required for this provider'}
               className="w-full rounded-lg border border-border bg-background px-3 py-2.5 font-mono text-sm text-foreground placeholder:text-muted-foreground/50 focus:border-foreground/40 focus:outline-none"
               autoComplete="off"
               spellCheck={false}

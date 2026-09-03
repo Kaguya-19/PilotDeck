@@ -5,6 +5,7 @@ const nativeFetch = globalThis.fetch;
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   vi.resetModules();
 });
 
@@ -35,6 +36,7 @@ describe('user onboarding status route', () => {
   });
 
   it('still requires an API key for non-local providers', async () => {
+    vi.stubEnv('OPENAI_API_KEY', '');
     const { request } = await createUserApp({
       exists: true,
       config: {
@@ -58,6 +60,32 @@ describe('user onboarding status route', () => {
       hasCompletedOnboarding: false,
     });
   });
+
+  it('treats a catalog environment credential as completed onboarding', async () => {
+    vi.stubEnv('OPENAI_API_KEY', 'sk-from-env');
+    const { request } = await createUserApp({
+      exists: true,
+      config: {
+        agent: { model: 'openai/gpt-4.1-mini' },
+        model: {
+          providers: {
+            openai: {
+              protocol: 'openai',
+              url: '',
+              models: { 'gpt-4.1-mini': {} },
+            },
+          },
+        },
+      },
+    });
+
+    const data = await request('/api/user/onboarding-status');
+
+    expect(data).toMatchObject({
+      success: true,
+      hasCompletedOnboarding: true,
+    });
+  });
 });
 
 async function createUserApp(record) {
@@ -76,7 +104,8 @@ async function createUserApp(record) {
   vi.doMock('../utils/gitConfig.js', () => ({
     getSystemGitConfig: vi.fn(async () => ({ git_name: null, git_email: null })),
   }));
-  vi.doMock('../services/pilotdeckConfig.js', () => ({
+  vi.doMock('../services/pilotdeckConfig.js', async (importOriginal) => ({
+    ...await importOriginal(),
     readPilotDeckConfigFile: vi.fn(() => record),
   }));
 

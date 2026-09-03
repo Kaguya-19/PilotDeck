@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   findCatalogProviderById,
@@ -30,15 +31,17 @@ export default function ModelsSection({ config, onChange }: ModelsSectionProps) 
   const { t } = useTranslation("settings");
   const providers = config.model?.providers ?? {};
   const ids = Object.keys(providers);
+  const [pendingProvider, setPendingProvider] = useState<{
+    id: string;
+    provider: V2Provider;
+    catalogEntry?: CatalogProvider;
+  } | null>(null);
 
   const applyChange = async (
     next: PilotDeckConfig,
     options?: ConfigSaveOptions,
   ): Promise<ConfigSaveResult> =>
     (await onChange(next, options)) ?? { ok: true };
-
-  const setProvider = async (id: string, prov: V2Provider) =>
-    applyChange(patch(config, ["model", "providers", id], prov));
 
   const removeProvider = async (id: string) => {
     const next = { ...providers };
@@ -94,38 +97,64 @@ export default function ModelsSection({ config, onChange }: ModelsSectionProps) 
     );
   };
 
-  const handleCatalogPick = async (cp: CatalogProvider) => {
-    if (providers[cp.id]) return;
-    await setProvider(cp.id, {
-      apiKey: "",
-      protocol: cp.protocol,
-      url: cp.defaultUrl,
-      models: {},
+  const savePendingProvider = async (
+    newId: string,
+    provider: V2Provider,
+  ): Promise<{ ok: boolean; error?: string }> => {
+    const id = newId.trim();
+    if (providers[id]) {
+      return { ok: false, error: t("pilotDeckConfig.panels.models.providerIdDuplicate") };
+    }
+    const result = await applyChange(
+      patch(config, ["model", "providers", id], provider),
+    );
+    if (result.ok) setPendingProvider(null);
+    return result;
+  };
+
+  const handleCatalogPick = (cp: CatalogProvider) => {
+    if (providers[cp.id] || pendingProvider) return;
+    setPendingProvider({
+      id: cp.id,
+      catalogEntry: cp,
+      provider: {
+        apiKey: "",
+        protocol: cp.protocol,
+        url: cp.defaultUrl,
+        models: {},
+      },
     });
   };
 
-  const handleCustom = async () => {
+  const handleCustom = () => {
+    if (pendingProvider) return;
     let i = 1;
     while (providers[`provider${i}`]) i++;
-    await setProvider(`provider${i}`, {
-      protocol: "openai",
-      url: "",
-      apiKey: "",
-      models: {},
+    setPendingProvider({
+      id: `provider${i}`,
+      provider: {
+        protocol: "openai",
+        url: "",
+        apiKey: "",
+        models: {},
+      },
     });
   };
+
+  const pickerIds = new Set(ids);
+  if (pendingProvider) pickerIds.add(pendingProvider.id);
 
   return (
     <div className="space-y-3">
       <PageSectionHeader description={t("pilotDeckConfig.panels.models.description")} />
-      <div className="flex justify-start">
+      {!pendingProvider && <div className="flex justify-start">
         <CatalogPicker
-          existingIds={new Set(ids)}
+          existingIds={pickerIds}
           onPick={handleCatalogPick}
           onCustom={handleCustom}
         />
-      </div>
-      {ids.length === 0 && (
+      </div>}
+      {ids.length === 0 && !pendingProvider && (
         <div className="rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
           {t("pilotDeckConfig.panels.models.emptyProviders")}
         </div>
@@ -140,6 +169,18 @@ export default function ModelsSection({ config, onChange }: ModelsSectionProps) 
           onRemove={() => void removeProvider(id)}
         />
       ))}
+      {pendingProvider && (
+        <ProviderCard
+          key={`pending-${pendingProvider.id}`}
+          providerId={pendingProvider.id}
+          provider={pendingProvider.provider}
+          catalogEntry={pendingProvider.catalogEntry}
+          initialEditing
+          onCancelNew={() => setPendingProvider(null)}
+          onSave={savePendingProvider}
+          onRemove={() => setPendingProvider(null)}
+        />
+      )}
     </div>
   );
 }
