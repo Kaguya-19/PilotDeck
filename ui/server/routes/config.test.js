@@ -1304,6 +1304,69 @@ describe('config provider rename secret preservation', () => {
   });
 });
 
+describe('desktop bootstrap config writes', () => {
+  function bootstrapConfig() {
+    return {
+      schemaVersion: 1,
+      agent: { model: '_placeholder/_placeholder' },
+      model: {
+        providers: {
+          _placeholder: {
+            protocol: 'openai',
+            url: 'https://example.invalid/v1',
+            apiKey: 'PLACEHOLDER_RUN_ONBOARDING_TO_REPLACE',
+            models: { _placeholder: {} },
+          },
+        },
+      },
+      tools: { webSearch: { enabled: true } },
+    };
+  }
+
+  it('allows Web Search to be changed before onboarding is complete', async () => {
+    const initial = stringifyYaml(bootstrapConfig());
+    const { request, configPath } = await createDiskConfigApp(initial);
+    const next = bootstrapConfig();
+    next.tools.webSearch.enabled = false;
+
+    const response = await request('/api/config', {
+      method: 'PUT',
+      body: JSON.stringify({ raw: stringifyYaml(next) }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body.validation.valid).toBe(true);
+    const saved = parseYaml(readFileSync(configPath, 'utf8'));
+    expect(saved.tools.webSearch.enabled).toBe(false);
+    expect(saved.agent.model).toBe('_placeholder/_placeholder');
+    expect(saved.model.providers).toHaveProperty('_placeholder');
+  });
+
+  it('returns actionable validation details without overwriting the config', async () => {
+    const initial = stringifyYaml(bootstrapConfig());
+    const { request, configPath } = await createDiskConfigApp(initial);
+    const next = bootstrapConfig();
+    next.model.providers.provider1 = {
+      protocol: 'openai',
+      url: '',
+      apiKey: '',
+      models: {},
+    };
+
+    const response = await request('/api/config', {
+      method: 'PUT',
+      body: JSON.stringify({ raw: stringifyYaml(next) }),
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe('CONFIG_VALIDATION_FAILED');
+    expect(response.body.validation.errors).toContain(
+      'model.providers.provider1.apiKey is required',
+    );
+    expect(readFileSync(configPath, 'utf8')).toBe(initial);
+  });
+});
+
 describe('config write revisions', () => {
   it('rejects a stale full-config save instead of overwriting a newer write', async () => {
     const initial = stringifyYaml({

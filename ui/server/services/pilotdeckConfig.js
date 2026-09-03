@@ -256,6 +256,18 @@ function validateProvider(id, provider, errors) {
   if (!allowsMissingApiKey(id) && !normalizeString(provider.apiKey)) {
     errors.push(`model.providers.${id}.apiKey is required`);
   }
+  if (!isRecord(provider.models) || Object.keys(provider.models).length === 0) {
+    errors.push(`model.providers.${id}.models must contain at least one model`);
+  } else {
+    for (const [modelId, model] of Object.entries(provider.models)) {
+      if (!normalizeString(modelId)) {
+        errors.push(`model.providers.${id}.models contains an empty model id`);
+      }
+      if (model !== null && model !== undefined && !isRecord(model)) {
+        errors.push(`model.providers.${id}.models.${modelId} must be an object`);
+      }
+    }
+  }
 }
 
 function validateModelRef(config, ref, label, errors) {
@@ -445,6 +457,13 @@ export function validatePilotDeckConfig(config) {
   const errors = [];
   const warnings = [];
 
+  const providers = normalized.model?.providers;
+  if (isRecord(providers)) {
+    for (const [providerId, provider] of Object.entries(providers)) {
+      validateProvider(providerId, provider, errors);
+    }
+  }
+
   const mainRef = normalizeString(normalized.agent.model);
   if (!mainRef) {
     warnings.push('agent.model is empty; pick a model from model.providers.');
@@ -452,8 +471,6 @@ export function validatePilotDeckConfig(config) {
     const main = resolveModel(normalized, mainRef, { allowMissing: true });
     if (!main) {
       errors.push(`agent.model="${mainRef}" doesn't resolve to a configured provider/model`);
-    } else {
-      validateProvider(main.providerId, main.provider, errors);
     }
   }
 
@@ -755,70 +772,92 @@ export function syncAgentModelWithRouter(config) {
 
 const BOOTSTRAP_PLACEHOLDER_KEY = 'PLACEHOLDER_RUN_ONBOARDING_TO_REPLACE';
 
-// Remove bootstrap placeholder providers — both the new `_placeholder` name
-// and any legacy provider whose apiKey is still the onboarding sentinel.
-// Called automatically on every config write so stale placeholders disappear
-// as soon as the user saves real provider details.
-function purgeBootstrapPlaceholder(config) {
+function isBootstrapPlaceholderProvider(providerId, provider) {
+  return providerId === '_placeholder'
+    || normalizeString(provider?.apiKey) === BOOTSTRAP_PLACEHOLDER_KEY;
+}
+
+// Keep the bootstrap provider until onboarding has selected a real, resolvable
+// agent model. Unrelated settings (for example Web Search) must remain writable
+// before onboarding is complete. Once a real model is selected, remove all
+// current and legacy sentinels and repair references that pointed at them in
+// the same atomic write.
+function finalizeBootstrapPlaceholder(config) {
   if (!isRecord(config)) return config;
   const providers = config?.model?.providers;
+  const agentModel = normalizeString(config?.agent?.model);
+  const selected = agentModel
+    ? resolveModel(config, agentModel, { allowMissing: true })
+    : null;
+  if (
+    !selected
+    || isBootstrapPlaceholderProvider(selected.providerId, selected.provider)
+  ) return config;
+
+  const removedProviderIds = new Set();
   if (isRecord(providers)) {
-    for (const [pid, prov] of Object.entries(providers)) {
-      if (pid === '_placeholder' || normalizeString(prov?.apiKey) === BOOTSTRAP_PLACEHOLDER_KEY) {
-        delete providers[pid];
+    for (const [providerId, provider] of Object.entries(providers)) {
+      if (isBootstrapPlaceholderProvider(providerId, provider)) {
+        removedProviderIds.add(providerId);
+        delete providers[providerId];
       }
     }
   }
+  if (removedProviderIds.size === 0) return config;
 
-  const agentModel = normalizeString(config?.agent?.model);
-  if (agentModel === '_placeholder/_placeholder') {
-    const realProviders = isRecord(providers) ? Object.keys(providers) : [];
-    if (realProviders.length > 0) {
-      const firstProvider = realProviders[0];
-      const models = Object.keys(providers[firstProvider]?.models ?? {});
-      if (models.length > 0) {
-        config.agent.model = `${firstProvider}/${models[0]}`;
-      }
-    }
+  function referencesRemovedProvider(ref) {
+    const value = normalizeString(ref);
+    const slash = value.indexOf('/');
+    return slash > 0 && removedProviderIds.has(value.slice(0, slash));
   }
 
   const subagentDefault = normalizeString(config?.agent?.subagents?.default);
-  if (subagentDefault && subagentDefault !== 'inherit' && !resolveModel(config, subagentDefault, { allowMissing: true })) {
+  if (subagentDefault && subagentDefault !== 'inherit' && referencesRemovedProvider(subagentDefault)) {
     config.agent.subagents.default = 'inherit';
+  }
+
+  if (referencesRemovedProvider(config?.memory?.model)) {
+    config.memory.model = 'inherit';
   }
 
   const router = config?.router;
   if (!isRecord(router)) return config;
 
-  const agentRef = normalizeString(config.agent?.model);
-  const survivingProviders = isRecord(providers) ? new Set(Object.keys(providers)) : new Set();
-
-  function isOrphanRef(ref) {
-    const s = normalizeString(ref);
-    if (!s) return false;
-    const slash = s.indexOf('/');
-    if (slash <= 0) return false;
-    return !survivingProviders.has(s.slice(0, slash));
-  }
-
   if (isRecord(router.scenarios)) {
     for (const [key, val] of Object.entries(router.scenarios)) {
-      if (isOrphanRef(val)) router.scenarios[key] = agentRef || val;
+      if (referencesRemovedProvider(val)) router.scenarios[key] = agentModel;
     }
   }
-  if (Array.isArray(router.fallback?.default)) {
-    router.fallback.default = router.fallback.default.map(
-      v => isOrphanRef(v) ? (agentRef || v) : v
-    );
+  if (isRecord(router.fallback)) {
+    for (const [key, refs] of Object.entries(router.fallback)) {
+      if (!Array.isArray(refs)) continue;
+      router.fallback[key] = refs.map(
+        value => referencesRemovedProvider(value) ? agentModel : value,
+      );
+    }
+  }
+  if (typeof router.stats?.baselineModel === 'string'
+    && referencesRemovedProvider(router.stats.baselineModel)) {
+    router.stats.baselineModel = agentModel;
+  } else if (isRecord(router.stats?.baselineModel)) {
+    const baseline = router.stats.baselineModel;
+    if (removedProviderIds.has(normalizeString(baseline.provider))) {
+      const selectedRef = splitModelRef(agentModel);
+      router.stats.baselineModel = {
+        ...baseline,
+        provider: selectedRef?.providerId,
+        model: selectedRef?.modelId,
+      };
+    }
   }
   if (isRecord(router.tokenSaver)) {
-    if (isOrphanRef(router.tokenSaver.judge)) {
-      router.tokenSaver.judge = agentRef || router.tokenSaver.judge;
+    if (referencesRemovedProvider(router.tokenSaver.judge)) {
+      router.tokenSaver.judge = agentModel;
     }
     if (isRecord(router.tokenSaver.tiers)) {
       for (const tier of Object.values(router.tokenSaver.tiers)) {
-        if (isRecord(tier) && isOrphanRef(tier.model)) {
-          tier.model = agentRef || tier.model;
+        if (isRecord(tier) && referencesRemovedProvider(tier.model)) {
+          tier.model = agentModel;
         }
       }
     }
@@ -832,7 +871,7 @@ function purgeBootstrapPlaceholder(config) {
 // there's no read-modify-write needed anymore (the previous translation
 // layer existed only to bridge an older internal schema).
 export async function writePilotDeckConfig(config) {
-  const sanitized = purgeBootstrapPlaceholder(
+  const sanitized = finalizeBootstrapPlaceholder(
     syncAgentModelWithRouter(
       sanitizeProviderCredentials(
         isRecord(config) ? deepMerge({}, config) : config,

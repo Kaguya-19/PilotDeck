@@ -805,7 +805,11 @@ router.put('/', async (req, res) => {
     res.json(response);
     } catch (error) {
       if (error?.validation) {
-        return res.status(400).json({ error: error.message, validation: error.validation });
+        return res.status(400).json({
+          error: error.message,
+          code: 'CONFIG_VALIDATION_FAILED',
+          validation: error.validation,
+        });
       }
       res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
     }

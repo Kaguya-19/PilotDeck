@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   Check,
@@ -40,6 +40,8 @@ type ProviderCardProps = {
   ) => Promise<{ ok: boolean; error?: string }>;
   onRemove: () => void;
   catalogEntry?: CatalogProvider;
+  initialEditing?: boolean;
+  onCancelNew?: () => void;
 };
 
 export default function ProviderCard({
@@ -48,19 +50,28 @@ export default function ProviderCard({
   onSave,
   onRemove,
   catalogEntry,
+  initialEditing = false,
+  onCancelNew,
 }: ProviderCardProps) {
   const { t } = useTranslation("settings");
   const [draftProvider, setDraftProvider] = useState<V2Provider>(provider);
-  const [editing, setEditing] = useState(false);
+  const [editing, setEditing] = useState(initialEditing);
   const [saving, setSaving] = useState(false);
-  const isMaskedKey = isMaskedSecret(draftProvider.apiKey);
-  const protocol = draftProvider.protocol ?? catalogEntry?.protocol ?? "openai";
-  const effectiveUrl = draftProvider.url || catalogEntry?.defaultUrl || "";
-  const enabledModels = Object.keys(draftProvider.models ?? {});
+  const savingRef = useRef(false);
   const [newModelId, setNewModelId] = useState("");
   const [showProviderAdvanced, setShowProviderAdvanced] = useState(false);
   const [providerIdDraft, setProviderIdDraft] = useState(providerId);
   const [providerIdError, setProviderIdError] = useState("");
+  const isMaskedKey = isMaskedSecret(draftProvider.apiKey);
+  const protocol = draftProvider.protocol ?? catalogEntry?.protocol ?? "openai";
+  const effectiveUrl = draftProvider.url || catalogEntry?.defaultUrl || "";
+  const enabledModels = Object.keys(draftProvider.models ?? {});
+  const trimmedProviderId = providerIdDraft.trim();
+  const providerRequiresApiKey = trimmedProviderId === "ollama"
+    ? false
+    : catalogEntry?.id === trimmedProviderId
+      ? catalogEntry.requiresApiKey !== false
+      : true;
   const [apiModels, setApiModels] = useState<ApiModelListItem[] | null>(null);
   const [apiModelsStatus, setApiModelsStatus] = useState<
     "idle" | "loading" | "error"
@@ -79,8 +90,10 @@ export default function ProviderCard({
     setProviderIdError("");
   }, [editing, provider, providerId]);
 
-  const update = (patchValue: Partial<V2Provider>) =>
+  const update = (patchValue: Partial<V2Provider>) => {
+    setProviderIdError("");
     setDraftProvider((prev) => ({ ...prev, ...patchValue }));
+  };
 
   const cancelEditing = () => {
     setDraftProvider(provider);
@@ -88,14 +101,37 @@ export default function ProviderCard({
     setProviderIdError("");
     setNewModelId("");
     setEditing(false);
+    onCancelNew?.();
   };
 
   const saveEditing = async () => {
-    const nextId = providerIdDraft.trim() || providerId;
+    if (savingRef.current) return;
+    const nextId = providerIdDraft.trim();
+    if (!/^[a-z0-9][a-z0-9_-]{0,63}$/i.test(nextId)) {
+      setProviderIdError(t("pilotDeckConfig.panels.models.providerIdInvalid"));
+      return;
+    }
+    if (!effectiveUrl.trim()) {
+      setProviderIdError(t("pilotDeckConfig.panels.models.providerUrlRequired"));
+      return;
+    }
+    if (providerRequiresApiKey && !draftProvider.apiKey?.trim()) {
+      setProviderIdError(t("pilotDeckConfig.panels.models.providerApiKeyRequired"));
+      return;
+    }
+    if (enabledModels.length === 0) {
+      setProviderIdError(t("pilotDeckConfig.panels.models.providerModelRequired"));
+      return;
+    }
+    savingRef.current = true;
     setSaving(true);
     setProviderIdError("");
     try {
-      const result = await onSave(nextId, draftProvider);
+      const result = await onSave(nextId, {
+        ...draftProvider,
+        protocol,
+        url: effectiveUrl,
+      });
       if (!result.ok) {
         setProviderIdError(
           result.error || t("pilotDeckConfig.panels.models.providerIdDuplicate"),
@@ -105,6 +141,7 @@ export default function ProviderCard({
       setEditing(false);
       setNewModelId("");
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   };
@@ -133,7 +170,6 @@ export default function ProviderCard({
 
   const visibleModels: Array<ApiModelListItem | CatalogModel> =
     apiModels ?? catalogEntry?.models ?? [];
-  const providerRequiresApiKey = catalogEntry?.requiresApiKey !== false;
   const canFetchModels = Boolean(
     effectiveUrl && (!providerRequiresApiKey || draftProvider.apiKey),
   );

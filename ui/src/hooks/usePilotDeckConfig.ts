@@ -66,6 +66,18 @@ type ReloadInfo = {
   at: number;
 };
 
+function configSaveError(data: unknown): string {
+  const payload = data && typeof data === 'object'
+    ? data as { error?: unknown; validation?: { errors?: unknown } }
+    : {};
+  const validationErrors = Array.isArray(payload.validation?.errors)
+    ? payload.validation.errors.filter((item: unknown) => typeof item === 'string' && item.trim())
+    : [];
+  if (validationErrors.length > 0) return validationErrors.join(', ');
+  if (typeof payload.error === 'string' && payload.error.trim()) return payload.error;
+  return 'Failed to save config';
+}
+
 function usePilotDeckConfigState() {
   const [path, setPath] = useState('');
   const [raw, setRaw] = useState('');
@@ -291,11 +303,7 @@ function usePilotDeckConfigState() {
         });
         const data = await response.json();
         if (!response.ok) {
-          throw new Error(
-            data.error
-              || data.validation?.errors?.join(', ')
-              || 'Failed to save config',
-          );
+          throw new Error(configSaveError(data));
         }
 
         // Every successful queued write advances the disk snapshot, even when
@@ -358,6 +366,23 @@ function usePilotDeckConfigState() {
     return result;
   }, [applyResponse]);
 
+  // Structured settings use optimistic updates for responsiveness, but a
+  // rejected write must never leave that invalid draft in the shared config
+  // context. Restore the latest confirmed disk snapshot only when this is
+  // still the current draft, so a newer user edit is never overwritten.
+  const commitRaw = useCallback((
+    nextRaw: string,
+    options: ConfigSaveOptions = {},
+  ): Promise<ConfigSaveResult> => {
+    updateRaw(nextRaw);
+    return save(options).then((result) => {
+      if (!result.ok && rawRef.current === nextRaw) {
+        updateRaw(savedRawRef.current);
+      }
+      return result;
+    });
+  }, [save, updateRaw]);
+
   const reloadConfig = useCallback(async () => {
     setSaving(true);
     setError(null);
@@ -414,6 +439,7 @@ function usePilotDeckConfigState() {
     message,
     refresh,
     save,
+    commitRaw,
     reloadConfig,
     openFile,
   };

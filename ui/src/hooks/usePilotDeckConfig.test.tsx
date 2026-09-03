@@ -278,6 +278,54 @@ describe("usePilotDeckConfig saves", () => {
     expect(result.current.saving).toBe(false);
   });
 
+  it("rolls a rejected structured save back to the latest confirmed config", async () => {
+    mocks.authenticatedFetch.mockImplementation(
+      (url: string, options?: RequestInit) => {
+        if (url === "/api/config" && !options?.method) {
+          return Promise.resolve(response(configResponse("confirmed")));
+        }
+        if (url === "/api/config/validate") {
+          return Promise.resolve(
+            response({ valid: false, errors: ["draft is invalid"], warnings: [] }),
+          );
+        }
+        if (url === "/api/config" && options?.method === "PUT") {
+          return Promise.resolve(
+            response({
+              error: "Invalid PilotDeck config",
+              validation: {
+                valid: false,
+                errors: ["model.providers.provider1.apiKey is required"],
+                warnings: [],
+              },
+            }, false),
+          );
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      },
+    );
+
+    const { result } = renderHook(() => usePilotDeckConfig(), {
+      wrapper: ConfigWrapper,
+    });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    let saveResult;
+    await act(async () => {
+      saveResult = await result.current.commitRaw("invalid structured draft");
+    });
+
+    expect(saveResult).toEqual({
+      ok: false,
+      error: "model.providers.provider1.apiKey is required",
+    });
+    expect(result.current.error).toBe(
+      "model.providers.provider1.apiKey is required",
+    );
+    expect(result.current.raw).toBe("confirmed");
+    expect(result.current.isDirty).toBe(false);
+  });
+
   it("shares one draft and save queue between settings consumers", async () => {
     mocks.authenticatedFetch.mockImplementation(
       (url: string, options?: RequestInit) => {

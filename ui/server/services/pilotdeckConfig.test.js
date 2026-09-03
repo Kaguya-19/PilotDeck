@@ -406,6 +406,142 @@ describe('validatePilotDeckConfig gateway validation', () => {
         expect(config.model.providers.ollama.url).toBe('http://localhost:11434/v1');
     });
 
+    it('rejects incomplete providers even when they are not the active agent model', () => {
+        const validation = validatePilotDeckConfig({
+            agent: { model: '_placeholder/_placeholder' },
+            model: {
+                providers: {
+                    _placeholder: {
+                        protocol: 'openai',
+                        url: 'https://example.invalid/v1',
+                        apiKey: 'PLACEHOLDER_RUN_ONBOARDING_TO_REPLACE',
+                        models: { _placeholder: {} },
+                    },
+                    provider1: {
+                        protocol: 'openai',
+                        url: '',
+                        apiKey: '',
+                        models: {},
+                    },
+                },
+            },
+        });
+
+        expect(validation.valid).toBe(false);
+        expect(validation.errors).toEqual(expect.arrayContaining([
+            'model.providers.provider1.url is required',
+            'model.providers.provider1.apiKey is required',
+            'model.providers.provider1.models must contain at least one model',
+        ]));
+    });
+
+    it('keeps the bootstrap provider when an unrelated setting is saved before onboarding', async () => {
+        useTempConfig(null);
+
+        const result = await writePilotDeckConfig({
+            agent: { model: '_placeholder/_placeholder' },
+            model: {
+                providers: {
+                    _placeholder: {
+                        protocol: 'openai',
+                        url: 'https://example.invalid/v1',
+                        apiKey: 'PLACEHOLDER_RUN_ONBOARDING_TO_REPLACE',
+                        models: { _placeholder: {} },
+                    },
+                },
+            },
+            tools: { webSearch: { enabled: false } },
+        });
+
+        expect(result.config.agent.model).toBe('_placeholder/_placeholder');
+        expect(result.config.model.providers).toHaveProperty('_placeholder');
+        expect(result.config.tools.webSearch.enabled).toBe(false);
+    });
+
+    it('keeps the bootstrap provider while a real provider is configured but not selected', async () => {
+        useTempConfig(null);
+
+        const result = await writePilotDeckConfig({
+            agent: { model: '_placeholder/_placeholder' },
+            model: {
+                providers: {
+                    _placeholder: {
+                        protocol: 'openai',
+                        url: 'https://example.invalid/v1',
+                        apiKey: 'PLACEHOLDER_RUN_ONBOARDING_TO_REPLACE',
+                        models: { _placeholder: {} },
+                    },
+                    ollama: {
+                        protocol: 'openai',
+                        url: 'http://localhost:11434/v1',
+                        models: { 'qwen3:0.6b': {} },
+                    },
+                },
+            },
+        });
+
+        expect(result.config.model.providers).toHaveProperty('_placeholder');
+        expect(result.config.model.providers).toHaveProperty('ollama');
+    });
+
+    it('removes bootstrap providers and rewrites their references after selecting a real model', async () => {
+        useTempConfig(null);
+
+        const result = await writePilotDeckConfig({
+            agent: {
+                model: 'ollama/qwen3:0.6b',
+                subagents: { default: '_placeholder/_placeholder' },
+            },
+            memory: { model: '_placeholder/_placeholder' },
+            model: {
+                providers: {
+                    _placeholder: {
+                        protocol: 'openai',
+                        url: 'https://example.invalid/v1',
+                        apiKey: 'PLACEHOLDER_RUN_ONBOARDING_TO_REPLACE',
+                        models: { _placeholder: {} },
+                    },
+                    ollama: {
+                        protocol: 'openai',
+                        url: 'http://localhost:11434/v1',
+                        models: { 'qwen3:0.6b': {} },
+                    },
+                },
+            },
+            router: {
+                scenarios: {
+                    default: '_placeholder/_placeholder',
+                    vision: '_placeholder/_placeholder',
+                },
+                fallback: {
+                    default: ['_placeholder/_placeholder'],
+                    vision: ['_placeholder/_placeholder'],
+                },
+                stats: { baselineModel: '_placeholder/_placeholder' },
+                tokenSaver: {
+                    judge: '_placeholder/_placeholder',
+                    defaultTier: 'fast',
+                    tiers: { fast: { model: '_placeholder/_placeholder' } },
+                },
+            },
+        });
+
+        expect(result.config.model.providers).not.toHaveProperty('_placeholder');
+        expect(result.config.agent.subagents.default).toBe('inherit');
+        expect(result.config.memory.model).toBe('inherit');
+        expect(result.config.router.scenarios).toEqual({
+            default: 'ollama/qwen3:0.6b',
+            vision: 'ollama/qwen3:0.6b',
+        });
+        expect(result.config.router.fallback).toEqual({
+            default: ['ollama/qwen3:0.6b'],
+            vision: ['ollama/qwen3:0.6b'],
+        });
+        expect(result.config.router.stats.baselineModel).toBe('ollama/qwen3:0.6b');
+        expect(result.config.router.tokenSaver.judge).toBe('ollama/qwen3:0.6b');
+        expect(result.config.router.tokenSaver.tiers.fast.model).toBe('ollama/qwen3:0.6b');
+    });
+
     it('resets a placeholder subagent default when writing config', async () => {
         const configPath = useTempConfig(null);
 
