@@ -146,6 +146,43 @@ describe('LlmConfigurationStep', () => {
     });
   });
 
+  it('shows the provider error instead of the aggregate connection-test message', async () => {
+    mocks.authenticatedFetch.mockImplementation(async (url: string) => {
+      if (url === '/api/config/provider') {
+        return { ok: true, json: async () => ({ exists: false, provider: null }) };
+      }
+      if (url === '/api/config/test-connections') {
+        return {
+          ok: true,
+          json: async () => ({
+            status: 'failed',
+            models: [{
+              modelId: 'claude-sonnet-5',
+              textInput: 'unsupported',
+              imageInput: 'unknown',
+              error: { code: 'ENDPOINT_UNREACHABLE', message: 'Upstream rate limit exceeded.' },
+            }],
+            error: { code: 'TEXT_TEST_FAILED', message: 'One or more models failed the text connection test.' },
+          }),
+        };
+      }
+      return { ok: true, json: async () => ({}) };
+    });
+
+    render(<LlmConfigurationStep onSaved={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /^Custom OpenAI/ }));
+    fireEvent.change(screen.getByLabelText('Provider ID'), { target: { value: 'modelbest' } });
+    fireEvent.change(screen.getByLabelText('Base URL'), { target: { value: 'https://llm-center.modelbest.co/v1' } });
+    fireEvent.change(screen.getByLabelText('API Key'), { target: { value: 'sk-test' } });
+    fireEvent.change(screen.getByLabelText('Model'), { target: { value: 'claude-sonnet-5' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Test Connection' }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/claude-sonnet-5: Upstream rate limit exceeded/)).toBeTruthy();
+    });
+    expect(screen.queryByText(/One or more models failed/)).toBeNull();
+  });
+
   it('ignores a connection result when the form changes while testing', async () => {
     let resolveTest!: (response: Response) => void;
     const pendingTest = new Promise<Response>((resolve) => { resolveTest = resolve; });

@@ -9,6 +9,21 @@ import { ConfigSaveError } from "../../shared/view";
 import AgentsSection from "./components/AgentsSection";
 import { splitModelRef } from "./utils/modelRefs";
 
+function connectionTestErrorMessage(result: {
+  error?: string | { message?: string } | null;
+  message?: string;
+  models?: Array<{ modelId?: string; error?: string | { message?: string } | null }>;
+}, fallback: string) {
+  const modelErrors = (Array.isArray(result.models) ? result.models : [])
+    .map((model) => {
+      const detail = typeof model.error === "string" ? model.error : model.error?.message;
+      return detail ? `${model.modelId || "Model"}: ${detail}` : "";
+    })
+    .filter(Boolean);
+  if (modelErrors.length) return modelErrors.join("; ");
+  return typeof result.error === "string" ? result.error : result.error?.message || result.message || fallback;
+}
+
 type AgentModelSectionsProps = {
   title: string;
 };
@@ -73,7 +88,7 @@ export default function AgentModelSections({ title }: AgentModelSectionsProps) {
         });
         const result = await response.json();
         if (!response.ok || result.status === "failed") {
-          throw new Error(result.error?.message || result.message || "Model connection test failed.");
+          throw new Error(connectionTestErrorMessage(result, "Model connection test failed."));
         }
         if (result.status === "manual_input_required") {
           const unknownModels = Array.isArray(result.models)
@@ -90,7 +105,7 @@ export default function AgentModelSections({ title }: AgentModelSectionsProps) {
           });
           const completedResult = await completed.json();
           if (!completed.ok || completedResult.status !== "passed") {
-            throw new Error(completedResult.error?.message || "Image capability confirmation failed.");
+            throw new Error(connectionTestErrorMessage(completedResult, "Image capability confirmation failed."));
           }
         }
         modelTestBindings = [{ testId: result.testId }];

@@ -106,6 +106,13 @@ import { listModelCatalog, validateExplicitModelSelection, validateModelSelectio
 import { createDialogProjectRegistry } from "../gateway/dialog/projectRegistry.js";
 import type { SessionModelSelection } from "../gateway/protocol/types.js";
 import { listCommands } from "../gateway/dialog/commands.js";
+import {
+  ContentAddressedWorkspaceSnapshotRecorder,
+  JsonlInvocationLogSink,
+  resolveLegalStorageConfig,
+  type ModelInvocationLogSink,
+  type WorkspaceSnapshotRecorder,
+} from "../storage/index.js";
 
 export type CreateLocalGatewayOptions = {
   projectRoot?: string;
@@ -147,6 +154,11 @@ export type CreateLocalGatewayOptions = {
    */
   autoElicitation?: boolean;
   telemetry?: TelemetryClient;
+  /** Host-injected legal data sinks. Environment defaults are used when omitted. */
+  invocationLogSink?: ModelInvocationLogSink;
+  snapshotRecorder?: WorkspaceSnapshotRecorder;
+  /** Host-injected workspace identity override, primarily for embedding/tests. */
+  workspaceId?: string;
 };
 
 export type SubsystemUpdate = {
@@ -216,6 +228,15 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
     );
   }
   const env = options.pilotHome ? { ...baseEnv, PILOT_HOME: pilotHome } : baseEnv;
+  const legalStorageConfig = resolveLegalStorageConfig(env);
+  const legalWorkspaceId = options.workspaceId;
+  const legalWorkspaceIdResolver = legalStorageConfig
+    ? (projectKey?: string): string => resolveProjectStorageId(projectKey ?? projectRoot, pilotHome)
+    : undefined;
+  const invocationLogSink = options.invocationLogSink
+    ?? (legalStorageConfig ? new JsonlInvocationLogSink(legalStorageConfig) : undefined);
+  const snapshotRecorder = options.snapshotRecorder
+    ?? (legalStorageConfig ? new ContentAddressedWorkspaceSnapshotRecorder(legalStorageConfig) : undefined);
   const builtinSkillsRoot = resolveBuiltinSkillsRoot(options.builtinSkillsRoot, env);
   const legacySkillMigration = migrateLegacyBundledSkillCopies({ pilotHome, builtinSkillsRoot });
   if (legacySkillMigration.migrated.length > 0) {
@@ -370,6 +391,11 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
     };
   };
   const gateway = new InProcessGateway(router, {
+    invocationLogSink,
+    snapshotRecorder,
+    workspaceId: legalWorkspaceId,
+    workspaceIdResolver: legalWorkspaceIdResolver,
+    storageConfigVersion: legalStorageConfig?.storageConfigVersion,
     funasrInstallCommand: getPilotDeckInstallCommand(),
     now,
     serverInfo: { mode: "in_process", projectKey: projectRoot },

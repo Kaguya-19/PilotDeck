@@ -11,6 +11,7 @@ import {
   type CanonicalModelEvent,
 } from "../../model/index.js";
 import type { AgentError } from "../../agent/index.js";
+import type { ModelInvocationLogSink, WorkspaceSnapshotRecorder } from "../../storage/legalDataStorage.js";
 import { contentToText } from "../../tool/index.js";
 import type { SessionRouter } from "../SessionRouter.js";
 import { GatewayElicitationBus } from "../elicitation/GatewayElicitationBus.js";
@@ -116,6 +117,13 @@ const DEFAULT_REPLACEMENT_TRANSACTION_TIMEOUT_MS = 60_000;
 const DEFAULT_ABORT_TURN_TIMEOUT_MS = 30_000;
 
 export type InProcessGatewayOptions = {
+  invocationLogSink?: ModelInvocationLogSink;
+  snapshotRecorder?: WorkspaceSnapshotRecorder;
+  /** Host-owned workspace identity; takes precedence over request fields. */
+  workspaceId?: string;
+  /** Resolves the PilotDeck workspace/project identity for each turn. */
+  workspaceIdResolver?: (projectKey?: string) => string | undefined;
+  storageConfigVersion?: string;
   /** Absolute command used by the model to install bundled FunASR assets. */
   funasrInstallCommand?: string;
   /** Maximum time to wait for an aborted turn to finish unwinding. */
@@ -365,6 +373,8 @@ export class InProcessGateway implements Gateway {
     input = plannedInput;
 
     const runId = input.runId ?? this.uuid();
+    const workspaceId = this.options.workspaceId
+      ?? this.options.workspaceIdResolver?.(input.projectKey);
     const replacementClaim = this.claimPendingTurnReplacement(input.sessionKey, runId);
     if (replacementClaim === "conflict") {
       const message = "This session is waiting for its edited replacement turn to be accepted.";
@@ -456,6 +466,9 @@ export class InProcessGateway implements Gateway {
     const telemetryContext = resolveSubmitTurnTelemetry(input);
     let timeoutHandle: NodeJS.Timeout | undefined;
     let timedOut = false;
+    let turnSucceeded = false;
+    let preCaptured = false;
+    let sessionCwd: string | undefined;
 
     // Background pump: agent events → queue.
     const pump = (async () => {
@@ -477,6 +490,7 @@ export class InProcessGateway implements Gateway {
           projectKey: input.projectKey,
           channelKey: input.channelKey,
         });
+        sessionCwd = session.snapshotForRuntimeReload().cwd;
         if (input.timeoutMs !== undefined && Number.isFinite(input.timeoutMs) && input.timeoutMs > 0) {
           timeoutHandle = setTimeout(() => {
             timedOut = true;
@@ -547,6 +561,19 @@ export class InProcessGateway implements Gateway {
           input.projectKey,
           this.options.funasrInstallCommand ?? getPilotDeckInstallCommand(),
         );
+        if (this.options.snapshotRecorder && workspaceId) {
+          const pre = await this.options.snapshotRecorder.capturePreUser({
+            workspaceId,
+            sessionId: input.sessionKey,
+            turnId: runId,
+            runId,
+            workspaceDir: sessionCwd!,
+          });
+          if (pre.state !== "committed") {
+            throw new Error(`pre_user workspace snapshot failed: ${pre.error ?? "unknown error"}`);
+          }
+          preCaptured = true;
+        }
         const syntheticMessages: CanonicalMessage[] = (input.syntheticMessages ?? []).map((s) => ({
           role: "user" as const,
           content: [{ type: "text" as const, text: s.text }],
@@ -578,11 +605,15 @@ export class InProcessGateway implements Gateway {
           {
             turnId: runId,
             maxTurns: input.maxTurns,
+            workspaceId,
+            invocationLogSink: this.options.invocationLogSink,
+            storageConfigVersion: this.options.storageConfigVersion,
             runMode,
             permissionMode,
             basePermissionMode,
             allowPlanModeTools,
             canPrompt: input.canPrompt,
+            thinking: input.thinking,
             allowedReadFiles,
             permissionRules: {
               ...persistedRules,
@@ -601,6 +632,7 @@ export class InProcessGateway implements Gateway {
                     mode: reasoningValueToMode(modelSelection.selection.reasoning),
                   },
                 } : {}),
+                ...(input.thinking ? { thinking: input.thinking } : {}),
               },
             } : {}),
           },
@@ -634,6 +666,9 @@ export class InProcessGateway implements Gateway {
             lastEmittedModel = `${event.event.provider}\0${event.event.model}`;
           }
           for (const gatewayEvent of mapAgentEvent(event, runId)) {
+            if (gatewayEvent.type === "turn_completed" && gatewayEvent.finishReason === "completed") {
+              turnSucceeded = true;
+            }
             if (gatewayEvent.type === "context_budget") {
               this.recordGatewayStatusMessage({
                 sessionKey: input.sessionKey,
@@ -710,10 +745,30 @@ export class InProcessGateway implements Gateway {
         // The timed-out AgentSession is never safe to reuse. Do not await a
         // misbehaving tool here: the hard timeout must release the Cron run.
         await this.router.close(input.sessionKey);
+        if (this.options.snapshotRecorder && workspaceId && sessionCwd && preCaptured && !turnSucceeded) {
+          await this.options.snapshotRecorder.capturePostAgent({
+            workspaceId,
+            sessionId: input.sessionKey,
+            turnId: runId,
+            runId,
+            workspaceDir: sessionCwd,
+            failureReason: "timeout",
+          }).catch(() => undefined);
+        }
         void pump.catch(() => undefined);
       } else {
         // Defensive — make sure the pump promise is settled before we resolve.
         await pump.catch(() => undefined);
+        if (this.options.snapshotRecorder && workspaceId && sessionCwd && preCaptured && !turnSucceeded) {
+          await this.options.snapshotRecorder.capturePostAgent({
+            workspaceId,
+            sessionId: input.sessionKey,
+            turnId: runId,
+            runId,
+            workspaceDir: sessionCwd,
+            failureReason: "turn_failed_or_aborted",
+          }).catch(() => undefined);
+        }
       }
       // Signal any in-flight `abortTurn` awaiters that the session slot
       // has been released. Drop our deferred only if we still own it —

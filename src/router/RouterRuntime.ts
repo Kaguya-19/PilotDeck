@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type {
   CanonicalModelEvent,
   CanonicalModelRequest,
@@ -573,6 +574,10 @@ export function createRouterRuntime(
     request: CanonicalModelRequest,
     ctx: RouterExecuteContext,
   ): AsyncIterable<CanonicalModelEvent> {
+    const attemptContext: RouterExecuteContext = {
+      ...ctx,
+      logicalCallId: ctx.logicalCallId ?? randomUUID(),
+    };
     if (!enabled) {
       const routedCachePlan = request.cachePlan &&
         (request.cachePlan.provider === undefined || request.cachePlan.provider === decision.provider) &&
@@ -595,7 +600,7 @@ export function createRouterRuntime(
       );
       const cappedPassthroughRequest = clampMaxOutputTokensToModelCap(downgradedPassthrough, deps.modelRuntime);
       let sawErrorEvent = false;
-      for await (const item of streamAttempt(cappedPassthroughRequest, deps.modelRuntime, ctx, events)) {
+      for await (const item of streamAttempt(cappedPassthroughRequest, deps.modelRuntime, attemptContext, events)) {
         if (item.kind === "event") {
           if (item.event.type === "error") {
             sawErrorEvent = true;
@@ -727,7 +732,7 @@ export function createRouterRuntime(
         const pending: CanonicalModelEvent[] = [];
         let outcome: AttemptOutcome | undefined;
 
-        for await (const item of streamAttempt(attemptRequest, deps.modelRuntime, ctx, events)) {
+        for await (const item of streamAttempt(attemptRequest, deps.modelRuntime, attemptContext, events)) {
           if (item.kind === "outcome") {
             outcome = item.outcome;
             break;
@@ -1146,6 +1151,22 @@ async function* streamAttempt(
   try {
     for await (const event of modelRuntime.stream(request, {
       signal: abortSignal,
+      ...(ctx.invocationLogSink && ctx.workspaceId ? {
+        invocation: {
+          sink: ctx.invocationLogSink,
+          context: {
+            workspaceId: ctx.workspaceId,
+            sessionId: ctx.sessionId,
+            turnId: ctx.turnId,
+            runId: ctx.runId ?? ctx.turnId,
+            logicalCallId: ctx.logicalCallId ?? randomUUID(),
+            caller: ctx.caller ?? "agent",
+            subSessionId: ctx.subSessionId,
+            parentToolCallId: ctx.parentToolCallId,
+            storageConfigVersion: ctx.storageConfigVersion,
+          },
+        },
+      } : {}),
       onRetryProgress(progress) {
         events.emit({
           type: "pilotdeck_router_retry_progress",

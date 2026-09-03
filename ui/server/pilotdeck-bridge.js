@@ -1546,6 +1546,7 @@ export async function runChatViaGateway(
             runId,
             ...(Array.isArray(options?.uploadedAttachments) ? { uploadedAttachments: options.uploadedAttachments } : {}),
             ...(options?.modelOverride ? { modelOverride: options.modelOverride } : {}),
+            ...(options?.thinking && typeof options.thinking === 'object' ? { thinking: options.thinking } : {}),
             ...(basePermissionMode ? { basePermissionMode } : {}),
             ...(attachments.length > 0 ? { attachments } : {}),
             ...(options.workspaceCwd ? { workspaceCwd: options.workspaceCwd } : {}),

@@ -17,6 +17,9 @@ export type AgentInput =
 
 export type AgentSubmitOptions = {
   turnId?: string;
+  workspaceId?: string;
+  storageConfigVersion?: string;
+  invocationLogSink?: import("../../storage/legalDataStorage.js").ModelInvocationLogSink;
   maxTurns?: number;
   metadata?: Record<string, unknown>;
   runMode?: AgentRunMode;
@@ -35,4 +38,5 @@ export type AgentSubmitOptions = {
    */
   syntheticMessages?: import("../../model/index.js").CanonicalMessage[];
   modelOverride?: AgentModelOverride;
+  thinking?: import("../../model/index.js").CanonicalThinkingConfig;
 };

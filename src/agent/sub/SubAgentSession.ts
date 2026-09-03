@@ -65,6 +65,10 @@ export type SubAgentSessionOptions = {
   /** Parent session/turn scope used for forwarding child activity to hosts. */
   parentSessionId: string;
   parentTurnId: string;
+  workspaceId?: string;
+  storageConfigVersion?: string;
+  invocationLogSink?: import("../../storage/legalDataStorage.js").ModelInvocationLogSink;
+  parentToolCallId?: string;
   /** New session id for the fork's transcript writer (C3 sidechain hook). */
   subagentSessionId: string;
   /** Stable subagent UUID — mirrors C3 sidechain naming. */
@@ -138,6 +142,9 @@ export class SubAgentSession {
     const generator = loop.run({
       sessionId: this.options.subagentSessionId,
       turnId,
+      workspaceId: this.options.workspaceId,
+      invocationLogSink: this.options.invocationLogSink,
+      storageConfigVersion: this.options.storageConfigVersion,
       messages,
       maxTurns: this.options.maxTurns,
       abortSignal: this.options.abortSignal,
@@ -324,6 +331,7 @@ export class SubAgentSession {
         ...(parent.metadata ?? {}),
         subagentId: this.options.subagentId,
         subagentType: this.options.definition.id,
+        parentToolCallId: this.options.parentToolCallId,
       },
     };
   }

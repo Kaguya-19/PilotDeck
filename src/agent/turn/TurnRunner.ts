@@ -20,6 +20,9 @@ import type { AgentSteerMessage } from "../session/SteerMailbox.js";
 export type TurnRunnerOptions = {
   sessionId: string;
   turnId: string;
+  workspaceId?: string;
+  storageConfigVersion?: string;
+  invocationLogSink?: import("../../storage/legalDataStorage.js").ModelInvocationLogSink;
   messages: CanonicalMessage[];
   input: AgentInput;
   maxTurns?: number;
@@ -36,6 +39,7 @@ export type TurnRunnerOptions = {
   /** Synthetic messages appended after user input; stored with metadata.synthetic flag. */
   syntheticMessages?: CanonicalMessage[];
   modelOverride?: AgentModelOverride;
+  thinking?: import("../../model/index.js").CanonicalThinkingConfig;
   openSteerMailbox?: () => void;
   drainSteerMessages?: () => AgentSteerMessage[];
   drainOrCloseSteerMailbox?: () => { messages: AgentSteerMessage[]; closed: boolean };
@@ -118,6 +122,9 @@ export class TurnRunner {
           type: "steer_unapplied" as const,
           sessionId: options.sessionId,
           turnId: options.turnId,
+          workspaceId: options.workspaceId,
+          invocationLogSink: options.invocationLogSink,
+          storageConfigVersion: options.storageConfigVersion,
           itemId: steer.itemId,
           reason: "turn_ended" as const,
         }));
@@ -224,6 +231,8 @@ export class TurnRunner {
         const generator = this.loop.run({
           sessionId: options.sessionId,
           turnId: options.turnId,
+          workspaceId: options.workspaceId,
+          invocationLogSink: options.invocationLogSink,
           messages,
           maxTurns: options.maxTurns,
           runMode: options.runMode,
@@ -234,6 +243,7 @@ export class TurnRunner {
           canPrompt: options.canPrompt,
           permissionRules: options.permissionRules,
           modelOverride: options.modelOverride,
+          thinking: options.thinking,
           abortSignal: options.abortSignal,
           drainSteerMessages: options.drainSteerMessages
             ? () => trackDrainedSteers(options.drainSteerMessages?.() ?? [])

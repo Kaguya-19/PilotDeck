@@ -86,6 +86,14 @@ export type RouterDecisionInput = {
 export type RouterExecuteContext = {
   sessionId: string;
   turnId: string;
+  runId?: string;
+  workspaceId?: string;
+  storageConfigVersion?: string;
+  logicalCallId?: string;
+  subSessionId?: string;
+  parentToolCallId?: string;
+  caller?: "agent" | "subagent" | "router_judge";
+  invocationLogSink?: import("../../storage/legalDataStorage.js").ModelInvocationLogSink;
   projectPath?: string;
   abortSignal?: AbortSignal;
 };

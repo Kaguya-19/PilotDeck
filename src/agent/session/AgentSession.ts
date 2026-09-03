@@ -83,6 +83,9 @@ export class AgentSession {
     const runResult = yield* this.options.turnRunner.run({
       sessionId: this.state.sessionId,
       turnId,
+      workspaceId: submitOptions.workspaceId,
+      invocationLogSink: submitOptions.invocationLogSink,
+      storageConfigVersion: submitOptions.storageConfigVersion,
       messages: this.state.messages,
       input,
       maxTurns: submitOptions.maxTurns,
@@ -95,6 +98,7 @@ export class AgentSession {
       permissionRules: submitOptions.permissionRules,
       syntheticMessages: submitOptions.syntheticMessages,
       modelOverride: submitOptions.modelOverride,
+      thinking: submitOptions.thinking,
       abortSignal: this.state.abortController.signal,
       openSteerMailbox: () => this.steerMailbox.start(turnId),
       drainSteerMessages: () => this.steerMailbox.drain(turnId),

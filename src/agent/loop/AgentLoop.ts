@@ -124,6 +124,9 @@ type AgentStatusMessage = {
 export type AgentLoopInput = {
   sessionId: string;
   turnId: string;
+  workspaceId?: string;
+  storageConfigVersion?: string;
+  invocationLogSink?: import("../../storage/legalDataStorage.js").ModelInvocationLogSink;
   messages: CanonicalMessage[];
   maxTurns?: number;
   runMode?: AgentRunMode;
@@ -136,6 +139,7 @@ export type AgentLoopInput = {
   canPrompt?: boolean;
   permissionRules?: Partial<PermissionRuleSet>;
   modelOverride?: import("../protocol/input.js").AgentModelOverride;
+  thinking?: import("../../model/index.js").CanonicalThinkingConfig;
   abortSignal?: AbortSignal;
   onDurableMessage?: (message: CanonicalMessage) => void | Promise<void>;
   onAgentStatusMessage?: (status: AgentStatusMessage) => void | Promise<void>;
@@ -627,6 +631,13 @@ export class AgentLoop {
         for await (const event of this.dependencies.router.execute(decision, request, {
           sessionId: input.sessionId,
           turnId: input.turnId,
+          runId: input.turnId,
+          workspaceId: input.workspaceId,
+          invocationLogSink: input.invocationLogSink,
+          storageConfigVersion: input.storageConfigVersion,
+          caller: this.config.isSubagent ? "subagent" : "agent",
+          subSessionId: this.config.isSubagent ? input.sessionId : undefined,
+          parentToolCallId: this.config.metadata?.parentToolCallId as string | undefined,
           projectPath: this.config.cwd,
           abortSignal: input.abortSignal,
         })) {
@@ -2138,7 +2149,7 @@ export class AgentLoop {
       maxOutputTokens: this.config.maxOutputTokens,
       temperature: input.modelOverride?.temperature ?? this.config.temperature,
       speed: input.modelOverride?.speed,
-      thinking: input.modelOverride?.thinking ?? this.config.thinking,
+      thinking: input.modelOverride?.thinking ?? input.thinking ?? this.config.thinking,
       stream: true,
       metadata: this.config.metadata,
       cacheBreakpoints: finalCacheBreakpoints,
@@ -2544,6 +2555,10 @@ export class AgentLoop {
           parentWriteSnapshots: this.writeSnapshots,
           parentSessionId: input.sessionId,
           parentTurnId: input.turnId,
+          workspaceId: input.workspaceId,
+          invocationLogSink: input.invocationLogSink,
+          storageConfigVersion: input.storageConfigVersion,
+          parentToolCallId: toolCallId,
           subagentSessionId,
           subagentId,
           abortSignal: composedAbort.signal,

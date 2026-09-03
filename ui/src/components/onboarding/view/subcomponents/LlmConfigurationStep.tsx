@@ -52,6 +52,20 @@ const CUSTOM_PROVIDER: CatalogProvider = {
 
 const DEFAULT_PROVIDER = CATALOG_PROVIDERS.find((provider) => provider.id === 'openrouter') ?? CATALOG_PROVIDERS[0];
 
+function connectionTestErrorMessage(result: {
+  error?: string | { message?: string } | null;
+  models?: Array<{ modelId?: string; error?: string | { message?: string } | null }>;
+}, fallback: string) {
+  const modelErrors = (Array.isArray(result.models) ? result.models : [])
+    .map((model) => {
+      const detail = typeof model.error === 'string' ? model.error : model.error?.message;
+      return detail ? `${model.modelId || 'Model'}: ${detail}` : '';
+    })
+    .filter(Boolean);
+  if (modelErrors.length) return modelErrors.join('; ');
+  return typeof result.error === 'string' ? result.error : result.error?.message || fallback;
+}
+
 function defaultModelForProvider(provider: CatalogProvider | null) {
   if (!provider) return '';
   return provider.models.find((model) => model.id === 'deepseek/deepseek-v4-flash')?.id
@@ -316,8 +330,7 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
       const data = await res.json();
       if (controller.signal.aborted || connectionTestGeneration.current !== testGeneration || currentConnectionConfigSignature.current !== testSignature) return;
       if (!res.ok || data.status === 'failed') {
-        const errorMessage = typeof data.error === 'string' ? data.error : data.error?.message;
-        throw new Error(errorMessage || data.message || 'Connection failed.');
+        throw new Error(connectionTestErrorMessage(data, data.message || 'Connection failed.'));
       }
 
       let completed = data;
@@ -348,8 +361,7 @@ export default function LlmConfigurationStep({ onSaved }: LlmConfigurationStepPr
         completed = await capabilityResponse.json();
         if (controller.signal.aborted || connectionTestGeneration.current !== testGeneration || currentConnectionConfigSignature.current !== testSignature) return;
         if (!capabilityResponse.ok || completed.status !== 'passed') {
-          const errorMessage = typeof completed.error === 'string' ? completed.error : completed.error?.message;
-          throw new Error(errorMessage || 'Image capability confirmation failed.');
+          throw new Error(connectionTestErrorMessage(completed, 'Image capability confirmation failed.'));
         }
       }
 

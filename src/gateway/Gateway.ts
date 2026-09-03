@@ -5,6 +5,7 @@ import { listProjectSessions } from "../session/index.js";
 import { InProcessGateway } from "./client/InProcessGateway.js";
 import { SessionRouter, type GatewaySessionFactory, type SessionRouterOptions } from "./SessionRouter.js";
 import type { Gateway, GatewayCronController, GatewayServerInfo } from "./protocol/types.js";
+import type { ModelInvocationLogSink, WorkspaceSnapshotRecorder } from "../storage/legalDataStorage.js";
 
 export type GatewayProjectStorageOptions = {
   projectRoot: string;
@@ -12,6 +13,8 @@ export type GatewayProjectStorageOptions = {
 };
 
 export type CreateGatewayOptions = {
+  invocationLogSink?: ModelInvocationLogSink;
+  snapshotRecorder?: WorkspaceSnapshotRecorder;
   session?: {
     create?: GatewaySessionFactory;
     list?: SessionRouterOptions["listSessions"];
@@ -46,6 +49,8 @@ export function createGateway(options: CreateGatewayOptions): Gateway {
       ...options.serverInfo,
     },
     cron: options.cron,
+    invocationLogSink: options.invocationLogSink,
+    snapshotRecorder: options.snapshotRecorder,
   });
 }
 

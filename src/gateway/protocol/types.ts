@@ -93,6 +93,7 @@ export type GatewaySubmitTurnInput = {
   sessionKey: string;
   channelKey: GatewayChannelKey;
   message: string;
+  workspaceId?: string;
   projectKey?: string;
   /** Override the agent session's working directory for this session. */
   workspaceCwd?: string;
@@ -100,6 +101,8 @@ export type GatewaySubmitTurnInput = {
   uploadedAttachments?: UploadedAttachmentRef[];
   /** A one-turn model override. Persisted session preferences are managed separately. */
   modelOverride?: ExplicitModelSelection;
+  /** Per-turn thinking/reasoning override from the chat composer. */
+  thinking?: import("../../model/index.js").CanonicalThinkingConfig;
   runMode?: AgentRunMode;
   mode?: GatewayMode;
   /** The user's actual permission preference before plan-mode override. */
