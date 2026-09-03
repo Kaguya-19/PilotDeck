@@ -550,10 +550,15 @@ function scoreExtension(name, platform) {
 
 function scoreArch(name, arch) {
   if (/(universal|all)/.test(name)) return 20;
-  if (arch === 'arm64') return /(arm64|aarch64)/.test(name) ? 25 : 0;
-  if (arch === 'x64') return /(x64|x86_64|amd64)/.test(name) ? 25 : 0;
-  if (arch === 'ia32') return /(ia32|x86|i386)/.test(name) ? 25 : 0;
-  return 0;
+  const assetArch = /(arm64|aarch64)/.test(name)
+    ? 'arm64'
+    : /(x64|x86_64|amd64)/.test(name)
+      ? 'x64'
+      : /(ia32|i386|(?:^|[-_.])x86(?:[-_.]|$))/.test(name)
+        ? 'ia32'
+        : null;
+  if (!assetArch) return 0;
+  return assetArch === arch ? 25 : -200;
 }
 
 function readPackageVersion(projectRoot) {

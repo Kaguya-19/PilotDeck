@@ -56,11 +56,25 @@ env:
 
 jobs:
   macos:
-    runs-on: macos-latest
+    name: macOS ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-latest
+            host_arch: arm64
+            binary_arch: arm64
+          - arch: x64
+            runner: macos-15-intel
+            host_arch: x86_64
+            binary_arch: x86_64
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     env:
       PILOTDECK_DESKTOP_RELEASE_DATE: ${{ inputs.release_date }}
       PILOTDECK_DESKTOP_REVISION: ${{ inputs.revision }}
+      PILOTDECK_DESKTOP_NODE_ARCH: ${{ matrix.arch }}
       PILOTDECK_DESKTOP_REQUIRE_SIGNING: ${{ inputs.require_macos_signing && '1' || '0' }}
       APPLE_ID: ${{ secrets.APPLE_ID }}
       APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
@@ -80,8 +94,10 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Verify Apple Silicon build host
-        run: test "$(uname -m)" = arm64
+      - name: Verify macOS build host
+        env:
+          EXPECTED_HOST_ARCH: ${{ matrix.host_arch }}
+        run: test "$(uname -m)" = "$EXPECTED_HOST_ARCH"
 
       - name: Set desktop release metadata
         run: node apps/desktop/scripts/set-ci-version.mjs
@@ -121,18 +137,24 @@ jobs:
           echo "CSC_KEYCHAIN=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
           echo "CSC_IDENTITY_AUTO_DISCOVERY=true" >> "$GITHUB_ENV"
 
-      - name: Build macOS universal installer
-        env:
-          PILOTDECK_DESKTOP_NODE_ARCH: universal
-        run: pnpm --filter pilotdeck-desktop run dist:mac
+      - name: Build macOS ${{ matrix.arch }} installer
+        run: pnpm --filter pilotdeck-desktop run dist:mac:${{ matrix.arch }}
 
       - name: Verify macOS artifact
         shell: bash
+        env:
+          MACOS_ARCH: ${{ matrix.arch }}
+          MACH_ARCH: ${{ matrix.binary_arch }}
         run: |
-          app_path="apps/desktop/dist-electron/mac-universal/PilotDeck.app"
-          dmg_path="$(find apps/desktop/dist-electron -maxdepth 1 -name '*.dmg' -print -quit)"
-          test -d "$app_path"
+          app_path="$(find apps/desktop/dist-electron -mindepth 2 -maxdepth 2 -type d -name 'PilotDeck.app' -print -quit)"
+          dmg_path="$(find apps/desktop/dist-electron -maxdepth 1 -name "*-mac-${MACOS_ARCH}.dmg" -print -quit)"
+          test -n "$app_path"
           test -n "$dmg_path"
+          test "$(lipo -archs "$app_path/Contents/MacOS/PilotDeck")" = "$MACH_ARCH"
+          test "$(lipo -archs "$app_path/Contents/Resources/node/bin/node")" = "$MACH_ARCH"
+          native_path="$(find "$app_path/Contents/Resources/runtime/node_modules/better-sqlite3" -name '*.node' -print -quit)"
+          test -n "$native_path"
+          test "$(lipo -archs "$native_path")" = "$MACH_ARCH"
           codesign --verify --deep --strict --verbose=2 "$app_path"
           hdiutil verify "$dmg_path"
 
@@ -140,7 +162,8 @@ jobs:
         if: ${{ inputs.require_macos_signing }}
         shell: bash
         run: |
-          app_path="apps/desktop/dist-electron/mac-universal/PilotDeck.app"
+          app_path="$(find apps/desktop/dist-electron -mindepth 2 -maxdepth 2 -type d -name 'PilotDeck.app' -print -quit)"
+          test -n "$app_path"
           codesign -dv --verbose=4 "$app_path" 2>&1 | grep -q 'Authority=Developer ID Application:'
           xcrun stapler validate "$app_path"
           spctl --assess --type execute --verbose=2 "$app_path"
@@ -148,8 +171,8 @@ jobs:
       - name: Upload macOS installer
         uses: actions/upload-artifact@v4
         with:
-          name: pilotdeck-desktop-macos
-          path: apps/desktop/dist-electron/*.dmg
+          name: pilotdeck-desktop-macos-${{ matrix.arch }}
+          path: apps/desktop/dist-electron/*-mac-${{ matrix.arch }}.dmg
           if-no-files-found: error
           retention-days: 14
 

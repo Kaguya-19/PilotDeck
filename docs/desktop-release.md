@@ -30,17 +30,18 @@ known baseline failures; all other UI/server tests remain in the merge gate.
 the latest desktop release tag:
 
 - no production change: skip the release;
-- production change: build a signed and notarized macOS installer plus an
-  unsigned Windows installer, then publish one dated GitHub Release;
+- production change: build signed and notarized macOS arm64 and x64 installers
+  plus an unsigned Windows installer, then publish one dated GitHub Release;
 - repeated manual release on the same date: use `-r2`, `-r3`, and so on.
 
 Release tags are `desktop-vYYYY.MM.DD`. The internal Electron version is a
 numeric SemVer derived from the same Shanghai date. GitHub Actions may also be
 started manually with an optional release revision.
 
-Every release contains the DMG, Windows installer, `desktop-release.json`, and
-`SHA256SUMS`. The desktop updater ignores unrelated Web/server releases and only
-considers tags beginning with `desktop-v`.
+Every release contains architecture-specific macOS DMGs, the Windows installer,
+`desktop-release.json`, and `SHA256SUMS`. The desktop updater ignores unrelated
+Web/server releases, considers only tags beginning with `desktop-v`, and selects
+the installer matching the current machine architecture.
 
 Release publishing and packaged updater metadata use the repository running the
 workflow. Production builds from upstream `main` therefore publish to and check
@@ -61,9 +62,10 @@ macOS:
 - `APPLE_TEAM_ID`
 - `MACOS_KEYCHAIN_PASSWORD` (optional)
 
-The macOS universal job runs on GitHub's Apple Silicon `macos-latest` image and
-fails early if the host architecture is not arm64. This is required so both
-arm64 and Rosetta/x64 native dependencies are installed and tested.
+The macOS jobs run in parallel on GitHub's Apple Silicon `macos-latest` and
+Intel `macos-15-intel` images. Each job fails early when the runner architecture
+does not match its installer, and verifies the Electron executable, bundled
+Node.js, and native runtime modules before uploading the DMG.
 
 The macOS certificate must be a Developer ID Application certificate. The
 Windows installer does not require a signing certificate. GitHub's automatic
@@ -74,7 +76,9 @@ Windows installer does not require a signing certificate. GitHub's automatic
 ```bash
 pnpm install --frozen-lockfile
 pnpm --filter pilotdeck-desktop test
-pnpm --filter pilotdeck-desktop dist:mac
+# Run the command matching the Mac host architecture:
+pnpm --filter pilotdeck-desktop dist:mac:arm64
+pnpm --filter pilotdeck-desktop dist:mac:x64
 # Run the following on Windows:
 pnpm --filter pilotdeck-desktop dist:win
 ```
@@ -94,7 +98,8 @@ UI manifests, or if its committed lockfile is stale.
 
 ## Recovery
 
-If one platform fails, fix the credential or build issue and rerun the failed
-workflow. A release is created only after both platform artifacts are downloaded
-and verified. For a deliberate second release on the same Shanghai
-date, run the daily workflow manually and set revision `2` or higher.
+If one architecture or platform fails, fix the credential or build issue and
+rerun the failed workflow. A release is created only after both macOS DMGs and
+the Windows installer are downloaded and verified. For a deliberate additional
+release on the same Shanghai date, leave revision empty to select the next
+available `-rN` tag automatically.

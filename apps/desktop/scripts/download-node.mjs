@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { chmodSync, cpSync, existsSync, mkdirSync, rmSync, renameSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, rmSync, renameSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -23,8 +23,8 @@ const archMap = {
 };
 
 const nodePlatform = platformMap[process.platform];
-const nodeArch = requestedArch === "universal" ? "universal" : archMap[requestedArch];
-if (!nodePlatform || !nodeArch || (requestedArch === "universal" && process.platform !== "darwin")) {
+const nodeArch = archMap[requestedArch];
+if (!nodePlatform || !nodeArch) {
   throw new Error(`Unsupported platform for bundled Node: ${process.platform}/${requestedArch}`);
 }
 
@@ -74,12 +74,12 @@ function bundledNodeMatchesRequest() {
   if (!existsSync(nodeBinary)) return false;
   const versionCheck = spawnSync(nodeBinary, ["--version"], { encoding: "utf8" });
   if (versionCheck.stdout.trim() !== `v${version}`) return false;
-  if (nodeArch !== "universal") return true;
+  if (process.platform !== "darwin") return true;
 
   const archCheck = spawnSync("lipo", ["-archs", nodeBinary], { encoding: "utf8" });
   if (archCheck.status !== 0) return false;
-  const archs = new Set(archCheck.stdout.trim().split(/\s+/u));
-  return archs.has("x86_64") && archs.has("arm64");
+  const expectedArch = nodeArch === "x64" ? "x86_64" : nodeArch;
+  return archCheck.stdout.trim() === expectedArch;
 }
 
 function downloadSourceForArchive(archiveName) {
@@ -123,28 +123,6 @@ async function installSingleArchNode(arch) {
   await extractNodeArchive(arch, targetDir);
 }
 
-async function installUniversalDarwinNode() {
-  if (process.platform !== "darwin") {
-    throw new Error("Universal bundled Node is only supported on macOS");
-  }
-
-  const arm64Dir = resolve(tmpDir, "node-arm64");
-  const x64Dir = resolve(tmpDir, "node-x64");
-  await extractNodeArchive("arm64", arm64Dir);
-  await extractNodeArchive("x64", x64Dir);
-
-  cpSync(arm64Dir, targetDir, { recursive: true });
-  const targetBinary = join(targetDir, "bin", "node");
-  console.log("[desktop] creating universal bundled Node binary");
-  runChecked("lipo", [
-    "-create",
-    join(arm64Dir, "bin", "node"),
-    join(x64Dir, "bin", "node"),
-    "-output",
-    targetBinary,
-  ]);
-}
-
 if (bundledNodeMatchesRequest()) {
   pruneNodeDistribution();
   console.log(`[desktop] bundled Node already present: v${version} (${nodeArch})`);
@@ -156,11 +134,7 @@ mkdirSync(tmpDir, { recursive: true });
 
 rmSync(targetDir, { recursive: true, force: true });
 
-if (nodeArch === "universal") {
-  await installUniversalDarwinNode();
-} else {
-  await installSingleArchNode(nodeArch);
-}
+await installSingleArchNode(nodeArch);
 
 rmSync(tmpDir, { recursive: true, force: true });
 if (process.platform !== "win32") chmodSync(nodeBinary, 0o755);

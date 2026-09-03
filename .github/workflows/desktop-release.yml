@@ -134,7 +134,8 @@ jobs:
       - name: Verify complete cross-platform release
         shell: bash
         run: |
-          find release-assets -maxdepth 1 -name '*.dmg' -print -quit | grep -q .
+          find release-assets -maxdepth 1 -name '*-mac-arm64.dmg' -print -quit | grep -q .
+          find release-assets -maxdepth 1 -name '*-mac-x64.dmg' -print -quit | grep -q .
           find release-assets -maxdepth 1 -name '*-setup.exe' -print -quit | grep -q .
           test -s release-assets/desktop-release.json
           test -s release-assets/SHA256SUMS.txt

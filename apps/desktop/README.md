@@ -15,13 +15,16 @@ child processes, then opens the packaged Web UI inside an Electron window.
 ## Packaging
 
 ```bash
-pnpm --filter pilotdeck-desktop dist:mac
+# Run the command matching the Mac host architecture:
+pnpm --filter pilotdeck-desktop dist:mac:arm64
+pnpm --filter pilotdeck-desktop dist:mac:x64
 pnpm --filter pilotdeck-desktop dist:win
 ```
 
 Platform release builds should run on matching GitHub Actions runners:
 
-- macOS universal DMG artifacts on `macos-latest`
+- macOS arm64 DMG artifacts on `macos-latest`
+- macOS x64 DMG artifacts on `macos-15-intel`
 - Windows x64 NSIS installer artifacts on `windows-latest`
 
 macOS CI signs and notarizes release artifacts when the repository provides
@@ -38,9 +41,10 @@ these GitHub Secrets:
 CI release builds fail closed when signing credentials are absent. Local macOS
 development packages may still use ad-hoc signing.
 
-The packaging script stages a production-only runtime in `.runtime/app` before
-calling `electron-builder`; the final app should not include the workspace
-development dependency tree.
+Each packaging script stages one architecture-matched, production-only runtime
+in `.runtime/app` before calling `electron-builder`; the final app should not
+include the other macOS architecture or the workspace development dependency
+tree.
 
 See [`docs/desktop-release.md`](../../docs/desktop-release.md) for the daily
 release policy, required GitHub Secrets, manual recovery, and Web deployment

@@ -10,7 +10,9 @@
     "compile": "tsc -p tsconfig.json",
     "dev": "node scripts/build-runtime.mjs && tsc -p tsconfig.json && electron .",
     "pack": "node scripts/build-runtime.mjs && tsc -p tsconfig.json && electron-builder --dir",
-    "dist:mac": "PILOTDECK_DESKTOP_NODE_ARCH=universal node scripts/build-runtime.mjs && tsc -p tsconfig.json && electron-builder --mac --universal",
+    "dist:mac": "node scripts/build-runtime.mjs && tsc -p tsconfig.json && electron-builder --mac",
+    "dist:mac:arm64": "PILOTDECK_DESKTOP_NODE_ARCH=arm64 node scripts/build-runtime.mjs && tsc -p tsconfig.json && electron-builder --mac --arm64",
+    "dist:mac:x64": "PILOTDECK_DESKTOP_NODE_ARCH=x64 node scripts/build-runtime.mjs && tsc -p tsconfig.json && electron-builder --mac --x64",
     "dist:win": "node scripts/build-runtime.mjs && tsc -p tsconfig.json && electron-builder --win",
     "dist:win:portable": "node scripts/build-runtime.mjs && tsc -p tsconfig.json && electron-builder --win portable",
     "download-git-bash": "node scripts/download-git-bash.mjs",
@@ -77,13 +79,6 @@
         "filter": [
           "**/*"
         ]
-      },
-      {
-        "from": ".runtime/app-x64",
-        "to": "runtime-x64",
-        "filter": [
-          "**/*"
-        ]
       }
     ],
     "mac": {
@@ -93,7 +88,6 @@
       "gatekeeperAssess": false,
       "entitlements": "resources/entitlements.mac.plist",
       "entitlementsInherit": "resources/entitlements.mac.plist",
-      "x64ArchFiles": "Contents/Resources/{runtime,runtime-x64}/**/*",
       "signIgnore": [
         "Contents/Resources/runtime/node_modules/playwright-core/\\.local-browsers/"
       ],
