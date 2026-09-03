@@ -76,6 +76,39 @@ test("registered Office attachments receive conversion guidance without raw diag
   }
 });
 
+test("unregistered Office attachments retain diagnostics instead of disappearing", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pilotdeck-attachment-guidance-"));
+  try {
+    const docxPath = join(root, "sample.docx");
+    await writeFile(docxPath, Buffer.from("PK".padEnd(128, "x")));
+
+    let capturedInput: AgentInput | undefined;
+    const gateway = createGateway((input) => {
+      capturedInput = input;
+    });
+
+    for await (const _event of gateway.submitTurn({
+      sessionKey: "session-1",
+      channelKey: "wecom",
+      message: "inspect attachment",
+      attachments: [{
+        type: "file",
+        path: docxPath,
+        name: "sample.docx",
+        metadata: { source: "wecom", mediaType: "file" },
+      }],
+    })) {
+      // Drain the stream so the fake session runs to completion.
+    }
+
+    const text = inputText(capturedInput);
+    assert.match(text, /\[Attachment diagnostics\]/);
+    assert.match(text, /sample\.docx/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("registered PDF attachments retain their original name in the history path note", async () => {
   const root = await mkdtemp(join(tmpdir(), "pilotdeck-attachment-guidance-"));
   try {

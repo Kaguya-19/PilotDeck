@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { ChatAttachment } from '../types/types';
 import {
+  createTextContentReference,
+  formatContentReferencePromptBlock,
+} from '../../../types/contentReference';
+import {
   buildAttachmentPathNote,
   mergeUserAttachments,
   parseUserAttachmentNote,
@@ -43,7 +47,7 @@ describe('attachment path notes', () => {
   });
 
   it('hides PDF runtime metadata after refresh and restores the attachment', () => {
-    const filePath = '/workspace/政研室/.tmp/chat-uploads/run/files/file-0-report.pdf';
+    const filePath = '/workspace/政研室/.tmp/chat-uploads/run/files/file-0-opaque-upload-id';
     const parsed = parseUserAttachmentNote([
       '分析一下这个文件内容，总结给我',
       `[PDF attachment: ${filePath}, 54858 bytes, estimated 1 pages. Use read_file on this registered attachment path to inspect it.]`,
@@ -76,6 +80,61 @@ describe('attachment path notes', () => {
         path: filePath,
         mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
       }],
+    });
+  });
+
+  it.each([
+    '请解释 <attachment path="/tmp/demo.txt"> 这段 XML',
+    '正文中提到了 [PDF attachment:，但这不是附件元数据',
+    '请解释 [Attachment diagnostics] 这个标题',
+    '请解释 [Registered attachment files in this session:] 这个标题',
+  ])('preserves attachment-like user text: %s', (content) => {
+    expect(parseUserAttachmentNote(content)).toEqual({
+      content,
+      attachments: [],
+    });
+  });
+
+  it('restores generated attachments that follow a content reference block', () => {
+    const reference = createTextContentReference({
+      id: 'reference-1',
+      createdAt: '2026-08-16T09:00:00.000Z',
+      selectionMode: 'text',
+      source: { relativePath: 'notes.md', fileName: 'notes.md' },
+      renderer: { id: 'text', backend: 'builtin', locatorQuality: 'semantic' },
+      locator: { surface: 'document', quote: { exact: 'selection' } },
+      selectedText: 'selection',
+    });
+    const filePath = '/tmp/file-0-report';
+    const parsed = parseUserAttachmentNote([
+      '比较两个文件',
+      formatContentReferencePromptBlock([reference]),
+      `[PDF attachment: ${filePath}, 42 bytes, estimated 1 page. Use read_file on this registered attachment path to inspect it.]`,
+      '\n\n[Registered attachment files in this session:]\n',
+      `- report.pdf: ${filePath}`,
+    ].join(''));
+
+    expect(parsed.content).toBe('比较两个文件');
+    expect(parsed.attachments.map((attachment) => ({
+      kind: attachment.kind || 'file',
+      name: attachment.name,
+    }))).toEqual([
+      { kind: 'file', name: 'report.pdf' },
+      { kind: 'content-reference', name: 'notes.md' },
+    ]);
+  });
+
+  it('does not restore a registered image as a duplicate file card', () => {
+    const filePath = '/tmp/file-0-opaque-image-id';
+    const parsed = parseUserAttachmentNote([
+      '查看图片',
+      '[Registered attachment files in this session:]',
+      `- photo.png: ${filePath}`,
+    ].join('\n'));
+
+    expect(parsed).toEqual({
+      content: '查看图片',
+      attachments: [],
     });
   });
 

@@ -13,12 +13,6 @@ import {
 const ATTACHMENT_NOTE_MARKER = '[Files attached by user and available for reading in the project:]';
 const ATTACHMENT_NOTE_END_MARKER = '[End files attached by user]';
 const ATTACHMENT_NOTE_JSON_PREFIX = '- attachment-json: ';
-const GENERATED_ATTACHMENT_BLOCK_MARKERS = [
-  '[Attachment diagnostics]',
-  '[Registered attachment files in this session:]',
-  '[PDF attachment:',
-  '<attachment ',
-];
 // Older transcripts have no end marker. Their next canonical text block may
 // be concatenated directly onto the final path during history projection.
 const LEGACY_ATTACHMENT_NOTE_TERMINATORS = [
@@ -113,24 +107,26 @@ function sliceBeforeFirstMarker(value: string, markers: string[]): string {
 }
 
 function inferAttachmentMimeType(name: string, filePath: string): string | undefined {
-  const source = `${name} ${filePath}`.toLowerCase();
-  if (source.endsWith('.pdf')) return 'application/pdf';
-  if (source.endsWith('.doc')) return 'application/msword';
-  if (source.endsWith('.docx')) return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
-  if (source.endsWith('.xls')) return 'application/vnd.ms-excel';
-  if (source.endsWith('.xlsx')) return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
-  if (source.endsWith('.ppt')) return 'application/vnd.ms-powerpoint';
-  if (source.endsWith('.pptx')) return 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
-  if (source.endsWith('.txt')) return 'text/plain';
-  if (source.endsWith('.md') || source.endsWith('.markdown')) return 'text/markdown';
-  if (source.endsWith('.json')) return 'application/json';
-  if (source.endsWith('.csv')) return 'text/csv';
-  if (source.endsWith('.xml')) return 'application/xml';
-  if (source.endsWith('.png')) return 'image/png';
-  if (source.endsWith('.jpg') || source.endsWith('.jpeg')) return 'image/jpeg';
-  if (source.endsWith('.gif')) return 'image/gif';
-  if (source.endsWith('.webp')) return 'image/webp';
-  if (source.endsWith('.svg') || source.endsWith('.svgz')) return 'image/svg+xml';
+  for (const source of [name, filePath]) {
+    const normalized = source.toLowerCase();
+    if (normalized.endsWith('.pdf')) return 'application/pdf';
+    if (normalized.endsWith('.doc')) return 'application/msword';
+    if (normalized.endsWith('.docx')) return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    if (normalized.endsWith('.xls')) return 'application/vnd.ms-excel';
+    if (normalized.endsWith('.xlsx')) return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+    if (normalized.endsWith('.ppt')) return 'application/vnd.ms-powerpoint';
+    if (normalized.endsWith('.pptx')) return 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+    if (normalized.endsWith('.txt')) return 'text/plain';
+    if (normalized.endsWith('.md') || normalized.endsWith('.markdown')) return 'text/markdown';
+    if (normalized.endsWith('.json')) return 'application/json';
+    if (normalized.endsWith('.csv')) return 'text/csv';
+    if (normalized.endsWith('.xml')) return 'application/xml';
+    if (normalized.endsWith('.png')) return 'image/png';
+    if (normalized.endsWith('.jpg') || normalized.endsWith('.jpeg')) return 'image/jpeg';
+    if (normalized.endsWith('.gif')) return 'image/gif';
+    if (normalized.endsWith('.webp')) return 'image/webp';
+    if (normalized.endsWith('.svg') || normalized.endsWith('.svgz')) return 'image/svg+xml';
+  }
   return undefined;
 }
 
@@ -167,49 +163,64 @@ function appendUniqueAttachment(
   attachments.push(candidate);
 }
 
-function generatedAttachmentBlockStart(value: string): number {
-  let start = -1;
-  for (const marker of GENERATED_ATTACHMENT_BLOCK_MARKERS) {
-    const index = value.indexOf(marker);
-    if (index >= 0 && (start < 0 || index < start)) start = index;
+function generatedDiagnosticsBlockStart(value: string): number | null {
+  const marker = '[Attachment diagnostics]';
+  for (let index = value.indexOf(marker); index >= 0; index = value.indexOf(marker, index + marker.length)) {
+    const suffix = value.slice(index + marker.length);
+    if (/^\s*-\s+(?:Attachment|Image|PDF attachment|File extension|Cannot determine image mime type)\b/u.test(suffix)) {
+      return index;
+    }
   }
-  return start;
+  return null;
 }
 
 function parseGeneratedAttachmentBlocks(value: string): {
   content: string;
   attachments: AttachmentPathNoteFile[];
 } | null {
-  const start = generatedAttachmentBlockStart(value);
-  if (start < 0) return null;
-
-  const generated = value.slice(start);
   const attachments: AttachmentPathNoteFile[] = [];
   const seen = new Set<string>();
+  const starts: number[] = [];
   const registeredMarker = '[Registered attachment files in this session:]';
-  const registeredIndex = generated.indexOf(registeredMarker);
+  const registeredIndex = value.lastIndexOf(registeredMarker);
   if (registeredIndex >= 0) {
-    const registeredLines = generated.slice(registeredIndex + registeredMarker.length).split(/\r?\n/);
+    const registeredLines = value.slice(registeredIndex + registeredMarker.length).split(/\r?\n/);
+    let foundRegisteredAttachment = false;
     for (const rawLine of registeredLines) {
-      appendUniqueAttachment(attachments, seen, parseAttachmentPathNoteLine(rawLine.trim()));
+      const parsed = parseAttachmentPathNoteLine(rawLine.trim());
+      const candidate = parsed
+        ? attachmentFromGeneratedPath(parsed.path, parsed.name)
+        : null;
+      if (candidate) foundRegisteredAttachment = true;
+      appendUniqueAttachment(attachments, seen, candidate);
     }
+    if (foundRegisteredAttachment) starts.push(registeredIndex);
   }
 
-  const inlineAttachmentPattern = /<attachment\s+path="([^"]+)"/giu;
-  for (const match of generated.matchAll(inlineAttachmentPattern)) {
-    appendUniqueAttachment(attachments, seen, attachmentFromGeneratedPath(match[1] ?? ''));
+  const inlineAttachmentPattern = /<attachment\s+path="([^"]+)">[\s\S]*?<\/attachment>/giu;
+  for (const match of value.matchAll(inlineAttachmentPattern)) {
+    const candidate = attachmentFromGeneratedPath(match[1] ?? '');
+    if (candidate && match.index !== undefined) starts.push(match.index);
+    appendUniqueAttachment(attachments, seen, candidate);
   }
 
   const pdfAttachmentPattern = /\[PDF attachment:\s*(.+?),\s*\d+\s+bytes,\s*estimated\s+\d+\s+pages?\.\s*Use read_file on this registered attachment path to inspect it\.\]/giu;
-  for (const match of generated.matchAll(pdfAttachmentPattern)) {
-    appendUniqueAttachment(attachments, seen, attachmentFromGeneratedPath(match[1] ?? ''));
+  for (const match of value.matchAll(pdfAttachmentPattern)) {
+    const candidate = attachmentFromGeneratedPath(match[1] ?? '');
+    if (candidate && match.index !== undefined) starts.push(match.index);
+    appendUniqueAttachment(attachments, seen, candidate);
   }
 
   const officeDiagnosticPattern = /Attachment\s+(.+?)\s+has Office\/archive\/binary extension\s+[^;]+;/giu;
-  for (const match of generated.matchAll(officeDiagnosticPattern)) {
+  for (const match of value.matchAll(officeDiagnosticPattern)) {
     appendUniqueAttachment(attachments, seen, attachmentFromGeneratedPath(match[1] ?? ''));
   }
 
+  const diagnosticsStart = generatedDiagnosticsBlockStart(value);
+  if (diagnosticsStart !== null) starts.push(diagnosticsStart);
+  if (starts.length === 0) return null;
+
+  const start = Math.min(...starts);
   return { content: value.slice(0, start).trimEnd(), attachments };
 }
 
@@ -217,7 +228,14 @@ export function parseUserAttachmentNote(content: unknown): {
   content: string;
   attachments: ChatAttachment[];
 } {
-  const parsedContentReferences = parseContentReferencePromptBlock(content);
+  const rawText = typeof content === 'string' ? content : '';
+  // The bounded client-authored note is authoritative and already hides all
+  // following canonical blocks. Parsing generated blocks as well can mistake
+  // legacy terminator fixtures for additional attachments.
+  const generated = rawText.includes(ATTACHMENT_NOTE_MARKER)
+    ? null
+    : parseGeneratedAttachmentBlocks(rawText);
+  const parsedContentReferences = parseContentReferencePromptBlock(generated?.content ?? rawText);
   const parsedSelections = parseDocumentSelectionPromptBlock(parsedContentReferences.content);
   const text = parsedSelections.content;
   const markerIndex = text.indexOf(ATTACHMENT_NOTE_MARKER);
@@ -225,14 +243,12 @@ export function parseUserAttachmentNote(content: unknown): {
     ...parsedSelections.references.map(documentSelectionToAttachment),
     ...parsedContentReferences.references.map(contentReferenceToAttachment),
   ];
+  const generatedAttachments = (generated?.attachments.map(toChatAttachment) ?? [])
+    .filter((attachment) => !isImageAttachmentMime(attachment.mimeType));
   if (markerIndex < 0) {
-    const generated = parseGeneratedAttachmentBlocks(text);
     return {
-      content: generated?.content ?? text,
-      attachments: [
-        ...(generated?.attachments.map(toChatAttachment) ?? []),
-        ...selectionAttachments,
-      ],
+      content: text,
+      attachments: mergeUserAttachments(generatedAttachments, selectionAttachments),
     };
   }
 
@@ -261,7 +277,13 @@ export function parseUserAttachmentNote(content: unknown): {
     if (reachedLegacyTerminator) break;
   }
 
-  return { content: visibleContent, attachments: [...attachments, ...selectionAttachments] };
+  return {
+    content: visibleContent,
+    attachments: mergeUserAttachments(
+      attachments,
+      [...generatedAttachments, ...selectionAttachments],
+    ),
+  };
 }
 
 function attachmentIdentity(attachment: ChatAttachment): string {
