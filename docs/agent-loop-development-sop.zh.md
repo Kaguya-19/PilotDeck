@@ -206,6 +206,162 @@ TRD 至少说明：
 - tool batch 由宿主 scheduler 决定 permission preflight、并发和结果顺序；
 - final payload 保留结构化 result、stop reason、usage、errors 和 structured output。
 
+### 7.1 当前 PilotDeck 实现参考
+
+下面的代码片段对应当前仓库的模块化实现，目的是说明“宿主如何接入”，不是要求每个宿主复制
+同一份实现。接入第三方宿主时，只替换 host module、port provider 和 transport adapter；
+`AgentLoop` 的循环、重试和终态逻辑继续复用。
+
+#### A. 先定义宿主无关 execute payload
+
+默认 sidecar factory 接收的是通用 payload。宿主业务对象在自己的 glue 中投影为
+`agent`、`messages`、`tools`、`permissionContext`、`seedState` 和 `executionContext`：
+
+```json
+{
+  "kind": "request",
+  "messageId": "execute-1",
+  "method": "execute",
+  "runId": "run-1",
+  "operationId": "operation-1",
+  "requestId": "attempt-1",
+  "sessionId": "session-1",
+  "turnId": "turn-1",
+  "payload": {
+    "agent": {
+      "provider": "openai-compatible",
+      "model": "model-id",
+      "cwd": "/workspace",
+      "systemPrompt": "宿主显式提供的系统提示",
+      "permissionMode": "default"
+    },
+    "messages": [
+      {"role": "user", "content": [{"type": "text", "text": "执行任务"}]}
+    ],
+    "tools": [{
+      "name": "lookup",
+      "description": "查询信息",
+      "kind": "custom",
+      "inputSchema": {"type": "object"},
+      "readOnly": true,
+      "concurrencySafe": true,
+      "requiresUserInteraction": false
+    }],
+    "permissionContext": {
+      "mode": "default",
+      "canPrompt": false,
+      "bypassAvailable": false,
+      "rules": {"allow": [], "deny": []}
+    },
+    "seedState": {"allowedReadFiles": ["/workspace/input.txt"]},
+    "executionContext": {"source": "host", "remainingActions": 1}
+  }
+}
+```
+
+对应实现入口是 [`createSidecarExecution`](../src/cli/pilotdeck-agent-loop-default-factory.ts)。
+它只读取通用字段，并将其转换为 `AgentRuntimeConfig`、canonical messages、tool
+descriptors 和 `AgentLoop` input；不能在这里读取 `TaskFrame`、Harness 或其他宿主对象。
+
+#### B. 在宿主侧实现 model/tool/context module
+
+sidecar 通过 `module_call` 请求宿主能力。下面是宿主 adapter 的最小 dispatch 形态：
+
+```ts
+async function dispatchModule(call: ModuleCall, signal: AbortSignal) {
+  if (call.module === "model") {
+    const prepared = await modelPort.prepare({
+      request: call.payload.request,
+      context: { ...call.payload.context, abortSignal: signal },
+    });
+    const events = [];
+    for await (const event of modelPort.stream({
+      prepared,
+      context: { ...call.payload.context, abortSignal: signal },
+    })) events.push(event);
+    return { events };
+  }
+
+  if (call.module === "capability") {
+    const calls = call.payload.operation === "execute_batch"
+      ? call.payload.calls
+      : [{ toolCallId: call.payload.toolCallId, name: call.payload.name,
+          arguments: call.payload.arguments }];
+    const results = await toolPort.executeAll(calls, {
+      ...call.payload.context,
+      abortSignal: signal,
+    }, { ...call.payload.execution, abortSignal: signal });
+    return call.payload.operation === "execute_batch" ? { results } : results[0];
+  }
+
+  if (call.module === "context") {
+    return { result: await contextRuntime.prepareForModel({
+      ...call.payload.input,
+      abortSignal: signal,
+    }) };
+  }
+
+  throw new Error(`Unsupported host module: ${call.module}`);
+}
+```
+
+当前 sidecar host adapter 的完整参考见 [`createSidecarPorts`](../src/agent/modules/sidecar.ts)
+和对拍 gateway adapter 的 [`dispatchModule`](../tools/agent-loop-parity/adapters/pilotdeck_gateway_impl.mjs)。
+真实宿主应把 `modelPort`、`toolPort`、`contextRuntime` 和 permission runtime 绑定到自己的
+session/operation；sidecar 不自行执行宿主工具，也不自行决定权限。
+
+#### C. 声明能力并保持兼容回退
+
+宿主只有实现了对应方法，才在 execute payload 声明能力：
+
+```json
+{
+  "hostModules": {
+    "context": {"methods": ["prepare_for_model", "capture_turn"]},
+    "capability": {"methods": ["execute", "execute_batch"]}
+  }
+}
+```
+
+`execute_batch` 未声明时，sidecar 回退到 unary capability call；context 未声明时使用
+默认 context runtime。这个协商逻辑位于 [`pilotdeck-agent-loop-default-factory.ts`](../src/cli/pilotdeck-agent-loop-default-factory.ts)
+和 [`sidecar.ts`](../src/agent/modules/sidecar.ts)，不要在宿主业务代码中复制一套判断。
+
+#### D. 取消、deadline 和终态只通过协议传递
+
+宿主发送控制消息，sidecar 返回协议终态；宿主负责将终态写入自己的 operation 状态：
+
+```json
+{"kind":"request","messageId":"cancel-1","method":"cancel",
+ "runId":"run-1","operationId":"operation-1","reason":"user_cancelled"}
+```
+
+```json
+{"kind":"event","eventType":"execute.final","final":true,
+ "runId":"run-1","operationId":"operation-1","requestId":"attempt-1",
+ "outcome":"failed","code":"DEADLINE_EXCEEDED",
+ "payload":{"result":{"type":"error","stopReason":"deadline_exceeded"}}}
+```
+
+宿主 adapter 必须校验 identity、sequence 和唯一 final；连接断开或副作用状态未知时使用
+`result_unknown`/reconciliation，而不是根据最后一段文本猜测成功。参考实现见
+[`AgentLoopSidecarServer`](../src/agent/modules/sidecar.ts)。
+
+#### E. 最小接入和验证顺序
+
+以当前 PilotDeck 模块接入为例，代码提交应按以下顺序落地：
+
+1. 在宿主 glue 中生成上面的通用 payload 和 identity mapping；
+2. 实现 model、capability、context module dispatch，并声明 `hostModules`；
+3. 只在必要时实现 stdio/HTTP/WS transport adapter，先保留 direct/native 路径；
+4. 增加 malformed、cancel、deadline、permission、batch、seedState 和终态契约测试；
+5. 运行 `pnpm build`、modular focused tests 和 gateway native/sidecar 对拍；
+6. 将命令、commit、运行时版本、退出码和 known gap 记录到实验结果文档。
+
+对拍工具的具体入口是 [`tools/agent-loop-parity/README.md`](../tools/agent-loop-parity/README.md)。
+它使用本地确定性 mock provider/tool；真实宿主接入仍必须额外执行本地 Gateway、session、
+permission、tool 和 sidecar 进程的端到端验证。
+
 ## 8. 分层验证
 
 按风险从小到大运行：
@@ -214,8 +370,11 @@ TRD 至少说明：
 
 ```text
 pnpm build
-pnpm check
+pnpm exec tsc --noEmit
 ```
+
+当前 `package.json` 没有名为 `check` 的 script；不要把不存在的 `pnpm check` 当作通过条件。
+协议和文档检查使用 focused tests、`pnpm exec tsc --noEmit` 与 `git diff --check`。
 
 Python 宿主同时运行项目约定的 Ruff、类型检查和 focused pytest。确认 sidecar 使用要求的 Node 版本，宿主使用指定的 Python virtualenv。
 

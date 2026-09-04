@@ -310,10 +310,37 @@ operation cancel 的线性化点在宿主：先原子写入 `cancel_requested`�
 ```text
 pnpm exec tsc --noEmit
 node --test dist/tests/protocol/module-protocol-contract.spec.js
-pnpm run check:docs
 git diff --check
 git status --short
 ```
+
+当前 PilotDeck 的可运行参考实现：
+
+| 协议职责 | 代码入口 | 说明 |
+| --- | --- | --- |
+| 通用 execute payload -> AgentLoop input | [`src/cli/pilotdeck-agent-loop-default-factory.ts`](../src/cli/pilotdeck-agent-loop-default-factory.ts) | 读取 `agent`、`messages`、`tools`、`permissionContext`、`seedState` 和 `hostModules`，不识别宿主业务对象。 |
+| stdio sidecar 启动 | [`src/cli/pilotdeck-agent-loop-sidecar.ts`](../src/cli/pilotdeck-agent-loop-sidecar.ts) | 只负责加载 factory 和运行 Module Protocol server。 |
+| context/model/capability module bridge | [`src/agent/modules/sidecar.ts`](../src/agent/modules/sidecar.ts) | 将 sidecar module call 转换为宿主 ports；支持 context 与 `execute_batch` 能力协商。 |
+| 协议类型与 profile | [`src/agent/modules/protocol.ts`](../src/agent/modules/protocol.ts) | 定义 host module method、execution identity 和通用调用类型。 |
+| native/sidecar gateway 对拍 | [`tools/agent-loop-parity/README.md`](../tools/agent-loop-parity/README.md) | 使用真实 Gateway/session 与确定性 mock 验证同一组语义。 |
+
+第三方接入可按以下最小调用链实现：
+
+```text
+Host session/turn
+  -> build generic execute payload
+  -> transport adapter (stdio / Unix Socket / HTTP / WS)
+  -> PilotDeck sidecar factory
+  -> AgentLoop
+  -> module_call(model | context | capability)
+  -> Host ports/runtime
+  -> final event
+  -> Host operation aggregation
+```
+
+实现时应直接参照 [AgentLoop 接入开发 SOP 的当前 PilotDeck 实现参考](agent-loop-development-sop.zh.md#71-当前-pilotdeck-实现参考)。
+其中的 JSON payload、`dispatchModule`、能力声明和 cancel/final 示例分别对应上述代码入口；
+示例中的 `ModuleCall` 是说明用类型，实际项目应引用本仓库的协议类型或由 Schema 生成类型。
 
 ## 版本记录
 
