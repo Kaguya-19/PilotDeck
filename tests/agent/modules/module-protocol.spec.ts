@@ -56,6 +56,16 @@ test("Module Protocol v2 validates host-owned module_call requests", () => {
     module: "capability",
     payload: { name: "lookup", arguments: {} },
   }), { ok: true });
+  assert.deepEqual(validateModuleMessage({
+    kind: "request",
+    messageId: "call-2",
+    method: "module_call",
+    runId: "run-1",
+    operationId: "operation-1",
+    requestId: "request-2",
+    module: "context",
+    payload: { operation: "prepare_for_model", input: {} },
+  }), { ok: true });
 });
 
 test("ModuleOperationHost keeps one outcome and rejects stream gaps", () => {

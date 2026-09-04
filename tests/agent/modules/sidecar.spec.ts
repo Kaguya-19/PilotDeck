@@ -164,7 +164,7 @@ test("sidecar maps max_turns to a failed protocol outcome with the original resu
   await serving;
   const terminal = lines.find((message) => message.kind === "event" && message.final === true);
   assert.equal(terminal?.outcome, "failed");
-  assert.equal(terminal?.code, "AGENT_MAX_TURNS_REACHED");
+  assert.equal(terminal?.code, "agent_max_turns_reached");
   assert.deepEqual((terminal?.payload as Record<string, unknown>)?.result, {
     type: "max_turns",
     sessionId: "session-1",
@@ -177,6 +177,47 @@ test("sidecar maps max_turns to a failed protocol outcome with the original resu
     completedAt: "2026-09-02T00:00:00.001Z",
     errors: [{ code: "agent_max_turns_reached", message: "limit" }],
   });
+});
+
+test("sidecar supplies the canonical max_turns code when the result has no error", async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const lines: Record<string, unknown>[] = [];
+  let buffered = "";
+  output.on("data", (chunk: Buffer) => {
+    buffered += chunk.toString("utf8");
+    for (const line of buffered.split("\n").slice(0, -1)) lines.push(JSON.parse(line) as Record<string, unknown>);
+    buffered = buffered.slice(buffered.lastIndexOf("\n") + 1);
+  });
+  const factory: SidecarExecutionFactory = async () => ({
+    loop: {
+      async *run() {
+        return {
+          result: {
+            type: "max_turns",
+            sessionId: "session-1",
+            turnId: "turn-1",
+            stopReason: "max_turns",
+            usage: {},
+            permissionDenials: [],
+            turns: 1,
+            startedAt: "now",
+            completedAt: "now",
+          },
+          messages: [],
+        };
+      },
+    } as unknown as AgentLoop,
+    input: {} as never,
+  });
+  const serving = new AgentLoopSidecarServer(factory).serve(input, output);
+  input.write(`${JSON.stringify({ kind: "request", messageId: "execute-1", method: "execute", runId: "run-1", operationId: "op-1", requestId: "request-1", payload: {} })}\n`);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  input.end();
+  await serving;
+  const terminal = lines.find((message) => message.kind === "event" && message.final === true);
+  assert.equal(terminal?.outcome, "failed");
+  assert.equal(terminal?.code, "agent_max_turns_reached");
 });
 
 test("sidecar aborts a generic execution at its deadline", async () => {
@@ -234,4 +275,71 @@ test("sidecar tool port runs concurrency-safe calls in parallel and preserves or
   assert.equal(results[0]?.toolName, "one");
   assert.equal(results[1]?.toolName, "two");
   assert.equal(started.length, 2);
+});
+
+test("sidecar tool port delegates an advertised batch to the host once", async () => {
+  const requests: Array<Record<string, unknown>> = [];
+  const tools: PilotDeckToolDefinition[] = ["one", "two"].map((name) => ({
+    name,
+    description: name,
+    kind: "custom",
+    inputSchema: { type: "object" },
+    isReadOnly: () => true,
+    isConcurrencySafe: () => true,
+    execute: async () => ({ content: [{ type: "text", text: name }] }),
+  }));
+  const { createSidecarPorts } = await import("../../../src/agent/modules/sidecar.js");
+  const ports = createSidecarPorts(async (request) => {
+    requests.push(request as unknown as Record<string, unknown>);
+    const calls = request.payload.calls as Array<Record<string, unknown>>;
+    return {
+      kind: "response",
+      messageId: "response-batch",
+      inReplyTo: "call",
+      ok: true,
+      payload: {
+        results: calls.map((call) => ({
+          type: "success",
+          toolCallId: call.toolCallId,
+          toolName: call.name,
+          content: [],
+          startedAt: "now",
+          completedAt: "now",
+        })),
+      },
+    };
+  }, { tools, capabilityMethods: ["execute_batch"] });
+
+  const results = await ports.tools.executeAll(
+    [{ id: "call-1", name: "one", input: {} }, { id: "call-2", name: "two", input: {} }],
+    { sessionId: "s", turnId: "t", cwd: "/tmp", permissionMode: "default", permissionContext: { mode: "default", rules: { allow: [], deny: [], ask: [] }, cwd: "/tmp", additionalWorkingDirectories: [], canPrompt: false, bypassAvailable: false } },
+    { sessionId: "s", turnId: "t", runId: "run-1" },
+  );
+
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0]?.module, "capability");
+  assert.equal((requests[0]?.payload as Record<string, unknown>).operation, "execute_batch");
+  assert.deepEqual(results.map((result) => result.toolCallId), ["call-1", "call-2"]);
+});
+
+test("sidecar tool port rejects reordered batch results", async () => {
+  const { createSidecarPorts } = await import("../../../src/agent/modules/sidecar.js");
+  const ports = createSidecarPorts(async () => ({
+    kind: "response",
+    messageId: "response-batch",
+    inReplyTo: "call",
+    ok: true,
+    payload: {
+      results: [{ type: "success", toolCallId: "call-2", toolName: "two", content: [], startedAt: "now", completedAt: "now" }],
+    },
+  }), { capabilityMethods: ["execute_batch"] });
+
+  await assert.rejects(
+    () => ports.tools.executeAll(
+      [{ id: "call-1", name: "one", input: {} }],
+      { sessionId: "s", turnId: "t", cwd: "/tmp", permissionMode: "default", permissionContext: { mode: "default", rules: { allow: [], deny: [], ask: [] }, cwd: "/tmp", additionalWorkingDirectories: [], canPrompt: false, bypassAvailable: false } },
+      { sessionId: "s", turnId: "t", runId: "run-1" },
+    ),
+    /does not match tool call call-1/,
+  );
 });

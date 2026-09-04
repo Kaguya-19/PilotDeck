@@ -14,7 +14,55 @@
   ],
   "$defs": {
     "id": { "type": "string", "minLength": 1 },
-    "payload": { "type": "object" },
+    "payload": {
+      "type": "object",
+      "properties": {
+        "contextOverride": { "$ref": "#/$defs/contextOverride" },
+        "hostModules": { "$ref": "#/$defs/hostModules" }
+      }
+    },
+    "hostModules": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "context": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["methods"],
+          "properties": {
+            "methods": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "enum": ["prepare_for_model", "apply_tool_results", "recover_from_model_error", "capture_turn"]
+              }
+            }
+          }
+        },
+        "capability": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["methods"],
+          "properties": {
+            "methods": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "enum": ["execute", "execute_batch"] }
+            }
+          }
+        }
+      }
+    },
+    "contextOverride": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "systemPrompt": { "type": "string" },
+        "messages": { "type": "array" },
+        "metadata": { "type": "object" },
+        "tools": {}
+      }
+    },
     "outcome": {
       "type": "string",
       "enum": ["completed", "failed", "cancelled", "result_unknown"]
@@ -58,7 +106,7 @@
         "runId": { "$ref": "#/$defs/id" },
         "operationId": { "$ref": "#/$defs/id" },
         "requestId": { "$ref": "#/$defs/id" },
-        "module": { "enum": ["model", "capability", "permission", "checkpoint"] },
+        "module": { "enum": ["model", "capability", "permission", "checkpoint", "context"] },
         "payload": { "$ref": "#/$defs/payload" }
       }
     },

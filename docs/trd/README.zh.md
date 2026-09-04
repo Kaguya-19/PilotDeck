@@ -6,6 +6,7 @@
 
 | 编号 | 文档 | 主要边界 |
 |---:|---|---|
+| 03 | [AgentLoop Modular Framework](03-agent-loop-modular.zh.md) | AgentLoop ports、sidecar module protocol、宿主 context/tool 边界 |
 | 52 | [Model Pool Settings API](52-model-pool-settings-api.zh.md)；[接口文档](../model-pool-settings-api.md) | provider/model 配置、批量连接测试和图片能力补录 |
 | 53 | [Router Settings API](53-router-settings-api.zh.md) | 路由开关、任务层级、子智能体策略和模型定价 |
 | 54 | [Agent Search Settings API](54-search-settings-api.zh.md) | 五类搜索 provider、配置和服务探测 |

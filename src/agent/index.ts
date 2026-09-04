@@ -1,4 +1,4 @@
-export { AgentLoop, type AgentLoopInput, type AgentLoopRunResult } from "./loop/AgentLoop.js";
+export { AgentLoop, type AgentLoopInput, type AgentLoopRunResult, type AgentLoopSeedState } from "./loop/AgentLoop.js";
 export { collectToolCalls } from "./loop/collectToolCalls.js";
 export { decideLoopContinuation, type LoopContinuationDecision } from "./loop/decideLoopContinuation.js";
 export { createMissingToolResult, ensureToolResultPairing } from "./loop/ensureToolResultPairing.js";
@@ -62,6 +62,7 @@ export type {
 export { TurnInputProcessor, type TurnInputProcessorResult } from "./turn/TurnInputProcessor.js";
 export {
   TurnRunner,
+  type AgentLoopRunner,
   type TurnRunnerOptions,
   type TurnRunnerResult,
   type TurnRunnerRuntimeContext,

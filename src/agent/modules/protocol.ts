@@ -3,6 +3,16 @@ export const MODULE_PROTOCOL_VERSION = "2.0" as const;
 export type ModuleOutcome = "completed" | "failed" | "cancelled" | "result_unknown";
 export type ModuleExecuteProfile = "unary" | "streaming" | "side_effect" | "tool";
 export type ModuleRetryability = "safe" | "unsafe" | "retry_after_status";
+export type HostContextModuleMethod =
+  | "prepare_for_model"
+  | "apply_tool_results"
+  | "recover_from_model_error"
+  | "capture_turn";
+export type HostCapabilityModuleMethod = "execute" | "execute_batch";
+export type HostModuleCapabilities = {
+  context?: { methods: HostContextModuleMethod[] };
+  capability?: { methods: HostCapabilityModuleMethod[] };
+};
 export type ModuleOperationState =
   | "pending"
   | "running"
@@ -87,7 +97,7 @@ export type ModuleCallRequest = ModuleMessageBase & {
   runId: string;
   operationId: string;
   requestId: string;
-  module: "model" | "capability" | "permission" | "checkpoint";
+  module: "model" | "capability" | "permission" | "checkpoint" | "context";
   payload: Record<string, unknown>;
 };
 
@@ -182,7 +192,7 @@ export function validateModuleMessage(value: unknown): ModuleProtocolValidation 
     for (const field of ["runId", "operationId", "requestId", "module", "payload"]) {
       if (!(field in message)) return invalid("MISSING_MODULE_CALL_FIELD", `Module call field ${field} is required.`);
     }
-    if (!["model", "capability", "permission", "checkpoint"].includes(String(message.module))) {
+    if (!["model", "capability", "permission", "checkpoint", "context"].includes(String(message.module))) {
       return invalid("INVALID_MODULE", "Module call target is invalid.");
     }
   }

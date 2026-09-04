@@ -1,8 +1,12 @@
 export {
   type AgentContextBoundary,
+  type AgentContextCaptureTurnInput,
   type AgentContextDiagnostic,
   type AgentContextPrepareInput,
+  type AgentContextRecoveryInput,
   type AgentContextRuntime,
+  type AgentContextToolResultInput,
+  type AgentContextToolResultResult,
   type AgentPreparedContext,
 } from "./ContextRuntime.js";
 export { NullContextRuntime } from "./NullContextRuntime.js";

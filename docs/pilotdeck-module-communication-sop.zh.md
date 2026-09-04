@@ -5,7 +5,7 @@
 
 本 SOP 仅约束模块与模块之间的通信边界、执行语义和可靠性，不规定模块内部实现。它定义 Module Protocol v2.0；进程内 Cordis plugin 的内部调用不自动纳入该协议，也不要求每个模块或每条消息携带全部身份字段。
 
-当 PilotDeck AgentLoop 作为跨语言 sidecar 被 StaffDeck 调用时，sidecar 可以在同一条双向 NDJSON 连接上发送 `module_call` 请求。该请求只用于调用宿主持有的 model、capability、permission 或 checkpoint 模块，不能创建第二套 session/turn/run 状态。
+当 PilotDeck AgentLoop 作为跨语言 sidecar 被 StaffDeck 或其他宿主调用时，sidecar 可以在同一条双向 NDJSON 连接上发送 `module_call` 请求。该请求只用于调用宿主持有的 model、capability、permission、checkpoint 或 context 模块，不能创建第二套 session/turn/run 状态。
 
 ## 一、边界和核心规则
 
@@ -39,6 +39,8 @@ Gateway、Permission、Elicitation 等外部等待可以继续使用各自的 `r
 - operation 终态只能由宿主聚合产生；模块事件不能替代 `HostOperationStatus` snapshot。
 - 已由宿主提交的 `completed` 不能被后续 cancel 覆盖。
 - 连接级错误不能冒充业务终态；已建立 stream 的业务失败必须使用带 request identity 的终态 event。
+- sidecar 将 AgentLoop 结果映射为失败终态时，顶层 `code` 优先保留结果中的原始业务错误码；
+  只有结果未提供错误码时才使用 sidecar fallback，不能仅为 transport 改写大小写或命名。
 
 ### 2.3 取消、deadline 和副作用
 
@@ -119,6 +121,43 @@ request 至少包含：
 
 成功 response 必须包含 `messageId`、`inReplyTo`、`requestId`、`ok: true`、`final: true` 和 `outcome: completed`。请求尚未接受时使用 `response(ok: false)`；连接级故障使用 `kind: error`，不能把它当作 execute 终态。
 
+execute `payload` 可包含宿主无关的 `contextOverride`：
+
+```json
+{
+  "contextOverride": {
+    "systemPrompt": "宿主显式选择的系统提示",
+    "messages": [{"role": "user", "content": [{"type": "text", "text": "..."}]}],
+    "metadata": {"source": "host"},
+    "tools": []
+  }
+}
+```
+
+override 的字段优先于普通 `agent`、`messages`、`tools` 字段；显式提供
+`messages`（包括空数组）时不得再拼接 `task.prompt`。sidecar 只处理 canonical
+消息和通用 metadata，不识别宿主业务类型或字段。
+
+需要由宿主动态组装上下文或批量调度工具时，execute `payload` 使用 `hostModules`
+声明宿主实际支持的能力：
+
+```json
+{
+  "hostModules": {
+    "context": {
+      "methods": ["prepare_for_model", "apply_tool_results", "recover_from_model_error", "capture_turn"]
+    },
+    "capability": {
+      "methods": ["execute", "execute_batch"]
+    }
+  }
+}
+```
+
+sidecar 仅代理宿主显式声明的方法。未声明 context 时继续使用本地默认 context；未声明
+`execute_batch` 时继续使用兼容的单工具调用。`tryAutoCompact` 依赖进程内
+`budgetEvaluator`，当前不能跨协议声明或代理。
+
 ### 4.2 Streaming execute
 
 accepted response 在 unary 字段之外返回 `streamId` 和初始 `cursor`。后续 event 至少包含：
@@ -146,6 +185,33 @@ event 中的 `messageId` 可选，因为 `(streamId, sequence)` 已经提供去�
 ### 4.4 Tool
 
 工具调用在同一 `runId` 内使用稳定的 `toolCallId`。不同 retry 只改变 `requestId`；operation 终态只能为每个 `toolCallId` 投影一次 `tool_result`。
+
+支持批量执行的宿主接收一个 capability module call：
+
+```json
+{
+  "operation": "execute_batch",
+  "calls": [
+    {"toolCallId": "call-1", "name": "lookup", "arguments": {}},
+    {"toolCallId": "call-2", "name": "summarize", "arguments": {}}
+  ],
+  "context": {},
+  "execution": {}
+}
+```
+
+宿主必须将整批请求交给自己的 scheduler，并按输入顺序返回 `results`。permission preflight、
+并发策略和副作用控制属于宿主 ToolRuntime；sidecar 不逐项重排或重新实现权限判断。
+
+工具 descriptor 的 `requiresUserInteraction` 是宿主计算后的能力元数据。AgentLoop 使用它和
+`canPrompt` 过滤当前模型可见工具；sidecar 不按具体工具名称做特殊判断。
+
+### 4.5 Context
+
+context module call 使用 `{ operation, input }`，响应使用 `{ result }`。宿主将
+`prepare_for_model`、`apply_tool_results`、`recover_from_model_error` 和 `capture_turn` 转发给当前
+session 的 ContextRuntime。系统提示、skill catalog、上下文裁剪和工具结果投影策略仍由宿主拥有；
+sidecar 只负责调用和验证响应。`AbortSignal` 不进入 JSON，由宿主绑定当前 execution 的取消信号。
 
 ## 五、控制方法和能力
 

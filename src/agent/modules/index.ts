@@ -15,6 +15,9 @@ export {
   type ModuleExecuteProfile,
   type ModuleExecuteRequest,
   type ModuleHandshakeRequest,
+  type HostCapabilityModuleMethod,
+  type HostContextModuleMethod,
+  type HostModuleCapabilities,
   type ModuleMessage,
   type ModuleMessageBase,
   type ModuleOperationSnapshot,
@@ -31,11 +34,13 @@ export {
 export { createRouterModelInvokerPort, createToolSchedulerPort } from "./adapters.js";
 export {
   AgentLoopSidecarServer,
+  createSidecarContextRuntime,
   createSidecarPorts,
   moduleOutcomeFromAgentResult,
   type AgentLoopSidecarOptions,
   type SidecarExecution,
   type SidecarExecutionFactory,
   type SidecarModuleCall,
+  type SidecarModuleBinding,
   type SidecarModuleCallClient,
 } from "./sidecar.js";

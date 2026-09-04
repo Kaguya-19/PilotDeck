@@ -8,8 +8,10 @@ import type { SessionConfigOverrides } from "../always-on/runtime/SessionConfigO
 import {
   createAgentEventBuffer,
   createAgentSessionWithStorage,
+  type AgentLoopRunner,
   type AgentRuntimeConfig,
   type AgentRuntimeDependencies,
+  type AgentLoopSeedState,
   type AgentSession,
   type CreateAgentSessionOptions,
 } from "../agent/index.js";
@@ -125,6 +127,12 @@ export type CreateLocalGatewayOptions = {
    * end-to-end against a deterministic transport. NOT part of the public API.
    */
   __testModelFactory?: (snapshot: PilotConfigSnapshot) => ModelRuntime;
+  /** @internal Test hook for exercising the complete Gateway with an external AgentLoop transport. */
+  __testAgentLoopFactory?: (input: {
+    config: AgentRuntimeConfig;
+    dependencies: AgentRuntimeDependencies;
+    seedState?: AgentLoopSeedState;
+  }) => AgentLoopRunner;
   /**
    * Fallback project root used as the agent cwd when no explicit
    * `projectKey` is provided (e.g. IM channels without a bound project).
@@ -236,6 +244,7 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
     sessionOverrides: options.sessionOverrides,
     additionalWorkingDirectories: options.additionalWorkingDirectories,
     modelFactory: options.__testModelFactory,
+    agentLoopFactory: options.__testAgentLoopFactory,
     autoElicitation: options.autoElicitation,
     telemetry,
     onProjectActivated: (activeProjectRoot) => extensionWatchManager.watchProject(activeProjectRoot),
@@ -588,6 +597,8 @@ type ProjectRuntimeRegistryOptions = {
   additionalWorkingDirectories?: string[];
   /** @internal Test hook from `CreateLocalGatewayOptions.__testModelFactory`. */
   modelFactory?: (snapshot: PilotConfigSnapshot) => ModelRuntime;
+  /** @internal Test hook from `CreateLocalGatewayOptions.__testAgentLoopFactory`. */
+  agentLoopFactory?: CreateAgentSessionOptions["__agentLoopFactory"];
   autoElicitation?: boolean;
   telemetry: TelemetryClient;
   onProjectActivated?: (projectRoot: string) => void;
@@ -1029,6 +1040,7 @@ class ProjectRuntimeRegistry {
       extendDependencies: prepared.extendDependencies,
       sessionTitleGenerator: prepared.sessionTitleGenerator,
       collectFileArtifacts: this.shouldCollectFileArtifacts(prepared.runtime),
+      __agentLoopFactory: this.options.agentLoopFactory,
     });
     return resumed.session;
   }
@@ -1059,6 +1071,7 @@ class ProjectRuntimeRegistry {
       initialMetadata: previous.metadata,
       sessionTitleGenerator: prepared.sessionTitleGenerator,
       collectFileArtifacts: this.shouldCollectFileArtifacts(prepared.runtime),
+      __agentLoopFactory: this.options.agentLoopFactory,
     });
     return session;
   }

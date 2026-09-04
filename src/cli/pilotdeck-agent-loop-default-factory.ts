@@ -1,4 +1,10 @@
-import { createSidecarPorts, type SidecarExecution, type SidecarExecutionFactory } from "../agent/modules/sidecar.js";
+import {
+  createSidecarContextRuntime,
+  createSidecarPorts,
+  type SidecarExecution,
+  type SidecarExecutionFactory,
+} from "../agent/modules/sidecar.js";
+import type { HostCapabilityModuleMethod, HostContextModuleMethod, HostModuleCapabilities } from "../agent/modules/protocol.js";
 import { AgentLoop, type AgentLoopSeedState } from "../agent/loop/AgentLoop.js";
 import type { AgentRuntimeConfig } from "../agent/runtime/AgentRuntimeConfig.js";
 import type { AgentRunMode } from "../agent/protocol/input.js";
@@ -13,6 +19,14 @@ export type SidecarAgentLoopPayload = {
   task?: Record<string, unknown>;
   messages?: unknown;
   tools?: unknown;
+  hostModules?: HostModuleCapabilities;
+  /** Host-owned context projection for a single execution. */
+  contextOverride?: {
+    systemPrompt?: unknown;
+    messages?: unknown;
+    metadata?: unknown;
+    tools?: unknown;
+  };
   permissionContext?: unknown;
   seedState?: unknown;
   executionContext?: unknown;
@@ -23,11 +37,16 @@ export type SidecarAgentLoopPayload = {
  * inputs; hosts with different state or module requirements can replace it
  * through `PILOTDECK_AGENT_LOOP_FACTORY`.
  */
-export const createSidecarExecution: SidecarExecutionFactory = ({ request, abortSignal, callModule }) => {
+export const createSidecarExecution: SidecarExecutionFactory = ({ request, abortSignal, abortExecution, callModule }) => {
   const payload = asRecord(request.payload) ?? {};
   const agent = asRecord(payload.agent) ?? {};
   const task = asRecord(payload.task) ?? {};
+  const contextOverride = asRecord(payload.contextOverride) ?? {};
   const executionContext = asRecord(payload.executionContext);
+  const hostModules = asRecord(payload.hostModules);
+  const contextMethods = readHostContextMethods(asRecord(hostModules?.context)?.methods);
+  const capabilityMethods = readHostCapabilityMethods(asRecord(hostModules?.capability)?.methods);
+  const hasOverrideMessages = Object.prototype.hasOwnProperty.call(contextOverride, "messages");
   const sessionId = String(request.sessionId ?? request.operationId);
   const turnId = String(request.turnId ?? request.operationId);
   const cwd = String(agent.cwd ?? payload.cwd ?? process.cwd());
@@ -44,7 +63,9 @@ export const createSidecarExecution: SidecarExecutionFactory = ({ request, abort
     provider: String(agent.provider ?? payload.provider ?? "default"),
     model: String(agent.model ?? payload.model ?? "default"),
     cwd,
-    systemPrompt: asString(agent.systemPrompt ?? payload.systemPrompt),
+    systemPrompt: asString(
+      contextOverride.systemPrompt ?? agent.systemPrompt ?? payload.systemPrompt,
+    ),
     maxOutputTokens: asPositiveInteger(agent.maxOutputTokens ?? payload.maxOutputTokens),
     maxContextTokens: asPositiveInteger(agent.maxContextTokens ?? payload.maxContextTokens),
     runMode,
@@ -56,23 +77,34 @@ export const createSidecarExecution: SidecarExecutionFactory = ({ request, abort
       bypassAvailable,
       rules: asPermissionRules(permission.rules),
     }),
-    metadata: executionContext,
+    metadata: mergeMetadata(executionContext, asRecord(contextOverride.metadata)),
   };
-  const tools = readToolDescriptors(payload.tools).map((descriptor) => ({
+  const tools = readToolDescriptors(
+    contextOverride.tools !== undefined ? contextOverride.tools : payload.tools,
+  ).map((descriptor) => ({
     name: descriptor.name,
     description: descriptor.description,
     kind: descriptor.kind,
     inputSchema: descriptor.inputSchema,
     isReadOnly: () => descriptor.readOnly,
     isConcurrencySafe: () => descriptor.concurrencySafe,
+    requiresUserInteraction: () => descriptor.requiresUserInteraction,
     execute: async () => ({ content: [{ type: "text", text: "Capability is executed by the host module." }] }),
   } satisfies PilotDeckToolDefinition));
+  const context = contextMethods.includes("prepare_for_model")
+    ? createSidecarContextRuntime(callModule, {
+        runId: request.runId,
+        operationId: request.operationId,
+        idempotencyKey: request.idempotencyKey,
+      }, contextMethods)
+    : undefined;
   const loop = new AgentLoop(
     config,
     {
       router: {} as never,
-      ports: createSidecarPorts(callModule, { tools }),
+      ports: createSidecarPorts(callModule, { tools, capabilityMethods, onAbort: abortExecution }),
       tools: { registry: { list: () => [] } as never, scheduler: { executeAll: async () => [] } as never },
+      ...(context ? { context } : {}),
     },
     parseSeedState(payload.seedState),
   );
@@ -81,7 +113,11 @@ export const createSidecarExecution: SidecarExecutionFactory = ({ request, abort
     input: {
       sessionId,
       turnId,
-      messages: buildInitialMessages(task, payload.messages),
+      messages: buildInitialMessages(
+        task,
+        hasOverrideMessages ? contextOverride.messages : payload.messages,
+        hasOverrideMessages,
+      ),
       maxTurns: asPositiveInteger(agent.maxTurns ?? payload.maxTurns),
       runMode,
       abortSignal,
@@ -106,13 +142,19 @@ type ToolDescriptor = {
   inputSchema: PilotDeckToolInputSchema;
   readOnly: boolean;
   concurrencySafe: boolean;
+  requiresUserInteraction: boolean;
 };
 
-function buildInitialMessages(task: Record<string, unknown>, rawMessages: unknown): CanonicalMessage[] {
+function buildInitialMessages(
+  task: Record<string, unknown>,
+  rawMessages: unknown,
+  explicitOverride = false,
+): CanonicalMessage[] {
   const messages = Array.isArray(rawMessages) ? rawMessages.flatMap(toCanonicalMessages) : [];
+  if (explicitOverride) return messages;
   const taskPrompt = asString(task.prompt ?? task.instruction ?? task.description);
-  if (taskPrompt) return [{ role: "user", content: [{ type: "text", text: taskPrompt }] }, ...messages];
   if (messages.length > 0) return messages;
+  if (taskPrompt) return [{ role: "user", content: [{ type: "text", text: taskPrompt }] }];
   return [{ role: "user", content: [{ type: "text", text: JSON.stringify(task) }] }];
 }
 
@@ -131,8 +173,33 @@ function toCanonicalContentBlocks(value: unknown): CanonicalContentBlock[] {
   const block = asRecord(value);
   if (!block) return [];
   if (block.type === "text" && typeof block.text === "string") return [{ type: "text", text: block.text }];
+  if (block.type === "tool_call" && typeof block.id === "string" && typeof block.name === "string") {
+    return [{ type: "tool_call", id: block.id, name: block.name, input: block.input ?? {} }];
+  }
+  if (block.type === "tool_result" && typeof block.toolCallId === "string") {
+    const content: CanonicalContentBlock[] = Array.isArray(block.content)
+      ? block.content.flatMap(toCanonicalContentBlocks)
+      : typeof block.content === "string"
+        ? [{ type: "text", text: block.content }]
+        : [];
+    return [{
+      type: "tool_result",
+      toolCallId: block.toolCallId,
+      content: content as any,
+      ...(block.isError === true ? { isError: true } : {}),
+      ...(block.raw !== undefined ? { raw: block.raw } : {}),
+    }];
+  }
   if (block.type === "image" && block.source === "base64" && typeof block.data === "string" && typeof block.mimeType === "string") {
-    return [{ type: "image", source: "base64", mimeType: block.mimeType, data: block.data }];
+    return [{
+      type: "image",
+      source: "base64",
+      mimeType: block.mimeType,
+      data: block.data,
+      ...(block.detail === "auto" || block.detail === "low" || block.detail === "high"
+        ? { detail: block.detail }
+        : {}),
+    }];
   }
   if (block.type === "image_url") {
     const url = asRecord(block.image_url)?.url;
@@ -142,6 +209,14 @@ function toCanonicalContentBlocks(value: unknown): CanonicalContentBlock[] {
     }
   }
   return [];
+}
+
+function mergeMetadata(
+  executionContext: Record<string, unknown> | undefined,
+  overrideMetadata: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (!executionContext && !overrideMetadata) return undefined;
+  return { ...(executionContext ?? {}), ...(overrideMetadata ?? {}) };
 }
 
 function readToolDescriptors(value: unknown): ToolDescriptor[] {
@@ -158,8 +233,24 @@ function readToolDescriptors(value: unknown): ToolDescriptor[] {
       inputSchema: asInputSchema(descriptor.inputSchema ?? descriptor.input_schema),
       readOnly: descriptor.readOnly === true,
       concurrencySafe: descriptor.concurrencySafe === true,
+      requiresUserInteraction: descriptor.requiresUserInteraction === true,
     }];
   });
+}
+
+function readHostContextMethods(value: unknown): HostContextModuleMethod[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((method): method is HostContextModuleMethod =>
+    method === "prepare_for_model"
+    || method === "apply_tool_results"
+    || method === "recover_from_model_error"
+    || method === "capture_turn");
+}
+
+function readHostCapabilityMethods(value: unknown): HostCapabilityModuleMethod[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((method): method is HostCapabilityModuleMethod =>
+    method === "execute" || method === "execute_batch");
 }
 
 function parseSeedState(value: unknown): AgentLoopSeedState | undefined {

@@ -3,10 +3,19 @@ import type { Writable, Readable } from "node:stream";
 import type { AgentLoop, AgentLoopInput } from "../loop/AgentLoop.js";
 import type { AgentEvent } from "../protocol/events.js";
 import type { CanonicalModelEvent } from "../../model/index.js";
+import type {
+  AgentContextCaptureTurnInput,
+  AgentContextPrepareInput,
+  AgentContextRecoveryInput,
+  AgentContextRuntime,
+  AgentContextToolResultInput,
+} from "../../context/index.js";
 import type { PilotDeckToolDefinition, PilotDeckToolResult, PilotDeckToolRuntimeContext, PilotDeckToolCall, PilotDeckToolErrorCode } from "../../tool/index.js";
 import type { ModelInvokerPort, PreparedModelInvocation, ToolPort } from "./protocol.js";
 import {
   MODULE_PROTOCOL_VERSION,
+  type HostCapabilityModuleMethod,
+  type HostContextModuleMethod,
   type ModuleCallRequest,
   type ModuleCapabilities,
   type ModuleExecuteRequest,
@@ -18,14 +27,73 @@ import {
 
 export type SidecarModuleCall = Omit<ModuleCallRequest, "kind" | "messageId" | "method"> & {
   idempotencyKey?: string;
+  /** Internal aggregation hint; it is not serialized into Module Protocol. */
+  recordFailure?: boolean;
 };
 
 export type SidecarModuleCallClient = (request: SidecarModuleCall) => Promise<ModuleResponse>;
 
+export type SidecarModuleBinding = {
+  runId: string;
+  operationId: string;
+  idempotencyKey?: string;
+};
+
+/** Build a context runtime whose state and prompt policy remain owned by the host. */
+export function createSidecarContextRuntime(
+  callModule: SidecarModuleCallClient,
+  binding: SidecarModuleBinding,
+  methods: readonly HostContextModuleMethod[],
+  uuid: () => string = () => Math.random().toString(36).slice(2),
+): AgentContextRuntime {
+  const supported = new Set(methods);
+  if (!supported.has("prepare_for_model")) {
+    throw new Error("Host context module must support prepare_for_model.");
+  }
+  const invoke = async <T>(operation: HostContextModuleMethod, input: object): Promise<T> => {
+    const response = await callModule({
+      ...binding,
+      requestId: `context-${operation}-${uuid()}`,
+      module: "context",
+      recordFailure: operation === "prepare_for_model",
+      payload: { operation, input: serializeContextInput(input) },
+    });
+    if (!response.ok) {
+      const failure = new Error(String(response.error?.message ?? response.code ?? `Context module ${operation} failed.`)) as Error & { code?: string };
+      failure.code = response.code;
+      throw failure;
+    }
+    if (!response.payload || !("result" in response.payload)) {
+      throw new Error(`Context module ${operation} returned no result.`);
+    }
+    return response.payload.result as T;
+  };
+  const runtime: AgentContextRuntime = {
+    prepareForModel: (input: AgentContextPrepareInput) => invoke("prepare_for_model", input),
+  };
+  if (supported.has("apply_tool_results")) {
+    runtime.applyToolResults = (input: AgentContextToolResultInput) => invoke("apply_tool_results", input);
+  }
+  if (supported.has("recover_from_model_error")) {
+    runtime.recoverFromModelError = (input: AgentContextRecoveryInput) => invoke("recover_from_model_error", input);
+  }
+  if (supported.has("capture_turn")) {
+    runtime.captureTurn = async (input: AgentContextCaptureTurnInput) => {
+      await invoke("capture_turn", input);
+    };
+  }
+  return runtime;
+}
+
 /** Build AgentLoop ports backed by host-owned modules over the sidecar stream. */
 export function createSidecarPorts(
   callModule: SidecarModuleCallClient,
-  options: { tools?: PilotDeckToolDefinition[]; uuid?: () => string } = {},
+  options: {
+    tools?: PilotDeckToolDefinition[];
+    uuid?: () => string;
+    capabilityMethods?: readonly HostCapabilityModuleMethod[];
+    onAbort?: (reason: string) => void;
+  } = {},
 ): { model: ModelInvokerPort; tools: ToolPort } {
   const uuid = options.uuid ?? (() => Math.random().toString(36).slice(2));
   return {
@@ -55,6 +123,27 @@ export function createSidecarPorts(
     tools: {
       list: () => options.tools ?? [],
       async executeAll(calls: PilotDeckToolCall[], context: PilotDeckToolRuntimeContext, execution): Promise<PilotDeckToolResult[]> {
+        if (options.capabilityMethods?.includes("execute_batch") && calls.length > 0) {
+          const response = await callModule({
+            runId: execution.runId,
+            operationId: execution.operationId ?? execution.turnId,
+            idempotencyKey: execution.idempotencyKey,
+            requestId: `tool-batch-${uuid()}`,
+            module: "capability",
+            payload: {
+              operation: "execute_batch",
+              calls: calls.map((call) => ({ name: call.name, arguments: call.input, toolCallId: call.id })),
+              context: serializeToolContext(context),
+              execution: serializeExecutionContext(execution),
+            },
+          });
+          const results = response.payload?.results;
+          if (!response.ok) return calls.map((call) => moduleFailureResult(call, response));
+          if (!Array.isArray(results) || results.length !== calls.length) {
+            throw new Error("Capability batch response must contain one result for every call.");
+          }
+          return results.map((result, index) => validateBatchToolResult(result, calls[index]!, index));
+        }
         const resultSlots = new Array<PilotDeckToolResult | undefined>(calls.length);
         const concurrent: Array<{ index: number; call: PilotDeckToolCall }> = [];
         const sequential: Array<{ index: number; call: PilotDeckToolCall }> = [];
@@ -66,6 +155,9 @@ export function createSidecarPorts(
           else sequential.push({ index, call });
         }
         const execute = async (call: PilotDeckToolCall): Promise<PilotDeckToolResult> => {
+          if (execution.abortSignal?.aborted) {
+            throw new Error("Tool execution cancelled.");
+          }
           const response = await callModule({
             runId: execution.runId,
             operationId: execution.operationId ?? execution.turnId,
@@ -80,28 +172,49 @@ export function createSidecarPorts(
               execution: serializeExecutionContext(execution),
             },
           });
+          // A host cancel can arrive while the module call is in flight. Do
+          // not let the completed response re-enter AgentLoop and trigger a
+          // follow-up model turn after cancellation has been linearized.
+          if (execution.abortSignal?.aborted) {
+            throw new Error("Tool execution cancelled.");
+          }
           const payload = response.payload;
+          const responseError = response.error;
+          const responseErrorCode = String(response.code ?? responseError?.code ?? "").toUpperCase();
+          const responseErrorMessage = String(responseError?.message ?? "");
+          if (
+            !response.ok
+            && (
+              ["CANCELLED", "ABORTED", "TOOL_ABORTED"].includes(responseErrorCode)
+              || /\bcancel(?:led|lation)?\b/i.test(`${responseErrorCode} ${responseErrorMessage}`)
+            )
+          ) {
+            options.onAbort?.("tool_cancelled");
+            throw new Error("Tool execution cancelled.");
+          }
+          // Host-owned tools may observe cancellation and return a structured
+          // cancellation error before the sidecar receives the control frame.
+          // Treat that result as terminal cancellation so AgentLoop does not
+          // schedule another model turn after the cancelled action.
+          if (
+            response.ok
+            && payload
+            && typeof payload === "object"
+            && payload.type === "error"
+            && payload.error
+            && typeof payload.error === "object"
+            && (
+              ["CANCELLED", "ABORTED", "TOOL_ABORTED"].includes(String((payload.error as Record<string, unknown>).code ?? "").toUpperCase())
+              || /\bcancel(?:led|lation)?\b/i.test(String((payload.error as Record<string, unknown>).message ?? ""))
+            )
+          ) {
+            options.onAbort?.("tool_cancelled");
+            throw new Error("Tool execution cancelled.");
+          }
           if (response.ok && payload && typeof payload === "object" && "type" in payload) {
             return payload as unknown as PilotDeckToolResult;
           }
-          return {
-            type: "error",
-            toolCallId: call.id,
-            toolName: call.name,
-            error: {
-              code: asToolErrorCode(response.code),
-              message: String(response.error?.message ?? "Capability module failed."),
-              ...(response.code || response.error ? {
-                details: {
-                  ...(response.code ? { moduleCode: response.code } : {}),
-                  ...(response.error ? { moduleError: response.error } : {}),
-                },
-              } : {}),
-            },
-            content: [{ type: "text", text: String(response.error?.message ?? "Capability module failed.") }],
-            startedAt: new Date().toISOString(),
-            completedAt: new Date().toISOString(),
-          };
+          return moduleFailureResult(call, response);
         };
         await Promise.all(concurrent.map(async ({ index, call }) => {
           resultSlots[index] = await execute(call);
@@ -112,6 +225,44 @@ export function createSidecarPorts(
         return resultSlots as PilotDeckToolResult[];
       },
     },
+  };
+}
+
+function serializeContextInput(input: object): Record<string, unknown> {
+  const source = input as Record<string, unknown>;
+  const { abortSignal: _abortSignal, budgetEvaluator: _budgetEvaluator, ...serializable } = source;
+  return serializable;
+}
+
+function validateBatchToolResult(result: unknown, call: PilotDeckToolCall, index: number): PilotDeckToolResult {
+  if (!result || typeof result !== "object" || !("type" in result)) {
+    throw new Error(`Capability batch result ${index} is invalid.`);
+  }
+  const toolResult = result as PilotDeckToolResult;
+  if (toolResult.toolCallId !== call.id) {
+    throw new Error(`Capability batch result ${index} does not match tool call ${call.id}.`);
+  }
+  return toolResult;
+}
+
+function moduleFailureResult(call: PilotDeckToolCall, response: ModuleResponse): PilotDeckToolResult {
+  return {
+    type: "error",
+    toolCallId: call.id,
+    toolName: call.name,
+    error: {
+      code: asToolErrorCode(response.code),
+      message: String(response.error?.message ?? "Capability module failed."),
+      ...(response.code || response.error ? {
+        details: {
+          ...(response.code ? { moduleCode: response.code } : {}),
+          ...(response.error ? { moduleError: response.error } : {}),
+        },
+      } : {}),
+    },
+    content: [{ type: "text", text: String(response.error?.message ?? "Capability module failed.") }],
+    startedAt: new Date().toISOString(),
+    completedAt: new Date().toISOString(),
   };
 }
 
@@ -146,6 +297,7 @@ export type SidecarExecution = {
 export type SidecarExecutionFactory = (input: {
   request: ModuleExecuteRequest;
   abortSignal: AbortSignal;
+  abortExecution?: (reason?: unknown) => void;
   callModule: SidecarModuleCallClient;
 }) => Promise<SidecarExecution> | SidecarExecution;
 
@@ -291,7 +443,8 @@ export class AgentLoopSidecarServer {
       const execution = await this.factory({
         request,
         abortSignal: controller.signal,
-          callModule: (call) => this.callModule(output, call, controller.signal),
+        abortExecution: (reason?: unknown) => controller.abort(reason),
+        callModule: (call) => this.callModule(output, call, controller.signal),
       });
       const iterator = execution.loop.run(execution.input);
       let next = await iterator.next();
@@ -321,7 +474,10 @@ export class AgentLoopSidecarServer {
         : moduleFailure
           ? moduleFailure
         : result.result.type === "max_turns"
-          ? { code: "AGENT_MAX_TURNS_REACHED", message: result.result.errors?.[0]?.message ?? "AgentLoop maximum turn limit reached." }
+          ? result.result.errors?.[0] ?? {
+              code: "agent_max_turns_reached",
+              message: "AgentLoop maximum turn limit reached.",
+            }
           : result.result.type === "error"
             ? result.result.errors?.[0]
             : undefined;
@@ -383,11 +539,12 @@ export class AgentLoopSidecarServer {
 
   private async callModule(output: Writable, call: SidecarModuleCall, abortSignal?: AbortSignal): Promise<ModuleResponse> {
     const messageId = this.nextId("module-call");
+    const { recordFailure = true, ...wireCall } = call;
     const request: ModuleCallRequest = {
       kind: "request",
       messageId,
       method: "module_call",
-      ...call,
+      ...wireCall,
     };
     const response = new Promise<ModuleResponse>((resolve, reject) => {
       const entry = { resolve, reject };
@@ -403,7 +560,7 @@ export class AgentLoopSidecarServer {
     });
     await this.send(output, request);
     const result = await response;
-    if (!result.ok) {
+    if (!result.ok && recordFailure) {
       this.moduleFailures.set(call.operationId ?? "", {
         ...(result.code ? { code: result.code } : {}),
         message: String(result.error?.message ?? result.code ?? "Module call failed."),

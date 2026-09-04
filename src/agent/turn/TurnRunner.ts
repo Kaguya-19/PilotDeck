@@ -60,6 +60,8 @@ export type TurnRunnerRuntimeReloadSnapshot = {
   metadata?: SessionMetadataValue;
 };
 
+export type AgentLoopRunner = Pick<AgentLoop, "run" | "snapshotFileState">;
+
 export type TurnRunnerDependencies = {
   metadataStore?: SessionMetadataStore;
   sessionTitleGenerator?: SessionTitleGenerator;
@@ -81,7 +83,7 @@ export class TurnRunner {
   private pendingSessionTitle: PendingSessionTitle | undefined;
 
   constructor(
-    private readonly loop: AgentLoop,
+    private readonly loop: AgentLoopRunner,
     private readonly transcript: AgentTranscriptWriter,
     private readonly inputProcessor = new TurnInputProcessor(),
     private readonly now: () => Date = () => new Date(),
