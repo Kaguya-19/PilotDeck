@@ -4,6 +4,8 @@
 
 本目录记录设置页面对应的后端接口契约。通用配置读写和凭证运行时规则分别由 `GET/PUT /api/config` 及配置运行时实现负责。
 
+AgentLoop 模块化框架的文档入口见 [AgentLoop Modular Framework 文档总览](../agent-loop-modular-index.zh.md)。
+
 | 编号 | 文档 | 主要边界 |
 |---:|---|---|
 | 03 | [AgentLoop Modular Framework](03-agent-loop-modular.zh.md) | AgentLoop ports、sidecar module protocol、宿主 context/tool 边界 |
