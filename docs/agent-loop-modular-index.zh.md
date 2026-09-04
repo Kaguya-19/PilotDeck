@@ -8,37 +8,41 @@ PilotDeck；宿主产品的 session、turn、permission、tool、checkpoint、SO
 
 ## 阅读顺序
 
-1. [AgentLoop 接入开发 SOP](agent-loop-development-sop.zh.md)
+1. [人类开发流程文档目录](agent-loop-human-development-directory.zh.md)
+
+   按需求、协议、实现、回归、真实部署、对拍和发布阶段组织现有文档，适合人类开发者快速定位入口。
+
+2. [AgentLoop 接入开发 SOP](agent-loop-development-sop.zh.md)
 
    面向开发者的阶段流程、DSH 能力族模块划分、代码修改范围、mapping/TRD 产物、分层测试、真实部署、对拍和发布检查。
 
-2. [Module Communication SOP](pilotdeck-module-communication-sop.zh.md)
+3. [Module Communication SOP](pilotdeck-module-communication-sop.zh.md)
 
    规范身份字段、operation/attempt 状态、终态、取消、deadline、重试、恢复、profile
    和 transport-independent adapter 约定。当前文档版本为 v0.3，协议版本为 v2.0。
 
-3. [Module Protocol v2 Schema](pilotdeck-module-protocol-v2.schema.json)
+4. [Module Protocol v2 Schema](pilotdeck-module-protocol-v2.schema.json)
 
    机器可读的 request、response、event、error、module_call 和 host module 字段定义。
 
-4. [AgentLoop Modular Framework TRD](trd/03-agent-loop-modular.zh.md)
+5. [AgentLoop Modular Framework TRD](trd/03-agent-loop-modular.zh.md)
 
    说明 `ModelInvokerPort`、`ToolPort`、`AgentContextRuntime`、sidecar factory、
    context module 和 capability module 的实现边界。
 
-5. [StaffDeck AgentLoop Integration](https://github.com/Kaguya-19/StaffDeck/tree/codex/pilotdeck-agent-loop/docs/pilotdeck-agent-loop-integration.md)
+6. [StaffDeck AgentLoop Integration](https://github.com/Kaguya-19/StaffDeck/tree/codex/pilotdeck-agent-loop/docs/pilotdeck-agent-loop-integration.md)
 
    StaffDeck 的具体 glue、TaskFrame/Harness mapping、checkpoint 投影、权限聚合和
    result_unknown 处理只在 StaffDeck 仓库维护，不成为 PilotDeck core contract。
 
-6. [PilotDeck Native / Sidecar 对拍 SOP](pilotdeck-agent-loop-parity-sop.zh.md)
+7. [PilotDeck Native / Sidecar 对拍 SOP](pilotdeck-agent-loop-parity-sop.zh.md)
 
    PilotDeck 原生与 sidecar 的比较范围、adapter 契约、scenario 矩阵、canonical trace、
    normalization、退出码和 gateway 验收门槛。
 
    实际运行记录见 [PilotDeck AgentLoop 对拍结果](pilotdeck-agent-loop-parity-results.zh.md)。
 
-7. [AgentLoop parity README](https://github.com/Kaguya-19/StaffDeck/tree/codex/pilotdeck-agent-loop/tools/agent-loop-parity/README.md)
+8. [AgentLoop parity README](https://github.com/Kaguya-19/StaffDeck/tree/codex/pilotdeck-agent-loop/tools/agent-loop-parity/README.md)
 
    跨宿主对拍 harness、mock provider/tool、canonical trace 和 StaffDeck 真实部署验证方法；
    PilotDeck-only 工具则位于本仓库的 `tools/agent-loop-parity/`。
