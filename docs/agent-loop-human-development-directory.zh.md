@@ -6,7 +6,9 @@
 
 1. [AgentLoop Modular Framework 文档总览](agent-loop-modular-index.zh.md)
    - 了解文档关系、核心边界和当前验收状态。
-2. [AgentLoop 接入开发 SOP](agent-loop-development-sop.zh.md)
+2. [人类模块化开发交互 SOP](agent-loop-human-operation-sop.zh.md)
+   - 说明人类如何向 coding agent 提需求、约束范围、根据对拍差异要求修复和授权提交。
+3. [AgentLoop 接入开发 SOP](agent-loop-development-sop.zh.md)
    - 了解完整开发流程、禁止事项和验收门槛。
 
 ## 1. 需求与边界
