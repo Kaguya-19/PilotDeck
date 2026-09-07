@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { appendFile, copyFile, lstat, mkdir, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 
@@ -63,7 +64,7 @@ export type InvocationLogRecord = InvocationLogContext & {
 };
 
 export type ModelInvocationLogSink = {
-  stage?(record: InvocationLogRecord): Promise<void>;
+  stage?(record: InvocationLogRecord): void | Promise<void>;
   append(record: InvocationLogRecord): Promise<void>;
 };
 
@@ -73,13 +74,15 @@ export class JsonlInvocationLogSink implements ModelInvocationLogSink {
 
   constructor(private readonly config: LegalStorageConfig) {}
 
-  async stage(record: InvocationLogRecord): Promise<void> {
-    return this.enqueue(async () => {
-      const path = this.pathFor(record);
-      await mkdir(dirname(path), { recursive: true });
-      await mkdir(join(dirname(path), ".pending"), { recursive: true });
-      await writeFile(join(dirname(path), ".pending", `${safePart(record.requestLogId)}.json`), JSON.stringify(record), "utf8");
-    });
+  stage(record: InvocationLogRecord): void {
+    const path = this.pathFor(record);
+    mkdirSync(dirname(path), { recursive: true });
+    mkdirSync(join(dirname(path), ".pending"), { recursive: true });
+    writeFileSync(
+      join(dirname(path), ".pending", `${safePart(record.requestLogId)}.json`),
+      JSON.stringify(record),
+      "utf8",
+    );
   }
 
   async append(record: InvocationLogRecord): Promise<void> {
