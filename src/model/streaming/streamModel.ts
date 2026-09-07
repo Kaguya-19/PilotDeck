@@ -893,8 +893,8 @@ async function beginInvocation(
     stream,
     finished: false,
   };
-  await Promise.resolve()
-    .then(() => invocation.sink.stage?.({
+  try {
+    await invocation.sink.stage?.({
       ...invocation.context,
       requestLogId: state.requestLogId,
       requestId: state.requestId,
@@ -909,8 +909,10 @@ async function beginInvocation(
       responseComplete: false,
       startedAt: now,
       completedAt: now,
-    }))
-    .catch(() => undefined);
+    });
+  } catch {
+    // Storage failures must not change the provider call result.
+  }
   return state;
 }
 
