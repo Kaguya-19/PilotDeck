@@ -85,7 +85,7 @@ export async function complete(
       const googleBody = buildModelRequest(nonStreamingRequest, {
         providers: { [provider.id]: provider },
       });
-      const invocation = await beginInvocation(options, provider, nonStreamingRequest.model, false, googleBody, attempt + 1);
+      const invocation = beginInvocation(options, provider, nonStreamingRequest.model, false, googleBody, attempt + 1);
       try {
         const raw = await sendGoogleCompleteRequest(
           provider,
@@ -110,7 +110,7 @@ export async function complete(
     }
 
     const body = buildModelRequest(nonStreamingRequest, config);
-    const invocation = await beginInvocation(options, provider, nonStreamingRequest.model, false, body, attempt + 1);
+    const invocation = beginInvocation(options, provider, nonStreamingRequest.model, false, body, attempt + 1);
     let response: Response;
     try {
       response = await sendProviderRequest(provider, body, false, options.fetch ?? fetch, options.signal);
@@ -184,7 +184,7 @@ export async function* streamModel(
       metadata: currentRequest.metadata,
     };
     const body = buildModelRequest(currentRequest, config);
-    const invocation = await beginInvocation(options, provider, currentRequest.model, true, body, attempt + 1);
+    const invocation = beginInvocation(options, provider, currentRequest.model, true, body, attempt + 1);
     if (process.env.PILOTDECK_DUMP_REQUEST === "1") {
       const fs = await import("node:fs");
       const os = await import("node:os");
@@ -375,7 +375,7 @@ async function* streamGoogleProviderRequest(params: {
       const body = withGoogleAbortSignal(buildModelRequest(currentRequest, {
         providers: { [params.provider.id]: params.provider },
       }) as Record<string, unknown>, streamAbort.signal);
-      invocation = await beginInvocation(params.options, params.provider, currentRequest.model, true, body, attempt + 1);
+      invocation = beginInvocation(params.options, params.provider, currentRequest.model, true, body, attempt + 1);
       if (process.env.PILOTDECK_DUMP_REQUEST === "1") {
         const fs = await import("node:fs");
         const os = await import("node:os");
@@ -870,14 +870,14 @@ type InvocationAttempt = {
   finished: boolean;
 };
 
-async function beginInvocation(
+function beginInvocation(
   options: ModelRuntimeOptions,
   provider: ProviderConfig,
   model: string,
   stream: boolean,
   body: unknown,
   attempt: number,
-): Promise<InvocationAttempt | undefined> {
+): InvocationAttempt | undefined {
   const invocation = options.invocation;
   if (!invocation) return undefined;
   const requestBody = JSON.stringify(provider.extraBody ? { ...(body as Record<string, unknown>), ...provider.extraBody } : body);
@@ -893,7 +893,7 @@ async function beginInvocation(
     stream,
     finished: false,
   };
-  await invocation.sink.stage({
+  invocation.sink.stage({
     ...invocation.context,
     requestLogId: state.requestLogId,
     requestId: state.requestId,

@@ -148,7 +148,7 @@ LLM 调用日志位于：
 
 `.pending` 用于 request staging。模型调用结束后会追加最终 attempt 记录；如果进程在调用中退出，pending 文件可作为未完成 attempt 的排查线索，不应手工改写成成功记录。
 
-request staging 是模型 HTTP 请求的硬前置条件：pending 文件完成同步写入、文件 fsync、原子 rename 和目录 fsync 后才会发送请求。staging 失败时不会发送该次模型请求。
+request staging 是模型 HTTP 请求的硬前置条件：`stage()` 是同步 `void` 函数，pending 文件完成同步写入、文件 fsync、原子 rename 和目录 fsync 后才会发送请求。staging 失败时不会发送该次模型请求。
 
 ### 异常轮次没有可用的 post_agent manifest
 

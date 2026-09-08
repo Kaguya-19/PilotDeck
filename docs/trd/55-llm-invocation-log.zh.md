@@ -95,7 +95,7 @@ HTTP/SSE 流本身不是单个 JSON 文档，因此流式 attempt 必须保存�
 
 1. 由调用方传入 `InvocationContext`（session、sub session、turn、run、logical call、caller）。
 2. 构造 provider-native body，并合并 provider 额外 body 后生成 `request_id` 和 `attempt` 记录。
-3. 调用 `sendProviderRequest` 或 Google SDK 前必须 `await stage()`；只有 request staging 成功完成后才能发送 HTTP。staging 失败时该 provider attempt 直接失败，不能绕过预写继续发送。
+3. 调用 `sendProviderRequest` 或 Google SDK 前同步执行 `stage()`；`stage()` 契约为 `void`，不返回 Promise。只有该同步函数正常返回后才能发送 HTTP。staging 失败时该 provider attempt 直接失败，不能绕过预写继续发送。
 4. 非流式先读取原始 bytes，再分别交给错误归一化和成功解析器；将同一 bytes 写入 response outbox。Google SDK 若只返回已解析对象，必须增加 transport/raw-response hook，不能用重新序列化对象冒充 provider 原文。
 5. 流式对 `Response.body`/SDK iterator 做 tee 或受控缓冲，parser 与原始字节收集器各消费一份；结束、异常和 abort 路径都必须 flush 一次且只能完成一次。
 6. 发送失败且没有 response 时仍完成该 attempt 记录，`llm_response=NULL`；后续 retry 不更新旧记录。

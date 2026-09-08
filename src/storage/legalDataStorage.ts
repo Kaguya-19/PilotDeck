@@ -75,7 +75,7 @@ export type InvocationLogRecord = InvocationLogContext & {
 };
 
 export type ModelInvocationLogSink = {
-  stage(record: InvocationLogRecord): void | Promise<void>;
+  stage(record: InvocationLogRecord): void;
   append(record: InvocationLogRecord): Promise<void>;
 };
 

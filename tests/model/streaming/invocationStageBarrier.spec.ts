@@ -38,45 +38,6 @@ function assertRequestWasStaged(root: string, body: BodyInit | null | undefined)
   assert.equal(staged.requestBody, String(body));
 }
 
-function deferred(): { promise: Promise<void>; resolve: () => void } {
-  let resolve!: () => void;
-  const promise = new Promise<void>((res) => { resolve = res; });
-  return { promise, resolve };
-}
-
-test("does not send HTTP until an asynchronous stage implementation settles", async () => {
-  const gate = deferred();
-  let fetchCalls = 0;
-  const pending = complete(request, config, {
-    invocation: {
-      context: {
-        workspaceId: "workspace",
-        sessionId: "session",
-        turnId: "turn",
-        runId: "turn",
-        logicalCallId: "call",
-        caller: "agent",
-      },
-      sink: {
-        stage: () => gate.promise,
-        append: async () => {},
-      },
-    },
-    fetch: async () => {
-      fetchCalls++;
-      return new Response(JSON.stringify({
-        choices: [{ message: { role: "assistant", content: "ok" } }],
-      }), { status: 200 });
-    },
-  });
-
-  await new Promise((resolve) => setTimeout(resolve, 10));
-  assert.equal(fetchCalls, 0);
-  gate.resolve();
-  await pending;
-  assert.equal(fetchCalls, 1);
-});
-
 test("complete synchronously stages the invocation before sending HTTP", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pilotdeck-stage-barrier-"));
   t.after(() => rm(root, { recursive: true, force: true }));
