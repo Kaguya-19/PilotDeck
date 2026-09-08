@@ -11,7 +11,11 @@ import {
   type CanonicalModelEvent,
 } from "../../model/index.js";
 import type { AgentError } from "../../agent/index.js";
-import type { ModelInvocationLogSink, WorkspaceSnapshotRecorder } from "../../storage/legalDataStorage.js";
+import type {
+  ModelInvocationLogSink,
+  WorkspaceSnapshotFailureKind,
+  WorkspaceSnapshotRecorder,
+} from "../../storage/legalDataStorage.js";
 import { contentToText } from "../../tool/index.js";
 import type { SessionRouter } from "../SessionRouter.js";
 import { GatewayElicitationBus } from "../elicitation/GatewayElicitationBus.js";
@@ -239,6 +243,24 @@ type PendingTurnReplacement = {
   phase: "prepared" | "submitting" | "finalizing";
 };
 
+function turnKey(sessionKey: string, runId: string): string {
+  return `${sessionKey}\0${runId}`;
+}
+
+async function settlesWithin(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise.then(() => true, () => true),
+      new Promise<false>((resolve) => {
+        timer = setTimeout(() => resolve(false), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export class InProcessGateway implements Gateway {
   private readonly now: () => Date;
   private readonly uuid: () => string;
@@ -272,6 +294,7 @@ export class InProcessGateway implements Gateway {
    * while `inFlightTurns` was still populated, racing the next submit.
    */
   private readonly turnCompletions = new Map<string, Promise<void>>();
+  private readonly abortedTurnReasons = new Map<string, string>();
   constructor(
     private readonly router: SessionRouter,
     private readonly options: InProcessGatewayOptions = {},
@@ -469,6 +492,62 @@ export class InProcessGateway implements Gateway {
     let turnSucceeded = false;
     let preCaptured = false;
     let sessionCwd: string | undefined;
+    let workspaceStable = true;
+    let postFailureKind: WorkspaceSnapshotFailureKind | undefined;
+    let postFailureReason: string | undefined;
+    const capturePostAgentSnapshot = async (): Promise<void> => {
+      if (!this.options.snapshotRecorder || !workspaceId || !sessionCwd || !preCaptured || turnSucceeded) return;
+      const failureKind = timedOut
+        ? "timeout"
+        : postFailureKind
+          ?? (this.abortedTurnReasons.has(turnKey(input.sessionKey, runId)) ? "interrupted" : "unknown");
+      const failureReason = timedOut
+        ? postFailureReason ?? "timeout"
+        : postFailureReason
+          ?? this.abortedTurnReasons.get(turnKey(input.sessionKey, runId))
+          ?? "turn_failed_or_aborted";
+      try {
+        const result = await this.options.snapshotRecorder.capturePostAgent({
+          workspaceId,
+          sessionId: input.sessionKey,
+          turnId: runId,
+          runId,
+          workspaceDir: sessionCwd,
+          workspaceStable,
+          failureKind,
+          failureReason,
+        });
+        if (result.state === "failed") {
+          const error = new Error(`post_agent workspace snapshot failed: ${result.error ?? "unknown error"}`);
+          console.error(`[pilotdeck] ${error.message} session=${input.sessionKey} run=${runId}`);
+          this.options.telemetry?.trackError(error, {
+            module: "session",
+            ownerModule: telemetryContext.ownerModule,
+            executionKind: telemetryContext.executionKind,
+            phase: telemetryContext.phase,
+            loopStage: "loop_end",
+            errorCategory: "loop_error",
+            sessionId: input.sessionKey,
+            metadata: { runId, failureKind, failureReason },
+          });
+        }
+      } catch (error) {
+        console.error(
+          `[pilotdeck] post_agent workspace snapshot threw session=${input.sessionKey} run=${runId}:`,
+          error,
+        );
+        this.options.telemetry?.trackError(error, {
+          module: "session",
+          ownerModule: telemetryContext.ownerModule,
+          executionKind: telemetryContext.executionKind,
+          phase: telemetryContext.phase,
+          loopStage: "loop_end",
+          errorCategory: "loop_error",
+          sessionId: input.sessionKey,
+          metadata: { runId, failureKind, failureReason },
+        });
+      }
+    };
 
     // Background pump: agent events → queue.
     const pump = (async () => {
@@ -649,6 +728,13 @@ export class InProcessGateway implements Gateway {
             executionKind: telemetryContext.executionKind,
             phase: telemetryContext.phase,
           });
+          if (event.type === "turn_failed") {
+            postFailureKind = "agent_error";
+            postFailureReason = `${event.error.code}: ${event.error.message}`;
+          } else if (event.type === "session_aborted") {
+            postFailureKind = "interrupted";
+            postFailureReason = event.reason ?? "session_aborted";
+          }
           if (event.type === "input_accepted") {
             await this.commitAcceptedTurnReplacement(input.sessionKey, runId);
           }
@@ -668,6 +754,10 @@ export class InProcessGateway implements Gateway {
           for (const gatewayEvent of mapAgentEvent(event, runId)) {
             if (gatewayEvent.type === "turn_completed" && gatewayEvent.finishReason === "completed") {
               turnSucceeded = true;
+            } else if (gatewayEvent.type === "turn_completed") {
+              const interrupted = String(gatewayEvent.finishReason).startsWith("aborted");
+              postFailureKind ??= interrupted ? "interrupted" : "agent_error";
+              postFailureReason ??= `turn_completed:${gatewayEvent.finishReason}`;
             }
             if (gatewayEvent.type === "context_budget") {
               this.recordGatewayStatusMessage({
@@ -687,6 +777,10 @@ export class InProcessGateway implements Gateway {
           }
         }
       } catch (error) {
+        if (!timedOut) {
+          postFailureKind ??= "gateway_error";
+          postFailureReason ??= error instanceof Error ? error.message : String(error);
+        }
         this.options.telemetry?.trackError(error, {
           module: "session",
           ownerModule: telemetryContext.ownerModule,
@@ -743,33 +837,25 @@ export class InProcessGateway implements Gateway {
       this.router.endTurn(input.sessionKey, runId);
       if (timedOut) {
         // The timed-out AgentSession is never safe to reuse. Do not await a
-        // misbehaving tool here: the hard timeout must release the Cron run.
-        await this.router.close(input.sessionKey);
-        if (this.options.snapshotRecorder && workspaceId && sessionCwd && preCaptured && !turnSucceeded) {
-          await this.options.snapshotRecorder.capturePostAgent({
-            workspaceId,
-            sessionId: input.sessionKey,
-            turnId: runId,
-            runId,
-            workspaceDir: sessionCwd,
-            failureReason: "timeout",
-          }).catch(() => undefined);
+        // misbehaving tool indefinitely, but give abort/tool cleanup a bounded
+        // chance to quiesce before scanning the workspace.
+        workspaceStable = await settlesWithin(pump, this.abortTurnTimeoutMs);
+        if (!workspaceStable) {
+          postFailureReason = `timeout; workspace_not_quiescent_after_${this.abortTurnTimeoutMs}ms`;
         }
+        try {
+          await this.router.close(input.sessionKey);
+        } catch (error) {
+          console.error(`[pilotdeck] failed to close timed-out session ${input.sessionKey}:`, error);
+        }
+        await capturePostAgentSnapshot();
         void pump.catch(() => undefined);
       } else {
         // Defensive — make sure the pump promise is settled before we resolve.
         await pump.catch(() => undefined);
-        if (this.options.snapshotRecorder && workspaceId && sessionCwd && preCaptured && !turnSucceeded) {
-          await this.options.snapshotRecorder.capturePostAgent({
-            workspaceId,
-            sessionId: input.sessionKey,
-            turnId: runId,
-            runId,
-            workspaceDir: sessionCwd,
-            failureReason: "turn_failed_or_aborted",
-          }).catch(() => undefined);
-        }
+        await capturePostAgentSnapshot();
       }
+      this.abortedTurnReasons.delete(turnKey(input.sessionKey, runId));
       // Signal any in-flight `abortTurn` awaiters that the session slot
       // has been released. Drop our deferred only if we still own it —
       // a later turn for the same session may have already installed
@@ -828,6 +914,10 @@ export class InProcessGateway implements Gateway {
 
   async abortTurn(input: { sessionKey: string; runId?: string; reason?: string }): Promise<void> {
     const reason = input.reason ?? (input.runId ? `aborted:${input.runId}` : "aborted");
+    const activeRunId = this.router.activeTurnRunId(input.sessionKey);
+    if (activeRunId && (!input.runId || input.runId === activeRunId)) {
+      this.abortedTurnReasons.set(turnKey(input.sessionKey, activeRunId), reason);
+    }
     await this.router.abort(input.sessionKey, reason);
     // Wait for the in-flight `submitTurn` (if any) to fully unwind so
     // `inFlightTurns` has been cleared by the time the RPC response is

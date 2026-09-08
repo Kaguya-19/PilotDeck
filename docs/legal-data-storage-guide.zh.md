@@ -148,6 +148,12 @@ LLM 调用日志位于：
 
 `.pending` 用于 request staging。模型调用结束后会追加最终 attempt 记录；如果进程在调用中退出，pending 文件可作为未完成 attempt 的排查线索，不应手工改写成成功记录。
 
+request staging 是模型 HTTP 请求的硬前置条件：pending 文件完成同步写入、文件 fsync、原子 rename 和目录 fsync 后才会发送请求。staging 失败时不会发送该次模型请求。
+
+### 异常轮次没有可用的 post_agent manifest
+
+异常快照的 manifest 包含 `abnormal=true`、`failureKind` 和 `failureReason`。只有同时存在 `manifest.json` 与 `_COMMITTED` 才是可恢复快照；如果采集过程中任一文件读取、对象写入或校验失败，目录中会尽力写入 `_FAILED.json`，且不会留下可被误判为成功的 manifest。若磁盘已满或目录完全不可写，失败标记本身也可能无法写入，此时请检查 server 日志中的 `post_agent workspace snapshot failed`。
+
 ### Node 原生依赖 ABI 错误
 
 确保构建、启动和依赖安装使用同一个 Node 22.x 版本。切换 Node 主版本后，应在该版本下重新安装或 rebuild 原生依赖，再启动 server。

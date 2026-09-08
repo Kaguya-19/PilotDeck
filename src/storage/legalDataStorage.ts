@@ -1,8 +1,19 @@
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream } from "node:fs";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { appendFile, copyFile, lstat, mkdir, readdir, rename, unlink, writeFile } from "node:fs/promises";
+import {
+  closeSync,
+  createReadStream,
+  createWriteStream,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { appendFile, lstat, mkdir, readlink, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
+import { Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
 
 export type LegalStorageConfig = {
   root: string;
@@ -64,7 +75,7 @@ export type InvocationLogRecord = InvocationLogContext & {
 };
 
 export type ModelInvocationLogSink = {
-  stage?(record: InvocationLogRecord): void | Promise<void>;
+  stage(record: InvocationLogRecord): void | Promise<void>;
   append(record: InvocationLogRecord): Promise<void>;
 };
 
@@ -76,13 +87,36 @@ export class JsonlInvocationLogSink implements ModelInvocationLogSink {
 
   stage(record: InvocationLogRecord): void {
     const path = this.pathFor(record);
-    mkdirSync(dirname(path), { recursive: true });
-    mkdirSync(join(dirname(path), ".pending"), { recursive: true });
-    writeFileSync(
-      join(dirname(path), ".pending", `${safePart(record.requestLogId)}.json`),
-      JSON.stringify(record),
-      "utf8",
-    );
+    const pendingDir = join(dirname(path), ".pending");
+    mkdirSync(pendingDir, { recursive: true });
+    const stagedPath = join(pendingDir, `${safePart(record.requestLogId)}.json`);
+    const temporaryPath = `${stagedPath}.tmp-${randomUUID()}`;
+    let fileDescriptor: number | undefined;
+    try {
+      fileDescriptor = openSync(temporaryPath, "wx");
+      writeFileSync(fileDescriptor, JSON.stringify(record), "utf8");
+      fsyncSync(fileDescriptor);
+      const completedDescriptor = fileDescriptor;
+      fileDescriptor = undefined;
+      closeSync(completedDescriptor);
+      renameSync(temporaryPath, stagedPath);
+      if (process.platform !== "win32") {
+        const directoryDescriptor = openSync(pendingDir, "r");
+        try {
+          fsyncSync(directoryDescriptor);
+        } finally {
+          closeSync(directoryDescriptor);
+        }
+      }
+    } catch (error) {
+      if (fileDescriptor !== undefined) closeSync(fileDescriptor);
+      try {
+        unlinkSync(temporaryPath);
+      } catch {
+        // The temporary file may not have been created or may already be renamed.
+      }
+      throw error;
+    }
   }
 
   async append(record: InvocationLogRecord): Promise<void> {
@@ -90,8 +124,8 @@ export class JsonlInvocationLogSink implements ModelInvocationLogSink {
       if (this.appended.has(record.requestLogId)) return;
       const path = this.pathFor(record);
       await mkdir(dirname(path), { recursive: true });
-      await unlink(join(dirname(path), ".pending", `${safePart(record.requestLogId)}.json`)).catch(() => undefined);
       await appendFile(path, `${JSON.stringify(record)}\n`, "utf8");
+      await unlink(join(dirname(path), ".pending", `${safePart(record.requestLogId)}.json`)).catch(() => undefined);
       this.appended.add(record.requestLogId);
     });
   }
@@ -116,14 +150,28 @@ export type WorkspaceSnapshotInput = {
   runId: string;
   roundNumber?: number;
   workspaceDir: string;
+  workspaceStable?: boolean;
+  failureKind?: WorkspaceSnapshotFailureKind;
   failureReason?: string;
 };
+
+export type WorkspaceSnapshotFailureKind =
+  | "timeout"
+  | "interrupted"
+  | "agent_error"
+  | "gateway_error"
+  | "unknown";
 
 export type WorkspaceSnapshotResult = {
   snapshotId: string;
   phase: "pre_user" | "post_agent";
   state: "committed" | "failed";
+  abnormal?: boolean;
+  roundStatus?: "captured" | "failed" | "aborted";
+  failureKind?: WorkspaceSnapshotFailureKind;
+  failureReason?: string;
   manifestPath?: string;
+  failureMarkerPath?: string;
   error?: string;
 };
 
@@ -152,7 +200,7 @@ export class ContentAddressedWorkspaceSnapshotRecorder implements WorkspaceSnaps
   }
 
   capturePostAgent(input: WorkspaceSnapshotInput): Promise<WorkspaceSnapshotResult> {
-    return this.capture(input, "post_agent", input.failureReason?.includes("abort") ? "aborted" : "failed");
+    return this.capture(input, "post_agent", input.failureKind === "interrupted" ? "aborted" : "failed");
   }
 
   private async capture(
@@ -186,9 +234,13 @@ export class ContentAddressedWorkspaceSnapshotRecorder implements WorkspaceSnaps
     const partition = join(snapshotRoot, "workspaces", safePart(input.workspaceId), "sessions", safePart(input.sessionId), "snapshots", snapshotId);
     const temp = join(partition, ".tmp");
     const manifestPath = join(partition, "manifest.json");
+    const abnormal = phase === "post_agent";
     try {
       await mkdir(join(snapshotRoot, "objects", "md5"), { recursive: true });
       await mkdir(temp, { recursive: true });
+      if (input.workspaceStable === false) {
+        throw new Error("Workspace did not finish unwinding before snapshot capture");
+      }
       const entries = await this.scanWorkspace(resolve(input.workspaceDir), snapshotRoot);
       const manifest = {
         snapshotId,
@@ -198,7 +250,9 @@ export class ContentAddressedWorkspaceSnapshotRecorder implements WorkspaceSnaps
         runId: input.runId,
         roundNumber: input.roundNumber,
         phase,
+        abnormal,
         roundStatus,
+        failureKind: input.failureKind,
         failureReason: input.failureReason,
         storageConfigVersion: this.config.storageConfigVersion,
         entries,
@@ -208,12 +262,65 @@ export class ContentAddressedWorkspaceSnapshotRecorder implements WorkspaceSnaps
       await writeFile(temporaryManifest, JSON.stringify(manifest, null, 2), "utf8");
       await rename(temporaryManifest, manifestPath);
       await writeFile(join(partition, "_COMMITTED"), "", "utf8");
-      const result = { snapshotId, phase, state: "committed" as const, manifestPath };
+      await rm(temp, { recursive: true, force: true });
+      const result = {
+        snapshotId,
+        phase,
+        state: "committed" as const,
+        abnormal,
+        roundStatus,
+        failureKind: input.failureKind,
+        failureReason: input.failureReason,
+        manifestPath,
+      };
       this.completed.set(key, result);
       return result;
     } catch (error) {
-      const result = { snapshotId, phase, state: "failed" as const, error: error instanceof Error ? error.message : String(error) };
+      const message = error instanceof Error ? error.message : String(error);
+      await unlink(manifestPath).catch(() => undefined);
+      await unlink(join(partition, "_COMMITTED")).catch(() => undefined);
+      const failureMarkerPath = await this.writeFailureMarker(partition, {
+        snapshotId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        runId: input.runId,
+        phase,
+        abnormal,
+        roundStatus,
+        failureKind: input.failureKind,
+        failureReason: input.failureReason,
+        state: "failed",
+        error: message,
+        createdAt: new Date().toISOString(),
+      });
+      const result = {
+        snapshotId,
+        phase,
+        state: "failed" as const,
+        abnormal,
+        roundStatus,
+        failureKind: input.failureKind,
+        failureReason: input.failureReason,
+        failureMarkerPath,
+        error: message,
+      };
+      this.completed.set(key, result);
       return result;
+    }
+  }
+
+  private async writeFailureMarker(partition: string, marker: object): Promise<string | undefined> {
+    const markerPath = join(partition, "_FAILED.json");
+    const temporary = join(partition, `.failed-${randomUUID()}.tmp`);
+    try {
+      await mkdir(partition, { recursive: true });
+      await writeFile(temporary, JSON.stringify(marker, null, 2), "utf8");
+      await rename(temporary, markerPath);
+      return markerPath;
+    } catch {
+      await unlink(temporary).catch(() => undefined);
+      return undefined;
     }
   }
 
@@ -225,7 +332,7 @@ export class ContentAddressedWorkspaceSnapshotRecorder implements WorkspaceSnaps
         const relativePath = relative(workspaceDir, absolute).split(sep).join("/");
         const info = await lstat(absolute);
         if (info.isSymbolicLink()) {
-          const target = await (await import("node:fs/promises")).readlink(absolute);
+          const target = await readlink(absolute);
           entries.push({ path: relativePath, entryType: "symlink", size: 0, linkTarget: target });
           continue;
         }
@@ -234,26 +341,14 @@ export class ContentAddressedWorkspaceSnapshotRecorder implements WorkspaceSnaps
           continue;
         }
         if (!info.isFile()) continue;
-        const digest = await md5File(absolute);
-        const objectPath = join(snapshotRoot, "objects", "md5", digest.slice(0, 2), digest.slice(2, 4), digest);
-        try {
-          await lstat(objectPath);
-        } catch {
-          await mkdir(dirname(objectPath), { recursive: true });
-          const temporary = join(snapshotRoot, "objects", "md5", `.tmp-${randomUUID()}`);
-          await copyFile(absolute, temporary);
-          try {
-            await rename(temporary, objectPath);
-          } catch (error) {
-            await unlink(temporary).catch(() => undefined);
-            try {
-              await lstat(objectPath);
-            } catch {
-              throw error;
-            }
-          }
-        }
-        entries.push({ path: relativePath, entryType: "file", size: info.size, md5: digest, objectKey: `objects/md5/${digest.slice(0, 2)}/${digest.slice(2, 4)}/${digest}` });
+        const stored = await storeContentAddressedFile(absolute, snapshotRoot);
+        entries.push({
+          path: relativePath,
+          entryType: "file",
+          size: stored.size,
+          md5: stored.digest,
+          objectKey: stored.objectKey,
+        });
       }
     };
     await visit(workspaceDir);
@@ -261,10 +356,74 @@ export class ContentAddressedWorkspaceSnapshotRecorder implements WorkspaceSnaps
   }
 }
 
+async function storeContentAddressedFile(
+  sourcePath: string,
+  snapshotRoot: string,
+): Promise<{ digest: string; size: number; objectKey: string }> {
+  const objectRoot = join(snapshotRoot, "objects", "md5");
+  await mkdir(objectRoot, { recursive: true });
+  const temporary = join(objectRoot, `.tmp-${randomUUID()}`);
+  const hash = createHash("md5");
+  let size = 0;
+  const hashingStream = new Transform({
+    transform(chunk: Buffer, _encoding, callback) {
+      hash.update(chunk);
+      size += chunk.length;
+      callback(null, chunk);
+    },
+  });
+
+  try {
+    await pipeline(
+      createReadStream(sourcePath),
+      hashingStream,
+      createWriteStream(temporary, { flags: "wx" }),
+    );
+    const digest = hash.digest("hex");
+    const objectKey = `objects/md5/${digest.slice(0, 2)}/${digest.slice(2, 4)}/${digest}`;
+    const objectPath = join(snapshotRoot, objectKey);
+    await mkdir(dirname(objectPath), { recursive: true });
+    try {
+      const existing = await lstat(objectPath);
+      if (!existing.isFile() || existing.size !== size || await md5File(objectPath) !== digest) {
+        throw new Error(`Snapshot object verification failed: ${objectKey}`);
+      }
+      await unlink(temporary);
+    } catch (error) {
+      if (isMissingFileError(error)) {
+        try {
+          await rename(temporary, objectPath);
+        } catch (renameError) {
+          try {
+            const raced = await lstat(objectPath);
+            if (!raced.isFile() || raced.size !== size || await md5File(objectPath) !== digest) {
+              throw renameError;
+            }
+            await unlink(temporary);
+          } catch (verificationError) {
+            throw isMissingFileError(verificationError) ? renameError : verificationError;
+          }
+        }
+      } else {
+        throw error;
+      }
+    }
+    return { digest, size, objectKey };
+  } catch (error) {
+    await unlink(temporary).catch(() => undefined);
+    throw error;
+  }
+}
+
 async function md5File(path: string): Promise<string> {
   const hash = createHash("md5");
   for await (const chunk of createReadStream(path)) hash.update(chunk);
   return hash.digest("hex");
+}
+
+function isMissingFileError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error
+    && (error as { code?: unknown }).code === "ENOENT";
 }
 
 function safePart(value: string): string {

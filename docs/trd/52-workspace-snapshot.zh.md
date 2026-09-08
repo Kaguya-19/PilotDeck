@@ -98,7 +98,9 @@ turn_id              string
 run_id               string
 round_number         integer
 phase                pre_user | post_agent
+abnormal             boolean
 round_status         captured | failed | aborted
+failure_kind         timeout | interrupted | agent_error | gateway_error | unknown nullable
 failure_reason       string nullable
 is_distil            boolean
 sandbox_image        string nullable
@@ -139,6 +141,7 @@ ${SNAPSHOT_ROOT}/
     sessions/<session_id>/
       snapshots/<snapshot_id>/manifest.json
       snapshots/<snapshot_id>/_COMMITTED
+      snapshots/<snapshot_id>/_FAILED.json
     locks/<turn_id>.lock
 ```
 
@@ -181,10 +184,12 @@ timeout 和用户中断必须先完成 abort/close 的收尾，再进行扫描�
 对象写入采用内容寻址和原子提交：
 
 1. 以流式方式读取文件，避免将整个文件加载到内存。
-2. 写入 `${SNAPSHOT_ROOT}/objects/.tmp/<uuid>`。
-3. 完成后校验计算出的 MD5 与目标 key 一致。
+2. 同一条流一边计算 MD5、一边写入 `${SNAPSHOT_ROOT}/objects/md5/.tmp-<uuid>`，确保 MD5 与实际保存正文来自同一份字节。
+3. 完成后校验计算出的 MD5 与目标 key 一致；已存在的对象也必须校验类型、大小和 MD5 后才能复用。
 4. 使用 exclusive create 或原子 rename 提交到 MD5 key；已存在时丢弃临时对象并复用已有对象。
 5. 只有对象提交成功后，manifest 才能引用该对象。
+
+任一文件读取、对象写入、校验、manifest 写入或 `_COMMITTED` 写入失败时，该快照必须保持 `failed`：删除未提交的 `manifest.json`，不得留下 `_COMMITTED`，并尽力写入 `_FAILED.json`。如果目标磁盘已满或目录完全不可写，失败标记也可能无法落盘，此时 Gateway 必须输出明确错误并上报 telemetry，不能静默吞掉。
 
 ## 7. 与现有运行时的集成边界
 

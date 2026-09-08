@@ -7,6 +7,7 @@ export {
   type LegalStorageConfig,
   type ModelInvocationLogSink,
   type WorkspaceSnapshotInput,
+  type WorkspaceSnapshotFailureKind,
   type WorkspaceSnapshotRecorder,
   type WorkspaceSnapshotResult,
 } from "./legalDataStorage.js";

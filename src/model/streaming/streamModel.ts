@@ -893,26 +893,22 @@ async function beginInvocation(
     stream,
     finished: false,
   };
-  try {
-    await invocation.sink.stage?.({
-      ...invocation.context,
-      requestLogId: state.requestLogId,
-      requestId: state.requestId,
-      attempt,
-      provider: provider.id,
-      protocol: provider.protocol,
-      model,
-      stream,
-      requestBody,
-      requestBytes: Buffer.byteLength(requestBody),
-      outcome: "success",
-      responseComplete: false,
-      startedAt: now,
-      completedAt: now,
-    });
-  } catch {
-    // Storage failures must not change the provider call result.
-  }
+  await invocation.sink.stage({
+    ...invocation.context,
+    requestLogId: state.requestLogId,
+    requestId: state.requestId,
+    attempt,
+    provider: provider.id,
+    protocol: provider.protocol,
+    model,
+    stream,
+    requestBody,
+    requestBytes: Buffer.byteLength(requestBody),
+    outcome: "success",
+    responseComplete: false,
+    startedAt: now,
+    completedAt: now,
+  });
   return state;
 }
 
