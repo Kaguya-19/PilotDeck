@@ -7,6 +7,8 @@ import test from "node:test";
 
 import { parseModelConfig } from "../../../src/model/config/parseModelConfig.js";
 import type { CanonicalModelRequest } from "../../../src/model/protocol/canonical.js";
+import type { ProviderConfig } from "../../../src/model/protocol/canonical.js";
+import type { GoogleClientFactory } from "../../../src/model/providers/google/client.js";
 import { complete, streamModel } from "../../../src/model/streaming/streamModel.js";
 import { JsonlInvocationLogSink } from "../../../src/storage/legalDataStorage.js";
 
@@ -26,6 +28,23 @@ const request: CanonicalModelRequest = {
   provider: "test",
   model: "test-model",
   messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+};
+
+const googleConfig = parseModelConfig({
+  providers: {
+    google: {
+      protocol: "google",
+      url: "https://generativelanguage.googleapis.com/v1beta",
+      apiKey: "test-key",
+      retry: { requestMaxRetries: 0, streamMaxRetries: 0 },
+      models: { "test-model": {} },
+    },
+  },
+});
+
+const googleRequest: CanonicalModelRequest = {
+  ...request,
+  provider: "google",
 };
 
 function assertRequestWasStaged(root: string, body: BodyInit | null | undefined): void {
@@ -128,4 +147,76 @@ test("does not send HTTP when synchronous invocation staging fails", async () =>
     /storage unavailable/,
   );
   assert.equal(fetchCalls, 0);
+});
+
+test("Google complete stages synchronously before invoking the SDK", async () => {
+  const order: string[] = [];
+  const googleClientFactory: GoogleClientFactory = (_provider: ProviderConfig) => ({
+    models: {
+      generateContent: async () => {
+        order.push("sdk");
+        return { candidates: [{ content: { parts: [{ text: "ok" }] } }] } as never;
+      },
+      generateContentStream: async () => (async function* () {})(),
+    },
+  });
+
+  await complete(googleRequest, googleConfig, {
+    invocation: {
+      context: {
+        workspaceId: "workspace",
+        sessionId: "session",
+        turnId: "turn",
+        runId: "turn",
+        logicalCallId: "call",
+        caller: "agent",
+      },
+      sink: {
+        stage: () => { order.push("stage"); },
+        append: async () => {},
+      },
+    },
+    googleClientFactory,
+  });
+
+  assert.deepEqual(order, ["stage", "sdk"]);
+});
+
+test("Google streaming stages synchronously before invoking the SDK", async () => {
+  const order: string[] = [];
+  const googleClientFactory: GoogleClientFactory = (_provider: ProviderConfig) => ({
+    models: {
+      generateContent: async () => ({} as never),
+      generateContentStream: async () => {
+        order.push("sdk");
+        return (async function* () {
+          yield { candidates: [{ content: { parts: [{ text: "ok" }] } }] } as never;
+          yield { candidates: [{ finishReason: "STOP", content: { parts: [] } }] } as never;
+        })();
+      },
+    },
+  });
+
+  const iterator = streamModel(googleRequest, googleConfig, {
+    invocation: {
+      context: {
+        workspaceId: "workspace",
+        sessionId: "session",
+        turnId: "turn",
+        runId: "turn",
+        logicalCallId: "call",
+        caller: "agent",
+      },
+      sink: {
+        stage: () => { order.push("stage"); },
+        append: async () => {},
+      },
+    },
+    googleClientFactory,
+  })[Symbol.asyncIterator]();
+
+  while (!(await iterator.next()).done) {
+    // Drain the SDK stream.
+  }
+  assert.deepEqual(order, ["stage", "sdk"]);
 });

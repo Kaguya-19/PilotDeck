@@ -128,3 +128,63 @@ test("gateway does not scan a timed-out workspace before agent unwind completes"
   assert.equal(postInputs[0]?.workspaceStable, false);
   assert.match(postInputs[0]?.failureReason ?? "", /workspace_not_quiescent/);
 });
+
+test("gateway marks a user-interrupted post-agent snapshot as aborted", async (t) => {
+  const workspace = await mkdtemp(join(tmpdir(), "pilotdeck-gateway-snapshot-"));
+  const postInputs: WorkspaceSnapshotInput[] = [];
+  const recorder: WorkspaceSnapshotRecorder = {
+    capturePreUser: async () => ({
+      snapshotId: "pre",
+      phase: "pre_user",
+      state: "committed",
+      abnormal: false,
+      roundStatus: "captured",
+    }),
+    capturePostAgent: async (input) => {
+      postInputs.push(input);
+      return {
+        snapshotId: "post",
+        phase: "post_agent",
+        state: "committed",
+        abnormal: true,
+        roundStatus: "aborted",
+        failureKind: input.failureKind,
+        failureReason: input.failureReason,
+      };
+    },
+  };
+  const fakeSession = {
+    snapshotForRuntimeReload: () => ({ cwd: workspace, transcriptPath: "" }),
+    async *submit(_input: unknown, options: AgentSubmitOptions = {}) {
+      yield {
+        type: "session_aborted",
+        sessionId: "web:interrupted",
+        turnId: options.turnId ?? "turn-interrupted",
+        reason: "user requested stop",
+      } as const;
+    },
+    abort() {},
+  } as unknown as AgentSession;
+  const router = new SessionRouter({
+    idleSweepIntervalMs: 0,
+    createSession: () => fakeSession,
+  });
+  t.after(() => router.shutdown());
+  const gateway = new InProcessGateway(router, {
+    workspaceId: "workspace",
+    snapshotRecorder: recorder,
+  });
+
+  for await (const _event of gateway.submitTurn({
+    sessionKey: "web:interrupted",
+    channelKey: "web",
+    message: "run",
+    runId: "turn-interrupted",
+  })) {
+    // Drain the turn so finalization runs.
+  }
+
+  assert.equal(postInputs.length, 1);
+  assert.equal(postInputs[0]?.failureKind, "interrupted");
+  assert.equal(postInputs[0]?.failureReason, "user requested stop");
+});
