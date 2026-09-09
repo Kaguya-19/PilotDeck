@@ -26,6 +26,22 @@ function fallbackCopyToClipboard(text: string): boolean {
   return copied;
 }
 
+// Supply both representations so document editors receive a table while plain
+// text editors receive tab-separated cells. Older browsers retain text copying.
+export async function copyHtmlToClipboard(html: string, text: string): Promise<boolean> {
+  try {
+    if (typeof window !== 'undefined' && window.isSecureContext &&
+        typeof ClipboardItem !== 'undefined' && navigator.clipboard?.write) {
+      await navigator.clipboard.write([new ClipboardItem({
+        'text/html': new Blob([html], { type: 'text/html' }),
+        'text/plain': new Blob([text], { type: 'text/plain' }),
+      })]);
+      return true;
+    }
+  } catch { /* Fall back to text if rich clipboard access is unavailable. */ }
+  return copyTextToClipboard(text);
+}
+
 export async function copyTextToClipboard(text: string): Promise<boolean> {
   if (!text) {
     return false;

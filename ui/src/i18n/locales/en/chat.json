@@ -1,4 +1,11 @@
 {
+  "copyBlock": {
+    "code": "Copy code",
+    "table": "Copy table",
+    "tableMarkdown": "Copy table as Markdown",
+    "copied": "Copied",
+    "failed": "Copy failed. Try again."
+  },
   "codeBlock": {
     "copy": "Copy",
     "copied": "Copied",

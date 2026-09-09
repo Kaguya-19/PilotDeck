@@ -5,7 +5,7 @@
 
 import type { NormalizedMessage } from '../../../stores/useSessionStore';
 import type { ChatMessage, SubagentChildTool } from '../types/types';
-import { decodeHtmlEntities, unescapeWithMathProtection, formatUsageLimitText } from '../utils/chatFormatting';
+import { formatUsageLimitText } from '../utils/chatFormatting';
 import { mergeUserAttachments, parseUserAttachmentNote } from '../utils/attachmentNotes';
 
 // Per-message conversion cache keyed by NormalizedMessage reference.
@@ -20,9 +20,8 @@ type ConvertSingleMessageOptions = {
 };
 
 function normalizeAssistantText(content: string): string {
-  let text = decodeHtmlEntities(content);
-  text = unescapeWithMathProtection(text);
-  return formatUsageLimitText(text);
+  // The transport has already decoded JSON. Preserve Markdown/code verbatim.
+  return formatUsageLimitText(content);
 }
 
 function isEmptyAssistantTextMessage(msg: NormalizedMessage): boolean {
@@ -109,7 +108,7 @@ function convertSingleMessage(
           id: msg.id,
           entryId: msg.entryId,
           type: 'user',
-          content: unescapeWithMathProtection(decodeHtmlEntities(content)),
+          content,
           timestamp: msg.timestamp,
           ...turnIdentity,
           ...(msg.forkUnsupportedContent ? {
@@ -230,7 +229,7 @@ function convertSingleMessage(
           id: msg.id,
           type: 'assistant',
           ...(msg.model ? { model: msg.model } : {}),
-          content: unescapeWithMathProtection(thinkingContent),
+          content: thinkingContent,
           timestamp: msg.timestamp,
           ...turnIdentity,
           isThinking: true,

@@ -2611,3 +2611,27 @@
     box-shadow: 0 0 0 1px rgba(102, 94, 232, 0.18);
   }
 }
+
+/* Block copy controls float above content without adding a toolbar row. */
+.markdown-copy-controls {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+
+.markdown-copy-block:hover > .markdown-copy-controls,
+.markdown-copy-block:focus-within > .markdown-copy-controls {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+@media (hover: none) {
+  .markdown-copy-controls {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+.markdown-copy-table th:last-child {
+  padding-inline-end: 3.5rem;
+}

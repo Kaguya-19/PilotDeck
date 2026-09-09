@@ -1,4 +1,11 @@
 {
+  "copyBlock": {
+    "code": "复制代码",
+    "table": "复制表格",
+    "tableMarkdown": "复制表格 Markdown",
+    "copied": "已复制",
+    "failed": "复制失败，请重试"
+  },
   "codeBlock": {
     "copy": "复制",
     "copied": "已复制",
