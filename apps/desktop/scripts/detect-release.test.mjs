@@ -72,7 +72,7 @@ test("unchanged and documentation-only commits skip unless forced", (t) => {
 for (const file of [
   "ui/app.js", "apps/desktop/src/main.ts", "Dockerfile",
   ".github/workflows/desktop-build.yml", ".github/workflows/desktop-windows.yml",
-  ".github/workflows/release.yml",
+  ".github/workflows/release.yml", ".github/workflows/release-retry.yml",
 ]) {
   test(`production changes trigger a release: ${file}`, (t) => {
     const { git, commit, detect } = repository(t);

@@ -12,6 +12,7 @@ on:
       - pnpm-workspace.yaml
       - .github/workflows/desktop-*.yml
       - .github/workflows/release.yml
+      - .github/workflows/release-retry.yml
   workflow_dispatch:
 
 permissions:
