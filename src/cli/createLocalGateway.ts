@@ -82,7 +82,7 @@ import {
   recoverPendingLastTurnReplacements,
   replaceLastWebSessionTurn,
 } from "../web/server/replaceLastTurn.js";
-import { describeWebProject, listWebProjects } from "../web/server/listProjects.js";
+import { createRegisteredWebProjectResolver, describeWebProject, listRegisteredWebProjects, listWebProjects } from "../web/server/listProjects.js";
 import { BackgroundTaskRuntime, type BackgroundTaskCompletionEvent } from "../task/runtime/BackgroundTaskRuntime.js";
 import { createBuiltinRegistry, createPlanFileManager, filterAvailableTools } from "../tool/index.js";
 import type {
@@ -336,7 +336,8 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
   const skillManager = new SkillManager({ pilotHome, builtinSkillsRoot, env });
   const dialogProjects = createDialogProjectRegistry({
     pilotHome,
-    listProjects: async () => (await listWebProjects({ pilotHome })).projects,
+    listProjects: () => listRegisteredWebProjects({ pilotHome }),
+    resolveProject: createRegisteredWebProjectResolver({ pilotHome }),
   });
   const uploadStore = new UploadStore({
     listProjects: dialogProjects.listProjectKeys,

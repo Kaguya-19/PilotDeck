@@ -457,6 +457,16 @@ export class InProcessGateway implements Gateway {
     let timeoutHandle: NodeJS.Timeout | undefined;
     let timedOut = false;
 
+    const timingStart = performance.now();
+    let timingPrevious = timingStart;
+    const timingStages: Record<string, number> = {};
+    const markTiming = (stage: string) => {
+      const current = performance.now();
+      timingStages[stage] = Math.round(current - timingPrevious);
+      timingPrevious = current;
+    };
+    let completedEventAt: number | undefined;
+
     // Background pump: agent events → queue.
     const pump = (async () => {
       try {
@@ -472,11 +482,13 @@ export class InProcessGateway implements Gateway {
             // turn over a transient yaml read error.
           }
         }
+        markTiming("configMs");
         const session = await this.router.getOrCreate({
           sessionKey: input.sessionKey,
           projectKey: input.projectKey,
           channelKey: input.channelKey,
         });
+        markTiming("sessionMs");
         if (input.timeoutMs !== undefined && Number.isFinite(input.timeoutMs) && input.timeoutMs > 0) {
           timeoutHandle = setTimeout(() => {
             timedOut = true;
@@ -559,6 +571,7 @@ export class InProcessGateway implements Gateway {
             : input.modelSelection?.mode === "model" || input.modelOverride
               ? { selection: input.modelSelection?.mode === "model" ? input.modelSelection : input.modelOverride, source: "turn" as const }
               : { source: "default" as const };
+        markTiming("selectionMs");
         let lastEmittedModel: string | undefined;
         let actualRequestModel: string | undefined;
         if (modelSelection.selection) {
@@ -623,7 +636,13 @@ export class InProcessGateway implements Gateway {
           });
           if (event.type === "input_accepted") {
             await this.commitAcceptedTurnReplacement(input.sessionKey, runId);
+            markTiming("acceptanceMs");
+            const totalMs = Math.round(performance.now() - timingStart);
+            if (totalMs >= 200) console.info("[gateway:turn-timing]", JSON.stringify({
+              sessionKey: input.sessionKey, runId, phase: "accepted", totalMs, ...timingStages,
+            }));
           }
+          if (event.type === "turn_completed") completedEventAt = performance.now();
           if (event.type === "model_event" && event.event.type === "request_started") actualRequestModel = event.event.model;
           if (event.type === "model_event" && event.event.type === "request_started"
             && lastEmittedModel !== `${event.event.provider}\0${event.event.model}`) {
@@ -715,6 +734,12 @@ export class InProcessGateway implements Gateway {
       this.elicitationBus.rejectSession(input.sessionKey, "turn_ended");
       this.permissionBus.rejectSession(input.sessionKey, "turn_ended");
       this.router.endTurn(input.sessionKey, runId);
+      if (completedEventAt !== undefined) {
+        const releaseMs = Math.round(performance.now() - completedEventAt);
+        if (releaseMs >= 200) console.info("[gateway:turn-timing]", JSON.stringify({
+          sessionKey: input.sessionKey, runId, phase: "released", releaseMs,
+        }));
+      }
       if (timedOut) {
         // The timed-out AgentSession is never safe to reuse. Do not await a
         // misbehaving tool here: the hard timeout must release the Cron run.

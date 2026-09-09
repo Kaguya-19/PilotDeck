@@ -59,6 +59,53 @@ export async function listWebProjects(
   return { projects };
 }
 
+/** Registration-only lookup: never read chat transcripts to validate a send. */
+export async function listRegisteredWebProjects(
+  options: ListWebProjectsOptions,
+): Promise<Array<{ projectKey: string }>> {
+  const projectsDir = resolve(options.pilotHome, "projects");
+  const entries = await readdir(projectsDir, { withFileTypes: true }).catch(() => []);
+  const projects: Array<{ projectKey: string }> = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const projectKey = await resolveProjectPathFromId(projectsDir, entry.name);
+    if (projectKey && resolve(projectKey) !== resolve(options.pilotHome)) projects.push({ projectKey });
+  }
+  return projects;
+}
+
+/** Cache locations, not authorization: revalidate registrations on every lookup. */
+export function createRegisteredWebProjectResolver(options: ListWebProjectsOptions) {
+  const projectsDir = resolve(options.pilotHome, "projects");
+  const locations = new Map<string, string>();
+  return async (projectKey: string): Promise<string | undefined> => {
+    const requested = resolve(projectKey);
+    const directId = createProjectId(requested);
+    const matches = async (id: string): Promise<boolean> => {
+      if (!(await stat(resolve(projectsDir, id)).catch(() => undefined))?.isDirectory()) return false;
+      const registered = await resolveProjectPathFromId(projectsDir, id);
+      return registered !== null && resolve(registered) === requested;
+    };
+    const cachedId = locations.get(requested);
+    for (const id of new Set([cachedId, directId])) {
+      if (id && await matches(id)) return requested;
+    }
+    locations.delete(requested);
+    // Legacy/collision-resistant directories may use a different ID. Only
+    // inspect registration markers; session counts and titles are irrelevant.
+    const entries = await readdir(projectsDir, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name === directId || entry.name === cachedId) continue;
+      if (await matches(entry.name)) {
+        if (locations.size >= 256) locations.delete(locations.keys().next().value!);
+        locations.set(requested, entry.name);
+        return requested;
+      }
+    }
+    return undefined;
+  };
+}
+
 export async function describeWebProject(
   projectKey: string,
   options: ListWebProjectsOptions,

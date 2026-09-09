@@ -8,6 +8,7 @@ export type RegisteredDialogProject = {
 export type DialogProjectRegistryOptions = {
   pilotHome: string;
   listProjects: () => Promise<RegisteredDialogProject[]>;
+  resolveProject?: (projectKey: string) => Promise<string | undefined>;
 };
 
 export type DialogProjectRegistry = {
@@ -43,6 +44,11 @@ export function createDialogProjectRegistry(
       return generalProjectKey;
     }
 
+    if (options.resolveProject) {
+      const registered = await options.resolveProject(requestedProjectKey);
+      if (registered && resolve(registered) === requestedProjectKey) return registered;
+      throw new DialogGatewayError("PROJECT_NOT_FOUND", `Unknown projectKey: ${projectKey}`);
+    }
     const projects = await options.listProjects();
     const match = projects.find(
       (project) => resolve(project.projectKey) === requestedProjectKey,

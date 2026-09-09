@@ -96,13 +96,7 @@ export class TurnRunner {
 
   async *run(options: TurnRunnerOptions): AsyncGenerator<AgentEvent, TurnRunnerResult, unknown> {
     yield { type: "turn_started", sessionId: options.sessionId, turnId: options.turnId };
-    const artifactCollector = this.runtimeContext.collectFileArtifacts === false
-      ? undefined
-      : await FileArtifactCollector.start({
-          cwd: this.runtimeContext.cwd,
-          allowedInputPaths: options.allowedReadFiles,
-          now: this.now,
-        }).catch(() => undefined);
+    let artifactCollector: FileArtifactCollector | undefined;
     try {
       const unacknowledgedSteers = new Map<string, AgentSteerMessage>();
       const trackDrainedSteers = (steers: AgentSteerMessage[]): AgentSteerMessage[] => {
@@ -164,6 +158,16 @@ export class TurnRunner {
 
       await this.persistListingPromptMetadata(options, accepted.messages);
       yield { type: "input_accepted", sessionId: options.sessionId, turnId: options.turnId, messages: accepted.messages };
+
+      // Acknowledge durable input before scanning the workspace. The baseline
+      // still completes before hooks/model/tools can mutate any files.
+      artifactCollector = this.runtimeContext.collectFileArtifacts === false
+        ? undefined
+        : await FileArtifactCollector.start({
+            cwd: this.runtimeContext.cwd,
+            allowedInputPaths: options.allowedReadFiles,
+            now: this.now,
+          }).catch(() => undefined);
 
       const prompt = inputToPromptText(options.input);
       const userPromptHooks = await this.lifecycle?.dispatch({
@@ -297,9 +301,9 @@ export class TurnRunner {
           yield { type: "file_artifacts", sessionId: options.sessionId, turnId: options.turnId, artifacts };
         }
         for (const event of unappliedSteers) yield event;
-        if (turnCompletedEvent) yield turnCompletedEvent;
         await this.transcript.recordTurnResult(options.sessionId, options.turnId, runResult.result);
         await this.finalizeSessionMetadata(options, sessionTitle);
+        if (turnCompletedEvent) yield turnCompletedEvent;
         return runResult;
       } catch (error) {
         const unappliedSteers = closeSteerMailbox();

@@ -64,6 +64,7 @@ test("TurnRunner emits and persists file artifacts before completing the turn", 
     );
 
     const eventTypes: string[] = [];
+    let acceptedBeforeBaseline = false;
     for await (const event of runner.run({
       sessionId: "session-1",
       turnId: "turn-1",
@@ -71,8 +72,19 @@ test("TurnRunner emits and persists file artifacts before completing the turn", 
       input: { type: "text", text: "Create a workbook" },
     })) {
       eventTypes.push(event.type);
+      if (event.type === "input_accepted") {
+        assert.ok(transcript.entries.some(entry => entry.type === "accepted_input"));
+        // A file existing at the acceptance boundary must become baseline,
+        // not be reported as a file produced by the upcoming tools.
+        await writeFile(join(projectRoot, "already-present.txt"), "baseline");
+        acceptedBeforeBaseline = true;
+      }
+      if (event.type === "turn_completed") {
+        assert.ok(transcript.entries.some(entry => entry.type === "turn_result"));
+      }
     }
 
+    assert.ok(acceptedBeforeBaseline);
     assert.ok(eventTypes.indexOf("file_artifacts") > -1);
     assert.ok(eventTypes.indexOf("file_artifacts") < eventTypes.indexOf("turn_completed"));
     const artifactEntryIndex = transcript.entries.findIndex((entry) => entry.type === "file_artifacts");
