@@ -34,6 +34,20 @@ the latest unified release tag:
   plus an unsigned Windows installer, then publish one dated GitHub Release;
 - repeated manual release on the same date: use `-r2`, `-r3`, and so on.
 
+If the first Daily Release attempt fails only during builds,
+`.github/workflows/release-retry.yml` requests one automatic retry of the failed
+jobs on fresh runners. Successful platform builds and the original source SHA,
+release date, and revision are retained. Publishing proceeds after the retried
+builds succeed. Detection failures, publication failures, cancelled jobs, and
+second or later attempts are not automatically retried. The retry decision is
+recorded in the separate **Retry Release Build** workflow summary; both build
+attempts remain visible in the original run. This applies to scheduled and
+manually started Daily Release runs once the retry workflow is on `main`.
+
+Each platform upload can replace its own artifact when a failed build is retried,
+including when an earlier upload stored the artifact but failed before completing.
+Artifacts from successful platform jobs are retained.
+
 Release names and tags are `vYYYY.MM.DD`, for example `v2026.09.07`.
 Additional releases on that date use `v2026.09.07-r2`, `-r3`, and so on.
 The internal Electron version remains a numeric SemVer derived from the same
