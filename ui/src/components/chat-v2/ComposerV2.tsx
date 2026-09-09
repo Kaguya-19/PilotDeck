@@ -803,7 +803,8 @@ export default function ComposerV2({
                       }
                       openLabel={
                         t("documentReferences.open", {
-                          defaultValue: `Open ${reference.source.fileName}`,
+                          name: reference.source.fileName,
+                          defaultValue: "Open {{name}}",
                         }) as string
                       }
                       onOpen={

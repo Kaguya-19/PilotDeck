@@ -244,5 +244,6 @@
         "save": "Save Changes"
       }
     }
-  }
+  },
+  "sessionMissing": "This chat record no longer exists."
 }

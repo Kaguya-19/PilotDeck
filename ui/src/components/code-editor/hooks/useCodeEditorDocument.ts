@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../../../utils/api';
 import type { CodeEditorFile } from '../types/types';
@@ -17,6 +18,7 @@ const getErrorMessage = (error: unknown) => {
 };
 
 export const useCodeEditorDocument = ({ file, projectPath }: UseCodeEditorDocumentParams) => {
+  const { t } = useTranslation('common');
   // `content` is the editor's authoritative buffer. We never put an error
   // placeholder in here — if a load fails, the surface is hidden and the
   // user sees an error panel instead. Otherwise a stray Ctrl+S would
@@ -116,11 +118,11 @@ export const useCodeEditorDocument = ({ file, projectPath }: UseCodeEditorDocume
     // Without this, a transient read failure followed by Ctrl+S would write
     // empty/stale content to disk.
     if (loading) {
-      setSaveError('File is still loading');
+      setSaveError(t('common:uiText.fileLoading'));
       return;
     }
     if (loadError) {
-      setSaveError('Cannot save: file failed to load. Reload first.');
+      setSaveError(t('common:uiText.fileLoadBeforeSave'));
       return;
     }
 
@@ -158,7 +160,7 @@ export const useCodeEditorDocument = ({ file, projectPath }: UseCodeEditorDocume
     } finally {
       setSaving(false);
     }
-  }, [content, filePath, fileProjectName, loadError, loading]);
+  }, [content, filePath, fileProjectName, loadError, loading, t]);
 
   const handleDownload = useCallback(() => {
     const blob = new Blob([content], { type: 'text/plain' });

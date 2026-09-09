@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import React from 'react';
 
 interface TaskItem {
@@ -81,6 +82,7 @@ const statusConfig = {
  * Parses text content from TaskList/TaskGet results
  */
 export const TaskListContent: React.FC<TaskListContentProps> = ({ content }) => {
+  const { t } = useTranslation('common');
   const safeContent = stringifyTaskContent(content);
   const tasks = parseTaskContent(content);
 
@@ -100,7 +102,7 @@ export const TaskListContent: React.FC<TaskListContentProps> = ({ content }) => 
     <div>
       <div className="mb-1.5 flex items-center gap-2">
         <span className="text-[11px] text-gray-500 dark:text-gray-400">
-          {completed}/{total} completed
+          {t('uiText.tasksCompleted', { completed, total })}
         </span>
         <div className="h-1 flex-1 overflow-hidden rounded-full bg-gray-200 dark:bg-gray-700">
           <div
@@ -125,7 +127,7 @@ export const TaskListContent: React.FC<TaskListContentProps> = ({ content }) => 
                 {task.subject}
               </span>
               <span className={`flex-shrink-0 rounded border px-1 py-px text-[10px] ${config.badgeClass}`}>
-                {task.status.replace('_', ' ')}
+                {t(`uiText.taskStatus.${task.status}`, { defaultValue: task.status })}
               </span>
             </div>
           );

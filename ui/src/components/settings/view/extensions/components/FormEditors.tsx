@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import type { ReactNode } from "react";
 import { Plus, Trash2 } from "lucide-react";
 import type { KeyValueRow } from "../types/mcp";
@@ -55,11 +56,12 @@ export function StringListEditor({
   onChange: (values: string[]) => void;
   disabled?: boolean;
 }) {
+  const { t } = useTranslation("common");
   return (
     <div className="mcp-repeatable-field">
       <span className="mcp-field-label">{label}</span>
       <div className="mcp-repeatable-list">
-        {values.length === 0 && disabled ? <span className="mcp-empty-field-value">无</span> : null}
+        {values.length === 0 && disabled ? <span className="mcp-empty-field-value">{t('uiText.none')}</span> : null}
         {values.map((value, index) => (
           <div key={index} className="mcp-repeatable-row single">
             <input
@@ -114,11 +116,12 @@ export function KeyValueEditor({
   onChange: (rows: KeyValueRow[]) => void;
   disabled?: boolean;
 }) {
+  const { t } = useTranslation("common");
   return (
     <div className="mcp-repeatable-field">
       <span className="mcp-field-label">{label}</span>
       <div className="mcp-repeatable-list">
-        {rows.length === 0 && disabled ? <span className="mcp-empty-field-value">无</span> : null}
+        {rows.length === 0 && disabled ? <span className="mcp-empty-field-value">{t('uiText.none')}</span> : null}
         {rows.map((row) => (
           <div key={row.id} className="mcp-repeatable-row pair">
             <input

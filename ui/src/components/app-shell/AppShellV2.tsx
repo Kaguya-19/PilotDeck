@@ -1,8 +1,8 @@
+import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useMatch, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import ReactDOM from 'react-dom';
-import { Loader2, Trash2 } from 'lucide-react';
 import { useWebSocket } from '../../contexts/WebSocketContext';
 import { useDeviceSettings } from '../../hooks/useDeviceSettings';
 import { useSessionProtection } from '../../hooks/useSessionProtection';
@@ -124,7 +124,7 @@ export default function AppShellV2() {
     matchProjectChat?.params.projectName ?? matchProject?.params.projectName ?? undefined;
   const sessionId =
     matchProjectChat?.params.sessionId ?? matchLegacySession?.params.sessionId ?? undefined;
-  useTranslation('common');
+  const { t } = useTranslation('common');
 
   const { isMobile } = useDeviceSettings({ trackPWA: false });
   const [desktopSidebarOpen, setDesktopSidebarOpen] = useState(true);
@@ -475,17 +475,17 @@ export default function AppShellV2() {
       const response = await api.deleteProject(target.name, true);
       if (!response.ok) {
         const body = (await response.json().catch(() => ({}))) as { error?: string };
-        throw new Error(body.error || `Failed (HTTP ${response.status})`);
+        throw new Error(body.error || t('uiText.httpFailed', { status: response.status }));
       }
       sidebarSharedProps.onProjectDelete?.(target.name);
       await refreshProjectsSilently();
       setDeleteTarget(null);
     } catch (err) {
-      setDeleteError(err instanceof Error ? err.message : 'Failed to delete project');
+      setDeleteError(err instanceof Error ? err.message : t('uiText.deleteProjectFailed'));
     } finally {
       setIsDeletingProject(false);
 	    }
-	  }, [deleteTarget, refreshProjectsSilently, sidebarSharedProps]);
+	  }, [deleteTarget, refreshProjectsSilently, sidebarSharedProps, t]);
 
 	  const [deleteSessionTarget, setDeleteSessionTarget] = useState<DeleteSessionTarget | null>(null);
 	  const [isDeletingSession, setIsDeletingSession] = useState(false);
@@ -516,7 +516,7 @@ export default function AppShellV2() {
 
 	      if (!response.ok) {
 	        const body = (await response.json().catch(() => ({}))) as { error?: string };
-	        throw new Error(body.error || `Failed (HTTP ${response.status})`);
+	        throw new Error(body.error || t('uiText.httpFailed', { status: response.status }));
 	      }
 
 	      sidebarSharedProps.onSessionDelete?.(session.id);
@@ -530,11 +530,11 @@ export default function AppShellV2() {
 	      await refreshProjectsSilently();
 	      setDeleteSessionTarget(null);
 	    } catch (err) {
-	      setDeleteSessionError(err instanceof Error ? err.message : 'Failed to delete conversation');
+	      setDeleteSessionError(err instanceof Error ? err.message : t('uiText.deleteSessionFailed'));
 	    } finally {
 	      setIsDeletingSession(false);
 	    }
-	  }, [deleteSessionTarget, refreshProjectsSilently, sidebarSharedProps]);
+	  }, [deleteSessionTarget, refreshProjectsSilently, sidebarSharedProps, t]);
 
   const handleSelectProject = useCallback(
     (project: Project) => {
@@ -737,7 +737,7 @@ export default function AppShellV2() {
             type="button"
             className="fixed inset-0 bg-black/40 backdrop-blur-sm"
             onClick={() => setSidebarOpen(false)}
-            aria-label="Close sidebar"
+            aria-label={t("uiText.closeSidebar")}
           />
           <div
             className={`relative h-full w-[85vw] max-w-sm transform transition-transform duration-150 ${
@@ -856,66 +856,15 @@ function DeleteProjectDialog({
   const sessionCount = project.sessions?.length ?? 0;
   const displayName = project.displayName || project.name;
 
+  const { t } = useTranslation('common');
   return (
-    <div className="fixed inset-0 z-[65] flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
-      <div className="w-full max-w-md rounded-xl border border-border bg-card text-card-foreground shadow-xl">
-        <div className="flex items-start gap-3 border-b border-border p-5">
-          <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg bg-destructive/15 text-destructive">
-            <Trash2 className="h-5 w-5" strokeWidth={1.75} />
-          </div>
-          <div className="min-w-0 flex-1">
-            <h3 className="text-base font-semibold text-foreground">Delete project?</h3>
-            <p className="mt-1 break-all text-sm text-muted-foreground">
-              <span className="font-mono text-xs">{displayName}</span>
-            </p>
-          </div>
-        </div>
-
-        <div className="space-y-3 p-5">
-          <p className="text-sm text-foreground">
-            This removes the project from PilotDeck and deletes its session metadata.
-            {sessionCount > 0 ? (
-              <>
-                {' '}
-                <span className="font-medium">
-                  {sessionCount} session{sessionCount === 1 ? '' : 's'}
-                </span>{' '}
-                will also be removed.
-              </>
-            ) : null}
-          </p>
-          <p className="text-xs text-muted-foreground">
-            Files on disk are <span className="font-medium text-foreground">not</span> deleted —
-            only PilotDeck&apos;s reference to them.
-          </p>
-          {error ? (
-            <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-              {error}
-            </div>
-          ) : null}
-        </div>
-
-        <div className="flex items-center justify-end gap-2 border-t border-border bg-muted/30 px-5 py-3">
-          <button
-            type="button"
-            onClick={onCancel}
-            disabled={isDeleting}
-            className="inline-flex h-9 items-center justify-center rounded-md border border-border bg-background px-3 text-sm font-medium text-foreground hover:bg-accent disabled:opacity-50"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={onConfirm}
-            disabled={isDeleting}
-            className="inline-flex h-9 items-center justify-center gap-2 rounded-md bg-destructive px-3 text-sm font-medium text-destructive-foreground hover:bg-destructive/90 disabled:opacity-60"
-          >
-            {isDeleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" strokeWidth={1.75} />}
-            {isDeleting ? 'Deleting…' : 'Delete project'}
-          </button>
-        </div>
-      </div>
-    </div>
+    <ConfirmDialog title={t('confirmDialog.deleteProjectTitle')} destructive busy={isDeleting} error={error}
+      confirmLabel={t('confirmDialog.deleteProject')} onCancel={onCancel} onConfirm={onConfirm}>
+      <p className="mb-3 break-all font-medium text-foreground">{displayName}</p>
+      <p>{t('confirmDialog.deleteProjectBody')}</p>
+      {sessionCount > 0 && <p className="mt-2">{t('confirmDialog.deleteSessions', { count: sessionCount })}</p>}
+      <p className="mt-3 text-xs">{t('confirmDialog.keepFiles')}</p>
+    </ConfirmDialog>
   );
 }
 
@@ -937,53 +886,12 @@ function DeleteSessionDialog({
   const projectName = target.project.displayName || target.project.name;
   const sessionTitle = sessionDisplayTitle(target.session);
 
+  const { t } = useTranslation('common');
   return (
-    <div className="fixed inset-0 z-[65] flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
-      <div className="w-full max-w-md rounded-xl border border-border bg-card text-card-foreground shadow-xl">
-        <div className="flex items-start gap-3 border-b border-border p-5">
-          <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg bg-destructive/15 text-destructive">
-            <Trash2 className="h-5 w-5" strokeWidth={1.75} />
-          </div>
-          <div className="min-w-0 flex-1">
-            <h3 className="text-base font-semibold text-foreground">Delete conversation?</h3>
-            <p className="mt-1 truncate text-sm text-muted-foreground">
-              {sessionTitle}
-            </p>
-          </div>
-        </div>
-
-        <div className="space-y-3 p-5">
-          <p className="text-sm text-foreground">
-            This removes the conversation from <span className="font-medium">{projectName}</span>.
-          </p>
-
-          {error ? (
-            <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-              {error}
-            </div>
-          ) : null}
-        </div>
-
-        <div className="flex items-center justify-end gap-2 border-t border-border bg-muted/30 px-5 py-3">
-          <button
-            type="button"
-            onClick={onCancel}
-            disabled={isDeleting}
-            className="inline-flex h-9 items-center justify-center rounded-md border border-border bg-background px-3 text-sm font-medium text-foreground hover:bg-accent disabled:opacity-50"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={onConfirm}
-            disabled={isDeleting}
-            className="inline-flex h-9 items-center justify-center gap-2 rounded-md bg-destructive px-3 text-sm font-medium text-destructive-foreground hover:bg-destructive/90 disabled:opacity-60"
-          >
-            {isDeleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" strokeWidth={1.75} />}
-            {isDeleting ? 'Deleting…' : 'Delete conversation'}
-          </button>
-        </div>
-      </div>
-    </div>
+    <ConfirmDialog title={t('confirmDialog.deleteSessionTitle')} destructive busy={isDeleting} error={error}
+      confirmLabel={t('confirmDialog.deleteSession')} onCancel={onCancel} onConfirm={onConfirm}>
+      <p className="mb-3 break-words font-medium text-foreground">{sessionTitle}</p>
+      <p>{t('confirmDialog.deleteSessionBody', { project: projectName })}</p>
+    </ConfirmDialog>
   );
 }

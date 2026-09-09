@@ -1,3 +1,5 @@
+import { I18nextProvider } from 'react-i18next';
+import { createTestI18n } from '../../../i18n/testInstance';
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -61,22 +63,24 @@ describe('ProtectedRoute runtime states', () => {
     expect(screen.getByText('onboarding')).toBeTruthy();
   });
 
-  it('waits for Gateway after configuration becomes ready', () => {
+  it('waits for Gateway after configuration becomes ready', async () => {
+    const i18n = await createTestI18n();
     mocks.auth = authValue({ gatewayRuntime: { state: 'starting' } });
 
-    render(<MemoryRouter><ProtectedRoute><div>application</div></ProtectedRoute></MemoryRouter>);
+    render(<I18nextProvider i18n={i18n}><MemoryRouter><ProtectedRoute><div>application</div></ProtectedRoute></MemoryRouter></I18nextProvider>);
     expect(screen.getByText('Loading...')).toBeTruthy();
     expect(screen.queryByText('application')).toBeNull();
   });
 
-  it('keeps an actionable error screen when Gateway fails', () => {
+  it('keeps an actionable error screen when Gateway fails', async () => {
+    const i18n = await createTestI18n();
     const retryGateway = vi.fn();
     mocks.auth = authValue({
       gatewayRuntime: { state: 'error', error: 'Gateway crashed' },
       retryGateway,
     });
 
-    render(<MemoryRouter><ProtectedRoute><div>application</div></ProtectedRoute></MemoryRouter>);
+    render(<I18nextProvider i18n={i18n}><MemoryRouter><ProtectedRoute><div>application</div></ProtectedRoute></MemoryRouter></I18nextProvider>);
     expect(screen.getByText('Gateway crashed')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Retry Gateway' }));
     expect(retryGateway).toHaveBeenCalledTimes(1);

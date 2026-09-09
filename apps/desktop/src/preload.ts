@@ -8,6 +8,7 @@ type RuntimeStatus = {
 };
 
 contextBridge.exposeInMainWorld("pilotdeckDesktop", {
+  setAppearance: (value: { language: "en" | "zh-CN"; themeMode: "light" | "dark" | "system" }) => ipcRenderer.invoke("pilotdeck:set-appearance", value),
   checkUpdates: () => ipcRenderer.invoke("pilotdeck:update-check"),
   getUpdateStatus: () => ipcRenderer.invoke("pilotdeck:update-status"),
   startUpdate: () => ipcRenderer.invoke("pilotdeck:update-start"),

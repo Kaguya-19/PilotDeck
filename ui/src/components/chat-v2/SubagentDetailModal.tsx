@@ -104,7 +104,7 @@ export default function SubagentDetailModal({
             type="button"
             onClick={onClose}
             className="rounded p-1 text-neutral-400 transition-colors hover:bg-neutral-100 hover:text-neutral-600 dark:hover:bg-neutral-800 dark:hover:text-neutral-300"
-            aria-label="Close"
+            aria-label={t('common:uiText.close')}
           >
             <X className="h-4 w-4" strokeWidth={2} />
           </button>

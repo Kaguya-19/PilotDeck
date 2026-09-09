@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { Check, ChevronLeft, HelpCircle } from 'lucide-react';
 import type { PermissionPanelProps } from '../../configs/permissionPanelRegistry';
@@ -43,6 +44,7 @@ export const AskUserQuestionPanel: React.FC<PermissionPanelProps> = ({
   request,
   onDecision,
 }) => {
+  const { t } = useTranslation('common');
   const input = request.input as { questions?: unknown } | undefined;
   const questions = normalizeQuestions(input?.questions);
 
@@ -211,7 +213,7 @@ export const AskUserQuestionPanel: React.FC<PermissionPanelProps> = ({
 
             <div className="flex min-w-0 flex-1 items-center gap-2">
               <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-                Agent needs your input
+                {t('common:uiText.questionTitle')}
               </span>
               {q.header && (
                 <span className="inline-flex items-center rounded border border-border bg-muted px-1.5 py-px text-[9px] font-semibold uppercase tracking-wider text-muted-foreground">
@@ -235,7 +237,7 @@ export const AskUserQuestionPanel: React.FC<PermissionPanelProps> = ({
                   key={i}
                   type="button"
                   onClick={() => setCurrentStep(i)}
-                  aria-label={`Go to question ${i + 1}`}
+                  aria-label={t("common:uiText.goToQuestion", { number: i + 1 })}
                   className={cn(
                     'h-[3px] rounded-full transition-all duration-300',
                     i === currentStep
@@ -254,7 +256,7 @@ export const AskUserQuestionPanel: React.FC<PermissionPanelProps> = ({
             {q.question}
           </p>
           {multi && (
-            <span className="text-[10px] text-muted-foreground">Select all that apply</span>
+            <span className="text-[10px] text-muted-foreground">{t('common:uiText.selectMultiple')}</span>
           )}
         </div>
 
@@ -342,7 +344,7 @@ export const AskUserQuestionPanel: React.FC<PermissionPanelProps> = ({
                   isOtherOn ? 'font-medium text-foreground' : 'text-muted-foreground',
                 )}
               >
-                Other...
+                {t('common:uiText.other')}
               </span>
               {isOtherOn && (
                 <Check className="ml-auto h-4 w-4 flex-shrink-0 text-foreground" strokeWidth={2.5} />
@@ -375,7 +377,7 @@ export const AskUserQuestionPanel: React.FC<PermissionPanelProps> = ({
                       // Prevent container keydown from firing
                       e.stopPropagation();
                     }}
-                    placeholder="Type your answer..."
+                    placeholder={t("common:uiText.typeAnswer")}
                     className="h-8 pr-14 text-[13px]"
                   />
                   <kbd className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 rounded border border-border bg-muted px-1 py-0.5 font-mono text-[9px] text-muted-foreground">
@@ -396,7 +398,7 @@ export const AskUserQuestionPanel: React.FC<PermissionPanelProps> = ({
             onClick={handleSkip}
             className="h-7 px-2 text-[11px] text-muted-foreground hover:text-foreground"
           >
-            {isSingle ? 'Skip' : 'Skip all'}
+            {isSingle ? t('common:uiText.skip') : t('common:uiText.skipAll')}
             <span className="ml-1 font-mono text-[9px] opacity-60">Esc</span>
           </Button>
 
@@ -410,7 +412,7 @@ export const AskUserQuestionPanel: React.FC<PermissionPanelProps> = ({
                 className="h-7 gap-0.5 px-2 text-[11px]"
               >
                 <ChevronLeft className="!h-3 !w-3" />
-                Back
+                {t('common:uiText.back')}
               </Button>
             )}
 
@@ -421,7 +423,7 @@ export const AskUserQuestionPanel: React.FC<PermissionPanelProps> = ({
               disabled={!hasCurrentSelection || (isLast && !allQuestionsAnswered)}
               className="h-7 gap-1 px-3 text-[11px] font-medium"
             >
-              {isLast ? 'Submit' : 'Next'}
+              {isLast ? t('common:uiText.submit') : t('common:uiText.next')}
               <span className="font-mono text-[9px] opacity-60">Enter</span>
             </Button>
           </div>

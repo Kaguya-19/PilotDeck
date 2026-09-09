@@ -1,3 +1,4 @@
+import { useConfirm } from '../../ui/ConfirmDialog';
 import { useState, useEffect, useRef } from 'react';
 import type { MouseEvent, MutableRefObject } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -54,6 +55,7 @@ export default function EditorSidebar({
   workspaceMode = false,
 }: EditorSidebarProps) {
   const { t } = useTranslation('codeEditor');
+  const confirm = useConfirm();
   const [poppedOut, setPoppedOut] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const [effectiveWidth, setEffectiveWidth] = useState(editorWidth);
@@ -108,11 +110,11 @@ export default function EditorSidebar({
     return null;
   }
 
-  const requestCloseTab = (tabId: string) => {
+  const requestCloseTab = async (tabId: string) => {
     const tab = editorTabs.find((candidate) => candidate.id === tabId);
     const file = tab?.fileStack.at(-1);
     if (!tab || !file) return;
-    if (tab.dirty && !window.confirm(t('tabs.unsavedConfirm', { fileName: file.name }))) {
+    if (tab.dirty && !await confirm({ message: t('tabs.unsavedConfirm', { fileName: file.name }), destructive: true, confirmLabel: t('common:confirmDialog.discard') })) {
       return;
     }
     if (editorTabs.length === 1) {
@@ -121,7 +123,7 @@ export default function EditorSidebar({
     onTabClose(tabId);
   };
 
-  const requestCloseTabs = (tabIds: string[]) => {
+  const requestCloseTabs = async (tabIds: string[]) => {
     const requestedTabIds = new Set(tabIds);
     const tabsToClose = editorTabs.filter((tab) => requestedTabIds.has(tab.id));
     if (tabsToClose.length === 0) return;
@@ -129,12 +131,12 @@ export default function EditorSidebar({
     const dirtyTabs = tabsToClose.filter((tab) => tab.dirty);
     if (dirtyTabs.length === 1) {
       const fileName = dirtyTabs[0].fileStack.at(-1)?.name;
-      if (fileName && !window.confirm(t('tabs.unsavedConfirm', { fileName }))) {
+      if (fileName && !await confirm({ message: t('tabs.unsavedConfirm', { fileName }), destructive: true, confirmLabel: t('common:confirmDialog.discard') })) {
         return;
       }
     } else if (
       dirtyTabs.length > 1
-      && !window.confirm(t('tabs.unsavedBatchConfirm', { count: dirtyTabs.length }))
+      && !await confirm({ message: t('tabs.unsavedBatchConfirm', { count: dirtyTabs.length }), destructive: true, confirmLabel: t('common:confirmDialog.discard') })
     ) {
       return;
     }
@@ -227,7 +229,7 @@ export default function EditorSidebar({
           ref={resizeHandleRef}
           onMouseDown={onResizeStart}
           className="group relative z-10 w-px flex-shrink-0 cursor-col-resize bg-neutral-200 transition-colors hover:bg-neutral-400 dark:bg-neutral-800 dark:hover:bg-neutral-600"
-          title="Drag to resize"
+          title={t('common:uiText.resize')}
         >
           <div className="absolute inset-y-0 left-1/2 w-3 -translate-x-1/2" />
           <div className="absolute inset-y-0 left-1/2 w-0.5 -translate-x-1/2 bg-neutral-400 opacity-0 transition-opacity group-hover:opacity-100 dark:bg-neutral-600" />

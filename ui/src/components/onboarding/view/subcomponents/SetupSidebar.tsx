@@ -18,7 +18,7 @@ export default function SetupSidebar({ currentStep }: SetupSidebarProps) {
         </div>
         <p className="sidebar-kicker">{t('sidebar.kicker')}</p>
         <h2>{t('sidebar.title')}</h2>
-        <ol className="progress-rail" aria-label="Setup progress">
+        <ol className="progress-rail" aria-label={t('common:uiText.setupProgress')}>
           {ONBOARDING_STEP_IDS.map((stepId, index) => {
             const status = index < currentIndex ? 'done' : index === currentIndex ? 'active' : '';
             return (

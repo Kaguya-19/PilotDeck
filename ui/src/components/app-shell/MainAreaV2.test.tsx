@@ -161,7 +161,7 @@ describe('MainAreaV2 dashboard switcher', () => {
   it('places an available chat search button before Files and keeps its state in sync', async () => {
     render(<Harness initialTab="files" withSession />);
 
-    const tools = screen.getByLabelText('Tools');
+    const tools = screen.getByLabelText('common:uiText.tools');
     const searchButton = within(tools).getByRole('button', { name: 'Search current conversation' });
     const filesButton = within(tools).getByRole('button', { name: 'tabs.files' });
     const toolButtons = within(tools).getAllByRole('button');

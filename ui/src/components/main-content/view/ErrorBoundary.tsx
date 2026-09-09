@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import { useCallback, useState, type ErrorInfo, type ReactNode } from 'react';
 import {
   ErrorBoundary as ReactErrorBoundary,
@@ -30,9 +31,10 @@ function ErrorFallback({
   showDetails,
   componentStack,
 }: ErrorFallbackProps) {
+  const { t } = useTranslation('common');
   return (
     <div className="flex flex-col items-center justify-center p-8 text-center">
-      <div className="max-w-md rounded-lg border border-red-200 bg-red-50 p-6">
+      <div className="max-w-md rounded-lg border border-red-200 bg-red-50 dark:border-red-900 dark:bg-red-950/40 p-6">
         <div className="mb-4 flex items-center">
           <div className="flex-shrink-0">
             <svg className="h-5 w-5 text-red-400" viewBox="0 0 20 20" fill="currentColor">
@@ -43,14 +45,14 @@ function ErrorFallback({
               />
             </svg>
           </div>
-          <h3 className="ml-3 text-sm font-medium text-red-800">Something went wrong</h3>
+          <h3 className="ml-3 text-sm font-medium text-red-800 dark:text-red-200">{t('common:uiText.errorTitle')}</h3>
         </div>
-        <div className="text-sm text-red-700">
-          <p className="mb-2">An error occurred while loading the chat interface.</p>
+        <div className="text-sm text-red-700 dark:text-red-300">
+          <p className="mb-2">{t('common:uiText.chatError')}</p>
           {showDetails && (
             <details className="mt-4">
-              <summary className="cursor-pointer font-mono text-xs">Error Details</summary>
-              <pre className="mt-2 max-h-40 overflow-auto rounded bg-red-100 p-2 text-xs">
+              <summary className="cursor-pointer font-mono text-xs">{t('common:uiText.errorDetails')}</summary>
+              <pre className="mt-2 max-h-40 overflow-auto rounded bg-red-100 dark:bg-red-950 p-2 text-xs">
                 {formatError(error)}
                 {componentStack}
               </pre>
@@ -62,7 +64,7 @@ function ErrorFallback({
             onClick={resetErrorBoundary}
             className="rounded bg-red-600 px-4 py-2 text-sm text-white hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500"
           >
-            Try Again
+            {t('common:uiText.tryAgain')}
           </button>
         </div>
       </div>

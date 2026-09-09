@@ -838,7 +838,7 @@ describe('MessagesPaneV2 render behavior', () => {
     fireEvent.click(button as HTMLButtonElement);
 
     expect(screen.getByText(/find \. -maxdepth 1 -type f/)).toBeTruthy();
-    expect(screen.queryByText('Parameters')).toBeNull();
+    expect(screen.queryByText('common:uiText.parameters')).toBeNull();
     expect(container.querySelector('.border-l-red-500')).toBeNull();
     expect(screen.queryByRole('button', { name: /permissions\.grant|Grant Bash for this chat/ })).toBeNull();
 
@@ -1006,7 +1006,7 @@ describe('MessagesPaneV2 render behavior', () => {
     expect(processButton).not.toBeNull();
     fireEvent.click(processButton as HTMLButtonElement);
 
-    const parametersSummary = screen.getByText('Parameters').closest('summary');
+    const parametersSummary = screen.getByText('common:uiText.parameters').closest('summary');
     const parametersDetails = parametersSummary?.closest('details') as HTMLDetailsElement | null;
     expect(parametersDetails?.open).toBe(false);
     fireEvent.click(parametersSummary as HTMLElement);
@@ -1039,7 +1039,7 @@ describe('MessagesPaneV2 render behavior', () => {
 
     const completedProcessButton = screen.getByText('Ran 1 command').closest('button');
     expect(completedProcessButton?.getAttribute('aria-expanded')).toBe('true');
-    const persistedParameters = screen.getByText('Parameters').closest('details') as HTMLDetailsElement | null;
+    const persistedParameters = screen.getByText('common:uiText.parameters').closest('details') as HTMLDetailsElement | null;
     expect(persistedParameters?.open).toBe(true);
   });
 

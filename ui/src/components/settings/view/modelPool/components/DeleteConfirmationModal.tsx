@@ -1,6 +1,8 @@
+import type { TFunction } from 'i18next';
+import { ConfirmDialog } from '../../../../ui/ConfirmDialog';
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { PendingIcon, XIcon } from "./icons";
+import { PendingIcon } from "./icons";
 
 export type ModelUsageReference = {
   path: string;
@@ -25,27 +27,27 @@ type DeleteConfirmationModalProps = {
   onReplaceDefault?: (modelRef: string) => Promise<void>;
 };
 
-function routeName(value: string): string {
-  if (value === "default") return "默认路由";
+function routeName(value: string, t: TFunction): string {
+  if (value === "default") return t('common:modelUsage.defaultRoute');
   return value.replace(/[_-]/g, " ");
 }
 
-function usageLabel(path: string): string {
-  if (path === "agent.model") return "智能体 - 主智能体模型";
-  if (path === "agent.subagents.default") return "智能体 - 子智能体模型";
-  if (path === "memory.model") return "记忆 - 记忆模型";
+function usageLabel(path: string, t: TFunction): string {
+  if (path === "agent.model") return t('common:modelUsage.primaryModel');
+  if (path === "agent.subagents.default") return t('common:modelUsage.subagentModel');
+  if (path === "memory.model") return t('common:modelUsage.memoryModel');
 
   const scenario = /^router\.scenarios\.([^.]+)$/.exec(path);
-  if (scenario) return `路由 - ${routeName(scenario[1])} - 首选模型`;
+  if (scenario) return t('common:modelUsage.preferred', { route: routeName(scenario[1], t) });
 
   const fallback = /^router\.fallback\.([^.]+)\.\d+$/.exec(path);
-  if (fallback) return `路由 - ${routeName(fallback[1])} - 备选模型`;
+  if (fallback) return t('common:modelUsage.fallback', { route: routeName(fallback[1], t) });
 
-  if (path === "router.tokenSaver.judge") return "路由 - Token 节省器 - 判断模型";
+  if (path === "router.tokenSaver.judge") return t('common:modelUsage.judgeModel');
   const tier = /^router\.tokenSaver\.tiers\.([^.]+)\.model$/.exec(path);
-  if (tier) return `路由 - Token 节省器 - ${routeName(tier[1])}`;
-  if (path === "router.stats.baselineModel") return "路由 - 统计 - 基准模型";
-  if (path.startsWith("router.stats.modelPricing.")) return "路由 - 统计 - 模型定价";
+  if (tier) return t('common:modelUsage.tier', { route: routeName(tier[1], t) });
+  if (path === "router.stats.baselineModel") return t('common:modelUsage.baselineModel');
+  if (path.startsWith("router.stats.modelPricing.")) return t('common:modelUsage.modelPricing');
   return path;
 }
 
@@ -87,60 +89,46 @@ export default function DeleteConfirmationModal({
       : t("pilotDeckConfig.panels.models.deleteDialog.providerTitle", { name });
 
   return (
-    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
-      if (!replacing && event.target === event.currentTarget) onCancel();
-    }}>
-      <section
-        className={`modal ${kind}-delete-modal`}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="delete-modal-title"
-      >
-        <header className="modal-header">
-          <h2 id="delete-modal-title">{title}</h2>
-          <button className="icon-button" type="button" aria-label={t("pilotDeckConfig.panels.models.close")} disabled={replacing} onClick={onCancel}>
-            <XIcon size={18} />
-          </button>
-        </header>
-
-        <div className="modal-body">
+    <ConfirmDialog title={title} destructive busy={replacing} disabled={blocked}
+      confirmLabel={t(`pilotDeckConfig.panels.models.deleteDialog.${canReplace && !clearsDefault ? "replaceDefault" : "delete"}`)}
+      onCancel={onCancel} onConfirm={() => { if (canReplace) void replaceDefault(); else onConfirm(); }}>
           {loading ? (
-            <p className="delete-dialog-status">{t("pilotDeckConfig.panels.models.deleteDialog.checking")}</p>
+            <p className="text-sm">{t("pilotDeckConfig.panels.models.deleteDialog.checking")}</p>
           ) : error ? (
-            <div className="model-usage-intro">
+            <div className="flex items-start gap-2">
               <PendingIcon size={22} />
               <p>{error}</p>
             </div>
           ) : inUse && !clearsDefault ? (
-            <div className={`model-usage-warning${kind === "provider" ? " provider-usage-warning" : ""}`}>
-              <div className="model-usage-intro">
+            <div className="space-y-3">
+              <div className="flex items-start gap-2">
                 <PendingIcon size={22} />
                 <p>
                   {t(`pilotDeckConfig.panels.models.deleteDialog.${kind}InUse`)}
                 </p>
               </div>
               <ul
-                className={`model-usage-list${kind === "provider" ? " provider-usage-list" : ""}`}
+                className="mt-3 space-y-2"
                 aria-label={t("pilotDeckConfig.panels.models.deleteDialog.usageAria")}
               >
                 {usages.map(({ modelName, reference }, index) => (
                   <li key={`${reference.path}:${reference.value}:${index}`}>
-                    {modelName ? <span className="provider-usage-model">{modelName}</span> : null}
-                    <strong>{usageLabel(reference.path)}</strong>
+                    {modelName ? <span className="mr-2 font-mono text-xs">{modelName}</span> : null}
+                    <strong>{usageLabel(reference.path, t)}</strong>
                   </li>
                 ))}
               </ul>
             </div>
           ) : (
-            <p className="delete-confirm-copy">
+            <p className="text-sm">
               {t(`pilotDeckConfig.panels.models.deleteDialog.${kind}Confirm`, { name })}
             </p>
           )}
           {!loading && !error && canReplace && !clearsDefault && (
-            <div className="model-default-replacement">
-              <label className="field">
+            <div className="mt-4">
+              <label className="flex flex-col gap-2">
                 <span>{t("pilotDeckConfig.panels.models.deleteDialog.replacementLabel")}</span>
-                <select value={replacement} disabled={replacing} onChange={event => setReplacement(event.target.value)}>
+                <select className="h-9 w-full rounded-md border border-border bg-background px-2 text-foreground" value={replacement} disabled={replacing} onChange={event => setReplacement(event.target.value)}>
                   <option value="">{t("pilotDeckConfig.panels.models.deleteDialog.chooseReplacement")}</option>
                   {replacementOptions.map(ref => <option key={ref} value={ref}>{ref}</option>)}
                 </select>
@@ -149,17 +137,6 @@ export default function DeleteConfirmationModal({
             </div>
           )}
           {replacementError && <p role="alert">{replacementError}</p>}
-        </div>
-
-        <footer className="modal-actions">
-          <button className="button secondary" type="button" disabled={replacing} onClick={onCancel}>
-            {t("settingsPage.actions.cancel")}
-          </button>
-          <button className="button danger" type="button" disabled={blocked} onClick={() => { if (canReplace) void replaceDefault(); else onConfirm(); }}>
-            {t(`pilotDeckConfig.panels.models.deleteDialog.${canReplace && !clearsDefault ? "replaceDefault" : "delete"}`)}
-          </button>
-        </footer>
-      </section>
-    </div>
+    </ConfirmDialog>
   );
 }

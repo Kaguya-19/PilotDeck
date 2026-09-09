@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import { ServerCrash } from 'lucide-react';
 import AuthScreenLayout from './AuthScreenLayout';
 
@@ -10,11 +11,12 @@ export default function GatewayRuntimeErrorScreen({
   error,
   onRetry,
 }: GatewayRuntimeErrorScreenProps) {
+  const { t } = useTranslation('common');
   return (
     <AuthScreenLayout
-      title="Gateway failed to start"
-      description="Your model configuration was saved, but the local Gateway is unavailable."
-      footerText="The Web UI will stay available while you retry."
+      title={t('common:uiText.gatewayFailed')}
+      description={t('common:uiText.gatewayUnavailable')}
+      footerText={t('common:uiText.gatewayRetryHint')}
       logo={(
         <div className="flex h-16 w-16 items-center justify-center rounded-lg bg-destructive/10">
           <ServerCrash className="h-8 w-8 text-destructive" />
@@ -30,7 +32,7 @@ export default function GatewayRuntimeErrorScreen({
           className="w-full rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
           onClick={() => void onRetry()}
         >
-          Retry Gateway
+          {t('common:uiText.retryGateway')}
         </button>
       </div>
     </AuthScreenLayout>

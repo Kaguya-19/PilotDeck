@@ -617,9 +617,9 @@
   display: grid;
   grid-template-columns: 270px minmax(0, 1fr);
   overflow: hidden;
-  border: 1px solid #dedfeb;
+  border: 1px solid var(--line);
   border-radius: 15px;
-  background: #fff;
+  background: var(--surface);
   box-shadow: 0 11px 30px #3d3c6912;
 }
 
@@ -1131,7 +1131,7 @@
 :where(.pilotdeck-settings-app) .model-list {
   max-height: 280px;
   overflow-y: auto;
-  border: 1px solid #e1e2eb;
+  border: 1px solid var(--line);
   border-radius: 10px;
   scrollbar-width: thin;
   scrollbar-color: #d9dae4 transparent;
@@ -4427,7 +4427,7 @@
   bottom: 0;
   left: 10px;
   height: 1px;
-  background: rgb(232, 233, 240);
+  background: var(--line);
   pointer-events: none;
 }
 

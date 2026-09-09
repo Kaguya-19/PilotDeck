@@ -181,7 +181,7 @@ export default function ConnectionStep({ llm, onBack, onContinue }: ConnectionSt
                     value={llm.customProviderId}
                     disabled={llm.saving}
                     onChange={(event) => handleFieldChange(() => llm.setCustomProviderId(event.target.value))}
-                    placeholder="e.g. my-llm"
+                    placeholder={t('common:uiText.providerExample')}
                     autoComplete="off"
                     spellCheck={false}
                   />
