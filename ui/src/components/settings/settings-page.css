@@ -1322,7 +1322,7 @@
   color: rgb(139, 143, 158);
 }
 
-:where(.pilotdeck-settings-app) .model-row button:hover:not(:disabled) {
+:where(.pilotdeck-settings-app) .model-row button:not(.model-settings-trigger):hover:not(:disabled) {
   background: var(--danger-soft);
   color: var(--danger);
 }
@@ -8313,8 +8313,11 @@
   border-radius: 0;
   color: inherit;
 }
-:where(.pilotdeck-settings-app) .model-settings-trigger:hover:not(:disabled) {
+:where(.pilotdeck-settings-app) .model-row button.model-settings-trigger:is(:hover, :focus-visible):not(:disabled) {
   background: rgb(117 101 233 / 6%);
+}
+.dark :where(.pilotdeck-settings-app) .model-row button.model-settings-trigger:is(:hover, :focus-visible):not(:disabled) {
+  background: rgb(117 101 233 / 16%);
 }
 :where(.pilotdeck-settings-app) .model-settings-summary {
   display: flex;
