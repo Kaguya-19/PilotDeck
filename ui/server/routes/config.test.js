@@ -83,7 +83,7 @@ describe('config test-connection route', () => {
     expect(data.ok).toBe(true);
     expect(requestBodies[0]).toMatchObject({
       model: 'kimi-k3',
-      max_tokens: 8,
+      max_tokens: 4096,
       messages: [{ role: 'user', content: 'Reply exactly: 1' }],
     });
   });
@@ -320,7 +320,7 @@ describe('config test-connection route', () => {
     expect(data.error).toContain('did not produce any chat text');
   });
 
-  it('accepts OpenAI-compatible reasoning output from a constrained probe', async () => {
+  it('does not treat reasoning without a final answer as a completed probe', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({
       choices: [{ message: { content: '', reasoning_content: 'Brief reasoning' } }],
     })));
@@ -336,7 +336,8 @@ describe('config test-connection route', () => {
       }),
     });
 
-    expect(data.ok).toBe(true);
+    expect(data.ok).toBe(false);
+    expect(data.error).toContain('did not produce any chat text');
   });
 
   it('accepts Responses API output_text content parts', async () => {
@@ -640,6 +641,24 @@ describe('config model-pool connection test routes', () => {
     const result = await request('/api/config', { method: 'PUT', body: JSON.stringify({ raw: stringifyYaml(next) }) });
     expect(result.status).toBe(400);
     expect(readFileSync(configPath, 'utf8')).toBe(before);
+  });
+
+  it('tests exactly one existing model without writing any configuration', async () => {
+    const probe = vi.fn(async () => ({ok:true}));
+    const initial = {schemaVersion:1,agent:{model:'HXAPI/one'},model:{providers:{HXAPI:{protocol:'openai',url:'https://custom.example/v1',apiKey:'key',models:{one:null,two:{}}}}}};
+    const raw = stringifyYaml(initial);
+    const {request,configPath} = await createDiskConfigApp(raw,{probe});
+    const missing = await request('/api/config/connection-test-tasks',{method:'POST',body:JSON.stringify({providerId:'HXAPI',modelId:'missing'})});
+    expect(missing.status).toBe(400);expect(probe).not.toHaveBeenCalled();
+    const started = await request('/api/config/connection-test-tasks',{method:'POST',body:JSON.stringify({providerId:'HXAPI',modelId:'one'})});
+    expect(started.status).toBe(202);
+    await vi.waitFor(async()=>{
+      const state = await request('/api/config/connection-test-tasks');
+      expect(state.body.tasks[0]).toMatchObject({modelId:'one',status:'success',result:{models:[{modelId:'one',imageInput:'supported'}]}});
+    });
+    expect(probe).toHaveBeenCalledTimes(2);
+    expect(probe.mock.calls.every(([options])=>options.model==='one')).toBe(true);
+    expect(readFileSync(configPath,'utf8')).toBe(raw);
   });
 
   it.each(['unrelated edit', 'credential edit'])('runs a detached task against the latest config after %s', async (change) => {

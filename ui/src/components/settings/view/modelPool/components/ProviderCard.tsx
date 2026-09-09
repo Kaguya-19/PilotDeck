@@ -26,7 +26,8 @@ import {
   isProviderPending,
   isProviderUrlValid,
 } from "../utils/providerStatus";
-import ImageCapabilityModal from "../../../../onboarding/view/subcomponents/ImageCapabilityModal";
+import ModelSettingsModal, { type ModelSettingsPatch } from "./ModelSettingsModal";
+import { ChevronRight, Image as ImageIcon } from "lucide-react";
 import DeleteConfirmationModal, {
   type ModelUsageReference,
 } from "./DeleteConfirmationModal";
@@ -39,7 +40,6 @@ import {
   PendingIcon,
   PencilIcon,
   PlusIcon,
-  PlugIcon,
   RefreshIcon,
   SaveIcon,
   SearchIcon,
@@ -138,15 +138,12 @@ export default function ProviderCard({
   const [apiModelsStatus, setApiModelsStatus] = useState<"idle" | "loading" | "error">("idle");
   const [apiModelsError, setApiModelsError] = useState("");
   const tests = useConnectionTestTasks();
-  const task = tests.tasks.find(item => item.providerId === providerId);
+  const handledTests = useRef(new Set<string>());
+  const [modelSettingsId, setModelSettingsId] = useState<string | null>(null);
+  const task = tests.tasks.find(item => item.providerId === providerId && item.modelId === modelSettingsId);
   const activeTask = tests.tasks.find(isTestTaskBusy);
-  const ownBusy = isTestTaskBusy(task);
-  const testStatus = task?.status ?? "idle";
-  const testMessage = task?.message;
-  const manualModelIds = testStatus === "manual"
-    ? (task?.result?.models ?? []).filter(model => model.textInput === "supported" && model.imageInput === "unknown").map(model => model.modelId)
-    : [];
-  const testDisabled = tests.checking || tests.pending || !!activeTask || saving;
+  const ownBusy = tests.tasks.some(item => item.providerId === providerId && isTestTaskBusy(item));
+  const testDisabled = tests.checking || tests.pending || !!activeTask || saving || editing;
   const [deleteDialog, setDeleteDialog] = useState<DeleteDialogState | null>(null);
   const displayName = providerDisplayName(
     providerIdDraft || providerId,
@@ -262,18 +259,26 @@ export default function ProviderCard({
     update({ models: next });
   };
 
-  const patchModelCapabilities = (
-    modelId: string,
-    patchValue: { maxOutputTokens?: number; maxContextTokens?: number },
-  ) => {
-    const current = asModelRecord(draftProvider.models?.[modelId]);
-    const capabilities = { ...readCapabilities(current), ...patchValue };
-    update({
-      models: {
-        ...(draftProvider.models ?? {}),
-        [modelId]: { ...current, capabilities },
-      },
-    });
+  const modelSupportsImage = (modelId: string) => {
+    const model = asModelRecord(draftProvider.models?.[modelId]);
+    const multimodal = model.multimodal as { input?: string[] } | undefined;
+    return multimodal?.input ? multimodal.input.includes('image') : catalogModelFor(effectiveCatalogEntry, modelId)?.supportsImage === true;
+  };
+
+  const saveModelSettings = async (modelId: string, values: ModelSettingsPatch) => {
+    const source = editing ? draftProvider : provider;
+    if (!Object.prototype.hasOwnProperty.call(source.models || {}, modelId)) return { ok: false, error: t('pilotDeckConfig.panels.models.modelSettings.saveFailed') };
+    const current = asModelRecord(source.models?.[modelId]);
+    const multimodal = asModelRecord(current.multimodal as Record<string, unknown>);
+    const input = Array.isArray(multimodal.input) ? multimodal.input.filter(value => typeof value === 'string' && value !== 'image') : ['text'];
+    if (values.supportsImage) input.push('image');
+    const nextModel: Record<string, unknown> = { ...current, capabilities: { ...readCapabilities(current), maxOutputTokens: values.maxOutputTokens, maxContextTokens: values.maxContextTokens }, multimodal: { ...multimodal, input } };
+    delete nextModel.connectionTest;
+    const next = { ...source, models: { ...source.models, [modelId]: nextModel } };
+    if (editing) { update({ models: next.models }); return { ok: true }; }
+    const result = await onSave(providerId, next);
+    if (result.ok) setDraftProvider(next);
+    return result;
   };
 
   const tokenValue = (modelId: string, key: "maxOutputTokens" | "maxContextTokens") => {
@@ -560,39 +565,13 @@ export default function ProviderCard({
           <div className="model-list">
             {enabledModels.map((mid) => (
               <div className="model-row" key={mid}>
-                <strong className="model-name">{modelLabel(mid)}</strong>
-                <label className="model-token-field">
-                  <span>{t("pilotDeckConfig.panels.models.maxOutputTokens")}</span>
-                  <input
-                    aria-label={`${modelLabel(mid)} ${t("pilotDeckConfig.panels.models.maxOutputTokens")}`}
-                    type="text"
-                    inputMode="numeric"
-                    value={tokenValue(mid, "maxOutputTokens")}
-                    disabled={fieldsDisabled}
-                    onChange={(event) => {
-                      const next = Number(event.target.value);
-                      if (Number.isFinite(next) && next > 0) {
-                        patchModelCapabilities(mid, { maxOutputTokens: next });
-                      }
-                    }}
-                  />
-                </label>
-                <label className="model-token-field">
-                  <span>{t("pilotDeckConfig.panels.models.maxContextTokens")}</span>
-                  <input
-                    aria-label={`${modelLabel(mid)} ${t("pilotDeckConfig.panels.models.maxContextTokens")}`}
-                    type="text"
-                    inputMode="numeric"
-                    value={tokenValue(mid, "maxContextTokens")}
-                    disabled={fieldsDisabled}
-                    onChange={(event) => {
-                      const next = Number(event.target.value);
-                      if (Number.isFinite(next) && next > 0) {
-                        patchModelCapabilities(mid, { maxContextTokens: next });
-                      }
-                    }}
-                  />
-                </label>
+                <button type="button" className="model-settings-trigger" disabled={saving} onClick={() => setModelSettingsId(mid)}>
+                  <span className="model-name">{modelLabel(mid)}</span>
+                  <span className="model-settings-summary">
+                    {modelSupportsImage(mid) && <ImageIcon size={15} aria-label={t('pilotDeckConfig.panels.models.modelSettings.imageInput')} />}
+                    <ChevronRight size={16} />
+                  </span>
+                </button>
                 <button
                   type="button"
                   aria-label={t("pilotDeckConfig.panels.models.removeModelAria", { name: modelLabel(mid) })}
@@ -684,57 +663,20 @@ export default function ProviderCard({
           </section>
         )}
 
-        {!editing && (
-          <section className="detail-test-section" aria-label={t("pilotDeckConfig.panels.models.testConnection")}>
-            <p className="test-cost-note">{t("pilotDeckConfig.panels.models.testCostNote")}</p>
-            <div className="test-row">
-              {(testStatus === "error" || testStatus === "saveError") && testMessage ? (
-                <div className="test-failure-message">
-                  <PendingIcon size={16} />
-                  <strong>{t(`pilotDeckConfig.panels.models.${testStatus === "saveError" ? "testSaveFailed" : "testFailed"}`)}</strong>
-                  <span title={testMessage}>{testMessage}</span>
-                </div>
-              ) : null}
-              {tests.errorCode && <span role="status">{t(`pilotDeckConfig.panels.models.${tests.errorCode === "RATE_LIMITED" ? "testRateLimited" : tests.errorCode === "TEST_BUSY" ? "testBusy" : tests.errorCode === "STATUS_UNAVAILABLE" ? "testStatusUnavailable" : "testRequestFailed"}`)}</span>}
-              <button
-                className={cn("test-button", testStatus)}
-                type="button"
-                disabled={testDisabled || !configured}
-                onClick={() => void (testStatus === "saveError" && task ? tests.retry(task.id) : tests.start(providerId))}
-              >
-                {tests.checking ? t("pilotDeckConfig.panels.models.checkingTestStatus")
-                  : testStatus === "savingTest" ? t("pilotDeckConfig.panels.models.savingTest")
-                  : testStatus === "testing" ? <><RefreshIcon className="spin" /> {t("pilotDeckConfig.panels.models.testing")}</>
-                  : testStatus === "cancelling" ? t("pilotDeckConfig.panels.models.cancellingTest")
-                  : testStatus === "manual" ? t("pilotDeckConfig.panels.models.awaitingImageConfirmation")
-                  : testStatus === "saveError" ? t("pilotDeckConfig.panels.models.retryTestSave")
-                  : testStatus === "success" ? <><CheckCircleIcon /> {t("pilotDeckConfig.panels.models.connectionNormal")}</>
-                  : testStatus === "error" || testStatus === "cancelled" ? <><RefreshIcon /> {t("pilotDeckConfig.panels.models.retest")}</>
-                  : <><PlugIcon /> {t("pilotDeckConfig.panels.models.testConnection")}</>}
-              </button>
-              {testStatus === "saveError" && (
-                <button className="test-button" type="button" disabled={testDisabled || !configured} onClick={() => void tests.start(providerId)}>
-                  {t("pilotDeckConfig.panels.models.retest")}
-                </button>
-              )}
-              {task && ["testing", "manual"].includes(testStatus) && (
-                <button className="test-button" type="button" disabled={tests.pending} onClick={() => void tests.cancel(task.id)}>
-                  {t("pilotDeckConfig.panels.models.cancelTest")}
-                </button>
-              )}
-
-            </div>
-          </section>
-        )}
       </div>
-      {manualModelIds.length > 0 && (
-        <ImageCapabilityModal
-          key={task?.id}
-          modelIds={manualModelIds}
-          onCancel={() => { if (task && !tests.pending) void tests.cancel(task.id); }}
-          onConfirm={(values) => { if (task) void tests.confirm(task.id, values); }}
-        />
-      )}
+      {modelSettingsId && <ModelSettingsModal
+        key={modelSettingsId}
+        modelId={modelSettingsId}
+        initial={{ maxOutputTokens: tokenValue(modelSettingsId, 'maxOutputTokens'), maxContextTokens: tokenValue(modelSettingsId, 'maxContextTokens'), supportsImage: modelSupportsImage(modelSettingsId) }}
+        task={task}
+        applyTestResult={!task || (!task.acknowledged && !handledTests.current.has(task.id))}
+        testDisabled={testDisabled || !configured}
+        testError={tests.errorCode ? t(`pilotDeckConfig.panels.models.${tests.errorCode === 'TEST_BUSY' ? 'testBusy' : tests.errorCode === 'STATUS_UNAVAILABLE' ? 'testStatusUnavailable' : 'testRequestFailed'}`) : undefined}
+        onTest={() => void tests.start(providerId, modelSettingsId)}
+        onCancelTest={() => { if (task) void tests.cancel(task.id); }}
+        onSave={values => saveModelSettings(modelSettingsId, values)}
+        onClose={() => { if (task && !isTestTaskBusy(task)) { handledTests.current.add(task.id); void tests.acknowledge(task.id); } setModelSettingsId(null); }}
+      />}
       {deleteDialog && (
         <DeleteConfirmationModal
           kind={deleteDialog.kind}

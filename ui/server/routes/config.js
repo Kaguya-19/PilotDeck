@@ -511,6 +511,10 @@ const connectionTasks = createConnectionTestTasks({
   isCurrent: (userId, task) => {
     const provider = readPilotDeckConfigFile().config?.model?.providers?.[task.providerId];
     const tested = task.result?.models || [];
+    if (task.modelId) {
+      const { record } = getConnectionTestRecord(userId, task.result?.testId);
+      return Boolean(provider && Object.hasOwn(provider.models || {}, task.modelId) && record && connectionTestMatchesProvider(record, { ...provider, providerId: task.providerId, apiKey: resolveConfiguredProviderApiKey(task.providerId, provider) }));
+    }
     if (!provider || tested.length !== Object.keys(provider.models || {}).length
       || !tested.every(model => provider.models[model.modelId]?.connectionTest?.testedAt === task.result.testedAt)) return false;
     const { record } = getConnectionTestRecord(userId, task.result.testId);
@@ -547,16 +551,19 @@ router.post('/connection-test-tasks', modelTestRateLimiter, taskAction((req) => 
   const disk = readPilotDeckConfigFile();
   const provider = disk.config?.model?.providers?.[providerId];
   if (disk.parseError || !provider) throw Object.assign(new Error('Configured provider was not found.'), { status: 400, code: 'INVALID_REQUEST' });
+  const modelId = req.body?.modelId;
+  if (modelId !== undefined && (typeof modelId !== 'string' || !Object.hasOwn(provider.models || {}, modelId))) throw Object.assign(new Error('Configured model was not found.'), { status: 400, code: 'INVALID_REQUEST' });
   const catalog = lookupCatalogProvider(providerId);
   return connectionTasks.start(req.user.id, {
     providerId, protocol: provider.protocol || catalog?.protocol,
     endpoint: provider.url || catalog?.defaultUrl,
     apiKey: resolveConfiguredProviderApiKey(providerId, provider),
-    models: Object.keys(provider.models || {}), retryPolicy: {},
-  });
+    models: modelId ? [modelId] : Object.keys(provider.models || {}), retryPolicy: {},
+  }, { modelId });
 }));
 router.post('/connection-test-tasks/:id/retry', taskAction(req => connectionTasks.retry(req.user.id, req.params.id)));
 router.put('/connection-test-tasks/:id/image-capabilities', taskAction(req => connectionTasks.confirm(req.user.id, req.params.id, req.body)));
+router.post('/connection-test-tasks/:id/acknowledge', taskAction(req => connectionTasks.acknowledge(req.user.id, req.params.id)));
 router.post('/connection-test-tasks/:id/cancel', taskAction(req => connectionTasks.cancel(req.user.id, req.params.id)));
 
 function broadcastConfigEvent(payload) {
@@ -1107,7 +1114,6 @@ router.post('/test-connection', async (req, res) => {
     baseUrl: normalizedBaseUrl,
     apiKey: effectiveApiKey,
     model,
-    maxTokens: isOpenAIResponses ? 16 : 8,
   });
   if (probe.ok) {
     if (req.body?.skipImage === true) {
@@ -1136,7 +1142,6 @@ router.post('/test-connection', async (req, res) => {
       apiKey: effectiveApiKey,
       model,
       image: true,
-      maxTokens: 16,
     });
     const imageSupport = imageSupportResultFromProbe(imageProbe);
     return res.json({

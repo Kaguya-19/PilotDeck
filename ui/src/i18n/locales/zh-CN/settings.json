@@ -969,6 +969,19 @@
         "unavailableWarning": "当前选择了 LibreOffice，但本机没有可用的 LibreOffice/soffice。请安装 LibreOffice，或将预览服务切换为“内置预览”。"
       },
       "models": {
+        "modelSettings": {
+          "title": "模型设置",
+          "save": "保存",
+          "saveFailed": "模型设置保存失败。",
+          "imageInput": "支持图片输入",
+          "passed": "通过",
+          "failed": "不支持／失败",
+          "unknown": "未确定",
+          "testing": "测试中",
+          "cancelTest": "取消测试",
+          "textRequest": "文本请求",
+          "imageRequest": "图片请求"
+        },
         "title": "模型池",
         "description": "集中管理模型提供商、连接凭据和可用模型。已启用模型将供智能体、路由和记忆功能使用。",
         "providerIdDuplicate": "已有同名 Provider id。",

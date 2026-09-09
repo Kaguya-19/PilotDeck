@@ -6,7 +6,7 @@ import { NetworkFetchError, networkFetch } from '../../../src/network/fetch.js';
 import { deflateSync } from 'node:zlib';
 import { randomInt } from 'node:crypto';
 
-const TIMEOUT_MS = 30_000;
+const TIMEOUT_MS = 60_000;
 const IMAGE_COLORS = {
   red: [220, 48, 48],
   blue: [40, 96, 220],
@@ -86,14 +86,15 @@ function extractProbeText(body, protocol) {
     if (typeof value === 'string' && value.trim()) chunks.push(value);
   };
   if (protocol === 'anthropic') {
-    for (const part of body?.content || []) push(part?.text);
+    for (const part of body?.content || []) if (part?.type === 'text') push(part.text);
   } else if (protocol === 'google') {
     for (const candidate of body?.candidates || []) {
-      for (const part of candidate?.content?.parts || []) push(part?.text);
+      for (const part of candidate?.content?.parts || []) if (!part?.thought) push(part?.text);
     }
   } else if (protocol === 'openai-responses') {
-    push(body?.output_text);
+    if (body?.output_text) return stripThinking(body.output_text);
     for (const item of body?.output || []) {
+      if (item?.type === 'reasoning') continue;
       for (const part of item?.content || []) {
         push(part?.text);
         push(part?.output_text);
@@ -106,26 +107,32 @@ function extractProbeText(body, protocol) {
       else if (Array.isArray(content)) {
         for (const part of content) push(part?.text);
       }
-      push(choice?.message?.reasoning_content);
-      push(choice?.message?.reasoning);
+
       push(choice?.text);
     }
   }
-  return chunks.join(' ');
+  return stripThinking(chunks.join(' '));
 }
 
 function hasUsableOutput(body, protocol) {
   return Boolean(extractProbeText(body, protocol).trim());
 }
 
-const UNCERTAIN_IMAGE_ANSWER = /\b(?:no|cannot|can't|unable|unsure|uncertain|unknown|maybe|perhaps|possibly|probably|whether|guess|not\s+sure|do\s+not|don't|not)\b/i;
+// Some compatible servers put reasoning inline instead of a separate field.
+function stripThinking(text) {
+  return String(text || '').replace(/<(think|thinking)>[\s\S]*?<\/\1>/gi, '').replace(/<(think|thinking)>[\s\S]*$/gi, '').trim();
+}
+
+function isIncomplete(body, protocol) {
+  if (body?.status === 'incomplete' || body?.incomplete_details) return true;
+  if (protocol === 'google') return (body?.candidates || []).some(c => c?.finishReason === 'MAX_TOKENS');
+  if (protocol === 'anthropic') return body?.stop_reason === 'max_tokens' || body?.stop_reason === 'pause_turn';
+  return (body?.choices || []).some(c => c?.finish_reason === 'length');
+}
 
 export function isValidImageColorAnswer(answer, expectedColor) {
-  const text = String(answer || '').trim().toLowerCase();
-  if (!text || UNCERTAIN_IMAGE_ANSWER.test(text)) return false;
-  const colorWords = (text.match(/[a-z]+/g) || [])
-    .filter((word) => IMAGE_COLOR_NAMES.includes(word));
-  return colorWords.length === 1 && colorWords[0] === String(expectedColor).toLowerCase();
+  const color = String(expectedColor || '').toLowerCase();
+  return Boolean(color && String(answer || '').toLowerCase().includes(color));
 }
 
 function describedTestImage(body, protocol, color) {
@@ -193,9 +200,8 @@ function requestFor({ protocol, apiKey, model, image, maxTokens, imageProbe }) {
 /**
  * Executes one text or image probe without retaining API keys or upstream bodies.
  */
-// Onboarding needs enough output budget for reasoning models to emit their
-// visible answer. The legacy config endpoint passes its historical 8/16 value.
-export async function probeModelConnection({ protocol, baseUrl, endpointUrl, apiKey = '', model, image = false, maxTokens = 256, signal, retryPolicy = {} }) {
+// Allow reasoning models to finish without injecting provider-specific thinking flags.
+export async function probeModelConnection({ protocol, baseUrl, endpointUrl, apiKey = '', model, image = false, maxTokens = 4096, signal, retryPolicy = {} }) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new NetworkFetchError('network_timeout', 'Connection timed out.')), TIMEOUT_MS);
   const forwardAbort = () => controller.abort(signal.reason);
@@ -222,6 +228,9 @@ export async function probeModelConnection({ protocol, baseUrl, endpointUrl, api
       if (response.ok) {
         let body;
         try { body = JSON.parse(responseText); } catch { body = null; }
+        if (isExpectedProviderResponseShape(protocol, body) && isIncomplete(body, protocol)) {
+          return { ok: false, imageUnsupported: false, code: image ? 'IMAGE_CAPABILITY_UNKNOWN' : 'PROBE_INCOMPLETE', error: 'The test response was truncated before completion.' };
+        }
         if (isExpectedProviderResponseShape(protocol, body) && !hasErrorFinish(body, protocol) && hasUsableOutput(body, protocol)) {
           if (image && imageProbe && !describedTestImage(body, protocol, imageProbe.color)) {
             return {
@@ -257,7 +266,7 @@ export async function probeModelConnection({ protocol, baseUrl, endpointUrl, api
     const timedOut = controller.signal.aborted
       || error?.name === 'AbortError'
       || error?.code === 'network_timeout';
-    return { ok: false, imageUnsupported: false, code: 'ENDPOINT_UNREACHABLE', error: timedOut ? 'Connection timed out after 30s.' : (error?.message || String(error)) };
+    return { ok: false, imageUnsupported: false, code: 'ENDPOINT_UNREACHABLE', error: timedOut ? 'Connection timed out after 60s.' : (error?.message || String(error)) };
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener('abort', forwardAbort);

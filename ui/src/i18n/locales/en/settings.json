@@ -969,6 +969,19 @@
         "unavailableWarning": "LibreOffice is selected, but no LibreOffice/soffice executable is available on this machine. Install LibreOffice or switch to Built-in preview."
       },
       "models": {
+        "modelSettings": {
+          "title": "Model settings",
+          "save": "Save",
+          "saveFailed": "Could not save model settings.",
+          "imageInput": "Image input",
+          "passed": "Passed",
+          "failed": "Not supported / failed",
+          "unknown": "Undetermined",
+          "testing": "Testing",
+          "cancelTest": "Cancel",
+          "textRequest": "Text request",
+          "imageRequest": "Image request"
+        },
         "title": "Model Pool",
         "description": "Centrally manage model providers, connection credentials, and available models. Enabled models are used by agents, routing, and memory.",
         "providerIdDuplicate": "A Provider id with this name already exists.",

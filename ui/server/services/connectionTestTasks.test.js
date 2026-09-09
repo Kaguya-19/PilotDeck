@@ -60,3 +60,22 @@ describe('server-owned connection test tasks', () => {
     expect(persist).not.toHaveBeenCalled();
   });
 });
+
+it('keeps single-model tests separate and never persists their draft capability results', async () => {
+  const persist = vi.fn();
+  const manager = make({persist, prepare: body => async () => ({...passed, models: body.models.map(modelId => ({modelId, textInput:'supported',imageInput:'unknown'})), status:'manual_input_required', manualInputRequired:true})});
+  manager.start('one',{providerId:'HXAPI',models:['a']},{modelId:'a'});
+  await vi.waitFor(() => expect(manager.list('one')[0].status).toBe('success'));
+  manager.start('one',{providerId:'HXAPI',models:['b']},{modelId:'b'});
+  await vi.waitFor(() => expect(manager.list('one')).toHaveLength(2));
+  expect(manager.list('one').map(t => t.modelId)).toEqual(['a','b']);
+  manager.acknowledge('one', manager.list('one')[0].id);
+  expect(manager.list('one')[0].acknowledged).toBe(true);
+  expect(manager.list('two')).toEqual([]);
+  expect(persist).not.toHaveBeenCalled();
+});
+it('rejects a completed single-model result if the connection changed', async () => {
+  const manager = make({isCurrent: () => false});
+  manager.start('one',{providerId:'HXAPI',models:['a']},{modelId:'a'});
+  await vi.waitFor(() => expect(manager.list('one')[0]).toMatchObject({status:'error',result:null,code:'CONFIGURATION_MISMATCH'}));
+});

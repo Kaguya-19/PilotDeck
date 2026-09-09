@@ -109,7 +109,7 @@ describe("ProviderCard custom model add", () => {
 
     expect(screen.queryByPlaceholderText("pilotDeckConfig.panels.models.customModelIdPlaceholder")).toBeNull();
     expect(screen.getByText("my-custom-model")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "my-custom-model" })).toBeNull();
+    expect(screen.getByRole("button", { name: "my-custom-model" })).toBeTruthy();
   });
 });
 
@@ -183,82 +183,47 @@ describe("ProviderCard connection badge", () => {
     expect(onPendingChange).toHaveBeenCalledWith(false);
   });
 
-  it("keeps test buttons disabled while status is unavailable and recovers by polling", async () => {
-    mocks.authenticatedFetch.mockRejectedValueOnce(new Error("offline"))
-      .mockResolvedValue({ ok: true, json: async () => ({ tasks: [{ id: "task", providerId: "HXAPI", status: "testing" }] }) });
-    render(<ProviderCard providerId="HXAPI" provider={{ protocol: "openai", url: "https://example.test", apiKey: "********", models: { model: {} } }} onSave={vi.fn()} onRemove={vi.fn()} />);
-    await screen.findByText("pilotDeckConfig.panels.models.testStatusUnavailable");
-    expect((screen.getByRole("button", { name: "pilotDeckConfig.panels.models.checkingTestStatus" }) as HTMLButtonElement).disabled).toBe(true);
-    await screen.findByRole("button", { name: "pilotDeckConfig.panels.models.testing" }, { timeout: 3000 });
-    expect((screen.getByRole("button", { name: "pilotDeckConfig.panels.models.testing" }) as HTMLButtonElement).disabled).toBe(true);
+
+  it('saves a model without testing, preserving its other fields and sibling models', async () => {
+    const onSave = vi.fn(async (_id: string, _provider: unknown) => ({ok:true}));
+    const provider = { protocol:'openai' as const, url:'https://example.test/v1',apiKey:'key',models:{one:{capabilities:{maxOutputTokens:1024,supportsToolUse:true},multimodal:{input:['text','pdf'],maxPdfPages:5}},two:{capabilities:{maxOutputTokens:2048}}}};
+    render(<ProviderCard providerId="HXAPI" provider={provider} onSave={onSave} onRemove={vi.fn()} />);
+    expect(screen.queryByRole('button',{name:'pilotDeckConfig.panels.models.testConnection'})).toBeNull();
+    fireEvent.click(screen.getByRole('button',{name:'one'}));
+    fireEvent.change(screen.getByLabelText('pilotDeckConfig.panels.models.maxOutputTokens'),{target:{value:'8192'}});
+    fireEvent.click(screen.getByRole('checkbox'));
+    fireEvent.click(screen.getByRole('button',{name:'pilotDeckConfig.panels.models.modelSettings.save'}));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(onSave.mock.calls[0][1]).toMatchObject({models:{one:{capabilities:{maxOutputTokens:8192,supportsToolUse:true},multimodal:{input:['text','pdf','image'],maxPdfPages:5}},two:provider.models.two}});
+    expect(mocks.authenticatedFetch.mock.calls.some(([, options]) => options?.method === 'POST')).toBe(false);
   });
 
-  it("retains manual choices across changed polling snapshots until confirmation", async () => {
-    let polls = 0;
-    let status = "manual";
+  it('tests only the selected model, restores progress after remount and never saves on completion', async () => {
+    let tasks: any[] = [];
     mocks.authenticatedFetch.mockImplementation(async (_url, options) => {
-      if (options?.method === "PUT") status = "success";
-      else polls++;
-      return { ok: true, json: async () => ({ tasks: [{
-        id: "manual-task", providerId: "HXAPI", status, updatedAt: polls,
-        result: { models: ["one", "two"].map(modelId => ({ modelId, textInput: "supported", imageInput: "unknown" })) },
-      }] }) };
+      if (options?.method === 'POST') tasks = [{id:'single',providerId:'HXAPI',modelId:'one',status:'testing'}];
+      return {ok:true,json:async()=>({tasks})};
     });
-    render(<ProviderCard providerId="HXAPI" provider={{ protocol: "openai", url: "https://example.test", apiKey: "********", models: { one: {}, two: {} } }} onSave={vi.fn()} onRemove={vi.fn()} />);
-    await screen.findByRole("dialog");
-    fireEvent.click(screen.getAllByRole("radio", { name: "connection.manualUnsupported" })[0]);
-    await waitFor(() => expect(polls).toBeGreaterThanOrEqual(3), { timeout: 4000 });
-    expect((screen.getAllByRole("radio", { name: "connection.manualUnsupported" })[0] as HTMLInputElement).checked).toBe(true);
-    fireEvent.click(screen.getAllByRole("radio", { name: "connection.manualSupported" })[1]);
-    const before = polls;
-    await waitFor(() => expect(polls).toBeGreaterThan(before), { timeout: 3000 });
-    fireEvent.click(screen.getByRole("button", { name: "connection.manualConfirm" }));
-    await screen.findByRole("button", { name: "pilotDeckConfig.panels.models.connectionNormal" });
-    const submission = mocks.authenticatedFetch.mock.calls.find(([, options]) => options?.method === "PUT");
-    expect(JSON.parse(submission?.[1].body)).toEqual({ models: [
-      { modelId: "one", imageInput: "unsupported" }, { modelId: "two", imageInput: "supported" },
-    ] });
-  });
-
-  it("restores a running task after remount and disables testing on other providers", async () => {
-    let tasks: Array<Record<string, unknown>> = [];
-    mocks.authenticatedFetch.mockImplementation(async (_url, options) => {
-      if (options?.method === "POST") tasks = [{ id: "task-1", providerId: "HXAPI", status: "testing" }];
-      return { ok: true, json: async () => ({ tasks }) };
-    });
-    const provider = { protocol: "openai" as const, url: "https://example.test/v1", apiKey: "********", models: { model: {} } };
-    const props = { provider, onSave: vi.fn(), onRemove: vi.fn() };
-    const first = render(<ProviderCard providerId="HXAPI" {...props} />);
-    await waitFor(() => expect((screen.getByRole("button", { name: "pilotDeckConfig.panels.models.testConnection" }) as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(screen.getByRole("button", { name: "pilotDeckConfig.panels.models.testConnection" }));
-    await waitFor(() => expect((screen.getByRole("button", { name: "pilotDeckConfig.panels.models.testing" }) as HTMLButtonElement).disabled).toBe(true));
+    const props = {providerId:'HXAPI',provider:{protocol:'openai' as const,url:'https://example.test/v1',apiKey:'key',models:{one:{},two:{}}},onSave:vi.fn(),onRemove:vi.fn()};
+    const first = render(<ProviderCard {...props} />);
+    fireEvent.click(screen.getByRole('button',{name:'one'}));
+    const button = screen.getByRole('button',{name:'pilotDeckConfig.panels.models.testConnection'}) as HTMLButtonElement;
+    await waitFor(()=>expect(button.disabled).toBe(false));
+    fireEvent.click(button);
+    await screen.findByRole('button',{name:'pilotDeckConfig.panels.models.modelSettings.testing'});
+    expect(JSON.parse(mocks.authenticatedFetch.mock.calls.find(([,o])=>o?.method==='POST')![1].body)).toEqual({providerId:'HXAPI',modelId:'one'});
     first.unmount();
-    const other = render(<ProviderCard providerId="aicore" {...props} />);
-    await screen.findByRole("button", { name: "pilotDeckConfig.panels.models.testConnection" });
-    expect(screen.queryByText("pilotDeckConfig.panels.models.otherProviderTesting")).toBeNull();
-    expect((screen.getByRole("button", { name: "pilotDeckConfig.panels.models.testConnection" }) as HTMLButtonElement).disabled).toBe(true);
-    other.unmount();
-    render(<ProviderCard providerId="HXAPI" {...props} />);
-    await screen.findByRole("button", { name: "pilotDeckConfig.panels.models.testing" });
-    tasks = [{ id: "task-1", providerId: "HXAPI", status: "savingTest" }];
-    await waitFor(() => expect((screen.getByRole("button", { name: "pilotDeckConfig.panels.models.savingTest" }) as HTMLButtonElement).disabled).toBe(true), { timeout: 3000 });
-    tasks = [{ id: "task-1", providerId: "HXAPI", status: "success" }];
-    await screen.findByRole("button", { name: "pilotDeckConfig.panels.models.connectionNormal" }, { timeout: 3000 });
-    expect(mocks.authenticatedFetch.mock.calls.filter(([, options]) => options?.method === "POST")).toHaveLength(1);
+    render(<ProviderCard {...props} />);
+    fireEvent.click(screen.getByRole('button',{name:'two'}));
+    expect((screen.getByRole('button',{name:'pilotDeckConfig.panels.models.testConnection'}) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole('button',{name:'confirmDialog.cancel'}));
+    fireEvent.click(screen.getByRole('button',{name:'one'}));
+    await screen.findByRole('button',{name:'pilotDeckConfig.panels.models.modelSettings.testing'});
+    tasks = [{...tasks[0],status:'success',result:{models:[{modelId:'one',textInput:'supported',imageInput:'supported'}]}}];
+    await waitFor(()=>expect((screen.getByRole('checkbox') as HTMLInputElement).checked).toBe(true),{timeout:3000});
     expect(props.onSave).not.toHaveBeenCalled();
-  });
-
-  it("restores save failures and retries server-side saving without starting a new test", async () => {
-    let tasks = [{ id: "task-1", providerId: "HXAPI", status: "saveError", message: "Save failed" }];
-    mocks.authenticatedFetch.mockImplementation(async (url) => {
-      if (url.endsWith("/retry")) tasks = [{ ...tasks[0], status: "success", message: "" }];
-      return { ok: true, json: async () => ({ tasks }) };
-    });
-    render(<ProviderCard providerId="HXAPI" provider={{ protocol: "openai", url: "https://example.test", apiKey: "********", models: { model: {} } }} onSave={vi.fn()} onRemove={vi.fn()} />);
-    await screen.findByText("pilotDeckConfig.panels.models.testSaveFailed");
-    expect(screen.queryByRole("button", { name: "pilotDeckConfig.panels.models.connectionNormal" })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "pilotDeckConfig.panels.models.retryTestSave" }));
-    await screen.findByRole("button", { name: "pilotDeckConfig.panels.models.connectionNormal" });
-    expect(mocks.authenticatedFetch).toHaveBeenCalledWith("/api/config/connection-test-tasks/task-1/retry", expect.objectContaining({ method: "POST" }));
+    fireEvent.click(screen.getByRole('button',{name:'confirmDialog.cancel'}));
+    fireEvent.click(screen.getByRole('button',{name:'one'}));
+    expect((screen.getByRole('checkbox') as HTMLInputElement).checked).toBe(false);
   });
 });

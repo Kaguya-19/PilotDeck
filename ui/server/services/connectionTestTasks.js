@@ -45,19 +45,23 @@ export function createConnectionTestTasks({ prepare, persist, getRecord, applyIm
   };
   return {
     list,
-    start(userId, body) {
+    start(userId, body, { modelId } = {}) {
       prune();
       if (active(userId)) throw fail('Another connection test is in progress.');
       const run = prepare(body, userId, true); // validation and slot acquisition happen before acceptance
-      const task = { id: randomUUID(), providerId: body.providerId, status: 'testing', result: null, message: '', code: '', updatedAt: Date.now(), controller: new AbortController() };
+      const task = { id: randomUUID(), providerId: body.providerId, ...(modelId ? { modelId } : {}), status: 'testing', result: null, message: '', code: '', updatedAt: Date.now(), controller: new AbortController() };
       if (!users.has(userId)) users.set(userId, new Map());
-      users.get(userId).set(task.providerId, task);
+      users.get(userId).set(JSON.stringify([task.providerId, modelId || null]), task);
       void (async () => {
         try {
           const result = await run(task.controller.signal);
           if (task.controller.signal.aborted) return;
           update(task, { result });
-          if (result.status === 'passed') await save(userId, task);
+          if (modelId) {
+            if (!isCurrent(userId, task)) update(task, { status: 'error', result: null, code: 'CONFIGURATION_MISMATCH', message: 'The model connection configuration changed during testing.' });
+            else update(task, { status: result.status === 'failed' ? 'error' : 'success' });
+          }
+          else if (result.status === 'passed') await save(userId, task);
           else if (result.manualInputRequired) update(task, { status: 'manual' });
           else update(task, { status: 'error', message: result.error?.message || 'Connection failed.', code: result.error?.code || 'TEST_FAILED' });
         } catch (error) {
@@ -85,6 +89,12 @@ export function createConnectionTestTasks({ prepare, persist, getRecord, applyIm
       const result = applyImage(record, body);
       update(task, { result });
       void save(userId, task);
+      return publicTask(task);
+    },
+    acknowledge(userId, id) {
+      const task = lookup(userId, id);
+      if (!task.modelId || BUSY.has(task.status)) throw fail('This model test has not finished.');
+      update(task, { acknowledged: true });
       return publicTask(task);
     },
     cancel(userId, id) {
