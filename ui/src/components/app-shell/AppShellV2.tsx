@@ -136,7 +136,7 @@ export default function AppShellV2() {
   });
   const workspaceTab = activeTab === 'cron' || activeTab === 'skills' ? 'chat' : activeTab;
   const shellActiveTab = dedicatedTab ?? workspaceTab;
-  const { processingSessions: remoteProcessingSessions, unreadSessionIds, markRead } = useSessionIndicators({
+  const { processingSessions: remoteProcessingSessions, unreadSessionIds, markRead, acknowledge, selectSession: acknowledgeNavigation } = useSessionIndicators({
     scope: String(user?.id ?? 'local'),
     viewedSessionId: !isSettingsRoute && shellActiveTab === 'chat' && selectedSession?.id === readySessionId ? readySessionId : null,
     subscribe, sendMessage, isConnected,
@@ -494,6 +494,7 @@ export default function AppShellV2() {
       fallbackSession?: ProjectSession,
       options?: SessionNavigationOptions,
     ) => {
+      acknowledgeNavigation(sessId);
       if (project.name !== selectedProject?.name) {
         handleProjectSelect(project);
       }
@@ -509,7 +510,7 @@ export default function AppShellV2() {
         setActiveTab('chat');
       }
     },
-    [handleProjectSelect, handleSessionSelect, navigate, selectedProject?.name, setActiveTab],
+    [handleProjectSelect, handleSessionSelect, navigate, selectedProject?.name, setActiveTab, acknowledgeNavigation],
   );
 
   const workspacePath = selectedSession
@@ -530,6 +531,7 @@ export default function AppShellV2() {
       // `home` is retained only for old persisted state / links. The Agent
       // surface now owns both the welcome/new-session state and transcripts.
       if (tab === 'home') {
+        acknowledgeNavigation(null);
         setSelectedSession(null);
         const target = selectedProject
           ? `/p/${encodeURIComponent(selectedProject.name)}`
@@ -553,17 +555,19 @@ export default function AppShellV2() {
       setActiveTab,
       setSelectedSession,
       workspacePath,
+      acknowledgeNavigation,
     ],
   );
 
   const handleStartNewSession = useCallback(
     (project: Project, options?: SessionNavigationOptions) => {
       didDefaultProjectRef.current = true;
+      acknowledgeNavigation(null);
       handleNewSession(project);
       navigate(`/p/${encodeURIComponent(project.name)}`);
       setActiveTab(options?.preserveActiveTab ? 'files' : 'chat');
     },
-    [handleNewSession, navigate, setActiveTab],
+    [handleNewSession, navigate, setActiveTab, acknowledgeNavigation],
   );
 
   const handleHomeNewConversation = useCallback(() => {
@@ -688,7 +692,14 @@ export default function AppShellV2() {
         </div>
       )}
 
-      <main className="app-main flex min-h-0 min-w-0 flex-1 flex-col bg-white dark:bg-neutral-950">
+      <main
+        onClickCapture={acknowledge}
+        onKeyDownCapture={acknowledge}
+        onInputCapture={acknowledge}
+        onWheelCapture={acknowledge}
+        onTouchMoveCapture={acknowledge}
+        className="app-main flex min-h-0 min-w-0 flex-1 flex-col bg-white dark:bg-neutral-950"
+      >
         <MainAreaV2
           projects={sidebarSharedProps.projects}
           selectedProject={selectedProject}

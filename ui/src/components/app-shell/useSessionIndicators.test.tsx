@@ -6,59 +6,79 @@ const completed = (id = 's1', runId = 'r1') => ({type:'session-activity',activit
 afterEach(() => {cleanup(); localStorage.clear(); vi.restoreAllMocks();});
 it('persists unread completions, deduplicates replays and restores running state from snapshots', () => {
   const store = createSessionIndicatorStore('test', localStorage);
-  store.receive({type:'session-activity',activity:{sessionId:'s1',processing:true}}, null);
+  store.receive({type:'session-activity',activity:{sessionId:'s1',processing:true}});
   expect(store.getSnapshot().processingSessions.has('s1')).toBe(true);
-  store.receive(completed(), null);
+  store.receive(completed());
   expect(store.getSnapshot().unreadSessionIds.has('s1')).toBe(true);
   const restored = createSessionIndicatorStore('test', localStorage);
   expect(restored.getSnapshot().unreadSessionIds.has('s1')).toBe(true);
   restored.markRead('s1');
-  restored.receive(completed(), null);
+  restored.receive(completed());
   expect(restored.getSnapshot().unreadSessionIds.size).toBe(0);
-  restored.receive({type:'session-activity-snapshot',activities:[{sessionId:'s1',processing:true,completedRunId:'r1'}]}, null);
+  restored.receive({type:'session-activity-snapshot',activities:[{sessionId:'s1',processing:true,completedRunId:'r1'}]});
   expect(restored.getSnapshot().processingSessions.has('s1')).toBe(true);
-  restored.receive({type:'session-activity-snapshot',activities:[]}, null);
+  restored.receive({type:'session-activity-snapshot',activities:[]});
   expect(restored.getSnapshot().processingSessions.size).toBe(0);
-  restored.receive(completed('s1','r2'), null);
+  restored.receive(completed('s1','r2'));
   expect(restored.getSnapshot().unreadSessionIds.has('s1')).toBe(true);
 });
-it('marks read only when the loaded conversation is actually foreground, including refocus', () => {
+it('always lights on completion and requires a later action, not visibility or refresh', () => {
   let listener: (message:any) => void = () => {};
   const subscribe = (fn: typeof listener) => {listener = fn; return () => {};};
   const sendMessage = vi.fn();
-  let focused = true;
-  let visible: DocumentVisibilityState = 'visible';
-  vi.spyOn(document,'hasFocus').mockImplementation(() => focused);
-  vi.spyOn(document,'visibilityState','get').mockImplementation(() => visible);
-  const {result,rerender} = renderHook(({viewedSessionId}: {viewedSessionId:string|null}) => useSessionIndicators({scope:'user',viewedSessionId,subscribe,sendMessage,isConnected:true}),{initialProps:{viewedSessionId:null as string | null}});
+  const props = {scope:'user',viewedSessionId:'s1',subscribe,sendMessage,isConnected:true};
+  const {result,unmount} = renderHook(() => useSessionIndicators(props));
   expect(sendMessage).toHaveBeenCalledWith({type:'get-session-activity'});
+  act(() => result.current.acknowledge()); // Activity before completion cannot acknowledge it.
   act(() => listener(completed()));
   expect(result.current.unreadSessionIds.has('s1')).toBe(true);
-  // Selecting a row does not count until the chat reports its contents ready.
-  act(() => window.dispatchEvent(new Event('focus')));
+  act(() => {
+    window.dispatchEvent(new Event('focus'));
+    document.dispatchEvent(new Event('visibilitychange'));
+    window.dispatchEvent(new MouseEvent('mousemove'));
+  });
   expect(result.current.unreadSessionIds.has('s1')).toBe(true);
-  rerender({viewedSessionId:'s1'});
-  expect(result.current.unreadSessionIds.size).toBe(0);
+  unmount();
+  const refreshed = renderHook(() => useSessionIndicators(props));
+  act(() => listener({type:'session-activity-snapshot',activities:[completed().activity]}));
+  expect(refreshed.result.current.unreadSessionIds.has('s1')).toBe(true);
+  act(() => refreshed.result.current.acknowledge());
+  expect(refreshed.result.current.unreadSessionIds.size).toBe(0);
+  act(() => listener(completed()));
+  expect(refreshed.result.current.unreadSessionIds.size).toBe(0);
   act(() => listener(completed('s1','r2')));
-  expect(result.current.unreadSessionIds.size).toBe(0);
-  focused = false;
-  act(() => listener(completed('s1','r3')));
-  expect(result.current.unreadSessionIds.has('s1')).toBe(true);
-  focused = true; visible = 'hidden';
-  act(() => window.dispatchEvent(new Event('focus')));
-  expect(result.current.unreadSessionIds.has('s1')).toBe(true);
-  visible = 'visible';
-  act(() => document.dispatchEvent(new Event('visibilitychange')));
-  expect(result.current.unreadSessionIds.size).toBe(0);
-  // Settings/another page hides the still-mounted chat.
+  expect(refreshed.result.current.unreadSessionIds.has('s1')).toBe(true);
+});
+it('acknowledges navigation only after loading and never clears a newer completion', () => {
+  let listener: (message:any) => void = () => {};
+  const subscribe = (fn: typeof listener) => {listener = fn; return () => {};};
+  const sendMessage = vi.fn();
+  const {result,rerender} = renderHook(({viewedSessionId}: {viewedSessionId:string|null}) => useSessionIndicators({scope:'user',viewedSessionId,subscribe,sendMessage,isConnected:true}),{initialProps:{viewedSessionId:'s1' as string|null}});
+  act(() => {listener(completed('s1'));listener(completed('s2'));listener(completed('s3'));});
+  act(() => result.current.selectSession('s2'));
+  expect(result.current.unreadSessionIds.has('s1')).toBe(false);
+  expect(result.current.unreadSessionIds.has('s2')).toBe(true);
   rerender({viewedSessionId:null});
-  act(() => listener(completed('s1','r4')));
-  expect(result.current.unreadSessionIds.has('s1')).toBe(true);
+  act(() => result.current.acknowledge()); // Loading/hidden chat is not read.
+  expect(result.current.unreadSessionIds.has('s2')).toBe(true);
+  rerender({viewedSessionId:'s2'});
+  expect(result.current.unreadSessionIds.has('s2')).toBe(false);
+  expect(result.current.unreadSessionIds.has('s3')).toBe(true);
+  act(() => result.current.selectSession('s3'));
+  rerender({viewedSessionId:null});
+  act(() => listener(completed('s3','r2')));
+  rerender({viewedSessionId:'s3'});
+  expect(result.current.unreadSessionIds.has('s3')).toBe(true);
+  act(() => result.current.selectSession(null)); // Starting a new conversation acknowledges the old one.
+  expect(result.current.unreadSessionIds.size).toBe(0);
+  rerender({viewedSessionId:null});
+  act(() => {listener(completed('s3','r3'));result.current.acknowledge();});
+  expect(result.current.unreadSessionIds.has('s3')).toBe(true);
 });
 it('reconciles a completion missed during refresh, and isolates accounts', () => {
   const store = createSessionIndicatorStore('user-a', localStorage);
-  store.receive({type:'session-activity-snapshot',activities:[completed().activity]},null);
+  store.receive({type:'session-activity-snapshot',activities:[completed().activity]});
   expect(store.getSnapshot().unreadSessionIds.has('s1')).toBe(true);
   expect(createSessionIndicatorStore('user-b',localStorage).getSnapshot().unreadSessionIds.size).toBe(0);
-  expect(() => createSessionIndicatorStore('no-storage',undefined).receive(completed(),null)).not.toThrow();
+  expect(() => createSessionIndicatorStore('no-storage',undefined).receive(completed())).not.toThrow();
 });

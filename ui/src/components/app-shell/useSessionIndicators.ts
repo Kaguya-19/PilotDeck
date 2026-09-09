@@ -1,4 +1,4 @@
-import { createContext, useEffect, useMemo, useRef, useSyncExternalStore } from 'react';
+import { createContext, useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from 'react';
 
 export const SessionViewReadyContext = createContext<(sessionId: string | null) => void>(() => {});
 type ReadRecord = {runId: string; unread: boolean};
@@ -23,7 +23,7 @@ export function createSessionIndicatorStore(storageKey: string, storage: Storage
     publish();
   };
   restore();
-  const receive = (message: any, viewedSessionId: string | null) => {
+  const receive = (message: any) => {
     const fullSnapshot = message?.type === 'session-activity-snapshot';
     const activities: Activity[] = fullSnapshot ? message.activities : message?.type === 'session-activity' ? [message.activity] : [];
     if (!Array.isArray(activities)) return;
@@ -37,22 +37,19 @@ export function createSessionIndicatorStore(storageKey: string, storage: Storage
       if (activity.processing) processing.add(id); else processing.delete(id);
       const completed = activity.completedRunId;
       if (typeof completed === 'string' && records[id]?.runId !== completed) {
-        records[id] = {runId: completed, unread: id !== viewedSessionId};
-        recordsChanged = changed = true;
-      } else if (id === viewedSessionId && records[id]?.unread) {
-        records[id] = {...records[id], unread: false};
+        records[id] = {runId: completed, unread: true};
         recordsChanged = changed = true;
       }
     }
     if (recordsChanged) persist();
     if (changed) publish();
   };
-  const markRead = (id: string | null) => {
-    if (!id || !records[id]?.unread) return;
+  const markRead = (id: string | null, expectedRunId?: string) => {
+    if (!id || !records[id]?.unread || (expectedRunId !== undefined && records[id].runId !== expectedRunId)) return;
     records[id] = {...records[id], unread: false};
     persist(); publish();
   };
-  return {receive, markRead, restore, getSnapshot: () => snapshot, subscribe: (listener: () => void) => {
+  return {receive, markRead, restore, unreadRun: (id: string) => records[id]?.unread ? records[id].runId : undefined, getSnapshot: () => snapshot, subscribe: (listener: () => void) => {
     listeners.add(listener); return () => { listeners.delete(listener); };
   }};
 }
@@ -72,23 +69,33 @@ export function useSessionIndicators({scope, viewedSessionId, subscribe, sendMes
   }, [key]);
   const viewRef = useRef(viewedSessionId);
   viewRef.current = viewedSessionId;
-  const foregroundView = () => document.visibilityState === 'visible' && document.hasFocus() ? viewRef.current : null;
-  useEffect(() => subscribe(message => store.receive(message, foregroundView())), [store, subscribe]);
+  const pendingView = useRef<{id: string; runId: string} | null>(null);
+  const acknowledge = useCallback(() => {
+    store.markRead(viewRef.current);
+  }, [store]);
+  // Only an explicit navigation can acknowledge a background reply after loading.
+  // Capture its run now: a completion arriving after the click is a new reminder.
+  const selectSession = useCallback((id: string | null) => {
+    acknowledge();
+    const runId = id ? store.unreadRun(id) : undefined;
+    pendingView.current = id && runId ? {id, runId} : null;
+  }, [store, acknowledge]);
+  useEffect(() => subscribe(message => store.receive(message)), [store, subscribe]);
   useEffect(() => {
     if (isConnected) sendMessage({type: 'get-session-activity'});
   }, [isConnected, sendMessage, store]);
   useEffect(() => {
-    const read = () => store.markRead(foregroundView());
-    const restored = (event: StorageEvent) => { if (event.key === key) { store.restore(); read(); } };
-    read();
-    window.addEventListener('focus', read);
-    document.addEventListener('visibilitychange', read);
+    const pending = pendingView.current;
+    if (pending && pending.id === viewedSessionId) {
+      store.markRead(pending.id, pending.runId);
+      pendingView.current = null;
+    }
+  }, [store, viewedSessionId]);
+  useEffect(() => {
+    pendingView.current = null;
+    const restored = (event: StorageEvent) => { if (event.key === key) store.restore(); };
     window.addEventListener('storage', restored);
-    return () => {
-      window.removeEventListener('focus', read);
-      document.removeEventListener('visibilitychange', read);
-      window.removeEventListener('storage', restored);
-    };
-  }, [store, viewedSessionId, key]);
-  return {...useSyncExternalStore(store.subscribe, store.getSnapshot), markRead: store.markRead};
+    return () => window.removeEventListener('storage', restored);
+  }, [store, key]);
+  return {...useSyncExternalStore(store.subscribe, store.getSnapshot), markRead: store.markRead, acknowledge, selectSession};
 }
