@@ -12,6 +12,7 @@ import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
   ChevronRight,
+  Loader2,
   Folder,
   MessageSquarePlus,
   Plus,
@@ -814,17 +815,15 @@ export default function SidebarV2({
                   isOptimisticRow && 'cursor-default',
                 )}
               >
-                {options.flat ? (
-                  <svg aria-hidden="true" className="icon" fill="none" height="16" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" viewBox="0 0 24 24" width="16">
-                    <path d="M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z" />
-                  </svg>
-                ) : (
-                  <span
-                    aria-label={indicatorLabel}
-                    title={indicatorLabel}
-                    className="conversation-dot"
-                  />
-                )}
+                <span className={cn('session-indicator', options.flat && 'session-indicator-flat')}
+                  data-session-indicator={sessionId} data-status={indicatorStatus} aria-label={indicatorLabel} title={indicatorLabel}>
+                  {indicatorStatus === 'processing' ? <Loader2 aria-hidden="true" className="h-3 w-3 animate-spin" />
+                    : options.flat && indicatorStatus === 'idle' ? (
+                      <svg aria-hidden="true" className="icon" fill="none" height="16" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" viewBox="0 0 24 24" width="16">
+                        <path d="M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z" />
+                      </svg>
+                    ) : <span aria-hidden="true" className="conversation-dot" />}
+                </span>
                 <div className="min-w-0">
                   <div
                     className={cn(

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { createSessionActivityRegistry } from './session-activity.js';
 import '../../scripts/check-node-runtime.mjs';
 // Load environment variables before other imports execute
 import { assertRequiredPilotDeckEnv } from './load-env.js';
@@ -196,6 +197,15 @@ const WATCHER_DEBOUNCE_MS = 300;
 let projectsWatchers = [];
 let projectsWatcherDebounceTimer = null;
 const connectedClients = new Set();
+const sessionActivityRegistry = createSessionActivityRegistry();
+function broadcastSessionActivity(frame, userId) {
+    const activity = sessionActivityRegistry.receive(userId, frame);
+    if (!activity) return;
+    const payload = JSON.stringify({type: 'session-activity', activity});
+    for (const client of connectedClients) {
+        if (client.readyState === WebSocket.OPEN && (client.__pilotdeckUserId ?? null) === userId) client.send(payload);
+    }
+}
 const sessionWatchRegistry = createSessionWatchRegistry();
 registerAlwaysOnNotificationForwarding(connectedClients, (sessionId, frame) => {
     // Always-On gateway notifications do not carry the originating UI socket.
@@ -213,6 +223,7 @@ function normalizeSessionId(value) {
 }
 
 function broadcastChatFrame(frame, originWs, userId) {
+    broadcastSessionActivity(frame, userId);
     const payload = JSON.stringify(frame);
     const delivered = new Set();
     const frameSessionId = normalizeSessionId(frame?.sessionId);
@@ -2490,6 +2501,7 @@ class WebSocketWriter {
     }
 
     send(data) {
+        broadcastSessionActivity(data, this.userId);
         const message = JSON.stringify(data);
         if (this.ws.readyState === 1) { // WebSocket.OPEN
             this.ws.send(message);
@@ -2542,6 +2554,10 @@ function handleChatConnection(ws, request) {
             const data = JSON.parse(message);
 
             if (data.type === 'ping') return;
+            if (data.type === 'get-session-activity') {
+                writer.send({type: 'session-activity-snapshot', activities: sessionActivityRegistry.snapshot(userId)});
+                return;
+            }
             const requestSessionId = normalizeSessionId(data.sessionId);
 
             if (data.type === 'watch-session') {

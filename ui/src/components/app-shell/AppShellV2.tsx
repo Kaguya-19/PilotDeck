@@ -1,3 +1,5 @@
+import { useAuth } from '../auth/context/AuthContext';
+import { SessionViewReadyContext, useSessionIndicators } from './useSessionIndicators';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useMatch, useNavigate } from 'react-router-dom';
@@ -54,49 +56,6 @@ type DeleteSessionTarget = {
 
 const SettingsComponent = Settings as unknown as (props: TypedSettingsProps) => JSX.Element;
 
-const UNREAD_IGNORED_MESSAGE_TYPES = new Set([
-  'websocket-reconnected',
-  'pending-permissions-response',
-  'session-status',
-]);
-
-const UNREAD_IGNORED_MESSAGE_KINDS = new Set([
-  'session_created',
-  'status',
-  'stream_end',
-]);
-
-const getSessionIdFromMessage = (message: unknown): string | null => {
-  if (!message || typeof message !== 'object') return null;
-  const candidate = message as {
-    sessionId?: unknown;
-    session_id?: unknown;
-    newSessionId?: unknown;
-    actualSessionId?: unknown;
-  };
-  const value =
-    candidate.sessionId ??
-    candidate.session_id ??
-    candidate.actualSessionId ??
-    candidate.newSessionId;
-  return typeof value === 'string' && value.trim() ? value : null;
-};
-
-const isUnreadWorthyMessage = (message: unknown): boolean => {
-  if (!message || typeof message !== 'object') return false;
-  const candidate = message as { kind?: unknown; type?: unknown };
-
-  if (typeof candidate.kind === 'string') {
-    return !UNREAD_IGNORED_MESSAGE_KINDS.has(candidate.kind);
-  }
-
-  if (typeof candidate.type === 'string') {
-    return !UNREAD_IGNORED_MESSAGE_TYPES.has(candidate.type);
-  }
-
-  return false;
-};
-
 // V2 shell. Reuses the same data hooks as legacy AppContent so chat, discovery,
 // auth, and project plumbing keep working unchanged — V2 just reorganizes the
 // outer chrome (sidebar + breadcrumb header per prototype/shadcn.html).
@@ -130,11 +89,12 @@ export default function AppShellV2() {
   const [desktopSidebarOpen, setDesktopSidebarOpen] = useState(true);
   const { ws, sendMessage, latestMessage, isConnected, subscribe } = useWebSocket();
   const wasConnectedRef = useRef(false);
-  const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(() => new Set());
+  const { user } = useAuth();
+  const [readySessionId, setReadySessionId] = useState<string | null>(null);
 
   const {
     activeSessions,
-    processingSessions,
+    processingSessions: localProcessingSessions,
     markSessionAsActive,
     markSessionAsInactive,
     markSessionAsProcessing,
@@ -176,6 +136,22 @@ export default function AppShellV2() {
   });
   const workspaceTab = activeTab === 'cron' || activeTab === 'skills' ? 'chat' : activeTab;
   const shellActiveTab = dedicatedTab ?? workspaceTab;
+  const { processingSessions: remoteProcessingSessions, unreadSessionIds, markRead } = useSessionIndicators({
+    scope: String(user?.id ?? 'local'),
+    viewedSessionId: !isSettingsRoute && shellActiveTab === 'chat' && selectedSession?.id === readySessionId ? readySessionId : null,
+    subscribe, sendMessage, isConnected,
+  });
+  // Composer callbacks cover the interval before the server sees a new send.
+  const processingSessions = useMemo(() => new Set([...localProcessingSessions, ...remoteProcessingSessions]), [localProcessingSessions, remoteProcessingSessions]);
+  useEffect(() => subscribe(message => {
+    if (message?.type === 'session-activity' && !message.activity?.processing) markSessionAsNotProcessing(message.activity?.sessionId);
+    if (message?.type === 'session-activity-snapshot' && Array.isArray(message.activities)) {
+      const running = new Set(message.activities.filter((item: any) => item.processing).map((item: any) => item.sessionId));
+      for (const id of localProcessingSessions) if (!running.has(id)) markSessionAsNotProcessing(id);
+    }
+  }), [subscribe, localProcessingSessions, markSessionAsNotProcessing]);
+
+
 
   const misroutedFileFromUrl = useMemo(() => {
     if (!sessionId) return null;
@@ -324,34 +300,6 @@ export default function AppShellV2() {
       }
     };
   }, [switchProject]);
-
-  useEffect(() => {
-    const selectedSessionId = selectedSession?.id;
-    if (!selectedSessionId) return;
-
-    setUnreadSessionIds((previous) => {
-      if (!previous.has(selectedSessionId)) return previous;
-      const next = new Set(previous);
-      next.delete(selectedSessionId);
-      return next;
-    });
-  }, [selectedSession?.id]);
-
-  useEffect(() => {
-    return subscribe((message) => {
-      if (!isUnreadWorthyMessage(message)) return;
-
-      const messageSessionId = getSessionIdFromMessage(message);
-      if (!messageSessionId || messageSessionId === selectedSession?.id) return;
-
-      setUnreadSessionIds((previous) => {
-        if (previous.has(messageSessionId)) return previous;
-        const next = new Set(previous);
-        next.add(messageSessionId);
-        return next;
-      });
-    });
-  }, [selectedSession?.id, subscribe]);
 
   useEffect(() => {
     if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) {
@@ -520,12 +468,7 @@ export default function AppShellV2() {
 	      }
 
 	      sidebarSharedProps.onSessionDelete?.(session.id);
-	      setUnreadSessionIds((previous) => {
-	        if (!previous.has(session.id)) return previous;
-	        const next = new Set(previous);
-	        next.delete(session.id);
-	        return next;
-	      });
+	      markRead(session.id);
 	      setSessionCustomTitle(session.id, null);
 	      await refreshProjectsSilently();
 	      setDeleteSessionTarget(null);
@@ -534,7 +477,7 @@ export default function AppShellV2() {
 	    } finally {
 	      setIsDeletingSession(false);
 	    }
-	  }, [deleteSessionTarget, refreshProjectsSilently, sidebarSharedProps, t]);
+	  }, [deleteSessionTarget, refreshProjectsSilently, sidebarSharedProps, t, markRead]);
 
   const handleSelectProject = useCallback(
     (project: Project) => {
@@ -551,12 +494,6 @@ export default function AppShellV2() {
       fallbackSession?: ProjectSession,
       options?: SessionNavigationOptions,
     ) => {
-      setUnreadSessionIds((previous) => {
-        if (!previous.has(sessId)) return previous;
-        const next = new Set(previous);
-        next.delete(sessId);
-        return next;
-      });
       if (project.name !== selectedProject?.name) {
         handleProjectSelect(project);
       }
@@ -710,6 +647,7 @@ export default function AppShellV2() {
   );
 
   return (
+    <SessionViewReadyContext.Provider value={setReadySessionId}>
     <div className="app-root ui-v2 fixed inset-0 flex flex-col font-sans text-neutral-900 dark:text-neutral-100">
       <ConnectionBanner />
       {isSettingsRoute ? (
@@ -835,6 +773,7 @@ export default function AppShellV2() {
 	          )
 	        : null}
 	    </div>
+    </SessionViewReadyContext.Provider>
 	  );
 	}
 

@@ -1,3 +1,5 @@
+import { useContext } from 'react';
+import { SessionViewReadyContext } from '../app-shell/useSessionIndicators';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { MessageSquare } from 'lucide-react';
@@ -102,6 +104,7 @@ function ChatInterfaceV2({
     ? selectedProjectFromShell
     : (workspaceBinding ?? selectedProjectFromShell ?? defaultProject);
   const { t } = useTranslation('chat');
+  const setViewReady = useContext(SessionViewReadyContext);
   const { subscribe: contextSubscribe } = useWebSocket();
   const { tasksEnabled: _tasksEnabled, isTaskMasterInstalled: _isTaskMasterInstalled } =
     useTasksSettings();
@@ -227,6 +230,12 @@ function ChatInterfaceV2({
     pendingViewSessionRef,
     sessionStore,
   });
+
+  useEffect(() => {
+    const ready = !isLoadingSessionMessages && !sessionLoadError && currentSessionId && currentSessionId === selectedSession?.id && chatMessages.length > 0;
+    setViewReady(ready ? currentSessionId : null);
+    return () => setViewReady(null);
+  }, [currentSessionId, selectedSession?.id, isLoadingSessionMessages, sessionLoadError, chatMessages.length > 0, setViewReady]);
 
   const watchedSessionId = selectedSession?.id || currentSessionId || null;
   useSessionWatch({ sessionId: watchedSessionId, ws, sendMessage });
