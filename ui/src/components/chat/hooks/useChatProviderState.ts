@@ -105,7 +105,10 @@ export function useChatProviderState({ selectedProject, selectedSession }: UseCh
   });
   const [modelOptions, setModelOptions] = useState<ModelOption[]>(DEFAULT_MODEL_OPTIONS);
   const [thinkingModelContext, setThinkingModelContext] = useState<ThinkingModelContext | null>(null);
-  const modelState = useChatModelSelection();
+  const modelState = useChatModelSelection({
+    projectKey: selectedProject?.fullPath || selectedProject?.path || '',
+    sessionId: selectedSession?.id || '',
+  });
 
   useEffect(() => {
     setPendingPermissionRequests((previous) => {

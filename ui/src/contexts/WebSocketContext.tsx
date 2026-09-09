@@ -151,6 +151,7 @@ const useWebSocketProviderState = (): WebSocketContextType => {
             const data = JSON.parse(event.data);
             // Invalidate even while the composer is unmounted (for example in settings).
             if (data?.type === 'config:reloaded') globalModelSelectionStore.invalidate();
+            globalModelSelectionStore.receiveMessage(data);
             const subs = subscribersRef.current;
             if (subs.size > 0) {
               subs.forEach((sub) => {
@@ -218,6 +219,7 @@ const useWebSocketProviderState = (): WebSocketContextType => {
     if (socket && socket.readyState === WebSocket.OPEN) {
       try {
         socket.send(JSON.stringify(message));
+        globalModelSelectionStore.trackMessage(message);
         return true;
       } catch (error) {
         console.warn('Failed to send WebSocket message', error);

@@ -2,7 +2,7 @@ import { act, cleanup, render } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 import { WebSocketProvider } from './WebSocketContext';
 const invalidate = vi.hoisted(() => vi.fn());
-vi.mock('../components/chat/utils/globalModelSelection', () => ({ globalModelSelectionStore: { invalidate } }));
+vi.mock('../components/chat/utils/globalModelSelection', () => ({ globalModelSelectionStore: { invalidate, receiveMessage: vi.fn(), trackMessage: vi.fn() } }));
 vi.mock('../components/auth/context/AuthContext', () => ({ useAuth: () => ({ token: 'fixture' }) }));
 
 class Socket extends EventTarget {

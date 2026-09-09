@@ -790,11 +790,7 @@ function ChatInterfaceV2({
       canSubmitWithoutModel={canSubmitWithoutModel}
       modelCatalogError={modelCatalogError}
       projectKey={selectedProject?.fullPath || selectedProject?.path || ''}
-      onModelSelectionChange={(selection) => {
-        void setModelSelection(selection).catch((error) => {
-          addToast('error', error instanceof Error ? error.message : String(error));
-        });
-      }}
+      onModelSelectionChange={setModelSelection}
       pendingPermissionRequests={pendingPermissionRequests}
       handlePermissionDecision={handlePermissionDecision}
       handleGrantToolPermission={handleGrantToolPermission}
