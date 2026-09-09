@@ -95,3 +95,17 @@ describe('getQueueMenuPosition', () => {
     })).toEqual({ left: 8, top: 48, placement: 'bottom' });
   });
 });
+
+
+it('shows only waiting messages while submission and dispatch appear in the conversation', () => {
+  const state: InputQueueState = { sessionId: 'web:s_send', revision: 1, paused: false, items: [
+    { ...item('sending', 'Sending now'), status: 'submitting' },
+    item('waiting', 'Waiting for the active turn'),
+  ] };
+  const view = renderTray(state);
+  expect(screen.queryByText('Sending now')).toBeNull();
+  expect(screen.getByText('Waiting for the active turn')).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'More queue actions' })).toBeNull();
+  view.rerender(<QueuedMessagesTray state={{ ...state, items: [{ ...item('sending', 'Sending now'), status: 'dispatching' }] }} isLoading={false} onResume={vi.fn()} onSteer={vi.fn()} onDelete={vi.fn()} onMoveToFront={vi.fn()} />);
+  expect(screen.queryByRole('region', { name: 'Queued messages' })).toBeNull();
+});

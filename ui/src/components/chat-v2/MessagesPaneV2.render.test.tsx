@@ -5,6 +5,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { FindShortcutProvider } from '../../contexts/FindShortcutContext';
 import type { ChatMessage, ChatRunMode, SessionRuntimeState } from '../chat/types/types';
 import MessagesPaneV2 from './MessagesPaneV2';
+import type { QueuedInputSummary } from '../chat/types/queuedInput';
 import {
   getChatResponseReserveTarget,
   shouldKeepChatResponseReservedSpace,
@@ -93,6 +94,7 @@ function makeMessage(index: number): ChatMessage {
 function createPaneElement({
   messages,
   activityMessages = [],
+  sendingInputs = [],
   isAssistantWorking = false,
   sessionRuntimeState = 'synchronizing',
   activeRunId = null,
@@ -104,6 +106,7 @@ function createPaneElement({
 }: {
   messages: ChatMessage[];
   activityMessages?: ChatMessage[];
+  sendingInputs?: QueuedInputSummary[];
   isAssistantWorking?: boolean;
   sessionRuntimeState?: SessionRuntimeState;
   activeRunId?: string | null;
@@ -122,6 +125,7 @@ function createPaneElement({
         isLoadingSessionMessages={false}
         chatMessages={messages}
         activityMessages={activityMessages}
+        sendingInputs={sendingInputs}
         visibleMessages={messages}
         visibleMessageCount={messages.length}
         isLoadingMoreMessages={false}
@@ -152,6 +156,7 @@ function createPaneElement({
 function renderPane(options: {
   messages: ChatMessage[];
   activityMessages?: ChatMessage[];
+  sendingInputs?: QueuedInputSummary[];
   isAssistantWorking?: boolean;
   sessionRuntimeState?: SessionRuntimeState;
   activeRunId?: string | null;
@@ -1580,4 +1585,15 @@ describe('chat response reserved space', () => {
     expect(within(reservedArea as HTMLElement).getByText('Message 3')).toBeTruthy();
     expect(within(reservedArea as HTMLElement).queryByText('Message 2')).toBeNull();
   });
+});
+
+
+it('shows a provisional send without writing a duplicate transcript message on acceptance', () => {
+  const pending = { id: 'send-1', status: 'submitting' as const, createdAt: new Date().toISOString(), displayText: 'My next message' };
+  const view = renderPane({ messages: [], sendingInputs: [pending] });
+  expect(screen.getAllByText('My next message')).toHaveLength(1);
+  expect(view.container.querySelector('[data-sending-input="send-1"]')).toBeTruthy();
+  view.rerender(createPaneElement({ messages: [{ type: 'user', runId: 'send-1', content: 'My next message', timestamp: pending.createdAt }], sendingInputs: [] }));
+  expect(screen.getAllByText('My next message')).toHaveLength(1);
+  expect(view.container.querySelector('[data-sending-input]')).toBeNull();
 });

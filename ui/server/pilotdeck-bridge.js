@@ -1954,6 +1954,18 @@ export function scheduleQueuedDispatchAfterActivityCheck(
             const syncResult = syncLocalActiveRunFromSnapshot(state, activeSnapshot, snapshotGuard);
             retryAfterNewerSnapshot = !syncResult.applied && syncResult.reason === 'stale_request';
             if (retryAfterNewerSnapshot) return;
+            // A fresh connection may discover a turn owned by another client.
+            // Only then is the provisional send actually waiting in a queue.
+            if (state.active) {
+                let changed = false;
+                for (const item of state.inputQueue || []) {
+                    if (item.status === 'submitting') {
+                        item.status = 'queued';
+                        changed = true;
+                    }
+                }
+                if (changed) mutateInputQueue(state, writer);
+            }
         } catch (error) {
             console.warn('[pilotdeck-bridge] failed to verify activity before queued dispatch:', error?.message || error);
         }
@@ -1992,6 +2004,7 @@ export async function enqueueInputViaGateway(sessionId, item, writer, provider =
     if (state.inputQueue.length >= 20) {
         return { ok: false, error: 'The message queue is full.' };
     }
+    const submitting = !state.active && !state.queuePaused && !state.queueDispatching && state.inputQueue.length === 0;
     state.inputQueue.push({
         id: item.id,
         runId: item.runId,
@@ -1999,7 +2012,7 @@ export async function enqueueInputViaGateway(sessionId, item, writer, provider =
         displayText: String(item.displayText || item.command).trim(),
         createdAt: item.createdAt || new Date().toISOString(),
         options: item.options || {},
-        status: 'queued',
+        status: submitting ? 'submitting' : 'queued',
     });
     mutateInputQueue(state, writer);
     if (!state.active && !state.queuePaused) {
@@ -2087,6 +2100,9 @@ export function pauseInputQueueViaGateway(sessionId, writer, reason = 'user_stop
     if (!state || state.inputQueue.length === 0) return null;
     state.queuePaused = true;
     state.queuePauseReason = reason;
+    for (const item of state.inputQueue) {
+        if (item.status === 'submitting') item.status = 'queued';
+    }
     return mutateInputQueue(state, writer);
 }
 

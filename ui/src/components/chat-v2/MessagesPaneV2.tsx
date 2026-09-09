@@ -15,6 +15,8 @@ import type { SessionStore } from '../../stores/useSessionStore';
 import { getSessionRequestParams, isReadOnlySession, type Project, type ProjectSession, type SessionProvider } from '../../types/app';
 import { getIntrinsicMessageKey } from '../chat/utils/messageKeys';
 import MessageRowV2 from './MessageRowV2';
+import SendingMessages from './SendingMessages';
+import type { QueuedInputSummary } from '../chat/types/queuedInput';
 import AssistantReplyQuoteAction from './AssistantReplyQuoteAction';
 import SubagentDetailModal from './SubagentDetailModal';
 import ChatHistorySearchBar from './ChatHistorySearchBar';
@@ -50,6 +52,7 @@ type MessagesPaneV2Props = {
   sessionLoadError?: string | null;
   onRetrySessionLoad?: () => void;
   chatMessages: ChatMessage[];
+  sendingInputs?: QueuedInputSummary[];
   activityMessages?: ChatMessage[];
   visibleMessages: ChatMessage[];
   visibleMessageCount: number;
@@ -333,6 +336,7 @@ function MessagesPaneV2({
   sessionLoadError,
   onRetrySessionLoad,
   chatMessages,
+  sendingInputs = [],
   activityMessages = [],
   visibleMessages,
   visibleMessageCount,
@@ -438,7 +442,7 @@ function MessagesPaneV2({
     t('emptyChat.prompts.review', { defaultValue: 'Review the most recent file I touched' }),
   ];
 
-  const isEmpty = !isLoadingSessionMessages && chatMessages.length === 0;
+  const isEmpty = !isLoadingSessionMessages && chatMessages.length === 0 && sendingInputs.length === 0;
   const hasSessionLoadError = Boolean(!isLoadingSessionMessages && sessionLoadError && chatMessages.length === 0);
   const isNewConversationEmpty = isEmpty && !selectedSession;
   const isExistingConversationEmpty = isEmpty && Boolean(selectedSession) && !hasSessionLoadError;
@@ -1332,7 +1336,7 @@ function MessagesPaneV2({
           <div
             className={shouldReserveResponseSpace ? 'chat-current-turn-reserve' : undefined}
             data-chat-response-reserved-space={shouldReserveResponseSpace ? 'true' : undefined}
-            style={shouldReserveResponseSpace ? { minHeight: reservedSpaceTarget } : undefined}
+            style={shouldReserveResponseSpace && sendingInputs.length === 0 ? { minHeight: reservedSpaceTarget } : undefined}
           >
             {latestUserRenderIndex >= 0
               ? windowedMessageItems
@@ -1372,6 +1376,7 @@ function MessagesPaneV2({
               </ProcessLiveStatus>
             ) : null}
           </div>
+          <SendingMessages items={sendingInputs} />
         </div>
       )}
 

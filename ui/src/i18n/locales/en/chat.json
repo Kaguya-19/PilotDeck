@@ -16,6 +16,7 @@
     "emptyDescription": "Reference a workspace file with @ when you want it included."
   },
   "inputQueue": {
+    "sending": "Sending",
     "label": "Queued messages",
     "resume": "Continue",
     "pausedAfterStop": "You stopped the current response, so the queue is paused",

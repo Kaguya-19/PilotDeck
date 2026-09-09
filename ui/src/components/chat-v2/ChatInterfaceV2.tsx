@@ -16,6 +16,7 @@ import { useChatSessionState } from '../chat/hooks/useChatSessionState';
 import { useChatRealtimeHandlers } from '../chat/hooks/useChatRealtimeHandlers';
 import { useChatComposerState } from '../chat/hooks/useChatComposerState';
 import { useSessionInputQueue } from '../chat/hooks/useSessionInputQueue';
+import { isSendingInput } from '../chat/types/queuedInput';
 import {
   getEffectiveThinkingMode,
   getThinkingModeAvailability,
@@ -236,6 +237,13 @@ function ChatInterfaceV2({
     sendMessage,
     subscribe: subscribe || contextSubscribe,
   });
+  const sendingInputs = inputQueue.queueState.sessionId === watchedSessionId
+    ? inputQueue.queueState.items.filter(isSendingInput)
+    : [];
+  const sendingInputIds = sendingInputs.map((item) => item.id).join(',');
+  useEffect(() => {
+    if (sendingInputIds) scheduleScrollToBottom();
+  }, [sendingInputIds, scheduleScrollToBottom]);
 
   const {
     input,
@@ -877,6 +885,7 @@ function ChatInterfaceV2({
         sessionLoadError={sessionLoadError}
         onRetrySessionLoad={handleWebSocketReconnect}
         chatMessages={chatMessages}
+        sendingInputs={sendingInputs}
         activityMessages={activityMessages}
         visibleMessages={visibleMessages}
         visibleMessageCount={visibleMessageCount}

@@ -16,6 +16,7 @@
     "emptyDescription": "需要把文件加入上下文时，请用 @ 引用工作区文件。"
   },
   "inputQueue": {
+    "sending": "发送中",
     "label": "排队消息",
     "resume": "继续",
     "pausedAfterStop": "由于你中断了当前响应，队列已暂停",

@@ -446,37 +446,13 @@ export class TurnRunner {
     return pending;
   }
 
-  private async flushReadySessionTitle(
-    options: TurnRunnerOptions,
-    pending: PendingSessionTitle | undefined,
-  ): Promise<void> {
-    if (!pending) {
-      return;
-    }
-    if (!pending.completed) {
-      // The title generation has its own timeout (SESSION_TITLE_TIMEOUT_MS).
-      // Wait for it to settle instead of discarding immediately.
-      await pending.promise;
-    }
-    if (!pending.title) {
-      return;
-    }
-    const metadataStore = this.turnDependencies.metadataStore;
-    if (!metadataStore) {
-      return;
-    }
-    const latest = metadataStore.getSnapshot();
-    if (latest.title || latest.aiTitle) {
-      return;
-    }
-    await metadataStore.saveAiTitle(pending.title, options.turnId);
-  }
-
   private async finalizeSessionMetadata(
     options: TurnRunnerOptions,
     pending?: PendingSessionTitle,
   ): Promise<void> {
-    await this.flushReadySessionTitle(options, pending);
+    // Title completion saves its own metadata. It must not hold the session
+    // slot after the reply finishes; later turns can continue while it runs.
+    pending?.cleanup();
     await this.turnDependencies.metadataStore?.reappendTail(options.turnId).catch(() => {});
   }
 

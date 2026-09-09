@@ -286,3 +286,68 @@ test("TurnRunner persists a bounded prompt when a hook blocks a first turn", asy
     assert.equal(lastEntry.metadata.lastPrompt, prompt.slice(0, 1_200));
   }
 });
+
+test("pending title generation does not hold subsequent turns and cannot overwrite a manual title", async () => {
+  for (const manuallyRenamed of [false, true]) {
+    const sessionId = `background-title-${manuallyRenamed}`;
+    const transcript = new InMemoryTranscriptWriter();
+    const metadataStore = new SessionMetadataStore({ transcript, sessionId });
+    let resolveTitle!: (title: string) => void;
+    const title = new Promise<string>((resolve) => { resolveTitle = resolve; });
+    let titleCalls = 0;
+    const loop = {
+      async *run(input: AgentLoopInput): AsyncGenerator<AgentEvent, AgentLoopRunResult, unknown> {
+        const completed = { ...result(sessionId), turnId: input.turnId };
+        yield { type: "turn_completed", sessionId, turnId: input.turnId, result: completed };
+        return { result: completed, messages: input.messages };
+      },
+    } as AgentLoop;
+    const runner = new TurnRunner(loop, transcript, undefined, () => new Date(), undefined,
+      { cwd: process.cwd(), transcriptPath: "", collectFileArtifacts: false },
+      { metadataStore, autoGenerateSessionTitle: true, sessionTitleGenerator: async () => { titleCalls++; return title; } });
+    const session = new AgentSession({ sessionId, turnRunner: runner });
+    const drain = async (text: string) => {
+      for await (const _ of session.submit({ type: "text", text })) { /* drain */ }
+    };
+    // The old implementation cannot finish either turn until resolveTitle is called.
+    try {
+      await Promise.race([
+        (async () => { await drain("First"); await drain("Second"); })(),
+        new Promise<never>((_, reject) => { const timer = setTimeout(() => reject(new Error("title blocked turn completion")), 1000); timer.unref(); }),
+      ]);
+      assert.equal(session.snapshot().status, "idle");
+      assert.equal(titleCalls, 1);
+      assert.equal(metadataStore.getSnapshot().lastPrompt, "Second");
+      if (manuallyRenamed) await metadataStore.saveTitle("My title");
+    } finally { resolveTitle("Generated title"); }
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(metadataStore.getSnapshot().lastPrompt, "Second");
+    assert.equal(metadataStore.getSnapshot().aiTitle, manuallyRenamed ? undefined : "Generated title");
+    assert.equal(metadataStore.getSnapshot().title, manuallyRenamed ? "My title" : undefined);
+    assert.equal(transcript.entries.filter(entry => entry.type === "accepted_input").length, 2);
+  }
+});
+
+test("title request failure does not fail a completed conversation", async () => {
+  const sessionId = "failed-background-title";
+  const transcript = new InMemoryTranscriptWriter();
+  const metadataStore = new SessionMetadataStore({ transcript, sessionId });
+  let rejectTitle!: (error: Error) => void;
+  const title = new Promise<string>((_, reject) => { rejectTitle = reject; });
+  const loop = {
+    async *run(input: AgentLoopInput): AsyncGenerator<AgentEvent, AgentLoopRunResult, unknown> {
+      const completed = result(sessionId);
+      yield { type: "turn_completed", sessionId, turnId: input.turnId, result: completed };
+      return { result: completed, messages: input.messages };
+    },
+  } as AgentLoop;
+  const runner = new TurnRunner(loop, transcript, undefined, () => new Date(), undefined,
+    { cwd: process.cwd(), transcriptPath: "", collectFileArtifacts: false },
+    { metadataStore, autoGenerateSessionTitle: true, sessionTitleGenerator: async () => title });
+  const session = new AgentSession({ sessionId, turnRunner: runner });
+  for await (const _ of session.submit({ type: "text", text: "Hello" })) { /* drain */ }
+  rejectTitle(new Error("title request timed out"));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(session.snapshot().status, "idle");
+  assert.equal(metadataStore.getSnapshot().aiTitle, undefined);
+});
