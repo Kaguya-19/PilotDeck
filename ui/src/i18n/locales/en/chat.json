@@ -380,7 +380,8 @@
       "speedLevels": {
         "standard": "Standard",
         "fast": "Fast"
-      }
+      },
+      "backToModels": "Back to models"
     },
     "sending": "Sending...",
     "queueSend": "Queue message",

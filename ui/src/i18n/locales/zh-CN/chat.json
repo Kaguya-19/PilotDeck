@@ -363,7 +363,8 @@
       "speedLevels": {
         "standard": "标准",
         "fast": "快速"
-      }
+      },
+      "backToModels": "返回模型列表"
     },
     "sending": "发送中…",
     "queueSend": "加入发送队列",
