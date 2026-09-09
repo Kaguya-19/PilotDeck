@@ -62,6 +62,7 @@ import { readPermissionSettings } from './services/permissionSettings.js';
 import { regenerateLastMessageTransaction } from './services/regenerateLastMessage.js';
 import { getDefaultPtyShell } from './utils/defaultShell.js';
 import { pickNativeFolder } from './utils/nativeFolderPicker.js';
+import { browseDirectories } from './utils/browseDirectories.js';
 import { getOpenUrlSpawnCommand } from './utils/processSpawn.js';
 
 import { getProjects, getProjectCronJobsOverview, getSessions, renameProject, deleteSession, deleteProject, addProjectManually, extractProjectDirectory, clearProjectDirectoryCache, searchConversations } from './projects.js';
@@ -1406,24 +1407,7 @@ app.get('/api/browse-filesystem', authenticateToken, async (req, res) => {
             return res.status(404).json({ error: 'Directory not accessible' });
         }
 
-        // Use existing getFileTree function with shallow depth (only direct children)
-        const fileTree = await getFileTree(resolvedPath, 1, 0, false); // maxDepth=1, showHidden=false
-
-        // Filter only directories and format for suggestions
-        const directories = fileTree
-            .filter(item => item.type === 'directory')
-            .map(item => ({
-                path: item.path,
-                name: item.name,
-                type: 'directory'
-            }))
-            .sort((a, b) => {
-                const aHidden = a.name.startsWith('.');
-                const bHidden = b.name.startsWith('.');
-                if (aHidden && !bHidden) return 1;
-                if (!aHidden && bHidden) return -1;
-                return a.name.localeCompare(b.name);
-            });
+        const directories = await browseDirectories(resolvedPath, req.query.showHidden === 'true');
 
         // Add common directories if browsing home directory
         const suggestions = [];

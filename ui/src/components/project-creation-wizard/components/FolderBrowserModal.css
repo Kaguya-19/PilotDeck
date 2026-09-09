@@ -1,76 +1,120 @@
 .folder-picker-overlay {
-  --brand: #6167e8;
-  --brand-soft: #eff0ff;
-}
-
-.folder-picker-path {
+  --fp-bg: #fff;
+  --fp-side: #f7f7fc;
+  --fp-field: #fafafe;
+  --fp-ink: #303242;
+  --fp-muted: #7a7f91;
+  --fp-line: #e7e7f0;
+  --fp-hover: #f3f1fc;
+  --fp-selected: #eae6ff;
+  --fp-brand: #6558df;
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
   display: flex;
   align-items: center;
-  color: rgb(123, 132, 147);
-  font-size: 12px;
-  padding: 0px 24px;
-  gap: 8px;
-  border-top: 1px solid rgb(231, 233, 238);
-  border-bottom: 1px solid rgb(231, 233, 238);
-  background: rgb(251, 251, 252);
-  min-height: 40px;
-}
-
-.folder-picker-overlay .button {
-  min-height: 42px;
-  padding: 0 17px;
-  display: inline-flex;
-  align-items: center;
   justify-content: center;
-  gap: 8px;
-  border-radius: 10px;
+  padding: 20px;
+  background: #0007;
+  backdrop-filter: blur(5px);
+}
+.dark .folder-picker-overlay {
+  --fp-bg: #191922;
+  --fp-side: #16161e;
+  --fp-field: #20202c;
+  --fp-ink: #e6e5ef;
+  --fp-muted: #9998ad;
+  --fp-line: #30303f;
+  --fp-hover: #262434;
+  --fp-selected: #34304e;
+  --fp-brand: #aca1ff;
+}
+.folder-picker {
+  width: min(960px, 100%);
+  height: min(580px, 85dvh);
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--fp-line);
+  border-radius: 16px;
+  color: var(--fp-ink);
+  background: var(--fp-bg);
+  box-shadow: 0 24px 90px #0004;
   font-size: 13px;
-  font-weight: 700;
-  transition: transform 0.18s, box-shadow 0.18s, background 0.18s;
 }
-
-.folder-picker-overlay .button:hover:not(:disabled) {
-  transform: translateY(-1px);
-}
-
-.folder-picker-overlay .button.primary {
-  border: 1px solid #6167e8;
-  background: #6167e8;
-  color: rgb(255, 255, 255);
-  box-shadow: rgba(97, 103, 232, 0.22) 0 7px 18px;
-}
-
-.folder-picker-overlay .button.primary:hover:not(:disabled) {
-  background: rgb(84, 90, 213);
-  box-shadow: rgba(97, 103, 232, 0.28) 0 9px 22px;
-}
-
-.folder-picker-overlay .button.secondary {
-  border: 1px solid #e3e4ef;
-  background: rgb(255, 255, 255);
-  color: rgb(89, 98, 116);
-}
-
-.folder-picker-overlay .button.secondary:hover {
-  border-color: rgb(207, 212, 223);
-  background: rgb(250, 251, 252);
-}
-
-.folder-picker-overlay .button:disabled {
-  cursor: not-allowed;
-  opacity: 0.46;
-  box-shadow: none;
-}
-
-.folder-picker-overlay .folder-entry:hover {
-  background: rgb(247, 248, 250);
-}
-
-.folder-picker-overlay .folder-entry {
-  padding-right: 10px;
-}
-
-.folder-picker-overlay .folder-select-button:hover {
-  color: var(--brand);
-  background: var(--brand-soft);
+.folder-picker * { box-sizing: border-box; }
+.folder-picker button { font: inherit; color: inherit; cursor: pointer; border: 0; background: transparent; border-radius: 6px; }
+.folder-picker button:hover:not(:disabled) { background: var(--fp-hover); }
+.folder-picker button:focus-visible { outline: 2px solid var(--fp-brand); outline-offset: -2px; }
+.folder-picker button:disabled { opacity: .35; cursor: default; }
+.folder-picker input { min-width: 0; font: inherit; color: var(--fp-ink); background: var(--fp-field); border: 1px solid var(--fp-line); border-radius: 6px; outline: none; padding: 7px 9px; }
+.folder-picker input:focus { border-color: var(--fp-brand); }
+.folder-picker input::placeholder { color: var(--fp-muted); }
+.folder-picker svg { flex-shrink: 0; }
+.folder-picker-header { display: flex; align-items: center; gap: 9px; padding: 16px 20px 12px; }
+.folder-picker-header > svg { color: var(--fp-brand); }
+.folder-picker-header h2 { margin: 0; flex: 1; font-size: 15px; font-weight: 600; }
+.folder-picker-header button { display: grid; place-items: center; width: 28px; height: 28px; color: var(--fp-muted); }
+.folder-picker-header button svg { width: 18px; height: 18px; }
+.folder-picker-toolbar { display: flex; align-items: center; gap: 8px; padding: 0 16px 12px; border-bottom: 1px solid var(--fp-line); }
+.folder-picker-navigation { display: flex; gap: 2px; }
+.folder-picker-toolbar button { height: 30px; min-width: 28px; display: inline-flex; align-items: center; justify-content: center; color: var(--fp-muted); }
+.folder-picker-toolbar button svg { width: 16px; height: 16px; }
+.folder-picker-toolbar button[aria-pressed=true] { color: var(--fp-brand); background: var(--fp-selected); }
+.folder-picker-address { flex: 1; min-width: 0; }
+.folder-picker-address > input { width: 100%; height: 32px; }
+.folder-picker-address nav { display: flex; align-items: center; overflow-x: auto; height: 32px; border: 1px solid var(--fp-line); border-radius: 7px; padding: 0 5px; scrollbar-width: none; }
+.folder-picker-address nav > span { display: flex; align-items: center; min-width: max-content; color: var(--fp-muted); }
+.folder-picker-address nav button { padding: 0 6px; font-size: 12px; max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
+.folder-picker-address nav > span:last-of-type button { color: var(--fp-ink); }
+.folder-picker-address .folder-picker-edit-path { margin-left: auto; }
+.folder-picker-search { display: flex; position: relative; align-items: center; width: 170px; }
+.folder-picker-search > svg { position: absolute; left: 9px; color: var(--fp-muted); }
+.folder-picker-search input { width: 100%; height: 32px; padding-left: 30px; }
+.folder-picker-content { display: flex; flex: 1; min-height: 0; }
+.folder-picker-shortcuts { width: 176px; flex-shrink: 0; padding: 10px 8px; overflow-y: auto; background: var(--fp-side); border-right: 1px solid var(--fp-line); }
+.folder-picker-shortcuts h3 { color: var(--fp-muted); font-size: 11px; font-weight: 500; margin: 12px 10px 5px; }
+.folder-picker-shortcuts h3:first-child { margin-top: 2px; }
+.folder-picker-shortcuts button { display: flex; align-items: center; width: 100%; gap: 9px; padding: 8px 10px; text-align: left; }
+.folder-picker-shortcuts button svg { width: 16px; height: 16px; color: var(--fp-muted); }
+.folder-picker-shortcuts button span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.folder-picker-shortcuts button.is-selected, .folder-picker-entries button[aria-current=true] { background: var(--fp-selected); color: var(--fp-brand); }
+.folder-picker-main { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+.folder-picker-columns { position: relative; display: flex; flex: 1; min-height: 0; overflow-x: auto; }
+.folder-picker-column { display: flex; flex-direction: column; flex: 0 0 245px; min-width: 0; border-right: 1px solid var(--fp-line); }
+.folder-picker-column:last-of-type { flex-grow: 1; border-right: 0; }
+.folder-picker-column-title { height: 32px; flex-shrink: 0; padding: 9px 12px 5px; font-size: 11px; color: var(--fp-muted); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.folder-picker-entries { flex: 1; overflow-y: auto; padding: 3px 6px 10px; }
+.folder-picker-entries button { width: 100%; display: flex; align-items: center; gap: 8px; padding: 8px; text-align: left; margin-bottom: 2px; }
+.folder-picker-entries button > svg { width: 16px; height: 16px; color: #8c83bc; }
+.folder-picker-entries button > span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.folder-picker-entries button .folder-picker-chevron { width: 12px; height: 12px; color: var(--fp-muted); }
+.folder-picker-empty { margin: 15px 6px; color: var(--fp-muted); font-size: 12px; }
+.folder-picker-loading { position: sticky; right: 10px; top: 10px; align-self: flex-start; color: var(--fp-brand); margin: 10px 0 0 -24px; pointer-events: none; }
+.folder-picker-new { display: flex; align-items: center; gap: 8px; padding: 10px; border-bottom: 1px solid var(--fp-line); }
+.folder-picker-new input { flex: 1; }
+.folder-picker-new button { padding: 7px; color: var(--fp-brand); }
+.folder-picker-error { color: #e57686; margin: 8px 12px; font-size: 12px; }
+.folder-picker-footer { border-top: 1px solid var(--fp-line); padding: 10px 16px 14px; }
+.folder-picker-selection { display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--fp-muted); font-size: 11px; margin-bottom: 10px; }
+.folder-picker-selection code { font-size: 11px; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.folder-picker-selection button { color: var(--fp-brand); padding: 4px; display: flex; }
+.folder-picker-selection button svg { width: 15px; height: 15px; }
+.folder-picker-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.folder-picker-actions button { padding: 8px 16px; background: var(--fp-field); border: 1px solid var(--fp-line); }
+.folder-picker-actions button.folder-picker-confirm { background: #6558df; color: #fff; border-color: #6558df; }
+.folder-picker-actions button.folder-picker-confirm:hover:not(:disabled) { background: #7568e9; }
+@media (max-width: 640px) {
+  .folder-picker-overlay { padding: 12px; }
+  .folder-picker { height: min(640px, 90dvh); }
+  .folder-picker-shortcuts { width: 112px; padding: 8px 4px; }
+  .folder-picker-shortcuts button { font-size: 12px; padding: 8px 6px; gap: 6px; }
+  .folder-picker-toolbar { flex-wrap: wrap; gap: 6px; padding: 0 10px 10px; }
+  .folder-picker-address { flex-basis: calc(100% - 104px); }
+  .folder-picker-search { flex: 1; }
+  .folder-picker-column:not(.is-current) { display: none; }
+  .folder-picker-column.is-current { flex: 1; }
+  .folder-picker-header { padding: 12px; }
+  .folder-picker-entries button { padding: 9px 5px; gap: 5px; }
 }

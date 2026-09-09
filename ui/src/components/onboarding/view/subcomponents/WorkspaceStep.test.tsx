@@ -142,11 +142,14 @@ describe('WorkspaceStep', () => {
     });
   });
 
-  it('uses the Electron folder picker in the desktop app', async () => {
+  it('uses the shared folder browser in the desktop app', async () => {
     const onWorkspacePathChange = vi.fn();
-    window.pilotdeckDesktop = { pickFolder: vi.fn(async () => '/tmp/from-desktop') } as never;
+    const pickFolder = vi.fn(async () => '/tmp/from-desktop');
+    window.pilotdeckDesktop = { pickFolder } as never;
     renderStep({ onWorkspacePathChange });
     fireEvent.click(screen.getByRole('button', { name: 'Choose file' }));
-    await waitFor(() => expect(onWorkspacePathChange).toHaveBeenCalledWith('/tmp/from-desktop'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Use test folder' }));
+    expect(onWorkspacePathChange).toHaveBeenCalledWith('/tmp/from-browser');
+    expect(pickFolder).not.toHaveBeenCalled();
   });
 });

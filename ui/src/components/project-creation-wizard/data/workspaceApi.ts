@@ -39,8 +39,8 @@ export const fetchGithubTokenCredentials = async () => {
   return (data.credentials || []).filter((credential) => credential.is_active);
 };
 
-export const browseFilesystemFolders = async (pathToBrowse: string) => {
-  const endpoint = `/browse-filesystem?path=${encodeURIComponent(pathToBrowse)}`;
+export const browseFilesystemFolders = async (pathToBrowse: string, showHidden = false) => {
+  const endpoint = `/browse-filesystem?path=${encodeURIComponent(pathToBrowse)}${showHidden ? '&showHidden=true' : ''}`;
   const response = await api.get(endpoint);
   const data = await parseJson<BrowseFilesystemResponse>(response);
 
