@@ -24,6 +24,8 @@ import os from 'node:os';
 
 import {
     getPilotDeckGateway,
+    beginProjectDeletion,
+    beginSessionDeletion,
     isGatewayUnavailableError,
     withPilotDeckGatewayReadRetry,
 } from './pilotdeck-bridge.js';
@@ -515,30 +517,36 @@ async function deleteSession(projectName, sessionId, _options = {}) {
     // The Gateway owns background title requests and the transcript write queue.
     // Drain/close it before unlinking, so late completions cannot recreate files.
     const gateway = await getPilotDeckGateway();
-    await gateway.closeSession({ sessionKey: sessionId, reason: 'session_deleted' });
-    // Try the sanitized filename first (current storage layout), then the
-    // raw form (legacy files written before the sanitize fix).
-    const safeId = sanitizeSessionIdForPath(sessionId);
-    const filenames = safeId === sessionId ? [sessionId] : [safeId, sessionId];
-    let removed = false;
-    for (const name of filenames) {
-        const transcript = path.join(
-            pilotHome,
-            'projects',
-            projectId,
-            'chats',
-            `${name}.jsonl`,
-        );
-        try {
-            await fs.unlink(transcript);
-            removed = true;
-        } catch (error) {
-            if (error?.code !== 'ENOENT') {
-                throw error;
+    const finishDeletion = beginSessionDeletion(fullPath, sessionId);
+    let deleted = false;
+    try {
+        await gateway.closeSession({ sessionKey: sessionId, reason: 'session_deleted' });
+        // Try the sanitized filename first (current storage layout), then the
+        // raw form (legacy files written before the sanitize fix).
+        const safeId = sanitizeSessionIdForPath(sessionId);
+        const filenames = safeId === sessionId ? [sessionId] : [safeId, sessionId];
+        let removed = false;
+        for (const name of filenames) {
+            const transcript = path.join(
+                pilotHome,
+                'projects',
+                projectId,
+                'chats',
+                `${name}.jsonl`,
+            );
+            try {
+                await fs.unlink(transcript);
+                removed = true;
+            } catch (error) {
+                if (error?.code !== 'ENOENT') {
+                    throw error;
+                }
             }
         }
-    }
-    return removed;
+        await fs.rm(path.join(pilotHome, 'projects', projectId, 'pending-inputs', `${safeId}.json`), { force: true });
+        deleted = true;
+        return removed;
+    } finally { finishDeletion(deleted); }
 }
 
 async function deleteProject(projectName, force = false) {
@@ -546,15 +554,22 @@ async function deleteProject(projectName, force = false) {
     const pilotHome = resolvePilotHome(process.env);
     const projectId = await resolveProjectIdForPathOrName(projectName, fullPath);
     const projectDir = path.join(pilotHome, 'projects', projectId);
+    const gateway = await getPilotDeckGateway();
+    if (!gateway.closeProjectSessions) throw new Error('Gateway does not support project session closure.');
+    const finishDeletion = beginProjectDeletion(fullPath);
+    let deleted = false;
     try {
+        await gateway.closeProjectSessions({ projectKey: fullPath });
         await fs.rm(projectDir, { recursive: true, force });
+        deleted = true;
         directoryCache.delete(projectName);
         return true;
     } catch (error) {
-        if (error?.code === 'ENOENT') {
-            return false;
-        }
+        if (error?.code === 'ENOENT') { deleted = true; return false; }
         throw error;
+    } finally {
+        finishDeletion(deleted);
+        await gateway.closeProjectSessions({ projectKey: fullPath, resume: true });
     }
 }
 

@@ -848,6 +848,15 @@ export class InProcessGateway implements Gateway {
     return { sessionKey: `${input.channelKey}:${projectKey}s_${suffix}` };
   }
 
+  async closeProjectSessions(input: { projectKey: string; resume?: boolean }): Promise<{ sessionKeys: string[] }> {
+    if (!input.projectKey?.trim()) throw new Error("projectKey is required.");
+    const projectKey = resolve(input.projectKey);
+    if (input.resume) { this.router.resumeProject(projectKey); return { sessionKeys: [] }; }
+    const sessionKeys = await this.router.closeProject(projectKey);
+    for (const key of sessionKeys) this.sessionPermissionGrants.delete(key);
+    return { sessionKeys };
+  }
+
   async closeSession(input: { sessionKey: string; reason?: string }): Promise<void> {
     await this.router.close(input.sessionKey);
     this.sessionPermissionGrants.delete(input.sessionKey);

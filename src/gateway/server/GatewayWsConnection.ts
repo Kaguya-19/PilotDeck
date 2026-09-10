@@ -197,6 +197,9 @@ export class GatewayWsConnection {
         return this.options.gateway.resumeSession(frame.params as never);
       case "new_session":
         return this.options.gateway.newSession(frame.params as never);
+      case "close_project_sessions":
+        if (!this.options.gateway.closeProjectSessions) throw new Error("Project session closure is unavailable.");
+        return this.options.gateway.closeProjectSessions(frame.params as never);
       case "close_session":
         return this.options.gateway.closeSession(frame.params as never).then(() => ({ ok: true }));
       case "record_agent_status_message":

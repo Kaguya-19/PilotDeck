@@ -12,6 +12,7 @@ const gateway = vi.hoisted(() => ({
 
 vi.mock('./pilotdeck-bridge.js', () => ({
     getPilotDeckGateway: vi.fn(async () => gateway),
+    beginSessionDeletion: vi.fn(() => () => {}),
     isGatewayUnavailableError: (error) => /Gateway WebSocket/i.test(error?.message || ''),
     withPilotDeckGatewayReadRetry: vi.fn(async (operation) => operation(gateway)),
 }));

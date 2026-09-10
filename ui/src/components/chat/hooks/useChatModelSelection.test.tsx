@@ -15,6 +15,7 @@ const items = [A, B].map(s => ({ id: `${s.provider}/${s.model}`, ...s, displayNa
 const catalog = { items: [{ id: 'router/auto', provider: 'router', model: 'auto', displayName: 'Auto', available: true, capabilities: {} }, ...items], defaultSelection: B };
 const json = (data: unknown, status = 200) => ({ ok: status < 400, status, json: async () => data });
 const deferred = <T,>() => { let resolve!: (value: T) => void; const promise = new Promise<T>(r => { resolve = r; }); return { promise, resolve }; };
+const serverSelections = new Map<string, unknown>();
 const saved = () => JSON.parse(localStorage.getItem(GLOBAL_MODEL_SELECTION_KEY) || 'null');
 const mount = (projectKey = '/a', sessionId = '') => renderHook((props: { projectKey: string; sessionId: string }) => useChatModelSelection(props), { initialProps: { projectKey, sessionId } });
 const ready = async (hook: ReturnType<typeof mount>) => waitFor(() => expect(hook.result.current.isModelSelectionReady).toBe(true));
@@ -22,12 +23,12 @@ function track(runId: string, selection = A as typeof A | typeof B | typeof AUTO
   mocks.store.trackMessage({ type: 'pilotdeck-command', options: { runId, modelSelection: selection, projectPath: projectKey, sessionId } });
 }
 function accept(runId: string, sessionId: string) { act(() => mocks.store.receiveMessage({ type: 'model-selection-saved', runId, sessionId })); }
-function send(runId: string, sessionId: string, selection = A as typeof A | typeof B | typeof AUTO, project = '/a') { track(runId, selection, project, sessionId); accept(runId, sessionId); }
+function send(runId: string, sessionId: string, selection = A as typeof A | typeof B | typeof AUTO, project = '/a') { serverSelections.set(JSON.stringify([project, sessionId]), selection); track(runId, selection, project, sessionId); accept(runId, sessionId); }
 beforeEach(() => {
-  localStorage.clear(); mocks.fetch.mockReset();
+  localStorage.clear(); serverSelections.clear(); mocks.fetch.mockReset();
   mocks.fetch.mockImplementation((url: string) => {
     const query = new URL(url, 'http://localhost').searchParams;
-    return Promise.resolve(json(url.startsWith('/api/models?') ? catalog : { saved: readSessionModelSelection(query.get('projectKey') || '', query.get('sessionKey') || '') }));
+    return Promise.resolve(json(url.startsWith('/api/models?') ? catalog : { saved: serverSelections.get(JSON.stringify([query.get('projectKey'), query.get('sessionKey')])) || null }));
   });
   mocks.store = createGlobalModelSelectionStore();
 });
@@ -190,4 +191,23 @@ describe('server model reconciliation', () => {
     const hook = mount('/a', 'web:a');
     await waitFor(() => expect(hook.result.current.modelSelection).toEqual(B));
   });
+});
+
+
+it('restores the last accepted queued model over execution history after navigation and refresh', async () => {
+  // Independent server records: M1 is executing; the queue has accepted M2.
+  mocks.fetch.mockImplementation((url: string) => Promise.resolve(json(url.startsWith('/api/models?') ? catalog : {saved: A, acceptedSelection: B})));
+  const hook = mount('/a', 'web:queued'); await ready(hook);
+  expect(hook.result.current.modelSelection).toEqual(B);
+  hook.rerender({projectKey: '/b', sessionId: ''}); await ready(hook);
+  hook.rerender({projectKey: '/a', sessionId: 'web:queued'}); await ready(hook);
+  expect(hook.result.current.modelSelection).toEqual(B);
+  hook.unmount();
+  localStorage.clear(); // Another client has no local model cache at all.
+  mocks.store = createGlobalModelSelectionStore();
+  const other = mount('/a', 'web:queued'); await ready(other);
+  expect(other.result.current.modelSelection).toEqual(B);
+  act(() => other.result.current.setModelSelection(AUTO));
+  accept('other-client', 'web:queued'); await act(async () => {});
+  expect(other.result.current.modelSelection).toEqual(AUTO);
 });

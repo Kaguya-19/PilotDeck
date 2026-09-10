@@ -26,7 +26,7 @@ export function useChatModelSelection({ projectKey = '', sessionId = '' }: { pro
         const response = await authenticatedFetch(`/api/sessions/model?${query}`, { signal: controller.signal });
         const data = await response.json();
         if (!response.ok) throw new Error(data?.error?.message || 'Failed to restore conversation model.');
-        if (!controller.signal.aborted && globalModelSelectionStore.getSessionRevision(sessionId) === revision) setHistory({ key, revision, selection: normalizeModelSelection(data.saved), error: null });
+        if (!controller.signal.aborted && globalModelSelectionStore.getSessionRevision(sessionId) === revision) setHistory({ key, revision, selection: normalizeModelSelection(data.acceptedSelection) || normalizeModelSelection(data.saved), error: null });
       } catch (error) {
         if (!controller.signal.aborted && globalModelSelectionStore.getSessionRevision(sessionId) === revision) setHistory({ key, revision, selection: null, error: error instanceof Error ? error.message : String(error) });
       }

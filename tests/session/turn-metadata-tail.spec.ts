@@ -441,3 +441,43 @@ test("concurrent close and reopen wait for the previous session writer to drain"
   assert.equal(created, 2);
   await router.close(context.sessionKey);
 });
+
+test("project closure waits for in-progress session creation and blocks new sessions until released", async () => {
+  let finishCreate!: (session: AgentSession) => void;
+  let disposed = 0;
+  const pending = new Promise<AgentSession>(resolve => { finishCreate = resolve; });
+  const router = new SessionRouter({
+    idleSweepIntervalMs: 0,
+    createSession: context => context.projectKey === "/deleting" ? pending : ({ dispose: async () => {} } as unknown as AgentSession),
+  });
+  const creation = router.getOrCreate({sessionKey: "s", projectKey: "/deleting", channelKey: "web"}).catch(error => error);
+  let closed = false;
+  const closing = router.closeProject("/deleting").then(() => { closed = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(closed, false);
+  await assert.rejects(router.getOrCreate({sessionKey: "new", projectKey: "/deleting", channelKey: "web"}), /being deleted/);
+  await router.getOrCreate({sessionKey: "other", projectKey: "/other", channelKey: "web"});
+  finishCreate({dispose: async () => { disposed++; }} as unknown as AgentSession);
+  await closing;
+  assert.match((await creation).message, /being deleted/);
+  assert.ok(disposed > 0);
+  router.resumeProject("/deleting");
+  await router.getOrCreate({sessionKey: "after", projectKey: "/deleting", channelKey: "web"});
+  router.shutdown();
+});
+
+test("project closure drains a session already being evicted", async () => {
+  let finish!: () => void;
+  const drained = new Promise<void>(resolve => { finish = resolve; });
+  const router = new SessionRouter({idleSweepIntervalMs: 0, createSession: () => ({dispose: () => drained} as unknown as AgentSession)});
+  await router.getOrCreate({sessionKey: "s", projectKey: "/project", channelKey: "web"});
+  const closingSession = router.close("s");
+  let closed = false;
+  const closingProject = router.closeProject("/project").then(() => {closed = true;});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(closed, false);
+  finish();
+  await Promise.all([closingSession, closingProject]);
+  assert.equal(closed, true);
+  router.shutdown();
+});
