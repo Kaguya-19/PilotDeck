@@ -1,4 +1,3 @@
-import { reloadUi } from '../../lib/uiDiagnostics';
 import { createFrameBatcher } from '../../utils/frameBatcher';
 import {
   useCallback,
@@ -1361,7 +1360,7 @@ export default function SidebarV2({
       </div>
       )}
 
-      <div className={cn('settings-actions flex items-center gap-1', isCompact && 'compact flex-col')}>
+      <div className={cn('settings-actions', isCompact && 'compact')}>
         <button
           type="button"
           onClick={onShowSettings}
@@ -1369,7 +1368,7 @@ export default function SidebarV2({
           title={t('sidebar:actions.settings', { defaultValue: 'Settings' }) as string}
           data-tooltip={isCompact ? t('sidebar:actions.settings', { defaultValue: 'Settings' }) as string : undefined}
           className={cn(
-            'primary-action settings-entry min-w-0 flex-1',
+            'primary-action settings-entry',
             isCompact && 'tooltip tooltip-right compact-settings',
           )}
         >
@@ -1380,14 +1379,6 @@ export default function SidebarV2({
             </svg>
           </span>
           <span className="truncate">{t('sidebar:actions.settings', { defaultValue: 'Settings' })}</span>
-        </button>
-        <button type="button" onClick={reloadUi}
-          aria-label={t('common:uiText.reloadInterface')}
-          title={t('common:uiText.reloadInterface')}
-          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-neutral-500 hover:bg-neutral-200/60 hover:text-neutral-800 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-100">
-          <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M20 7v5h-5M4 17v-5h5" /><path d="M6 7a7 7 0 0 1 12-1l2 6M4 12l2 6a7 7 0 0 0 12-1" />
-          </svg>
         </button>
       </div>
 

@@ -1,4 +1,5 @@
 import { installRendererRecovery } from "./rendererRecovery";
+import { buildApplicationMenu } from "./applicationMenu";
 import { normalizeAppearance, renderLoadingHtml, startupText, type DesktopAppearance } from "./appearance";
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from "electron";
 import { MacUpdater, NsisUpdater } from "electron-updater";
@@ -498,9 +499,7 @@ async function createOrShowWindow(): Promise<void> {
 
   const icon = resolveAppIcon();
 
-  if (process.platform === "win32") {
-    Menu.setApplicationMenu(null);
-  }
+  updateApplicationMenu();
 
   mainWindow = new BrowserWindow({
     width: 1320,
@@ -910,6 +909,12 @@ function readAppearance(): DesktopAppearance {
   } catch { return normalizeAppearance(null, app.getLocale()); }
 }
 
+function updateApplicationMenu(): void {
+  Menu.setApplicationMenu(Menu.buildFromTemplate(
+    buildApplicationMenu(process.platform, readAppearance().language),
+  ));
+}
+
 ipcMain.handle("pilotdeck:set-appearance", (event, value: unknown) => {
   requireUpdateSender(event);
   const appearance = normalizeAppearance(value, app.getLocale());
@@ -918,6 +923,7 @@ ipcMain.handle("pilotdeck:set-appearance", (event, value: unknown) => {
   if (current.language !== appearance.language || current.themeMode !== appearance.themeMode) {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, JSON.stringify(appearance), "utf8");
+    if (current.language !== appearance.language) updateApplicationMenu();
   }
 });
 

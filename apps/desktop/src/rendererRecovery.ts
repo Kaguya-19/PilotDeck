@@ -41,7 +41,7 @@ export function installRendererRecovery(window: BrowserWindow, options: Recovery
     options.log('unresponsive', {});
     void recover(false).catch(() => {});
   });
-  // Windows has no application menu. Preserve an explicit recovery shortcut.
+  // Keep F5 and reload shortcuts available while the native menu is hidden.
   window.webContents.on('before-input-event', (event, input) => {
     if (input.type !== 'keyDown' || input.isAutoRepeat || input.isComposing || input.alt) return;
     if (input.key === 'F5' || ((input.control || input.meta) && input.key.toLowerCase() === 'r')) {
