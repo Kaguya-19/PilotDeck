@@ -981,7 +981,7 @@
           "cancelTest": "Cancel",
           "textRequest": "Text request",
           "imageRequest": "Image request",
-          "imageNotDescribed": "The model replied without describing the test image."
+          "imageNotDescribed": "Could not confirm whether this model supports image input. Please verify and set this manually."
         },
         "title": "Model Pool",
         "description": "Centrally manage model providers, connection credentials, and available models. Enabled models are used by agents, routing, and memory.",
