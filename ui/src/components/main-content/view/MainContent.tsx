@@ -1,3 +1,4 @@
+import { createFrameBatcher } from '../../../utils/frameBatcher';
 import React, {
   Suspense,
   useCallback,
@@ -807,6 +808,7 @@ function SplitBody(props: SplitBodyProps) {
   }, [toolPanelMaxWidth]);
 
   useEffect(() => {
+    if (toolPanelResizing) return;
     try {
       localStorage.setItem(
         TOOL_PANEL_STORAGE_KEY,
@@ -815,13 +817,14 @@ function SplitBody(props: SplitBodyProps) {
     } catch {
       // The panel remains usable when localStorage is unavailable.
     }
-  }, [toolPanelWidth]);
+  }, [toolPanelWidth, toolPanelResizing]);
 
   useEffect(() => {
     if (!isNarrowWorkbench) setAssistantOverlayOpen(false);
   }, [isNarrowWorkbench]);
 
   useEffect(() => {
+    if (filesResizeTarget) return;
     try {
       localStorage.setItem(
         FILES_ASSISTANT_STORAGE_KEY,
@@ -830,7 +833,7 @@ function SplitBody(props: SplitBodyProps) {
     } catch {
       // Resizing remains available when persistent storage is unavailable.
     }
-  }, [filesAssistantWidth]);
+  }, [filesAssistantWidth, filesResizeTarget]);
 
   useEffect(() => {
     try {
@@ -890,7 +893,7 @@ function SplitBody(props: SplitBodyProps) {
   useEffect(() => {
     if (!filesResizeTarget) return undefined;
 
-    const handleMouseMove = (event: globalThis.MouseEvent) => {
+    const moveBatch = createFrameBatcher((event: globalThis.MouseEvent) => {
       const container = filesSplitContainerRef.current;
       if (!container) return;
 
@@ -900,9 +903,11 @@ function SplitBody(props: SplitBodyProps) {
           rect.right - event.clientX - FILES_PANEL_RAIL_WIDTH,
         ),
       );
-    };
+    });
+    const handleMouseMove = moveBatch.schedule;
 
     const handleMouseUp = () => {
+      moveBatch.flush();
       setFilesResizeTarget(null);
     };
 
@@ -912,6 +917,7 @@ function SplitBody(props: SplitBodyProps) {
     document.body.style.userSelect = "none";
 
     return () => {
+      moveBatch.cancel();
       document.removeEventListener("mousemove", handleMouseMove);
       document.removeEventListener("mouseup", handleMouseUp);
       document.body.style.cursor = "";
@@ -951,7 +957,7 @@ function SplitBody(props: SplitBodyProps) {
   useEffect(() => {
     if (!filesPanelSplitResizing) return undefined;
 
-    const handleMouseMove = (event: globalThis.MouseEvent) => {
+    const moveBatch = createFrameBatcher((event: globalThis.MouseEvent) => {
       const panel = filesSidePanelRef.current;
       if (!panel) return;
       const rect = panel.getBoundingClientRect();
@@ -968,8 +974,9 @@ function SplitBody(props: SplitBodyProps) {
             : 1 - pointerRatio,
         ),
       );
-    };
-    const handleMouseUp = () => setFilesPanelSplitResizing(false);
+    });
+    const handleMouseMove = moveBatch.schedule;
+    const handleMouseUp = () => { moveBatch.flush(); setFilesPanelSplitResizing(false); };
 
     document.addEventListener("mousemove", handleMouseMove);
     document.addEventListener("mouseup", handleMouseUp);
@@ -978,6 +985,7 @@ function SplitBody(props: SplitBodyProps) {
     document.body.style.userSelect = "none";
 
     return () => {
+      moveBatch.cancel();
       document.removeEventListener("mousemove", handleMouseMove);
       document.removeEventListener("mouseup", handleMouseUp);
       document.body.style.cursor = "";
@@ -1015,13 +1023,14 @@ function SplitBody(props: SplitBodyProps) {
   useEffect(() => {
     if (!toolPanelResizing) return undefined;
 
-    const handleMouseMove = (event: globalThis.MouseEvent) => {
+    const moveBatch = createFrameBatcher((event: globalThis.MouseEvent) => {
       const container = filesSplitContainerRef.current;
       if (!container) return;
       const rect = container.getBoundingClientRect();
       setToolPanelWidth(clampToolPanelWidth(rect.right - event.clientX));
-    };
-    const handleMouseUp = () => setToolPanelResizing(false);
+    });
+    const handleMouseMove = moveBatch.schedule;
+    const handleMouseUp = () => { moveBatch.flush(); setToolPanelResizing(false); };
 
     document.addEventListener("mousemove", handleMouseMove);
     document.addEventListener("mouseup", handleMouseUp);
@@ -1029,6 +1038,7 @@ function SplitBody(props: SplitBodyProps) {
     document.body.style.userSelect = "none";
 
     return () => {
+      moveBatch.cancel();
       document.removeEventListener("mousemove", handleMouseMove);
       document.removeEventListener("mouseup", handleMouseUp);
       document.body.style.cursor = "";

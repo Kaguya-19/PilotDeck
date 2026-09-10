@@ -698,7 +698,9 @@
     "answeredHeader": "{{header}} — 已回答",
     "answeredQuestions": "{{count}} 个问题 — 已回答",
     "questionsCount": "{{count}} 个问题",
-    "projectScope": "项目"
+    "projectScope": "项目",
+    "reloadInterface": "重新加载界面",
+    "chatLayoutError": "消息显示异常，可以尝试重新加载界面。"
   },
   "confirmDialog": {
     "title": "确认操作",

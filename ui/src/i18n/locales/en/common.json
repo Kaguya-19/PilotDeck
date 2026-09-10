@@ -714,7 +714,9 @@
     "answeredQuestions_one": "{{count}} question — answered",
     "answeredQuestions_other": "{{count}} questions — answered",
     "questionsCount_one": "{{count}} question",
-    "questionsCount_other": "{{count}} questions"
+    "questionsCount_other": "{{count}} questions",
+    "reloadInterface": "Reload interface",
+    "chatLayoutError": "Messages could not be displayed. Try reloading the interface."
   },
   "confirmDialog": {
     "title": "Confirm action",

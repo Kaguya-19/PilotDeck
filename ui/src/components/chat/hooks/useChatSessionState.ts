@@ -495,7 +495,10 @@ export function useChatSessionState({
     return all;
   }, [storeMessages, viewHiddenCount, pendingUserMessage, activeSessionId, pendingTargetSessionId, subagentLinks]);
 
-  const activityMessages = normalizedToChatMessages(activityStoreMessages);
+  const activityMessages = useMemo(
+    () => normalizedToChatMessages(activityStoreMessages),
+    [activityStoreMessages],
+  );
 
   /* ---------------------------------------------------------------- */
   /*  addMessage / clearMessages / rewindMessages                     */

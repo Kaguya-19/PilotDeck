@@ -1,3 +1,4 @@
+import { recordUiDiagnostic, reloadUi } from '../../../lib/uiDiagnostics';
 import { useTranslation } from 'react-i18next';
 import { useCallback, useState, type ErrorInfo, type ReactNode } from 'react';
 import {
@@ -59,12 +60,16 @@ function ErrorFallback({
             </details>
           )}
         </div>
-        <div className="mt-4">
+        <div className="mt-4 flex flex-wrap justify-center gap-2">
           <button
             onClick={resetErrorBoundary}
             className="rounded bg-red-600 px-4 py-2 text-sm text-white hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500"
           >
             {t('common:uiText.tryAgain')}
+          </button>
+          <button type="button" onClick={reloadUi}
+            className="rounded border border-red-300 px-4 py-2 text-sm text-red-800 hover:bg-red-100 dark:border-red-800 dark:text-red-200 dark:hover:bg-red-950">
+            {t('uiText.reloadInterface')}
           </button>
         </div>
       </div>
@@ -82,6 +87,7 @@ function ErrorBoundary({
 
   const handleError = useCallback((error: Error, errorInfo: ErrorInfo) => {
     console.error('ErrorBoundary caught an error:', error, errorInfo);
+    recordUiDiagnostic('react-boundary', { errorName: error.name });
     // Keep component stack for optional debug rendering in fallback UI.
     setComponentStack(errorInfo?.componentStack ?? null);
   }, []);

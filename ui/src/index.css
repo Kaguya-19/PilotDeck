@@ -1226,9 +1226,8 @@
   }
 
   .app-shell {
-    --sidebar-width: 220px;
     display: grid;
-    grid-template-columns: var(--sidebar-width) 1px minmax(0, 1fr);
+    grid-template-columns: 220px 1px minmax(0, 1fr);
     grid-template-rows: 62px minmax(0, 1fr);
     width: 100%;
     height: 100%;

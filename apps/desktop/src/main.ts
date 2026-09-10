@@ -1,3 +1,4 @@
+import { installRendererRecovery } from "./rendererRecovery";
 import { normalizeAppearance, renderLoadingHtml, startupText, type DesktopAppearance } from "./appearance";
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from "electron";
 import { MacUpdater, NsisUpdater } from "electron-updater";
@@ -514,6 +515,17 @@ async function createOrShowWindow(): Promise<void> {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
+    },
+  });
+
+  const recoveryWindow = mainWindow;
+  installRendererRecovery(recoveryWindow, {
+    isQuitting: () => isQuitting,
+    isChinese: () => readAppearance().language === "zh-CN",
+    showDialog: (options) => dialog.showMessageBox(recoveryWindow, options),
+    log: (event, details) => {
+      const line = `${new Date().toISOString()} [renderer] ${event} ${JSON.stringify(details)}\n`;
+      void fs.promises.appendFile(path.join(app.getPath("logs"), "renderer.log"), line).catch(() => {});
     },
   });
 

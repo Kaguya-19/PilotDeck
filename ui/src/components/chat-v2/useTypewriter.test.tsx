@@ -58,3 +58,17 @@ describe('stream text presentation', () => {
     expect(frames.size).toBe(0);
   });
 });
+
+
+it('limits long Markdown publishes and still delivers the complete text', () => {
+  let renders = 0;
+  const fullText = 'x'.repeat(10_000);
+  const view = renderHook(({ streaming }) => { renders++; return useTypewriter(fullText, streaming); },
+    { initialProps: { streaming: true } });
+  advance(1000, 120);
+  expect(renders).toBeLessThan(25);
+  view.rerender({ streaming: false });
+  advance(2000, 120);
+  expect(view.result.current).toBe(fullText);
+  expect(frames.size).toBe(0);
+});

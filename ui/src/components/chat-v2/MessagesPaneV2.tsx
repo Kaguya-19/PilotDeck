@@ -1,3 +1,4 @@
+import { recordUiDiagnostic, reloadUi } from '../../lib/uiDiagnostics';
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { Dispatch, ReactNode, RefObject, SetStateAction } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -573,7 +574,13 @@ function MessagesPaneV2({
     void heightVersion;
     return keyedMessageItems.map((item) => measuredHeightsRef.current.get(item.itemKey) ?? item.estimatedHeight);
   }, [heightVersion, keyedMessageItems]);
-  const shouldVirtualizeMessages = keyedMessageItems.length > MESSAGE_VIRTUALIZATION_THRESHOLD;
+  const shouldVirtualizeMessages = useMemo(() => (
+    keyedMessageItems.length > MESSAGE_VIRTUALIZATION_THRESHOLD
+    // A modest number of long answers can be heavier than hundreds of short
+    // messages. Keep small conversations intact for ordinary text selection.
+    || (keyedMessageItems.length > 40
+      && keyedMessageItems.reduce((height, item) => height + item.estimatedHeight, 0) > 20_000)
+  ), [keyedMessageItems]);
   // Keep the reader's row mounted when prepending history changes the virtual
   // offsets. The shared scroll controller then corrects any measured remainder.
   const virtualSnapshotRef = useRef<{ scope: string; keys: string[]; heights: number[] } | null>(null);
@@ -1186,9 +1193,46 @@ function MessagesPaneV2({
     onNavigate: revealSearchTrace,
   });
   const searchIsRenderedByShell = useRegisterChatHistorySearchControls(chatHistorySearch);
+  const [hasLayoutWarning, setHasLayoutWarning] = useState(false);
+  useEffect(() => {
+    setHasLayoutWarning(false);
+    if (isAssistantWorking || isLoadingSessionMessages || keyedMessageItems.length === 0) return;
+    // Check after completion/refresh layout has settled. Never interpret a
+    // hidden tab/panel, or an ordinary empty conversation, as a rendering fault.
+    const timer = window.setTimeout(() => {
+      const node = scrollContainerRef.current;
+      if (!node || node.clientHeight <= 0 || !node.getClientRects().length
+        || document.visibilityState === 'hidden') return;
+      const viewport = node.getBoundingClientRect();
+      const hasVisibleRow = Array.from(node.querySelectorAll<HTMLElement>('[data-message-key]'))
+        .some((row) => {
+          const rect = row.getBoundingClientRect();
+          return rect.height > 0 && rect.bottom > viewport.top && rect.top < viewport.bottom;
+        });
+      if (hasVisibleRow) return;
+      recordUiDiagnostic('chat-empty-viewport', {
+        messages: chatMessages.length, renderItems: keyedMessageItems.length,
+        windowStart: virtualWindow.startIndex, windowEnd: virtualWindow.endIndex,
+        scrollTop: node.scrollTop, scrollHeight: node.scrollHeight,
+        viewportHeight: node.clientHeight, virtualized: shouldVirtualizeMessages,
+      });
+      setHasLayoutWarning(true);
+    }, 800);
+    return () => window.clearTimeout(timer);
+  }, [isAssistantWorking, isLoadingSessionMessages, keyedMessageItems, chatMessages.length,
+    scrollContainerRef, virtualWindow.startIndex, virtualWindow.endIndex, shouldVirtualizeMessages]);
+
 
   return (
     <div className="relative min-h-0 flex-1 overflow-hidden">
+      {hasLayoutWarning ? (
+        <div role="alert" className="absolute inset-x-4 top-4 z-20 mx-auto flex max-w-xl items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200">
+          <span>{t('common:uiText.chatLayoutError')}</span>
+          <button type="button" onClick={reloadUi} className="shrink-0 rounded px-2 py-1 underline underline-offset-2 hover:bg-amber-100 dark:hover:bg-amber-900">
+            {t('common:uiText.reloadInterface')}
+          </button>
+        </div>
+      ) : null}
       {chatHistorySearch.isOpen && !searchIsRenderedByShell ? (
         <ChatHistorySearchBar
           query={chatHistorySearch.query}

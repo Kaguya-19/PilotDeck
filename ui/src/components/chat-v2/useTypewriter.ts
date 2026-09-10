@@ -10,6 +10,7 @@ export function useTypewriter(fullText: string, isStreaming: boolean, baseCharsP
   const frameRef = useRef<number | null>(null);
   const lastTimeRef = useRef<number | null>(null);
   const budgetRef = useRef(0);
+  const publishedAtRef = useRef(0);
 
   const pump = useCallback((time: number) => {
     frameRef.current = null;
@@ -27,7 +28,14 @@ export function useTypewriter(fullText: string, isStreaming: boolean, baseCharsP
     budgetRef.current -= count;
     if (count > 0) {
       lengthRef.current = Math.min(target.fullText.length, lengthRef.current + count);
-      setDisplayLen(lengthRef.current);
+      // Parsing a growing Markdown document every display frame starves
+      // keyboard/pointer work. Long replies publish at most every 50ms, while
+      // short replies retain the existing animation and the final tail flushes.
+      if (target.fullText.length < 4000 || lengthRef.current === target.fullText.length
+        || time - publishedAtRef.current >= 50) {
+        publishedAtRef.current = time;
+        setDisplayLen(lengthRef.current);
+      }
     }
     if (lengthRef.current < target.fullText.length) frameRef.current = requestAnimationFrame(pump);
     else lastTimeRef.current = null;

@@ -61,7 +61,7 @@ function createMarkdownComponents(onFileOpen?: (filePath: string) => void): Comp
   };
 }
 
-export function Markdown({
+export const Markdown = React.memo(function Markdown({
   children,
   className,
   isStreaming,
@@ -100,4 +100,4 @@ export function Markdown({
       </MarkdownSourceContext.Provider>
     </div>
   );
-}
+});

@@ -1,3 +1,5 @@
+import { reloadUi } from '../../lib/uiDiagnostics';
+import { createFrameBatcher } from '../../utils/frameBatcher';
 import {
   useCallback,
   useEffect,
@@ -355,7 +357,11 @@ export default function SidebarV2({
   useEffect(() => {
     if (isMobile) return;
     const appShell = sidebarRootRef.current?.closest<HTMLElement>('.app-shell');
-    appShell?.style.setProperty('--sidebar-width', `${sidebarWidth}px`);
+    if (!appShell) return;
+    // Updating an inherited custom property invalidates styles throughout the
+    // transcript. The grid width belongs only to the shell itself.
+    appShell.style.gridTemplateColumns = `${sidebarWidth}px 1px minmax(0, 1fr)`;
+    return () => { appShell.style.removeProperty('grid-template-columns'); };
   }, [isMobile, sidebarWidth]);
 
   const expandCompactSidebar = useCallback(() => {
@@ -376,26 +382,27 @@ export default function SidebarV2({
   }, []);
 
   useEffect(() => {
-    if (savedProjectsSplitRatio === null) return;
+    if (savedProjectsSplitRatio === null || projectsSplitResizing) return;
     try {
       window.localStorage.setItem(SIDEBAR_SPLIT_STORAGE_KEY, String(savedProjectsSplitRatio));
     } catch {
       // Split remains usable when persistent storage is unavailable.
     }
-  }, [savedProjectsSplitRatio]);
+  }, [savedProjectsSplitRatio, projectsSplitResizing]);
 
   useEffect(() => {
     if (!projectsSplitResizing) return undefined;
 
-    const handleMouseMove = (event: globalThis.MouseEvent) => {
+    const moveBatch = createFrameBatcher((event: globalThis.MouseEvent) => {
       const panel = projectsConversationsSplitRef.current;
       if (!panel) return;
       const rect = panel.getBoundingClientRect();
       const pointerRatio = (event.clientY - rect.top)
         / Math.max(1, rect.height - SIDEBAR_SPLITTER_HEIGHT);
       setProjectsSplitRatio(clampProjectsSplitRatio(pointerRatio));
-    };
-    const handleMouseUp = () => setProjectsSplitResizing(false);
+    });
+    const handleMouseMove = moveBatch.schedule;
+    const handleMouseUp = () => { moveBatch.flush(); setProjectsSplitResizing(false); };
 
     document.addEventListener('mousemove', handleMouseMove);
     document.addEventListener('mouseup', handleMouseUp);
@@ -403,6 +410,7 @@ export default function SidebarV2({
     document.body.style.userSelect = 'none';
 
     return () => {
+      moveBatch.cancel();
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
       document.body.style.cursor = '';
@@ -410,41 +418,37 @@ export default function SidebarV2({
     };
   }, [clampProjectsSplitRatio, projectsSplitResizing]);
 
+  const widthDragCleanupRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => widthDragCleanupRef.current?.(), []);
+
   const handleResizeStart = useCallback((event: MouseEvent<HTMLDivElement>) => {
     event.preventDefault();
+    widthDragCleanupRef.current?.();
     const startX = event.clientX;
     const startWidth = sidebarWidth;
+    let latestWidth = startWidth;
     setIsResizing(true);
-
-    const onMove = (e: globalThis.MouseEvent) => {
-      const next = Math.min(
-        SIDEBAR_MAX_WIDTH,
-        Math.max(SIDEBAR_MIN_WIDTH, startWidth + (e.clientX - startX)),
-      );
-      setSidebarWidth(next);
-    };
-
-    const onUp = () => {
-      setIsResizing(false);
+    const moveBatch = createFrameBatcher((e: globalThis.MouseEvent) => {
+      latestWidth = Math.min(SIDEBAR_MAX_WIDTH,
+        Math.max(SIDEBAR_MIN_WIDTH, startWidth + (e.clientX - startX)));
+      setSidebarWidth(latestWidth);
+    });
+    const onMove = moveBatch.schedule;
+    const cleanup = () => {
+      moveBatch.cancel();
       document.removeEventListener('mousemove', onMove);
       document.removeEventListener('mouseup', onUp);
-      // Persist the latest width by reading back from state — wrapped in a
-      // microtask so the latest setState has settled before we serialize.
-      queueMicrotask(() => {
-        try {
-          // Read directly off the DOM element rather than chasing closure state
-          // to avoid serializing a stale value.
-          const aside = document.querySelector<HTMLElement>('aside[data-sidebar-v2-root]');
-          const width = aside?.offsetWidth;
-          if (width && Number.isFinite(width)) {
-            window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(Math.round(width)));
-          }
-        } catch {
-          // localStorage may be unavailable in some environments — ignore.
-        }
-      });
+      widthDragCleanupRef.current = null;
     };
-
+    const onUp = () => {
+      moveBatch.flush();
+      cleanup();
+      setIsResizing(false);
+      try {
+        window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(Math.round(latestWidth)));
+      } catch { /* The width remains usable without persistent storage. */ }
+    };
+    widthDragCleanupRef.current = cleanup;
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup', onUp);
   }, [sidebarWidth]);
@@ -1357,7 +1361,7 @@ export default function SidebarV2({
       </div>
       )}
 
-      <div className={cn('settings-actions', isCompact && 'compact')}>
+      <div className={cn('settings-actions flex items-center gap-1', isCompact && 'compact flex-col')}>
         <button
           type="button"
           onClick={onShowSettings}
@@ -1365,7 +1369,7 @@ export default function SidebarV2({
           title={t('sidebar:actions.settings', { defaultValue: 'Settings' }) as string}
           data-tooltip={isCompact ? t('sidebar:actions.settings', { defaultValue: 'Settings' }) as string : undefined}
           className={cn(
-            'primary-action settings-entry',
+            'primary-action settings-entry min-w-0 flex-1',
             isCompact && 'tooltip tooltip-right compact-settings',
           )}
         >
@@ -1376,6 +1380,14 @@ export default function SidebarV2({
             </svg>
           </span>
           <span className="truncate">{t('sidebar:actions.settings', { defaultValue: 'Settings' })}</span>
+        </button>
+        <button type="button" onClick={reloadUi}
+          aria-label={t('common:uiText.reloadInterface')}
+          title={t('common:uiText.reloadInterface')}
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-neutral-500 hover:bg-neutral-200/60 hover:text-neutral-800 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-100">
+          <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M20 7v5h-5M4 17v-5h5" /><path d="M6 7a7 7 0 0 1 12-1l2 6M4 12l2 6a7 7 0 0 0 12-1" />
+          </svg>
         </button>
       </div>
 

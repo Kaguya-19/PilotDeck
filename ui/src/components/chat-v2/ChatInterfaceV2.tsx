@@ -1,3 +1,4 @@
+import ErrorBoundary from '../main-content/view/ErrorBoundary';
 import { useContext } from 'react';
 import { SessionViewReadyContext } from '../app-shell/useSessionIndicators';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
@@ -246,9 +247,9 @@ function ChatInterfaceV2({
     sendMessage,
     subscribe: subscribe || contextSubscribe,
   });
-  const sendingInputs = inputQueue.queueState.sessionId === watchedSessionId
+  const sendingInputs = React.useMemo(() => inputQueue.queueState.sessionId === watchedSessionId
     ? inputQueue.queueState.items.filter(isSendingInput)
-    : [];
+    : [], [inputQueue.queueState, watchedSessionId]);
   const sendingInputIds = sendingInputs.map((item) => item.id).join(',');
   useEffect(() => {
     if (sendingInputIds) scheduleScrollToBottom();
@@ -885,49 +886,51 @@ function ChatInterfaceV2({
 
   return (
     <div className="grid h-full min-h-0 min-w-0 grid-rows-[minmax(0,1fr)_auto] overflow-hidden bg-white dark:bg-neutral-950">
-      <MessagesPaneV2
-        scrollContainerRef={scrollContainerRef}
-        showReturnToLatest={canReturnToLatest}
-        onResumeScroll={scrollToBottom}
-        onPauseScroll={pauseScrollFollowing}
-        isLoadingSessionMessages={isLoadingSessionMessages}
-        sessionLoadError={sessionLoadError}
-        onRetrySessionLoad={handleWebSocketReconnect}
-        chatMessages={chatMessages}
-        sendingInputs={sendingInputs}
-        activityMessages={activityMessages}
-        visibleMessages={visibleMessages}
-        visibleMessageCount={visibleMessageCount}
-        isLoadingMoreMessages={isLoadingMoreMessages}
-        hasMoreMessages={hasMoreMessages}
-        totalMessages={totalMessages}
-        loadEarlierMessages={loadEarlierMessages}
-        loadAllMessages={loadAllMessages}
-        allMessagesLoaded={allMessagesLoaded}
-        isLoadingAllMessages={isLoadingAllMessages}
-        provider={'pilotdeck' as Provider}
-        selectedProject={selectedProject}
-        selectedSession={selectedSession}
-        createDiff={createDiff}
-        onFileOpen={onFileOpen}
-        onShowSettings={onShowSettings}
-        onGrantSessionToolPermission={handleGrantSessionToolPermission}
-        autoExpandTools={autoExpandTools}
-        showRawParameters={showRawParameters}
-        showThinking={showThinking}
-        inlineThinking={inlineThinking}
-        setInput={setInput}
-        isAssistantWorking={isLoading}
-        sessionRuntimeState={sessionRuntimeState}
-        activeRunId={activeRunId}
-        workingStatus={claudeStatus || pilotDeckStatus}
-        runMode={runMode}
-        planModeActive={effectivePermissionMode === 'plan'}
-        sessionStore={sessionStore}
-        onFork={sessionIsReadOnly ? undefined : handleFork}
-        onRegenerate={sessionIsReadOnly ? undefined : handleRegenerate}
-        forkDisabled={isForkPending}
-      />
+      <ErrorBoundary showDetails resetKeys={[selectedSession?.id, selectedProject?.name]}>
+        <MessagesPaneV2
+          scrollContainerRef={scrollContainerRef}
+          showReturnToLatest={canReturnToLatest}
+          onResumeScroll={scrollToBottom}
+          onPauseScroll={pauseScrollFollowing}
+          isLoadingSessionMessages={isLoadingSessionMessages}
+          sessionLoadError={sessionLoadError}
+          onRetrySessionLoad={handleWebSocketReconnect}
+          chatMessages={chatMessages}
+          sendingInputs={sendingInputs}
+          activityMessages={activityMessages}
+          visibleMessages={visibleMessages}
+          visibleMessageCount={visibleMessageCount}
+          isLoadingMoreMessages={isLoadingMoreMessages}
+          hasMoreMessages={hasMoreMessages}
+          totalMessages={totalMessages}
+          loadEarlierMessages={loadEarlierMessages}
+          loadAllMessages={loadAllMessages}
+          allMessagesLoaded={allMessagesLoaded}
+          isLoadingAllMessages={isLoadingAllMessages}
+          provider={'pilotdeck' as Provider}
+          selectedProject={selectedProject}
+          selectedSession={selectedSession}
+          createDiff={createDiff}
+          onFileOpen={onFileOpen}
+          onShowSettings={onShowSettings}
+          onGrantSessionToolPermission={handleGrantSessionToolPermission}
+          autoExpandTools={autoExpandTools}
+          showRawParameters={showRawParameters}
+          showThinking={showThinking}
+          inlineThinking={inlineThinking}
+          setInput={setInput}
+          isAssistantWorking={isLoading}
+          sessionRuntimeState={sessionRuntimeState}
+          activeRunId={activeRunId}
+          workingStatus={claudeStatus || pilotDeckStatus}
+          runMode={runMode}
+          planModeActive={effectivePermissionMode === 'plan'}
+          sessionStore={sessionStore}
+          onFork={sessionIsReadOnly ? undefined : handleFork}
+          onRegenerate={sessionIsReadOnly ? undefined : handleRegenerate}
+          forkDisabled={isForkPending}
+        />
+      </ErrorBoundary>
       {composerSlot}
     </div>
   );
