@@ -980,7 +980,8 @@
           "testing": "测试中",
           "cancelTest": "取消测试",
           "textRequest": "文本请求",
-          "imageRequest": "图片请求"
+          "imageRequest": "图片请求",
+          "imageNotDescribed": "模型已回复，但未描述测试图片。"
         },
         "title": "模型池",
         "description": "集中管理模型提供商、连接凭据和可用模型。已启用模型将供智能体、路由和记忆功能使用。",

@@ -980,7 +980,8 @@
           "testing": "Testing",
           "cancelTest": "Cancel",
           "textRequest": "Text request",
-          "imageRequest": "Image request"
+          "imageRequest": "Image request",
+          "imageNotDescribed": "The model replied without describing the test image."
         },
         "title": "Model Pool",
         "description": "Centrally manage model providers, connection credentials, and available models. Enabled models are used by agents, routing, and memory.",

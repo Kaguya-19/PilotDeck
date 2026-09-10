@@ -51,7 +51,11 @@ export default function ModelSettingsModal({ modelId, initial, task, testDisable
     ? <CheckCircle2 className="h-4 w-4 text-emerald-600 dark:text-emerald-400" aria-label={label('passed')} />
     : value === 'unsupported'
       ? <XCircle className="h-4 w-4 text-destructive" aria-label={label('failed')} />
-      : <CircleHelp className="h-4 w-4 text-muted-foreground" aria-label={label('unknown')} />;
+      : <CircleHelp className="h-4 w-4 text-amber-600 dark:text-amber-400" aria-label={label('unknown')} />;
+  const probeMessage = result?.error?.message === 'The model replied without describing the test image.'
+    ? label('imageNotDescribed')
+    : result?.error?.message;
+  const imageUnconfirmed = result?.textInput === 'supported' && result?.imageInput === 'unknown';
   const inputClass = 'mt-2 h-10 w-full rounded-lg border border-input bg-background px-3 text-sm text-foreground outline-none focus:border-primary focus:ring-1 focus:ring-primary';
   return <ConfirmDialog title={label('title')} confirmLabel={label('save')} busy={saving} disabled={!valid || running} error={error} onCancel={onClose} onConfirm={() => void save()}>
     <p className="mb-5 break-all text-sm font-medium text-foreground">{modelId}</p>
@@ -78,7 +82,7 @@ export default function ModelSettingsModal({ modelId, initial, task, testDisable
       {!running && result && <div className="mt-3 space-y-2 rounded-lg bg-muted/40 p-3 text-xs" role="status">
         <div className="flex items-center justify-between">{label('textRequest')}{status(result.textInput)}</div>
         <div className="flex items-center justify-between">{label('imageRequest')}{status(result.imageInput)}</div>
-        {result.error?.message && <p className="break-words text-muted-foreground">{result.error.message}</p>}
+        {probeMessage && <p className={`break-words ${imageUnconfirmed ? 'text-amber-600 dark:text-amber-400' : 'text-muted-foreground'}`}>{probeMessage}</p>}
       </div>}
       {(testError || task?.message) && <p role="status" className="mt-3 text-xs text-destructive">{testError || task?.message}</p>}
     </div>
