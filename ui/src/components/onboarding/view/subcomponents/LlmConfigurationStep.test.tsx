@@ -21,12 +21,16 @@ const connectionTestResult = (modelId: string, imageInput: 'supported' | 'unsupp
 
 vi.mock('react-i18next', async () => {
   const enOnboarding = (await import('../../../../i18n/locales/en/onboarding.json')).default as Record<string, unknown>;
-  const lookupTranslation = (key: string) => {
+  const lookupTranslation = (key: string, values?: Record<string, unknown>) => {
     const value = key.split('.').reduce<unknown>(
       (current, segment) => (current && typeof current === 'object' ? (current as Record<string, unknown>)[segment] : undefined),
       enOnboarding,
     );
-    return typeof value === 'string' ? value : key;
+    if (typeof value !== 'string') return key;
+    return Object.entries(values || {}).reduce(
+      (result, [name, replacement]) => result.replaceAll(`{{${name}}}`, String(replacement)),
+      value,
+    );
   };
 
   return {
@@ -295,6 +299,33 @@ describe('LlmConfigurationStep', () => {
       (button) => !(button as HTMLButtonElement).disabled,
     )).toBe(true);
     expect(screen.getByRole('button', { name: 'deepseek-v4-flash' })).toBeTruthy();
+  });
+
+  it('shows the server retry delay and blocks repeated rate-limited tests', async () => {
+    render(<LlmConfigurationStep onSaved={vi.fn()} />);
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /^DeepSeek$/ })).toBeTruthy();
+    });
+    fireEvent.click(screen.getByRole('button', { name: /^DeepSeek$/ }));
+    fireEvent.click(await screen.findByRole('button', { name: 'deepseek-v4-pro' }));
+    fireEvent.change(screen.getByLabelText(/API key/), { target: { value: 'sk-test' } });
+    mocks.authenticatedFetch.mockImplementation(async (url: string) => {
+      if (url === '/api/config/test-connections') {
+        return {
+          ok: false,
+          status: 429,
+          headers: new Headers({ 'Retry-After': '42' }),
+          json: async () => ({ code: 'RATE_LIMITED', message: 'Too many connection tests.' }),
+        };
+      }
+      return { ok: true, json: async () => ({}) };
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /Test connection/i }));
+
+    expect(await screen.findByText('Too many connection tests. Retry in 42 seconds.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Retry in 42s' })).toHaveProperty('disabled', true);
   });
 
   it('places a typed model ID into the selected list on enter', async () => {

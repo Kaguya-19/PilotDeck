@@ -220,6 +220,28 @@ describe('onboarding routes', () => {
     expect(signal.aborted).toBe(false);
   });
 
+  it('allows connection tests again after the request-rate window resets', async () => {
+    const probe = vi.fn().mockResolvedValue({ ok: false, code: 'MODEL_NOT_FOUND', error: 'unknown model' });
+    const { request } = await createOnboardingApp({ probe });
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+    const body = JSON.stringify({ providerId: 'ollama', apiKey: '', models: ['local'], retryPolicy: retryPolicy() });
+
+    for (let index = 0; index < 20; index += 1) {
+      expect((await request('/api/v1/model-connection-tests', {
+        method: 'POST', headers: { 'x-user': 'rate-window-user' }, body,
+      })).status).toBe(200);
+    }
+    const limited = await request('/api/v1/model-connection-tests', {
+      method: 'POST', headers: { 'x-user': 'rate-window-user' }, body,
+    });
+    expect(limited).toMatchObject({ status: 429, body: { code: 'RATE_LIMITED' } });
+
+    now.mockReturnValue(1_060_000);
+    expect((await request('/api/v1/model-connection-tests', {
+      method: 'POST', headers: { 'x-user': 'rate-window-user' }, body,
+    })).status).toBe(200);
+  });
+
   it('cancels model probes and releases their slot when the client disconnects', async () => {
     let probeSignal;
     const probe = vi.fn()
