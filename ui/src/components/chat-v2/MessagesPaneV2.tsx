@@ -238,6 +238,7 @@ function MeasuredMessageItem({
   message,
   isLast,
   compactBottomSpacing = false,
+  flushBottomSpacing = false,
   onHeightChange,
   children,
 }: {
@@ -245,6 +246,7 @@ function MeasuredMessageItem({
   message: ChatMessage;
   isLast: boolean;
   compactBottomSpacing?: boolean;
+  flushBottomSpacing?: boolean;
   onHeightChange: (itemKey: string, height: number) => void;
   children: ReactNode;
 }) {
@@ -284,7 +286,7 @@ function MeasuredMessageItem({
   return (
     <div
       ref={itemRef}
-      className={`chat-message ${isLast ? '' : compactBottomSpacing ? 'pb-2' : 'pb-4'}`}
+      className={`chat-message ${isLast || flushBottomSpacing ? '' : compactBottomSpacing ? 'pb-2' : 'pb-4'}`}
       data-message-key={itemKey}
       data-message-timestamp={message.timestamp ? String(message.timestamp) : undefined}
     >
@@ -1071,6 +1073,7 @@ function MessagesPaneV2({
           message={item.message}
           isLast={isLast}
           compactBottomSpacing={anchoredLiveGroups.length > 0 || rendersLiveHeaderAfterItem}
+          flushBottomSpacing={Boolean(item.turnTrace && !isProcessExpanded(`${messageWindowScope}:${item.turnTrace.id}`))}
           onHeightChange={handleMeasuredItemHeight}
         >
           {item.beforeRunAttachment ? (
