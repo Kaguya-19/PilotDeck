@@ -301,7 +301,10 @@ describe('LlmConfigurationStep', () => {
     expect(screen.getByRole('button', { name: 'deepseek-v4-flash' })).toBeTruthy();
   });
 
-  it('shows the server retry delay and blocks repeated rate-limited tests', async () => {
+  it.each([
+    ['RATE_LIMITED', 'Too many connection tests. Retry in 42 seconds.'],
+    ['TEST_BUSY', 'A previous connection test is still running. Retry in 42 seconds.'],
+  ])('shows the server retry delay and blocks repeated %s tests', async (code, expectedMessage) => {
     render(<LlmConfigurationStep onSaved={vi.fn()} />);
 
     await waitFor(() => {
@@ -316,7 +319,7 @@ describe('LlmConfigurationStep', () => {
           ok: false,
           status: 429,
           headers: new Headers({ 'Retry-After': '42' }),
-          json: async () => ({ code: 'RATE_LIMITED', message: 'Too many connection tests.' }),
+          json: async () => ({ code, message: 'Connection test unavailable.' }),
         };
       }
       return { ok: true, json: async () => ({}) };
@@ -324,7 +327,7 @@ describe('LlmConfigurationStep', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Test connection/i }));
 
-    expect(await screen.findByText('Too many connection tests. Retry in 42 seconds.')).toBeTruthy();
+    expect(await screen.findByText(expectedMessage)).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Retry in 42s' })).toHaveProperty('disabled', true);
   });
 

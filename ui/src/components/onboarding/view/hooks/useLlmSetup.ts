@@ -279,11 +279,14 @@ export default function useLlmSetup({ onSaved }: UseLlmSetupOptions = {}): LlmSe
       if (controller.signal.aborted || generation !== testGenerationRef.current) return;
       const data = await res.json();
       if (controller.signal.aborted || generation !== testGenerationRef.current) return;
-      if (res.status === 429 && data.code === 'RATE_LIMITED') {
+      if (res.status === 429 && (data.code === 'RATE_LIMITED' || data.code === 'TEST_BUSY')) {
         const retryAfterSeconds = readRetryAfterSeconds(res);
         setTestRetryAfterSeconds(retryAfterSeconds);
         setTestStatus('error');
-        setTestMessage(t('connection.testRateLimited', { seconds: retryAfterSeconds }));
+        setTestMessage(t(
+          data.code === 'TEST_BUSY' ? 'connection.testBusy' : 'connection.testRateLimited',
+          { seconds: retryAfterSeconds },
+        ));
         return;
       }
       if (!res.ok || data.status === 'failed' || typeof data.testId !== 'string') {
