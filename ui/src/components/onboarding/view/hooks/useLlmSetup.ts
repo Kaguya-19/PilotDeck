@@ -11,6 +11,8 @@ type UseLlmSetupOptions = {
   onSaved?: () => void | Promise<void>;
 };
 
+type TestRetryCode = 'RATE_LIMITED' | 'TEST_BUSY';
+
 function readRetryAfterSeconds(response: Response): number {
   const value = Number.parseInt(response.headers.get('Retry-After') || '', 10);
   return Number.isFinite(value) && value > 0 ? value : 60;
@@ -25,6 +27,7 @@ export default function useLlmSetup({ onSaved }: UseLlmSetupOptions = {}): LlmSe
   const [testStatus, setTestStatus] = useState<TestStatus>('idle');
   const [testMessage, setTestMessage] = useState('');
   const [testRetryAfterSeconds, setTestRetryAfterSeconds] = useState(0);
+  const [testRetryCode, setTestRetryCode] = useState<TestRetryCode | null>(null);
   const [modelImageSupport, setModelImageSupport] = useState<Record<string, ModelImageSupport>>({});
   const [manualModelIds, setManualModelIds] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
@@ -261,6 +264,7 @@ export default function useLlmSetup({ onSaved }: UseLlmSetupOptions = {}): LlmSe
     testAbortRef.current = controller;
     setTestStatus('testing');
     setTestMessage('');
+    setTestRetryCode(null);
     setConnectionTestId('');
     setManualModelIds([]);
     try {
@@ -282,11 +286,9 @@ export default function useLlmSetup({ onSaved }: UseLlmSetupOptions = {}): LlmSe
       if (res.status === 429 && (data.code === 'RATE_LIMITED' || data.code === 'TEST_BUSY')) {
         const retryAfterSeconds = readRetryAfterSeconds(res);
         setTestRetryAfterSeconds(retryAfterSeconds);
+        setTestRetryCode(data.code);
         setTestStatus('error');
-        setTestMessage(t(
-          data.code === 'TEST_BUSY' ? 'connection.testBusy' : 'connection.testRateLimited',
-          { seconds: retryAfterSeconds },
-        ));
+        setTestMessage('');
         return;
       }
       if (!res.ok || data.status === 'failed' || typeof data.testId !== 'string') {
@@ -492,13 +494,20 @@ export default function useLlmSetup({ onSaved }: UseLlmSetupOptions = {}): LlmSe
     }
   }, [apiKey, connectionTestId, customProviderIdError, effectiveModelId, effectiveModelIds, effectiveProtocol, effectiveProviderId, effectiveUrl, modelImageSupport, onSaved, selectedProvider]);
 
+  const visibleTestMessage = testRetryCode && testRetryAfterSeconds > 0
+    ? t(
+        testRetryCode === 'TEST_BUSY' ? 'connection.testBusy' : 'connection.testRateLimited',
+        { seconds: testRetryAfterSeconds },
+      )
+    : testMessage;
+
   return {
     selectedProvider,
     modelIds,
     apiKey,
     customUrl,
     testStatus,
-    testMessage,
+    testMessage: visibleTestMessage,
     testRetryAfterSeconds,
     saving,
     apiModels,
