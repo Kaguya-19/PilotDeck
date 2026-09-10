@@ -1,5 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { JsonlTranscriptWriter } from "../../src/session/transcript/JsonlTranscriptWriter.js";
+import { SessionRouter } from "../../src/gateway/SessionRouter.js";
 
 import type { AgentEvent } from "../../src/agent/protocol/events.js";
 import type { AgentTurnResult } from "../../src/agent/protocol/result.js";
@@ -350,4 +355,89 @@ test("title request failure does not fail a completed conversation", async () =>
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(session.snapshot().status, "idle");
   assert.equal(metadataStore.getSnapshot().aiTitle, undefined);
+});
+
+
+for (const replace of [false, true]) {
+  test(`closing a session prevents its late title from ${replace ? "changing a replacement transcript" : "recreating a deleted transcript"}`, async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pilotdeck-title-lifecycle-"));
+    const path = join(directory, "session.jsonl");
+    const sessionId = "web:late-title";
+    const transcript = new JsonlTranscriptWriter({ path });
+    const metadataStore = new SessionMetadataStore({ transcript, sessionId });
+    let resolveTitle!: (title: string) => void;
+    let signal: AbortSignal | undefined;
+    const title = new Promise<string>(resolve => { resolveTitle = resolve; });
+    const loop = {
+      async *run(input: AgentLoopInput): AsyncGenerator<AgentEvent, AgentLoopRunResult, unknown> {
+        const completed = result(sessionId);
+        yield { type: "turn_completed", sessionId, turnId: input.turnId, result: completed };
+        return { result: completed, messages: input.messages };
+      },
+    } as AgentLoop;
+    const runner = new TurnRunner(loop, transcript, undefined, () => new Date(), undefined,
+      { cwd: directory, transcriptPath: path, collectFileArtifacts: false },
+      { metadataStore, autoGenerateSessionTitle: true, sessionTitleGenerator: async input => { signal = input.signal; return title; } });
+    const router = new SessionRouter({ createSession: () => new AgentSession({ sessionId, turnRunner: runner }), idleSweepIntervalMs: 0 });
+    try {
+      const session = await router.getOrCreate({ sessionKey: sessionId, channelKey: "web" });
+      for await (const _ of session.submit({ type: "text", text: "Old request" })) { /* drain */ }
+      assert.match(await readFile(path, "utf8"), /Old request/);
+      await router.close(sessionId);
+      assert.equal(signal?.aborted, true);
+      await rm(path);
+      if (replace) await writeFile(path, "replacement transcript\n");
+      // Deliberately ignore the abort signal, as an incompatible provider can.
+      resolveTitle("Obsolete title");
+      await new Promise(resolve => setImmediate(resolve));
+      // Also exercise old queued callers after closure, not only the title guard.
+      await metadataStore.saveAiTitle("Late direct write");
+      if (replace) assert.equal(await readFile(path, "utf8"), "replacement transcript\n");
+      else await assert.rejects(readFile(path), { code: "ENOENT" });
+    } finally {
+      resolveTitle("cleanup");
+      await router.close(sessionId);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+}
+
+test("closing a transcript drains in-flight writes and discards queued and future writes", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pilotdeck-writer-close-"));
+  const path = join(directory, "session.jsonl");
+  const writer = new JsonlTranscriptWriter({ path });
+  try {
+    await writer.recordSessionMetadata("s", "t", { title: "Original" });
+    const queued = writer.recordSessionMetadata("s", "t", { aiTitle: "Queued" });
+    await writer.close();
+    await queued;
+    await rm(path);
+    await writer.recordSessionMetadata("s", "t", { aiTitle: "Too late" });
+    await assert.rejects(readFile(path), { code: "ENOENT" });
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+
+test("concurrent close and reopen wait for the previous session writer to drain", async () => {
+  let finishClose!: () => void;
+  const closing = new Promise<void>(resolve => { finishClose = resolve; });
+  let created = 0;
+  const router = new SessionRouter({
+    createSession: () => { created++; return { dispose: () => closing } as unknown as AgentSession; },
+    idleSweepIntervalMs: 0,
+  });
+  const context = {sessionKey: "web:closing", channelKey: "web"};
+  await router.getOrCreate(context);
+  const firstClose = router.close(context.sessionKey);
+  let secondClosed = false;
+  const secondClose = router.close(context.sessionKey).then(() => { secondClosed = true; });
+  const reopened = router.getOrCreate(context);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(secondClosed, false);
+  assert.equal(created, 1);
+  finishClose();
+  await Promise.all([firstClose, secondClose, reopened]);
+  assert.equal(secondClosed, true);
+  assert.equal(created, 2);
+  await router.close(context.sessionKey);
 });

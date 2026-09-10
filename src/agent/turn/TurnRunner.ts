@@ -79,6 +79,7 @@ type PendingSessionTitle = {
 const SESSION_LISTING_PROMPT_MAX_CHARS = 1_200;
 
 export class TurnRunner {
+  private disposed = false;
   private pendingSessionTitle: PendingSessionTitle | undefined;
 
   constructor(
@@ -394,11 +395,21 @@ export class TurnRunner {
     };
   }
 
+  /** Invalidate background work before the session transcript is removed/replaced. */
+  async dispose(): Promise<void> {
+    this.disposed = true;
+    this.pendingSessionTitle?.controller.abort("session_closed");
+    this.pendingSessionTitle?.cleanup();
+    // A provider may ignore cancellation. Do not wait for its network request;
+    // the completion guard below prevents it from ever saving a late title.
+    await this.transcript.close?.();
+  }
+
   private maybeGenerateSessionTitle(
     options: TurnRunnerOptions,
     acceptedMessages: CanonicalMessage[],
   ): PendingSessionTitle | undefined {
-    if (this.turnDependencies.autoGenerateSessionTitle !== true) {
+    if (this.disposed || this.turnDependencies.autoGenerateSessionTitle !== true) {
       return undefined;
     }
     const metadataStore = this.turnDependencies.metadataStore;
@@ -432,6 +443,7 @@ export class TurnRunner {
         signal: controller.signal,
       })
         .then(async (title) => {
+          if (this.disposed || controller.signal.aborted) return;
           pending.title = title;
           if (title) {
             const snap = metadataStore.getSnapshot();

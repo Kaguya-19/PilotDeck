@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { StrictMode } from 'react';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import FolderBrowserModal from './FolderBrowserModal';
@@ -96,7 +97,7 @@ describe('folder navigation', () => {
   const child = (name: string) => ({ name, path: '/home/' + name });
   const renderPicker = (initialPath?: string) => {
     const selected = vi.fn();
-    render(<FolderBrowserModal isOpen initialPath={initialPath} autoAdvanceOnSelect onClose={vi.fn()} onFolderSelected={selected} />);
+    render(<StrictMode><FolderBrowserModal isOpen initialPath={initialPath} autoAdvanceOnSelect onClose={vi.fn()} onFolderSelected={selected} /></StrictMode>);
     return selected;
   };
   beforeEach(() => {
@@ -104,6 +105,12 @@ describe('folder navigation', () => {
     mocks.browseFilesystemFolders.mockImplementation(async (path: string) => ({path: path === '~' ? '/home' : path, suggestions: path === '~' || path === '/home' ? [child('Alpha'), child('Beta'), child('.hidden')] : []}));
   });
   afterEach(() => { cleanup(); vi.clearAllMocks(); });
+  it('initializes an explicit path under StrictMode without user navigation', async () => {
+    const selected = renderPicker('/home/Beta');
+    await screen.findByRole('region', { name: '/home/Beta' });
+    fireEvent.click(screen.getByRole('button', { name: 'Use this folder' }));
+    expect(selected).toHaveBeenCalledWith('/home/Beta', true);
+  });
   it('keeps the parent column and selects only on confirmation', async () => {
     const selected = renderPicker();
     fireEvent.click(await screen.findByRole('button', {name: 'Alpha'}));

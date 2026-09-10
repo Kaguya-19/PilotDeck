@@ -512,6 +512,10 @@ async function deleteSession(projectName, sessionId, _options = {}) {
     const fullPath = await extractProjectDirectory(projectName);
     const pilotHome = resolvePilotHome(process.env);
     const projectId = await resolveProjectIdForPathOrName(projectName, fullPath);
+    // The Gateway owns background title requests and the transcript write queue.
+    // Drain/close it before unlinking, so late completions cannot recreate files.
+    const gateway = await getPilotDeckGateway();
+    await gateway.closeSession({ sessionKey: sessionId, reason: 'session_deleted' });
     // Try the sanitized filename first (current storage layout), then the
     // raw form (legacy files written before the sanitize fix).
     const safeId = sanitizeSessionIdForPath(sessionId);

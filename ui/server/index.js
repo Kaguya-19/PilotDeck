@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { createSessionActivityRegistry } from './session-activity.js';
+import { createBackgroundSessionForwarder, createSessionActivityRegistry } from './session-activity.js';
 import '../../scripts/check-node-runtime.mjs';
 // Load environment variables before other imports execute
 import { assertRequiredPilotDeckEnv } from './load-env.js';
@@ -208,13 +208,13 @@ function broadcastSessionActivity(frame, userId) {
     }
 }
 const sessionWatchRegistry = createSessionWatchRegistry();
-registerAlwaysOnNotificationForwarding(connectedClients, (sessionId, frame) => {
-    // Always-On gateway notifications do not carry the originating UI socket.
-    // Delivering them to every tab caused unrelated sessions' live status
-    // (notably compaction progress) to race in the frontend. A tab explicitly
-    // watches its displayed session, so that registry is the routing authority.
-    broadcastToSessionWatchers(sessionId, frame, undefined);
-});
+registerAlwaysOnNotificationForwarding(connectedClients, createBackgroundSessionForwarder({
+    // This installation is single-user (including authenticated OSS mode).
+    // Resolve its persisted owner, never the set of currently connected watchers.
+    getUserId: () => userDb.getFirstUser()?.id,
+    broadcastActivity: broadcastSessionActivity,
+    forwardToWatchers: broadcastToSessionWatchers,
+}));
 let isGetProjectsRunning = false; // Flag to prevent reentrant calls
 
 function normalizeSessionId(value) {

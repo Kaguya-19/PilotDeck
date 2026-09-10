@@ -46,3 +46,14 @@ export function createSessionActivityRegistry() {
         },
     };
 }
+
+/** Background turns have no originating socket; resolve the instance owner,
+ * record activity even with no watchers, and keep full frames session-scoped. */
+export function createBackgroundSessionForwarder({ getUserId, broadcastActivity, forwardToWatchers }) {
+    return (sessionId, frame) => {
+        const userId = getUserId();
+        if (userId === undefined || userId === null) return;
+        broadcastActivity(frame, userId);
+        forwardToWatchers(sessionId, frame, userId);
+    };
+}

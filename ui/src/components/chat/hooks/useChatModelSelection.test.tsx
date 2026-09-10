@@ -25,7 +25,10 @@ function accept(runId: string, sessionId: string) { act(() => mocks.store.receiv
 function send(runId: string, sessionId: string, selection = A as typeof A | typeof B | typeof AUTO, project = '/a') { track(runId, selection, project, sessionId); accept(runId, sessionId); }
 beforeEach(() => {
   localStorage.clear(); mocks.fetch.mockReset();
-  mocks.fetch.mockImplementation((url: string) => Promise.resolve(json(url.startsWith('/api/models?') ? catalog : {})));
+  mocks.fetch.mockImplementation((url: string) => {
+    const query = new URL(url, 'http://localhost').searchParams;
+    return Promise.resolve(json(url.startsWith('/api/models?') ? catalog : { saved: readSessionModelSelection(query.get('projectKey') || '', query.get('sessionKey') || '') }));
+  });
   mocks.store = createGlobalModelSelectionStore();
 });
 afterEach(cleanup);
@@ -114,7 +117,7 @@ describe('conversation model memory', () => {
     expect(hook.result.current.modelSelection).toEqual(A);
   });
   it('keeps a removed historical model visible but blocks sending until explicitly replaced', async () => {
-    send('a', 'web:a', A); mocks.fetch.mockImplementation((url: string) => Promise.resolve(json(url.startsWith('/api/models?') ? { ...catalog, items: [] } : {})));
+    send('a', 'web:a', A); mocks.fetch.mockImplementation((url: string) => Promise.resolve(json(url.startsWith('/api/models?') ? { ...catalog, items: [] } : { saved: A })));
     const hook = mount('/a', 'web:a'); await waitFor(() => expect(hook.result.current.isModelCatalogLoading).toBe(false));
     expect(hook.result.current.modelSelection).toEqual(A); expect(hook.result.current.isModelSelectionReady).toBe(false); expect(hook.result.current.modelCatalogError).toBeNull();
     mocks.fetch.mockResolvedValue(json({ ...catalog, items: items.filter(x=>x.model===B.model) })); act(()=>mocks.store.invalidate());
@@ -130,5 +133,61 @@ describe('conversation model memory', () => {
     const hook=mount(); await ready(hook); act(()=>hook.result.current.setModelSelection(A));
     mocks.fetch.mockResolvedValue(json({ ...catalog, items: items.filter(x=>x.model===B.model) })); act(()=>mocks.store.invalidate());
     await waitFor(()=>expect(hook.result.current.modelCatalogError).toContain('HXAPI/first')); expect(saved()).toBeNull();
+  });
+});
+
+
+describe('server model reconciliation', () => {
+  it('shows cache immediately, then restores the server choice after a full reload', async () => {
+    send('old', 'web:a', A);
+    mocks.store = createGlobalModelSelectionStore();
+    const response = deferred<ReturnType<typeof json>>();
+    mocks.fetch.mockImplementation((url: string) => url.startsWith('/api/models?') ? Promise.resolve(json(catalog)) : response.promise);
+    const hook = mount('/a', 'web:a');
+    expect(hook.result.current.modelSelection).toEqual(A);
+    expect(hook.result.current.isModelSelectionReady).toBe(false);
+    await act(() => response.resolve(json({ saved: B })));
+    await waitFor(() => expect(hook.result.current.modelSelection).toEqual(B));
+    expect(saved()).toEqual(A);
+  });
+  it('rechecks history after another client sends without changing the global preference', async () => {
+    send('old', 'web:a', A);
+    const hook = mount('/a', 'web:a'); await ready(hook);
+    mocks.fetch.mockResolvedValue(json({ saved: AUTO }));
+    accept('another-client', 'web:a');
+    await waitFor(() => expect(hook.result.current.modelSelection).toEqual(AUTO));
+    expect(saved()).toEqual(A);
+  });
+  it('does not let an older history response overwrite a newly accepted send', async () => {
+    send('old', 'web:a', A);
+    const response = deferred<ReturnType<typeof json>>();
+    mocks.fetch.mockImplementation((url: string) => url.startsWith('/api/models?') ? Promise.resolve(json(catalog)) : response.promise);
+    const hook = mount('/a', 'web:a');
+    await waitFor(() => expect(hook.result.current.isModelCatalogLoading).toBe(false));
+    mocks.fetch.mockResolvedValue(json({ saved: B }));
+    send('new', 'web:a', B);
+    await act(() => response.resolve(json({ saved: A })));
+    await waitFor(() => expect(hook.result.current.modelSelection).toEqual(B));
+  });
+  it('preserves an unsent manual choice through both initial and event-triggered reconciliation', async () => {
+    send('old', 'web:a', A);
+    const response = deferred<ReturnType<typeof json>>();
+    mocks.fetch.mockImplementation((url: string) => url.startsWith('/api/models?') ? Promise.resolve(json(catalog)) : response.promise);
+    const hook = mount('/a', 'web:a');
+    await waitFor(() => expect(hook.result.current.isModelCatalogLoading).toBe(false));
+    act(() => hook.result.current.setModelSelection(AUTO));
+    await act(() => response.resolve(json({ saved: B })));
+    expect(hook.result.current.modelSelection).toEqual(AUTO);
+    mocks.fetch.mockResolvedValue(json({ saved: B }));
+    accept('another-client', 'web:a');
+    await act(async () => {});
+    expect(hook.result.current.modelSelection).toEqual(AUTO);
+    expect(saved()).toEqual(A);
+  });
+  it('uses the global preference when the server no longer has a record despite an old cache', async () => {
+    send('old', 'web:a', A); send('global', 'web:b', B);
+    mocks.fetch.mockImplementation((url: string) => Promise.resolve(json(url.startsWith('/api/models?') ? catalog : { saved: null })));
+    const hook = mount('/a', 'web:a');
+    await waitFor(() => expect(hook.result.current.modelSelection).toEqual(B));
   });
 });

@@ -50,6 +50,7 @@ const DEFAULT_IDLE_SWEEP_INTERVAL_MS = 60 * 1000;
 
 export class SessionRouter {
   private readonly sessions = new Map<string, SessionRecord>();
+  private readonly closingSessions = new Map<string, Promise<void>>();
   private readonly inFlightTurns = new Map<string, string>();
   private readonly idleSessionTimeoutMs: number;
   private readonly idleSweepIntervalMs: number;
@@ -69,11 +70,13 @@ export class SessionRouter {
 
   async getOrCreate(context: GatewaySessionContext): Promise<AgentSession> {
     this.sweepIdle();
+    const closing = this.closingSessions.get(context.sessionKey);
+    if (closing) await closing;
     const cached = this.sessions.get(context.sessionKey);
     if (cached) {
       cached.context = mergeSessionContext(cached.context, context);
       if (cached.dirtyReason && this.options.recreateSession) {
-        this.emitSessionEvict(context.sessionKey, cached, "dirty_recreate");
+        await this.emitSessionEvict(context.sessionKey, cached, "dirty_recreate");
         cached.session = await this.options.recreateSession(cached.context, cached.session);
         cached.dirtyReason = undefined;
       }
@@ -149,7 +152,10 @@ export class SessionRouter {
   async close(sessionKey: string): Promise<void> {
     const record = this.sessions.get(sessionKey);
     if (record && this.sessions.delete(sessionKey)) {
-      this.emitSessionEvict(sessionKey, record, "closed");
+      await this.emitSessionEvict(sessionKey, record, "closed");
+    } else {
+      // An idle eviction or another close may already be draining this writer.
+      await this.closingSessions.get(sessionKey);
     }
   }
 
@@ -215,7 +221,7 @@ export class SessionRouter {
       clearInterval(this.idleSweepTimer);
     }
     for (const [sessionKey, record] of this.sessions) {
-      this.emitSessionEvict(sessionKey, record, "shutdown");
+      void this.emitSessionEvict(sessionKey, record, "shutdown").catch(() => undefined);
     }
     this.sessions.clear();
     this.inFlightTurns.clear();
@@ -245,7 +251,7 @@ export class SessionRouter {
       }
       if (now - record.lastUsedAt > this.idleSessionTimeoutMs) {
         this.sessions.delete(sessionKey);
-        this.emitSessionEvict(sessionKey, record, "idle");
+        void this.emitSessionEvict(sessionKey, record, "idle").catch(() => undefined);
       }
     }
   }
@@ -254,11 +260,16 @@ export class SessionRouter {
     sessionKey: string,
     record: SessionRecord,
     reason: "idle" | "closed" | "dirty_recreate" | "shutdown",
-  ): void {
+  ): Promise<void> {
+    const disposed = (record.session.dispose?.() ?? Promise.resolve()).finally(() => {
+      if (this.closingSessions.get(sessionKey) === disposed) this.closingSessions.delete(sessionKey);
+    });
+    this.closingSessions.set(sessionKey, disposed);
     this.options.onSessionEvict?.(sessionKey);
     if (reason === "idle") {
       this.options.onSessionIdleEvict?.(sessionKey, snapshotEvictedSession(sessionKey, record));
     }
+    return disposed;
   }
 
   private nowMs(): number {

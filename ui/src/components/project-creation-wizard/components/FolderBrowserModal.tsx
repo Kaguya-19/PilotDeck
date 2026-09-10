@@ -95,14 +95,15 @@ function FolderPicker({ initialPath, autoAdvanceOnSelect, onClose, onFolderSelec
   };
   useEffect(() => {
     let active = true;
+    const initialSequence = sequence.current;
     const previousFocus = document.activeElement as HTMLElement | null;
     searchInput.current?.focus();
     void read('~').then(async data => {
       if (!active) return;
       setHome(data);
-      if (sequence.current > 0) return;
+      if (sequence.current !== initialSequence) return;
       const ok = await navigate(initialPath?.trim() || preferences.recent[0] || data.path);
-      if (!ok && active && sequence.current === 1) await navigate(data.path, []);
+      if (!ok && active && sequence.current === initialSequence + 1) await navigate(data.path, []);
 
     }).catch(() => { if (active) { setBusy(false); setError(label('loadFailed')); } });
     const keydown = (event: KeyboardEvent) => {

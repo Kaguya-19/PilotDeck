@@ -78,6 +78,11 @@ export function createGlobalModelSelectionStore() {
   let submissionOrder = 0;
   let lastGlobalOrder = 0;
   const sessionOrders = new Map<string, number>();
+  const sessionRevisions = new Map<string, number>();
+  const invalidateSession = (sessionId: string) => {
+    sessionRevisions.set(sessionId, (sessionRevisions.get(sessionId) ?? 0) + 1);
+    publish({});
+  };
   type Pending = { projectKey: string; sessionId?: string; selection: ChatModelSelection; order: number; expires: number };
   const pending = new Map<string, Pending>();
   const accept = (entry: Pending, sessionId: string) => {
@@ -96,6 +101,7 @@ export function createGlobalModelSelectionStore() {
 
   return {
     getSnapshot: () => state,
+    getSessionRevision: (sessionId: string) => sessionRevisions.get(sessionId) ?? 0,
     subscribe(listener: () => void) {
       if (listeners.size === 0) {
         // A different tab may have changed the preference while no composer was mounted.
@@ -137,11 +143,17 @@ export function createGlobalModelSelectionStore() {
       if (!queued && message?.type !== 'model-selection-saved') return;
       const key = `${queued ? 'queue' : 'run'}:${queued ? message.requestId : message.runId}`;
       const entry = pending.get(key);
-      // Ignore replay, another client's traffic, duplicates, and a different session's response.
-      if (!entry || (entry.sessionId && entry.sessionId !== message.sessionId)) return;
+      // Another client's accepted send invalidates history, but must not change
+      // this client's global last-send preference or an unsent composer draft.
+      if (!entry) {
+        if (!queued && typeof message.sessionId === 'string' && message.sessionId) invalidateSession(message.sessionId);
+        return;
+      }
+      if (entry.sessionId && entry.sessionId !== message.sessionId) return;
       pending.delete(key);
       if (entry.expires < Date.now() || (queued && message.ok !== true) || typeof message.sessionId !== 'string' || !message.sessionId) return;
       accept(entry, message.sessionId);
+      invalidateSession(message.sessionId);
     },
   };
 }

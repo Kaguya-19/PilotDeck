@@ -37,4 +37,6 @@ export type AgentTranscriptWriter = {
   ): void | Promise<void>;
   recordEntry?(entry: AgentTranscriptEntry): void | Promise<void>;
   snapshotState?(): AgentTranscriptWriterState;
+  /** Stop accepting writes and wait for any in-flight append to finish. */
+  close?(): Promise<void>;
 };

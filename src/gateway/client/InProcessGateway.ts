@@ -1109,6 +1109,8 @@ export class InProcessGateway implements Gateway {
         });
       }
 
+      // Stop background metadata writes before reading or rewriting the old tail.
+      await this.router.close(input.sessionKey);
       result = await this.options.replaceLastTurn(input);
       this.pendingTurnReplacements.set(input.sessionKey, {
         transactionId: result.transactionId,
@@ -1117,9 +1119,6 @@ export class InProcessGateway implements Gateway {
         phase: "prepared",
       });
       this.scheduleReplacementTimeout(input.sessionKey);
-      // The cached AgentSession and transcript writer still reflect the old tail.
-      // Evict them so the replacement submit resumes from the rewritten JSONL.
-      await this.router.close(input.sessionKey);
       return result;
     } catch (error) {
       this.clearPendingTurnReplacement(input.sessionKey);
