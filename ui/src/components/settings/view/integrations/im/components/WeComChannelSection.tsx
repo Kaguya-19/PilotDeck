@@ -368,7 +368,7 @@ export default function WeComChannelSection({
                   type="password"
                   value={secret}
                   onChange={(e) => setSecret(e.target.value.trim())}
-                  placeholder={status.hasSecret ? "Keep existing secret" : "••••••••"}
+                  placeholder={status.hasSecret ? t('common:uiText.keepSecret') : "••••••••"}
                   className="h-9 w-full rounded-lg border border-border bg-muted px-3 font-mono text-[13px] text-foreground outline-none placeholder:text-muted-foreground/50 focus:border-ring focus:ring-1 focus:ring-ring"
                 />
               </label>
@@ -393,9 +393,9 @@ export default function WeComChannelSection({
                     onChange={(e) => setDmPolicy(e.target.value as WeComAccessPolicy)}
                     className="h-9 w-full rounded-lg border border-border bg-muted px-3 text-[13px] text-foreground outline-none focus:border-ring focus:ring-1 focus:ring-ring"
                   >
-                    <option value="open">open</option>
-                    <option value="allowlist">allowlist</option>
-                    <option value="disabled">disabled</option>
+                    <option value="open">{t('common:uiText.policyOpen')}</option>
+                    <option value="allowlist">{t('common:uiText.policyAllowlist')}</option>
+                    <option value="disabled">{t('common:uiText.policyDisabled')}</option>
                   </select>
                 </label>
                 <label className="space-y-1">
@@ -407,15 +407,15 @@ export default function WeComChannelSection({
                     onChange={(e) => setGroupPolicy(e.target.value as WeComAccessPolicy)}
                     className="h-9 w-full rounded-lg border border-border bg-muted px-3 text-[13px] text-foreground outline-none focus:border-ring focus:ring-1 focus:ring-ring"
                   >
-                    <option value="disabled">disabled</option>
-                    <option value="allowlist">allowlist</option>
-                    <option value="open">open</option>
+                    <option value="disabled">{t('common:uiText.policyDisabled')}</option>
+                    <option value="allowlist">{t('common:uiText.policyAllowlist')}</option>
+                    <option value="open">{t('common:uiText.policyOpen')}</option>
                   </select>
                 </label>
               </div>
               {dmPolicy === "allowlist" && (
                 <label className="block space-y-1">
-                  <span className="text-xs font-medium text-muted-foreground">DM allowlist</span>
+                  <span className="text-xs font-medium text-muted-foreground">{t('common:uiText.dmAllowlist')}</span>
                   <input
                     type="text"
                     value={allowFrom}
@@ -427,7 +427,7 @@ export default function WeComChannelSection({
               )}
               {groupPolicy === "allowlist" && (
                 <label className="block space-y-1">
-                  <span className="text-xs font-medium text-muted-foreground">Group allowlist</span>
+                  <span className="text-xs font-medium text-muted-foreground">{t('common:uiText.groupAllowlist')}</span>
                   <input
                     type="text"
                     value={groupAllowFrom}

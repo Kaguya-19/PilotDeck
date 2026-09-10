@@ -4,10 +4,12 @@ import { authenticatedFetch } from '../../../../../utils/api';
 export type ConnectionTestTask = {
   id: string;
   providerId: string;
+  modelId?: string;
+  acknowledged?: boolean;
   status: 'testing' | 'savingTest' | 'manual' | 'success' | 'error' | 'saveError' | 'cancelling' | 'cancelled';
   message?: string;
   code?: string;
-  result?: { models?: Array<{ modelId: string; textInput: string; imageInput: string }> };
+  result?: { models?: Array<{ modelId: string; textInput: string; imageInput: string; error?: { message?: string } }> };
 };
 export const isTestTaskBusy = (task?: ConnectionTestTask) => !!task && ['testing', 'savingTest', 'manual', 'cancelling'].includes(task.status);
 const endpoint = '/api/config/connection-test-tasks';
@@ -81,8 +83,9 @@ export function useConnectionTestTasks() {
   };
   return {
     tasks, checking, pending, errorCode,
-    start: (providerId: string) => action('', { providerId }),
+    start: (providerId: string, modelId?: string) => action('', { providerId, ...(modelId ? { modelId } : {}) }),
     retry: (id: string) => action(`/${encodeURIComponent(id)}/retry`),
+    acknowledge: (id: string) => action(`/${encodeURIComponent(id)}/acknowledge`),
     cancel: (id: string) => action(`/${encodeURIComponent(id)}/cancel`),
     confirm: (id: string, values: Record<string, boolean>) => action(`/${encodeURIComponent(id)}/image-capabilities`, {
       models: Object.entries(values).map(([modelId, supported]) => ({ modelId, imageInput: supported ? 'supported' : 'unsupported' })),

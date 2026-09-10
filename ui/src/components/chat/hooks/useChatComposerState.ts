@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { getSubmittedCommand, isModelIndependentCommand } from '../utils/composerCommand';
 import type {
   ChangeEvent,
@@ -330,6 +330,7 @@ export function useChatComposerState({
   >(null);
   const inputValueRef = useRef(input);
   const activeDraftStorageKeyRef = useRef(draftStorageKey);
+  const draftSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingSessionGrantResolversRef = useRef(new Map<string, (result: PermissionGrantResult) => void>());
   const activeAttachmentUploadsRef = useRef<AttachmentUploadBatch[]>([]);
   const completedAttachmentUploadsRef = useRef<Map<File, CompletedAttachmentUpload>>(new Map());
@@ -1596,17 +1597,44 @@ export function useChatComposerState({
     inputValueRef.current = input;
   }, [input]);
 
-  useEffect(() => {
+  const flushDraft = useCallback(() => {
+    if (draftSaveTimerRef.current !== null) clearTimeout(draftSaveTimerRef.current);
+    draftSaveTimerRef.current = null;
     const key = activeDraftStorageKeyRef.current;
     if (!key) return;
-    if (input !== '') {
-      safeLocalStorage.setItem(key, input);
-    } else {
-      safeLocalStorage.removeItem(key);
-    }
-  }, [input]);
+    const value = inputValueRef.current;
+    if (value !== '') safeLocalStorage.setItem(key, value);
+    else safeLocalStorage.removeItem(key);
+  }, []);
 
   useEffect(() => {
+    // Clearing after a send is immediate. Typing coalesces disk writes, while
+    // navigation, reload and backgrounding flush the latest draft below.
+    if (input === '') flushDraft();
+    else draftSaveTimerRef.current = setTimeout(flushDraft, 300);
+    return () => {
+      if (draftSaveTimerRef.current !== null) clearTimeout(draftSaveTimerRef.current);
+    };
+  }, [input, flushDraft]);
+
+  useEffect(() => {
+    const onHidden = () => { if (document.visibilityState === 'hidden') flushDraft(); };
+    window.addEventListener('pagehide', flushDraft);
+    window.addEventListener('beforeunload', flushDraft);
+    window.addEventListener('pilotdeck:flush-drafts', flushDraft);
+    document.addEventListener('visibilitychange', onHidden);
+    return () => {
+      flushDraft();
+      window.removeEventListener('pagehide', flushDraft);
+      window.removeEventListener('beforeunload', flushDraft);
+      window.removeEventListener('pilotdeck:flush-drafts', flushDraft);
+      document.removeEventListener('visibilitychange', onHidden);
+    };
+  }, [flushDraft]);
+
+  useEffect(() => {
+    if (draftSaveTimerRef.current !== null) clearTimeout(draftSaveTimerRef.current);
+    draftSaveTimerRef.current = null;
     const previousKey = activeDraftStorageKeyRef.current;
     const previousInput = inputValueRef.current;
     if (previousKey && previousKey !== draftStorageKey) {
@@ -1650,24 +1678,20 @@ export function useChatComposerState({
     }
   }, []);
 
-  useEffect(() => {
-    if (!textareaRef.current) {
+  useLayoutEffect(() => {
+    const node = textareaRef.current;
+    if (!node) return;
+    // Measure once after React applies the value, including restored drafts.
+    // onInput must not perform the same write/read cycle a second time.
+    node.style.height = 'auto';
+    if (!input) {
+      setIsTextareaExpanded(false);
       return;
     }
-    // Re-run when input changes so restored drafts get the same autosize behavior as typed text.
-    textareaRef.current.style.height = 'auto';
-    textareaRef.current.style.height = `${textareaRef.current.scrollHeight}px`;
-    const lineHeight = parseInt(window.getComputedStyle(textareaRef.current).lineHeight);
-    const expanded = textareaRef.current.scrollHeight > lineHeight * 2;
-    setIsTextareaExpanded(expanded);
-  }, [input]);
-
-  useEffect(() => {
-    if (!textareaRef.current || input.trim()) {
-      return;
-    }
-    textareaRef.current.style.height = 'auto';
-    setIsTextareaExpanded(false);
+    const height = node.scrollHeight;
+    const lineHeight = parseFloat(window.getComputedStyle(node).lineHeight) || 20;
+    node.style.height = `${height}px`;
+    setIsTextareaExpanded(height > lineHeight * 2);
   }, [input]);
 
   const handleInputChange = useCallback(
@@ -1680,8 +1704,6 @@ export function useChatComposerState({
       setCursorPosition(cursorPos);
 
       if (!newValue.trim()) {
-        event.target.style.height = 'auto';
-        setIsTextareaExpanded(false);
         resetCommandMenuState();
         return;
       }
@@ -1775,13 +1797,8 @@ export function useChatComposerState({
   const handleTextareaInput = useCallback(
     (event: FormEvent<HTMLTextAreaElement>) => {
       const target = event.currentTarget;
-      target.style.height = 'auto';
-      target.style.height = `${target.scrollHeight}px`;
       setCursorPosition(target.selectionStart);
       syncInputOverlayScroll(target);
-
-      const lineHeight = parseInt(window.getComputedStyle(target).lineHeight);
-      setIsTextareaExpanded(target.scrollHeight > lineHeight * 2);
     },
     [setCursorPosition, syncInputOverlayScroll],
   );

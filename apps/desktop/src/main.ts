@@ -1,3 +1,6 @@
+import { installRendererRecovery } from "./rendererRecovery";
+import { buildApplicationMenu } from "./applicationMenu";
+import { normalizeAppearance, renderLoadingHtml, startupText, type DesktopAppearance } from "./appearance";
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from "electron";
 import { MacUpdater, NsisUpdater } from "electron-updater";
 import { createUpdateController } from "./updates";
@@ -496,9 +499,7 @@ async function createOrShowWindow(): Promise<void> {
 
   const icon = resolveAppIcon();
 
-  if (process.platform === "win32") {
-    Menu.setApplicationMenu(null);
-  }
+  updateApplicationMenu();
 
   mainWindow = new BrowserWindow({
     width: 1320,
@@ -513,6 +514,17 @@ async function createOrShowWindow(): Promise<void> {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
+    },
+  });
+
+  const recoveryWindow = mainWindow;
+  installRendererRecovery(recoveryWindow, {
+    isQuitting: () => isQuitting,
+    isChinese: () => readAppearance().language === "zh-CN",
+    showDialog: (options) => dialog.showMessageBox(recoveryWindow, options),
+    log: (event, details) => {
+      const line = `${new Date().toISOString()} [renderer] ${event} ${JSON.stringify(details)}\n`;
+      void fs.promises.appendFile(path.join(app.getPath("logs"), "renderer.log"), line).catch(() => {});
     },
   });
 
@@ -532,7 +544,7 @@ async function createOrShowWindow(): Promise<void> {
   });
 
   await mainWindow.webContents.session.clearCache();
-  await mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(renderLoadingHtml())}`);
+  await mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(renderLoadingHtml(readAppearance()))}`);
   if (lastRuntimeStatus) {
     sendRuntimeStatus(lastRuntimeStatus);
   }
@@ -614,166 +626,11 @@ async function retryRuntime(): Promise<void> {
   if (!mainWindow || mainWindow.isDestroyed()) {
     await createOrShowWindow();
   } else {
-    await mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(renderLoadingHtml())}`);
+    await mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(renderLoadingHtml(readAppearance()))}`);
   }
   await startRuntimeAndLoad();
 }
 
-function renderLoadingHtml(): string {
-  return `<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>PilotDeck</title>
-  <style>
-    :root { color-scheme: light dark; }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      min-height: 100vh;
-      display: grid;
-      place-items: center;
-      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: #0e1116;
-      color: #eef2f8;
-    }
-    main {
-      width: min(520px, calc(100vw - 48px));
-      display: grid;
-      gap: 18px;
-    }
-    .brand {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      font-size: 22px;
-      font-weight: 650;
-      letter-spacing: 0;
-    }
-    .mark {
-      width: 34px;
-      height: 34px;
-      border-radius: 8px;
-      display: grid;
-      place-items: center;
-      background: #f2f6ff;
-      color: #0e1116;
-      font-weight: 800;
-    }
-    .panel {
-      border: 1px solid rgba(255,255,255,0.14);
-      border-radius: 8px;
-      padding: 22px;
-      background: rgba(255,255,255,0.045);
-      box-shadow: 0 18px 60px rgba(0,0,0,0.35);
-    }
-    .row {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-    }
-    .spinner {
-      width: 18px;
-      height: 18px;
-      border: 2px solid rgba(255,255,255,0.25);
-      border-top-color: #eef2f8;
-      border-radius: 50%;
-      animation: spin 0.8s linear infinite;
-      flex: 0 0 auto;
-    }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    #message {
-      margin: 0;
-      font-size: 15px;
-      line-height: 1.45;
-      color: #d8dee9;
-    }
-    #detail {
-      display: none;
-      margin: 14px 0 0;
-      padding: 12px;
-      max-height: 180px;
-      overflow: auto;
-      white-space: pre-wrap;
-      border-radius: 6px;
-      background: rgba(0,0,0,0.32);
-      color: #f4c7c7;
-      font: 12px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace;
-    }
-    #log {
-      margin-top: 12px;
-      color: #9ca8b8;
-      font-size: 12px;
-      word-break: break-all;
-    }
-    .actions {
-      display: none;
-      gap: 10px;
-      margin-top: 16px;
-    }
-    button {
-      appearance: none;
-      border: 1px solid rgba(255,255,255,0.18);
-      border-radius: 7px;
-      padding: 8px 12px;
-      background: #f2f6ff;
-      color: #0e1116;
-      font: inherit;
-      font-size: 13px;
-      cursor: pointer;
-    }
-    button.secondary {
-      background: transparent;
-      color: #eef2f8;
-    }
-    .error .spinner { display: none; }
-    .error #detail,
-    .error .actions { display: flex; }
-    .error #detail { display: block; }
-  </style>
-</head>
-<body>
-  <main>
-    <div class="brand"><div class="mark">P</div><div>PilotDeck</div></div>
-    <section class="panel" id="panel">
-      <div class="row">
-        <div class="spinner" aria-hidden="true"></div>
-        <p id="message">Preparing PilotDeck runtime...</p>
-      </div>
-      <pre id="detail"></pre>
-      <div id="log"></div>
-      <div class="actions">
-        <button id="retry">Retry</button>
-        <button id="openLog" class="secondary">Open Log</button>
-      </div>
-    </section>
-  </main>
-  <script>
-    const panel = document.getElementById("panel");
-    const message = document.getElementById("message");
-    const detail = document.getElementById("detail");
-    const log = document.getElementById("log");
-    const retry = document.getElementById("retry");
-    const openLog = document.getElementById("openLog");
-
-    window.pilotdeckDesktop?.onRuntimeStatus((status) => {
-      message.textContent = status.message || "Starting PilotDeck...";
-      log.textContent = status.logPath ? "Log: " + status.logPath : "";
-      if (status.phase === "error") {
-        panel.classList.add("error");
-        detail.textContent = status.error || status.message || "Unknown startup error.";
-      } else {
-        panel.classList.remove("error");
-        detail.textContent = "";
-      }
-    });
-    retry.addEventListener("click", () => window.pilotdeckDesktop?.retryRuntime());
-    openLog.addEventListener("click", () => window.pilotdeckDesktop?.openRuntimeLog());
-  </script>
-</body>
-</html>`;
-}
 
 function resolveRuntimeRoot(): string {
   if (process.env.PILOTDECK_DESKTOP_RUNTIME_ROOT) {
@@ -1046,6 +903,30 @@ for (const [channel, action] of Object.entries({
   ipcMain.handle(channel, (event) => { requireUpdateSender(event); return action(); });
 }
 
+function readAppearance(): DesktopAppearance {
+  try {
+    return normalizeAppearance(JSON.parse(fs.readFileSync(path.join(app.getPath("userData"), "appearance.json"), "utf8")), app.getLocale());
+  } catch { return normalizeAppearance(null, app.getLocale()); }
+}
+
+function updateApplicationMenu(): void {
+  Menu.setApplicationMenu(Menu.buildFromTemplate(
+    buildApplicationMenu(process.platform, readAppearance().language),
+  ));
+}
+
+ipcMain.handle("pilotdeck:set-appearance", (event, value: unknown) => {
+  requireUpdateSender(event);
+  const appearance = normalizeAppearance(value, app.getLocale());
+  const file = path.join(app.getPath("userData"), "appearance.json");
+  const current = readAppearance();
+  if (current.language !== appearance.language || current.themeMode !== appearance.themeMode) {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(appearance), "utf8");
+    if (current.language !== appearance.language) updateApplicationMenu();
+  }
+});
+
 ipcMain.handle("pilotdeck:get-runtime-info", () => runtime?.getInfo());
 ipcMain.handle("pilotdeck:retry-runtime", () => retryRuntime());
 ipcMain.handle("pilotdeck:open-runtime-log", async () => {
@@ -1114,6 +995,6 @@ app.on("before-quit", (event) => {
     stoppingForQuit = false;
     runtime = currentRuntime;
     isQuitting = false;
-    dialog.showErrorBox("PilotDeck could not stop", String(error));
+    dialog.showErrorBox(startupText("PilotDeck could not stop", readAppearance().language), String(error));
   });
 });

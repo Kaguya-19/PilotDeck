@@ -8,14 +8,27 @@ describe('model connection probe request formats', () => {
     ['red', true],
     ['**red**', true],
     ['The color is red.', true],
-    ['No, red.', false],
-    ['I cannot tell whether it is red.', false],
-    ['Not sure, maybe red.', false],
-    ['red or blue', false],
+    ['No, red.', true],
+    ['I cannot tell whether it is red.', true],
+    ['Not sure, maybe red.', true],
+    ['red or blue', true],
     ['blue', false],
-    ['infrared', false],
-  ])('strictly validates the image-probe answer %j', (answer, expected) => {
+    ['infrared', true],
+  ])('checks whether the final answer contains the requested color in the image-probe answer %j', (answer, expected) => {
     expect(isValidImageColorAnswer(answer, 'red')).toBe(expected);
+  });
+
+  it.each([
+    ['google', { candidates: [{ content: { parts: [{ thought: true, text: 'red' }, { text: 'blue' }] } }] }, false],
+    ['google', { candidates: [{ content: { parts: [{ thought: true, text: 'blue' }, { text: 'red' }] } }] }, true],
+    ['anthropic', { type: 'message', content: [{ type: 'thinking', text: 'red' }, { type: 'text', text: 'blue' }] }, false],
+    ['openai-responses', { object: 'response', output: [{ type: 'reasoning', content: [{ text: 'red' }] }, { type: 'message', content: [{ type: 'output_text', text: 'blue' }] }] }, false],
+    ['openai-responses', { object: 'response', status: 'incomplete', output_text: 'red' }, false],
+  ])('uses only completed final text for %s image detection', async (protocol, response, ok) => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(response), { status: 200 })));
+    const result = await probeModelConnection({ protocol, baseUrl: 'https://example.test/v1', image: true, model: 'reasoner' });
+    expect(result.ok).toBe(ok);
+    expect(result.imageUnsupported).not.toBe(true);
   });
 
   for (const [protocol, response, assertBody] of [
@@ -78,7 +91,7 @@ describe('model connection probe request formats', () => {
     expect(calls).toEqual(['https://example.test/chat/completions']);
   });
 
-  it.each(['colored', 'infrared'])(
+  it.each(['green', 'blue'])(
     'does not accept %s as the red image-probe answer',
     async (content) => {
       vi.stubGlobal('fetch', vi.fn(async () => ({
@@ -147,14 +160,32 @@ describe('model connection probe request formats', () => {
         apiKey: 'key',
         model: 'test-model',
       });
-      await vi.advanceTimersByTimeAsync(30_000);
+      await vi.advanceTimersByTimeAsync(60_000);
       await expect(pending).resolves.toMatchObject({
         ok: false,
         code: 'ENDPOINT_UNREACHABLE',
-        error: 'Connection timed out after 30s.',
+        error: 'Connection timed out after 60s.',
       });
     } finally {
       vi.useRealTimers();
     }
   });
 });
+
+  it.each([
+    ['final red with thinking', { choices: [{ message: { content: 'RED, red.', reasoning_content: 'It could be blue.' }, finish_reason: 'stop' }] }, true],
+    ['reasoning red only', { choices: [{ message: { content: '', reasoning_content: 'red' }, finish_reason: 'stop' }] }, false],
+    ['wrong final despite reasoning', { choices: [{ message: { content: 'blue', reasoning_content: 'red' }, finish_reason: 'stop' }] }, false],
+    ['inline reasoning', { choices: [{ message: { content: '<think>red</think>blue' }, finish_reason: 'stop' }] }, false],
+    ['unclosed reasoning', { choices: [{ message: { content: '<think>red' }, finish_reason: 'stop' }] }, false],
+    ['truncated answer', { choices: [{ message: { content: 'red' }, finish_reason: 'length' }] }, false],
+  ])('handles %s without forcing a thinking switch', async (_name, response, ok) => {
+    const fetch = vi.fn(async () => new Response(JSON.stringify(response), {status: 200}));
+    vi.stubGlobal('fetch', fetch);
+    const result = await probeModelConnection({protocol:'openai',baseUrl:'https://example.test/v1',image:true,model:'reasoner'});
+    expect(result.ok).toBe(ok);
+    expect(result.imageUnsupported).not.toBe(true);
+    const body = JSON.parse(fetch.mock.calls[0][1].body);
+    expect(body.max_tokens).toBe(4096);
+    expect(body).not.toHaveProperty('enable_thinking');
+  });

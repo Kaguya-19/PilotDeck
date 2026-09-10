@@ -127,6 +127,11 @@ export class AgentSession {
     yield { type: "session_ended", sessionId: this.state.sessionId, reason: sessionEndReason };
   }
 
+  async dispose(): Promise<void> {
+    if (this.state.status === "running") this.abort("session_closed");
+    await this.options.turnRunner.dispose?.();
+  }
+
   abort(reason?: string): void {
     this.state.abortController.abort(reason);
     this.state.status = "aborted";

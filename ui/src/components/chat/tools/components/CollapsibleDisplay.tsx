@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import React from 'react';
 import { CollapsibleSection } from './CollapsibleSection';
 
@@ -45,6 +46,7 @@ export const CollapsibleDisplay: React.FC<CollapsibleDisplayProps> = ({
   toolCategory,
   autoExpandable = true
 }) => {
+  const { t } = useTranslation('common');
   // Fall back to default styling for unknown/new categories so className never includes "undefined".
   const borderColor = borderColorMap[toolCategory || 'default'] || borderColorMap.default;
 
@@ -72,7 +74,7 @@ export const CollapsibleDisplay: React.FC<CollapsibleDisplayProps> = ({
               >
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
               </svg>
-              raw params
+              {t('common:uiText.rawParams')}
             </summary>
             <pre className="mt-1 overflow-hidden whitespace-pre-wrap break-words rounded border border-gray-200/40 bg-gray-50 p-2 font-mono text-[11px] text-gray-600 dark:border-gray-700/40 dark:bg-gray-900/50 dark:text-gray-400">
               {rawContent}

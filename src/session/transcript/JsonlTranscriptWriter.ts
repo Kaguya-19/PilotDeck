@@ -41,6 +41,7 @@ export type JsonlTranscriptWriterOptions = {
 
 export class JsonlTranscriptWriter implements AgentTranscriptWriter {
   private sequence = 0;
+  private closed = false;
   private writeChain: Promise<void> = Promise.resolve();
   private lastEntryId: string | null = null;
   private readonly now: () => Date;
@@ -142,10 +143,17 @@ export class JsonlTranscriptWriter implements AgentTranscriptWriter {
     });
   }
 
+  async close(): Promise<void> {
+    this.closed = true;
+    await this.writeChain.catch(() => undefined);
+  }
+
   recordEntry(entry: AgentTranscriptEntry): Promise<void> {
+    if (this.closed) return Promise.resolve();
     this.sequence = Math.max(this.sequence, entry.sequence);
     this.lastEntryId = entry.entryId ?? this.lastEntryId;
     this.writeChain = this.writeChain.then(async () => {
+      if (this.closed) return;
       await mkdir(dirname(this.options.path), { recursive: true, mode: 0o700 });
       await appendFile(this.options.path, `${JSON.stringify(entry)}\n`, { encoding: "utf8", mode: 0o600 });
     });

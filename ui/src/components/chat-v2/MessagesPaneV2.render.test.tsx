@@ -5,6 +5,8 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { FindShortcutProvider } from '../../contexts/FindShortcutContext';
 import type { ChatMessage, ChatRunMode, SessionRuntimeState } from '../chat/types/types';
 import MessagesPaneV2 from './MessagesPaneV2';
+import { ThinkingBlock } from './ThinkingBlock';
+import type { QueuedInputSummary } from '../chat/types/queuedInput';
 import {
   getChatResponseReserveTarget,
   shouldKeepChatResponseReservedSpace,
@@ -33,6 +35,23 @@ beforeAll(() => {
 
 afterEach(() => {
   cleanup();
+});
+
+describe('ThinkingBlock phase transitions', () => {
+  it('opens while streaming, respects manual collapse, and closes once on completion', () => {
+    const view = render(<ThinkingBlock content="First thought" isStreaming />);
+    const toggle = screen.getByRole('button');
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    fireEvent.click(toggle);
+    view.rerender(<ThinkingBlock content="First thought and more" isStreaming />);
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(toggle);
+    view.rerender(<ThinkingBlock content="Completed thought" isStreaming={false} />);
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(toggle);
+    view.rerender(<ThinkingBlock content="Completed thought, persisted" isStreaming={false} />);
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+  });
 });
 
 describe('getContextStatus', () => {
@@ -93,6 +112,7 @@ function makeMessage(index: number): ChatMessage {
 function createPaneElement({
   messages,
   activityMessages = [],
+  sendingInputs = [],
   isAssistantWorking = false,
   sessionRuntimeState = 'synchronizing',
   activeRunId = null,
@@ -104,6 +124,7 @@ function createPaneElement({
 }: {
   messages: ChatMessage[];
   activityMessages?: ChatMessage[];
+  sendingInputs?: QueuedInputSummary[];
   isAssistantWorking?: boolean;
   sessionRuntimeState?: SessionRuntimeState;
   activeRunId?: string | null;
@@ -122,6 +143,7 @@ function createPaneElement({
         isLoadingSessionMessages={false}
         chatMessages={messages}
         activityMessages={activityMessages}
+        sendingInputs={sendingInputs}
         visibleMessages={messages}
         visibleMessageCount={messages.length}
         isLoadingMoreMessages={false}
@@ -152,6 +174,7 @@ function createPaneElement({
 function renderPane(options: {
   messages: ChatMessage[];
   activityMessages?: ChatMessage[];
+  sendingInputs?: QueuedInputSummary[];
   isAssistantWorking?: boolean;
   sessionRuntimeState?: SessionRuntimeState;
   activeRunId?: string | null;
@@ -838,7 +861,7 @@ describe('MessagesPaneV2 render behavior', () => {
     fireEvent.click(button as HTMLButtonElement);
 
     expect(screen.getByText(/find \. -maxdepth 1 -type f/)).toBeTruthy();
-    expect(screen.queryByText('Parameters')).toBeNull();
+    expect(screen.queryByText('common:uiText.parameters')).toBeNull();
     expect(container.querySelector('.border-l-red-500')).toBeNull();
     expect(screen.queryByRole('button', { name: /permissions\.grant|Grant Bash for this chat/ })).toBeNull();
 
@@ -961,6 +984,9 @@ describe('MessagesPaneV2 render behavior', () => {
       },
     ];
     rerender(createPaneElement({ messages: completedMessages }));
+    const turnToggle = screen.getByRole('button', { name: /^Processed / });
+    expect(turnToggle.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(turnToggle);
 
     const summary = screen.getByText('Explored 1 file');
     const completedButton = summary.closest('button');
@@ -1006,7 +1032,7 @@ describe('MessagesPaneV2 render behavior', () => {
     expect(processButton).not.toBeNull();
     fireEvent.click(processButton as HTMLButtonElement);
 
-    const parametersSummary = screen.getByText('Parameters').closest('summary');
+    const parametersSummary = screen.getByText('common:uiText.parameters').closest('summary');
     const parametersDetails = parametersSummary?.closest('details') as HTMLDetailsElement | null;
     expect(parametersDetails?.open).toBe(false);
     fireEvent.click(parametersSummary as HTMLElement);
@@ -1036,10 +1062,13 @@ describe('MessagesPaneV2 render behavior', () => {
       },
     ];
     rerender(createPaneElement({ messages: persistedMessages }));
+    const turnToggle = screen.getByRole('button', { name: /^Processed / });
+    expect(turnToggle.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(turnToggle);
 
     const completedProcessButton = screen.getByText('Ran 1 command').closest('button');
     expect(completedProcessButton?.getAttribute('aria-expanded')).toBe('true');
-    const persistedParameters = screen.getByText('Parameters').closest('details') as HTMLDetailsElement | null;
+    const persistedParameters = screen.getByText('common:uiText.parameters').closest('details') as HTMLDetailsElement | null;
     expect(persistedParameters?.open).toBe(true);
   });
 
@@ -1072,6 +1101,9 @@ describe('MessagesPaneV2 render behavior', () => {
     ];
 
     renderPane({ messages });
+    const turnToggle = screen.getByRole('button', { name: /^Processed / });
+    expect(turnToggle.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(turnToggle);
 
     const summary = screen.getByText('Explored 1 file');
     const processButton = summary.closest('button');
@@ -1297,6 +1329,9 @@ describe('MessagesPaneV2 render behavior', () => {
     ];
 
     renderPane({ messages });
+    const turnToggle = screen.getByRole('button', { name: /^Processed / });
+    expect(turnToggle.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(turnToggle);
 
     const firstAssistant = screen.getByText('I will inspect first.');
     const readSummary = screen.getByText('Explored 1 file');
@@ -1409,6 +1444,9 @@ describe('MessagesPaneV2 render behavior', () => {
     ];
 
     const { container } = renderPane({ messages });
+    const turnToggle = screen.getByRole('button', { name: /^Processed / });
+    expect(turnToggle.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(turnToggle);
 
     expect(screen.queryByText('Tool error')).toBeNull();
     expect(screen.queryByText('FailedTool.tsx')).toBeNull();
@@ -1547,11 +1585,55 @@ describe('MessagesPaneV2 render behavior', () => {
       },
     ];
 
-    renderPane({ messages });
+    renderPane({ messages, isAssistantWorking: true });
 
     expect(screen.getByText('First assistant line.').closest('.chat-message')?.className).toContain('pb-4');
     expect(screen.getByText('First assistant line.').closest('.chat-message')?.className).not.toContain('pb-8');
   });
+  it('collapses the whole turn only at completion and preserves manual expansion on refresh', () => {
+    const messages: ChatMessage[] = [
+      makeMessage(0),
+      { ...makeMessage(1), content: 'Intermediate inspection.' },
+      { ...makeMessage(3), content: 'Final answer.' },
+    ];
+    const view = renderPane({ messages, isAssistantWorking: true });
+    expect(screen.getByText('Intermediate inspection.')).toBeTruthy();
+    view.rerender(createPaneElement({ messages }));
+    expect(screen.queryByText('Intermediate inspection.')).toBeNull();
+    expect(screen.getByText('Final answer.')).toBeTruthy();
+    const toggle = screen.getByRole('button', { name: /^Processed / });
+    fireEvent.click(toggle);
+    expect(screen.getByText('Intermediate inspection.')).toBeTruthy();
+    view.rerender(createPaneElement({ messages: messages.map((message) => ({ ...message })) }));
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(screen.getByText('Final answer.')).toBeTruthy();
+    fireEvent.click(toggle);
+    expect(screen.queryByText('Intermediate inspection.')).toBeNull();
+  });
+
+  it('reveals a completed trace when searching for intermediate assistant text', async () => {
+    renderPane({ messages: [makeMessage(0),
+      { ...makeMessage(1), content: 'Intermediate unique needle.' },
+      { ...makeMessage(3), content: 'Final answer.' },
+    ] });
+    expect(screen.queryByText('Intermediate unique needle.')).toBeNull();
+    fireEvent.keyDown(document, { key: 'f', ctrlKey: true });
+    const input = screen.getByRole('search').querySelector('input')!;
+    fireEvent.change(input, { target: { value: 'unique needle' } });
+    await waitFor(() => expect(screen.getByRole('button', { name: /^Processed / }).getAttribute('aria-expanded')).toBe('true'));
+    await waitFor(() => expect(document.querySelector('mark.chat-history-search-highlight-active')?.textContent).toBe('unique needle'));
+  });
+
+  it.each(['error', 'interrupted', 'no-final'])('keeps %s turns visible', (kind) => {
+    const messages: ChatMessage[] = [makeMessage(0), { ...makeMessage(1), content: 'Working details.' }];
+    if (kind === 'error') messages.push({ ...makeMessage(2), type: 'error', content: 'Connection failed.' });
+    if (kind === 'interrupted') messages.push({ ...makeMessage(2), type: 'assistant', isInterruptedNotice: true, content: 'Stopped.' });
+    if (kind === 'no-final') messages.push({ ...makeMessage(2), type: 'assistant', isToolUse: true, toolName: 'Bash', toolInput: { command: 'pwd' }, content: '' });
+    renderPane({ messages });
+    expect(screen.getByText('Working details.')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /^Processed / })).toBeNull();
+  });
+
 });
 
 describe('chat response reserved space', () => {
@@ -1580,4 +1662,15 @@ describe('chat response reserved space', () => {
     expect(within(reservedArea as HTMLElement).getByText('Message 3')).toBeTruthy();
     expect(within(reservedArea as HTMLElement).queryByText('Message 2')).toBeNull();
   });
+});
+
+
+it('shows a provisional send without writing a duplicate transcript message on acceptance', () => {
+  const pending = { id: 'send-1', status: 'submitting' as const, createdAt: new Date().toISOString(), displayText: 'My next message' };
+  const view = renderPane({ messages: [], sendingInputs: [pending] });
+  expect(screen.getAllByText('My next message')).toHaveLength(1);
+  expect(view.container.querySelector('[data-sending-input="send-1"]')).toBeTruthy();
+  view.rerender(createPaneElement({ messages: [{ type: 'user', runId: 'send-1', content: 'My next message', timestamp: pending.createdAt }], sendingInputs: [] }));
+  expect(screen.getAllByText('My next message')).toHaveLength(1);
+  expect(view.container.querySelector('[data-sending-input]')).toBeNull();
 });

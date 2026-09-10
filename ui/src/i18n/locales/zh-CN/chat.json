@@ -1,4 +1,11 @@
 {
+  "copyBlock": {
+    "code": "复制代码",
+    "table": "复制表格",
+    "tableMarkdown": "复制表格 Markdown",
+    "copied": "已复制",
+    "failed": "复制失败，请重试"
+  },
   "codeBlock": {
     "copy": "复制",
     "copied": "已复制",
@@ -9,6 +16,7 @@
     "emptyDescription": "需要把文件加入上下文时，请用 @ 引用工作区文件。"
   },
   "inputQueue": {
+    "sending": "发送中",
     "label": "排队消息",
     "resume": "继续",
     "pausedAfterStop": "由于你中断了当前响应，队列已暂停",
@@ -33,7 +41,9 @@
     "copied": "消息已复制",
     "selectFormat": "选择复制格式",
     "copyAsMarkdown": "复制为 Markdown",
-    "copyAsText": "复制为纯文本"
+    "copyAsText": "复制为纯文本",
+    "markdownShort": "MD",
+    "textShort": "TXT"
   },
   "edit": {
     "message": "修改消息",
@@ -354,14 +364,19 @@
       "speedLevels": {
         "standard": "标准",
         "fast": "快速"
-      }
-    }
+      },
+      "backToModels": "返回模型列表"
+    },
+    "sending": "发送中…",
+    "queueSend": "加入发送队列",
+    "stopping": "正在停止…"
   },
   "documentReferences": {
     "defaultPrompt": "请根据我引用的文档内容回答。",
     "pages": "第 {{pages}} 页",
     "pageUnknown": "页码未知",
-    "remove": "删除引用"
+    "remove": "删除引用",
+    "open": "打开 {{name}}"
   },
   "replyQuotes": {
     "addToChat": "添加到PilotDeck对话",
@@ -379,7 +394,10 @@
       "project": "项目",
       "user": "用户",
       "other": "其他"
-    }
+    },
+    "title": "命令",
+    "search": "搜索",
+    "ariaLabel": "可用命令"
   },
   "thinkingMode": {
     "selector": {
@@ -459,7 +477,8 @@
     },
     "scroll": {
       "returnToLatest": "回到最新"
-    }
+    },
+    "readonlyTranscript": "此对话记录为只读。"
   },
   "loading": "加载中...",
   "emptyChat": {
@@ -473,7 +492,9 @@
       "plan": "为该项目规划一次重构",
       "summary": "总结最近的变更",
       "review": "审查我最近修改的文件"
-    }
+    },
+    "readonlyTranscriptTitle": "此只读记录中没有可显示的消息",
+    "readonlyTranscriptDescription": "此只读记录仅包含聊天界面无法显示的记录。"
   },
   "shell": {
     "selectProject": {
@@ -560,7 +581,8 @@
       "completed": "已完成",
       "stopped": "已停止",
       "thinking": "思考中",
-      "executingTool": "正在执行 {{toolName}}"
+      "executingTool": "正在执行 {{toolName}}",
+      "connecting": "连接中…"
     }
   },
   "agentStatus": {
@@ -612,5 +634,32 @@
       "message": "{{message}}",
       "hint": "请用更短 prompt 重试，让 agent 把大型工具输入拆成更小步骤，或在“设置 → 模型 Provider”中切换到工具调用能力更强的模型。"
     }
+  },
+  "fork": {
+    "missingTarget": "无法从这条消息分叉。",
+    "ready": "分叉已创建，可编辑输入后发送。",
+    "failed": "分叉失败。",
+    "emptyTitle": "新分叉已就绪",
+    "emptyDescription": "这个分叉从原对话的起点开始。输入框中已填入分叉的消息，编辑并发送即可继续。",
+    "banner": "从 {{parent}} 分叉",
+    "unsupportedAttachments": "暂不支持分叉包含附件或媒体的消息",
+    "fromHere": "从此处分叉 · 携带 {{count}} 条消息"
+  },
+  "common": {
+    "remove": "移除"
+  },
+  "fileArtifacts": {
+    "updatedSinceMessage": "该文件在此消息之后已发生变化，是否打开当前版本？",
+    "browseTitle": "浏览",
+    "browse": "浏览 {{name}}",
+    "download": "下载／保存副本",
+    "downloadName": "下载 {{name}}",
+    "reference": "在对话中引用",
+    "referenceName": "在对话中引用 {{name}}",
+    "incomplete": "任务未完成",
+    "generated": "本轮生成",
+    "updated": "本轮更新",
+    "collapse": "收起",
+    "showAll": "查看全部 {{count}} 个文件"
   }
 }

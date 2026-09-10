@@ -575,6 +575,7 @@ export interface Gateway {
   resumeSession(input: { sessionKey: string }): Promise<{ sessionKey: string }>;
   newSession(input: NewSessionInput): Promise<{ sessionKey: string }>;
   closeSession(input: { sessionKey: string; reason?: string }): Promise<void>;
+  closeProjectSessions?(input: { projectKey: string; resume?: boolean }): Promise<{ sessionKeys: string[] }>;
   recordAgentStatusMessage?(input: GatewayRecordAgentStatusMessageInput): Promise<{ recorded: boolean }>;
   describeServer(): Promise<GatewayServerInfo>;
   projectFilesList?(input: ProjectFilesListInput): Promise<ProjectFilesListResult>;

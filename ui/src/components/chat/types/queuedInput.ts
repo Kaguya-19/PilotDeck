@@ -1,7 +1,8 @@
 import type { ChatModelSelection } from '../hooks/useChatProviderState';
 import type { ChatAttachment } from './types';
 
-export type QueuedInputStatus = 'queued' | 'steering' | 'dispatching' | 'delivery_uncertain' | 'failed';
+export type QueuedInputStatus = 'submitting' | 'queued' | 'steering' | 'dispatching' | 'delivery_uncertain' | 'failed';
+export const isSendingInput = (item: { status: QueuedInputStatus }) => item.status === 'submitting' || item.status === 'dispatching';
 export type InputQueuePauseReason = 'user_stopped' | 'previous_turn_failed' | 'restart_recovery';
 
 export type QueuedInputSummary = {

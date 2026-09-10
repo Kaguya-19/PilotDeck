@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { createBackgroundSessionForwarder, createSessionActivityRegistry } from './session-activity.js';
 import '../../scripts/check-node-runtime.mjs';
 // Load environment variables before other imports execute
 import { assertRequiredPilotDeckEnv } from './load-env.js';
@@ -61,6 +62,7 @@ import { readPermissionSettings } from './services/permissionSettings.js';
 import { regenerateLastMessageTransaction } from './services/regenerateLastMessage.js';
 import { getDefaultPtyShell } from './utils/defaultShell.js';
 import { pickNativeFolder } from './utils/nativeFolderPicker.js';
+import { browseDirectories } from './utils/browseDirectories.js';
 import { getOpenUrlSpawnCommand } from './utils/processSpawn.js';
 
 import { getProjects, getProjectCronJobsOverview, getSessions, renameProject, deleteSession, deleteProject, addProjectManually, extractProjectDirectory, clearProjectDirectoryCache, searchConversations } from './projects.js';
@@ -196,14 +198,23 @@ const WATCHER_DEBOUNCE_MS = 300;
 let projectsWatchers = [];
 let projectsWatcherDebounceTimer = null;
 const connectedClients = new Set();
+const sessionActivityRegistry = createSessionActivityRegistry();
+function broadcastSessionActivity(frame, userId) {
+    const activity = sessionActivityRegistry.receive(userId, frame);
+    if (!activity) return;
+    const payload = JSON.stringify({type: 'session-activity', activity});
+    for (const client of connectedClients) {
+        if (client.readyState === WebSocket.OPEN && (client.__pilotdeckUserId ?? null) === userId) client.send(payload);
+    }
+}
 const sessionWatchRegistry = createSessionWatchRegistry();
-registerAlwaysOnNotificationForwarding(connectedClients, (sessionId, frame) => {
-    // Always-On gateway notifications do not carry the originating UI socket.
-    // Delivering them to every tab caused unrelated sessions' live status
-    // (notably compaction progress) to race in the frontend. A tab explicitly
-    // watches its displayed session, so that registry is the routing authority.
-    broadcastToSessionWatchers(sessionId, frame, undefined);
-});
+registerAlwaysOnNotificationForwarding(connectedClients, createBackgroundSessionForwarder({
+    // This installation is single-user (including authenticated OSS mode).
+    // Resolve its persisted owner, never the set of currently connected watchers.
+    getUserId: () => userDb.getFirstUser()?.id,
+    broadcastActivity: broadcastSessionActivity,
+    forwardToWatchers: broadcastToSessionWatchers,
+}));
 let isGetProjectsRunning = false; // Flag to prevent reentrant calls
 
 function normalizeSessionId(value) {
@@ -213,6 +224,7 @@ function normalizeSessionId(value) {
 }
 
 function broadcastChatFrame(frame, originWs, userId) {
+    broadcastSessionActivity(frame, userId);
     const payload = JSON.stringify(frame);
     const delivered = new Set();
     const frameSessionId = normalizeSessionId(frame?.sessionId);
@@ -1395,24 +1407,7 @@ app.get('/api/browse-filesystem', authenticateToken, async (req, res) => {
             return res.status(404).json({ error: 'Directory not accessible' });
         }
 
-        // Use existing getFileTree function with shallow depth (only direct children)
-        const fileTree = await getFileTree(resolvedPath, 1, 0, false); // maxDepth=1, showHidden=false
-
-        // Filter only directories and format for suggestions
-        const directories = fileTree
-            .filter(item => item.type === 'directory')
-            .map(item => ({
-                path: item.path,
-                name: item.name,
-                type: 'directory'
-            }))
-            .sort((a, b) => {
-                const aHidden = a.name.startsWith('.');
-                const bHidden = b.name.startsWith('.');
-                if (aHidden && !bHidden) return 1;
-                if (!aHidden && bHidden) return -1;
-                return a.name.localeCompare(b.name);
-            });
+        const directories = await browseDirectories(resolvedPath, req.query.showHidden === 'true');
 
         // Add common directories if browsing home directory
         const suggestions = [];
@@ -2490,6 +2485,7 @@ class WebSocketWriter {
     }
 
     send(data) {
+        broadcastSessionActivity(data, this.userId);
         const message = JSON.stringify(data);
         if (this.ws.readyState === 1) { // WebSocket.OPEN
             this.ws.send(message);
@@ -2542,6 +2538,10 @@ function handleChatConnection(ws, request) {
             const data = JSON.parse(message);
 
             if (data.type === 'ping') return;
+            if (data.type === 'get-session-activity') {
+                writer.send({type: 'session-activity-snapshot', activities: sessionActivityRegistry.snapshot(userId)});
+                return;
+            }
             const requestSessionId = normalizeSessionId(data.sessionId);
 
             if (data.type === 'watch-session') {

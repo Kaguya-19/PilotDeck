@@ -96,7 +96,7 @@ export default function McpServerFormCard({
               <input
                 value={server.command}
                 onChange={(event) => onChange({ command: event.target.value })}
-                placeholder="npx、uvx 或可执行文件路径"
+                placeholder={t('common:uiText.commandPlaceholder')}
                 disabled={!editing}
               />
             </Field>

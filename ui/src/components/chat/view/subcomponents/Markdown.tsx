@@ -4,7 +4,7 @@ import type { Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
-import { normalizeInlineCodeFences } from '../../utils/chatFormatting';
+import { MarkdownCodeBlock, MarkdownTable, MarkdownSourceContext } from './MarkdownCopyBlocks';
 import { resolveMarkdownFileHref } from '../../utils/resolveMarkdownFileHref';
 import {
   createRemarkArtifactFileTextPlugin,
@@ -26,6 +26,8 @@ const linkClassName = 'text-blue-600 hover:underline dark:text-blue-400';
 
 function createMarkdownComponents(onFileOpen?: (filePath: string) => void): Components {
   return {
+    pre: MarkdownCodeBlock,
+    table: MarkdownTable,
     a: ({ href, children, ...props }) => {
       const filePath = resolveMarkdownFileHref(href);
       if (filePath && onFileOpen) {
@@ -59,20 +61,17 @@ function createMarkdownComponents(onFileOpen?: (filePath: string) => void): Comp
   };
 }
 
-export function Markdown({
+export const Markdown = React.memo(function Markdown({
   children,
   className,
   isStreaming,
   onFileOpen,
   artifactFiles,
 }: MarkdownProps) {
-  const content = useMemo(
-    () => normalizeInlineCodeFences(String(children ?? '')),
-    [children],
-  );
+  const content = String(children ?? '');
 
   const components = useMemo(
-    () => (onFileOpen ? createMarkdownComponents(onFileOpen) : undefined),
+    () => createMarkdownComponents(onFileOpen),
     [onFileOpen],
   );
   const remarkPlugins = useMemo(() => {
@@ -90,13 +89,15 @@ export function Markdown({
 
   return (
     <div className={`${className || ''} ${showFadeIn ? 'streaming-fade-in' : ''}`.trim()}>
-      <ReactMarkdown
-        remarkPlugins={remarkPlugins}
-        rehypePlugins={fullRehypePlugins}
-        components={components}
-      >
-        {content}
-      </ReactMarkdown>
+      <MarkdownSourceContext.Provider value={content}>
+        <ReactMarkdown
+          remarkPlugins={remarkPlugins}
+          rehypePlugins={fullRehypePlugins}
+          components={components}
+        >
+          {content}
+        </ReactMarkdown>
+      </MarkdownSourceContext.Provider>
     </div>
   );
-}
+});

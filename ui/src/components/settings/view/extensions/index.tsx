@@ -1,3 +1,4 @@
+import { ConfirmDialog } from '../../../ui/ConfirmDialog';
 import { useEffect, useMemo, useState } from "react";
 import {
   Cloud,
@@ -9,7 +10,6 @@ import {
   Plus,
   Search,
   TerminalSquare,
-  X,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { authenticatedFetch } from "../../../../utils/api";
@@ -636,69 +636,14 @@ export default function McpServersSection({
       </div>
 
       {pendingRemoval ? (
-        <div
-          className="modal-backdrop"
-          role="presentation"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget && !savingScope) {
-              setPendingRemoval(null);
-            }
-          }}
-        >
-          <section
-            className="modal"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="mcp-remove-modal-title"
-          >
-            <header className="modal-header">
-              <div>
-                <h2 id="mcp-remove-modal-title">{t("mcpConfig.removeTitle")}</h2>
-                <p>
-                  {t(
-                    pendingRemoval.scope === "global"
-                      ? "mcpConfig.removeGlobalDescription"
-                      : "mcpConfig.removeProjectDescription",
-                    {
-                      server: pendingRemoval.server.name,
-                      project:
-                        projectOptions.find(
-                          (project) => project.value === projectPath,
-                        )?.label || t("mcpConfig.noProjectSelected"),
-                    },
-                  )}
-                </p>
-              </div>
-              <button
-                className="icon-button"
-                type="button"
-                aria-label={t("mcpConfig.close")}
-                onClick={() => setPendingRemoval(null)}
-                disabled={Boolean(savingScope)}
-              >
-                <X size={18} />
-              </button>
-            </header>
-            <footer className="modal-actions">
-              <button
-                className="button secondary"
-                type="button"
-                onClick={() => setPendingRemoval(null)}
-                disabled={Boolean(savingScope)}
-              >
-                {t("settingsPage.actions.cancel")}
-              </button>
-              <button
-                className="button danger"
-                type="button"
-                onClick={() => void confirmRemoval()}
-                disabled={Boolean(savingScope)}
-              >
-                {t("pilotDeckConfig.actions.remove")}
-              </button>
-            </footer>
-          </section>
-        </div>
+        <ConfirmDialog destructive busy={Boolean(savingScope)} title={t("mcpConfig.removeTitle")}
+          confirmLabel={t("pilotDeckConfig.actions.remove")}
+          onCancel={() => setPendingRemoval(null)} onConfirm={() => void confirmRemoval()}>
+          {t(pendingRemoval.scope === "global" ? "mcpConfig.removeGlobalDescription" : "mcpConfig.removeProjectDescription", {
+            server: pendingRemoval.server.name,
+            project: projectOptions.find(project => project.value === projectPath)?.label || t("mcpConfig.noProjectSelected"),
+          })}
+        </ConfirmDialog>
       ) : null}
     </div>
   );

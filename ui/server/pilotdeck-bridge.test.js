@@ -2,6 +2,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import { createBackgroundSessionForwarder, createSessionActivityRegistry } from './session-activity.js';
 
 import {
     beginActivitySnapshotRead,
@@ -911,10 +912,10 @@ describe('dialog model preference frames', () => {
         }
     });
 
-    it('reports execution models without broadcasting changes to the composer preference', () => {
+    it('distinguishes accepted choices from routed execution models', () => {
         const sessionId = 'web:s';
         const accepted = gatewayEventToFrames({ type: 'input_accepted', runId: 'run-1', modelSelection: { mode: 'auto' } }, sessionId, 'pilotdeck');
-        expect(accepted).toEqual([]);
+        expect(accepted).toEqual([{ type: 'model-selection-saved', sessionId, provider: 'pilotdeck', runId: 'run-1', selection: { mode: 'auto' } }]);
         const running = gatewayEventToFrames({ type: 'model_selection_changed', runId: 'run-1', provider: 'chosen', model: 'routed', source: 'router' }, sessionId, 'pilotdeck');
         expect(running[0]).toMatchObject({ type: 'model-selection-changed', modelProvider: 'chosen', model: 'routed', runId: 'run-1' });
     });
@@ -924,4 +925,43 @@ describe('dialog model preference frames', () => {
 it('carries the actual model on assistant text deltas', () => {
   const frames = gatewayEventToFrames({ type: 'assistant_text_delta', text: 'Hello', model: 'qwen3.8-27b', runId: 'run-model' }, 'web:model', 'pilotdeck');
   expect(frames[0]).toMatchObject({ kind: 'stream_delta', model: 'qwen3.8-27b', content: 'Hello', runId: 'run-model' });
+});
+
+
+describe('Always-On sidebar activity integration', () => {
+    it('records unwatched runs for owner reconnect snapshots without leaking full content', () => {
+        const registry = createSessionActivityRegistry();
+        const summaries = [];
+        const fullFrames = [];
+        const clients = [{ userId: 1, watching: false }, { userId: 2, watching: true }];
+        const forward = createAlwaysOnTurnEventForwarder(createBackgroundSessionForwarder({
+            getUserId: () => 1,
+            broadcastActivity: (frame, userId) => {
+                const activity = registry.receive(userId, frame);
+                if (activity) for (const client of clients) {
+                    if (client.userId === userId) summaries.push({ userId, activity });
+                }
+            },
+            forwardToWatchers: (sessionId, frame, userId) => {
+                for (const client of clients) if (client.watching && client.userId === userId) fullFrames.push(frame);
+            },
+        }));
+        const emit = event => forward('always-on:turn-event', {sessionKey: 'cron:task-1', channelKey: 'cron', event: {runId: 'run-1', ...event}});
+        emit({type: 'turn_started'});
+        expect(registry.snapshot(1)).toEqual([expect.objectContaining({processing: true, runId: 'run-1'})]);
+        emit({type: 'assistant_text_delta', text: 'private task result'});
+        clients.length = 0; // Completion must be recorded even when every client disconnected.
+        emit({type: 'turn_completed', finishReason: 'completed'});
+        expect(registry.snapshot(1)).toEqual([expect.objectContaining({processing: false, completedRunId: 'run-1'})]);
+        expect(registry.snapshot(2)).toEqual([]);
+        expect(fullFrames).toEqual([]);
+        expect(summaries.every(item => item.userId === 1)).toBe(true);
+        expect(JSON.stringify(registry.snapshot(1))).not.toContain('private');
+    });
+    it('does not guess a user before instance ownership is available', () => {
+        const broadcastActivity = vi.fn(), forwardToWatchers = vi.fn();
+        createBackgroundSessionForwarder({getUserId: () => undefined, broadcastActivity, forwardToWatchers})('s', {kind: 'complete'});
+        expect(broadcastActivity).not.toHaveBeenCalled();
+        expect(forwardToWatchers).not.toHaveBeenCalled();
+    });
 });

@@ -307,6 +307,8 @@ export function getPilotDeckRepoRoot() {
  * the transcript and the agent state machine.
  */
 const sessionState = new Map();
+const deletingProjects = new Set();
+const deletingSessions = new Set();
 let sessionInputNotificationSink = null;
 
 export function registerSessionInputNotificationForwarding(forward) {
@@ -332,10 +334,15 @@ function loadQueueState(state) {
     if (!filePath) return;
     try {
         const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+        state.lastAcceptedModelSelection = parsed.lastAcceptedModelSelection;
         if (Array.isArray(parsed.items)) {
             state.inputQueue = parsed.items
                 .filter((item) => item && typeof item.id === 'string' && typeof item.command === 'string')
                 .map(restoreQueuedInputFromStorage);
+        }
+        if (parsed.version !== 2 && !state.lastAcceptedModelSelection) {
+            const last = [...state.inputQueue].reverse().find(item => item.options?.modelSelection);
+            if (last) captureAcceptedModel(state, last.options.modelSelection, last.id);
         }
         if (state.inputQueue.length > 0) {
             state.queuePaused = true;
@@ -478,26 +485,33 @@ export function hydrateQueuedInputOptions(options = {}) {
     };
 }
 
-function persistQueueState(state) {
+function persistQueueState(state, strict = false) {
+    if (state.deleted || state.deleting) return;
     const filePath = queueSidecarPath(state);
     if (!filePath) return;
+    let tempPath;
     try {
-        if (state.inputQueue.length === 0) {
+        if (state.inputQueue.length === 0 && !state.lastAcceptedModelSelection) {
             fs.rmSync(filePath, { force: true });
             return;
         }
         fs.mkdirSync(path.dirname(filePath), { recursive: true });
-        const tempPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+        tempPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
         fs.writeFileSync(tempPath, JSON.stringify({
-            version: 1,
+            version: 2,
+            lastAcceptedModelSelection: state.lastAcceptedModelSelection,
             revision: state.queueRevision,
             paused: state.queuePaused,
             pauseReason: state.queuePauseReason,
             items: state.inputQueue.map(serializeQueuedInputForStorage),
         }, null, 2), { mode: 0o600 });
         fs.renameSync(tempPath, filePath);
+        tempPath = undefined;
     } catch (error) {
         console.warn('[pilotdeck-bridge] failed to persist queued inputs:', error?.message || error);
+        if (strict) throw error;
+    } finally {
+        if (tempPath) { try { fs.rmSync(tempPath, {force: true}); } catch { /* Preserve the write error. */ } }
     }
 }
 
@@ -538,13 +552,13 @@ function emitInputQueueState(state, writer) {
     return snapshot;
 }
 
-function mutateInputQueue(state, writer) {
+function mutateInputQueue(state, writer, strict = false) {
     state.queueRevision += 1;
     if (state.inputQueue.length === 0) {
         state.queuePaused = false;
         state.queuePauseReason = undefined;
     }
-    persistQueueState(state);
+    persistQueueState(state, strict);
     return emitInputQueueState(state, writer);
 }
 
@@ -566,7 +580,53 @@ function newSessionKey() {
     return `web${sep}s_${randomUUID()}`;
 }
 
+export function beginProjectDeletion(projectKey) { return beginDeletion(projectKey); }
+export function beginSessionDeletion(projectKey, sessionKey) { return beginDeletion(projectKey, sessionKey); }
+
+function beginDeletion(projectKey, sessionKey) {
+    const key = path.resolve(projectKey);
+    const scope = sessionKey ? JSON.stringify([key, sessionKey]) : key;
+    const blocked = sessionKey ? deletingSessions : deletingProjects;
+    if (deletingProjects.has(key) || blocked.has(scope)) throw new Error('Deletion is already in progress.');
+    blocked.add(scope);
+    const states = [...sessionState.values()].filter(state => path.resolve(state.projectKey || GENERAL_HOME) === key && (!sessionKey || state.sessionKey === sessionKey));
+    for (const state of states) state.deleting = true;
+    return (deleted) => {
+        for (const state of states) {
+            state.deleting = false;
+            if (deleted) {
+                state.deleted = true;
+                state.inputQueue = [];
+                sessionState.delete(state.sessionKey);
+            }
+        }
+        blocked.delete(scope);
+    };
+}
+
+/** The queue sidecar also retains the last accepted send after the queue drains. */
+export function getAcceptedModelSelection(projectKey, sessionKey) {
+    const state = ensureSessionState(sessionKey, projectKey, 'web');
+    return state.lastAcceptedModelSelection?.selection ?? null;
+}
+
+function captureAcceptedModel(state, selection, requestId) {
+    if (!selection || !['auto', 'model'].includes(selection.mode)) return;
+    state.lastAcceptedModelSelection = {selection: {...selection}, requestId, acceptedAt: new Date().toISOString()};
+}
+
+export function recordAcceptedModelSelection(projectKey, sessionKey, selection, requestId) {
+    const state = ensureSessionState(sessionKey, projectKey, 'web');
+    const previous = state.lastAcceptedModelSelection;
+    if (selection === null) state.lastAcceptedModelSelection = undefined;
+    else captureAcceptedModel(state, selection, requestId);
+    try { persistQueueState(state, true); }
+    catch (error) { state.lastAcceptedModelSelection = previous; throw error; }
+}
+
 function ensureSessionState(sessionKey, projectKey, channelKey) {
+    const resolvedProject = path.resolve(projectKey || GENERAL_HOME);
+    if (deletingProjects.has(resolvedProject) || deletingSessions.has(JSON.stringify([resolvedProject, sessionKey]))) throw new Error('Project or session is being deleted.');
     let state = sessionState.get(sessionKey);
     if (!state) {
         state = {
@@ -592,6 +652,7 @@ function ensureSessionState(sessionKey, projectKey, channelKey) {
     } else {
         if (projectKey && state.projectKey !== projectKey && state.inputQueue.length === 0) {
             state.queueLoaded = false;
+            state.lastAcceptedModelSelection = undefined;
             state.projectKey = projectKey;
         }
         state.channelKey = channelKey;
@@ -831,6 +892,7 @@ export function gatewayEventToFrames(event, sessionId, provider) {
     const base = { sessionId, provider, ...(event.runId ? { runId: event.runId } : {}) };
     switch (event.type) {
         case 'input_accepted':
+            return event.modelSelection ? [{ type: 'model-selection-saved', ...base, selection: { ...event.modelSelection } }] : [];
         case 'steer_unapplied':
             return [];
         case 'steer_applied': {
@@ -1495,7 +1557,7 @@ function sendBridgeStatusEvent(writer, statusEvent, sessionKey, provider) {
  * @param {object} options Legacy options blob from the WS frame.
  * @param {{send: (msg: object) => void}} writer Existing writer.
  * @param {string} provider Provider hint (kept for legacy frame branding).
- * @param {{onInputAccepted?: (input: {sessionKey: string, runId: string}) => void | Promise<void>}} hooks
+ * @param {{onInputAccepted?: (input: {sessionKey: string, runId: string}) => void | Promise<void>, fromQueue?: boolean, getGateway?: () => Promise<object>}} hooks
  */
 export async function runChatViaGateway(
     command,
@@ -1556,7 +1618,8 @@ export async function runChatViaGateway(
     let sawGatewayError = false;
     let turnFinishReason = null;
     try {
-        gw = await ensureGateway();
+        gw = await (hooks.getGateway ? hooks.getGateway() : ensureGateway());
+        if (state.deleted || state.deleting) throw new Error('Project is being deleted.');
 
         if (staleRunId) {
             const message = 'This session already has an active turn. Queue the message or stop the current response first.';
@@ -1592,6 +1655,11 @@ export async function runChatViaGateway(
         for await (const event of stream) {
             if (event && event.type === 'input_accepted') {
                 inputAccepted = true;
+                // Queue acceptance already recorded this choice; execution must
+                // never replace a newer accepted message's model preference.
+                if (!hooks.fromQueue && options.modelSelection && !state.deleted && !state.deleting) {
+                    recordAcceptedModelSelection(projectKey, sessionKey, options.modelSelection, runId);
+                }
                 if (state.pendingGatewayRunId === runId) {
                     setPendingGatewayRun(state, undefined);
                 }
@@ -1800,7 +1868,7 @@ function queuedUserFrame(item, sessionKey, runId, provider) {
 }
 
 async function dispatchNextQueuedInput(state, writer, provider = 'pilotdeck') {
-    if (state.active || state.queuePaused || state.queueDispatching) return false;
+    if (state.deleted || state.deleting || state.active || state.queuePaused || state.queueDispatching) return false;
     const item = state.inputQueue[0];
     if (!item) return false;
     if (item.status === 'delivery_uncertain') {
@@ -1827,6 +1895,7 @@ async function dispatchNextQueuedInput(state, writer, provider = 'pilotdeck') {
             writer,
             provider,
             {
+                fromQueue: true,
                 onInputAccepted: async () => {
                     accepted = true;
                     state.inputQueue = state.inputQueue.filter((entry) => entry.id !== item.id);
@@ -1953,6 +2022,18 @@ export function scheduleQueuedDispatchAfterActivityCheck(
             const syncResult = syncLocalActiveRunFromSnapshot(state, activeSnapshot, snapshotGuard);
             retryAfterNewerSnapshot = !syncResult.applied && syncResult.reason === 'stale_request';
             if (retryAfterNewerSnapshot) return;
+            // A fresh connection may discover a turn owned by another client.
+            // Only then is the provisional send actually waiting in a queue.
+            if (state.active) {
+                let changed = false;
+                for (const item of state.inputQueue || []) {
+                    if (item.status === 'submitting') {
+                        item.status = 'queued';
+                        changed = true;
+                    }
+                }
+                if (changed) mutateInputQueue(state, writer);
+            }
         } catch (error) {
             console.warn('[pilotdeck-bridge] failed to verify activity before queued dispatch:', error?.message || error);
         }
@@ -1991,6 +2072,9 @@ export async function enqueueInputViaGateway(sessionId, item, writer, provider =
     if (state.inputQueue.length >= 20) {
         return { ok: false, error: 'The message queue is full.' };
     }
+    const submitting = !state.active && !state.queuePaused && !state.queueDispatching && state.inputQueue.length === 0;
+    const previousSelection = state.lastAcceptedModelSelection;
+    const previousRevision = state.queueRevision;
     state.inputQueue.push({
         id: item.id,
         runId: item.runId,
@@ -1998,9 +2082,22 @@ export async function enqueueInputViaGateway(sessionId, item, writer, provider =
         displayText: String(item.displayText || item.command).trim(),
         createdAt: item.createdAt || new Date().toISOString(),
         options: item.options || {},
-        status: 'queued',
+        status: submitting ? 'submitting' : 'queued',
     });
-    mutateInputQueue(state, writer);
+    captureAcceptedModel(state, item.options?.modelSelection, item.id);
+    state.queueRevision += 1;
+    try { persistQueueState(state, true); }
+    catch (error) {
+        state.inputQueue = state.inputQueue.filter(entry => entry.id !== item.id);
+        state.lastAcceptedModelSelection = previousSelection;
+        state.queueRevision = previousRevision;
+        return {ok: false, error: error?.message || 'Failed to persist queued input.'};
+    }
+    emitInputQueueState(state, writer);
+    if (item.options?.modelSelection) writer?.send?.({
+        type: 'model-selection-saved', sessionId, runId: item.runId || item.id,
+        selection: item.options.modelSelection,
+    });
     if (!state.active && !state.queuePaused) {
         // Acknowledge persistence immediately. Gateway startup/snapshot reads
         // can exceed the UI operation timeout, so verification and dispatch
@@ -2086,6 +2183,9 @@ export function pauseInputQueueViaGateway(sessionId, writer, reason = 'user_stop
     if (!state || state.inputQueue.length === 0) return null;
     state.queuePaused = true;
     state.queuePauseReason = reason;
+    for (const item of state.inputQueue) {
+        if (item.status === 'submitting') item.status = 'queued';
+    }
     return mutateInputQueue(state, writer);
 }
 

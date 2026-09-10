@@ -20,9 +20,9 @@ export default function ModelConfigurationErrorScreen({
 
   return (
     <AuthScreenLayout
-      title="Model configuration unavailable"
-      description="PilotDeck could not validate the model configuration."
-      footerText="Fix the configuration, then retry."
+      title={t('common:uiText.modelUnavailable')}
+      description={t('common:uiText.modelInvalid')}
+      footerText={t('common:uiText.fixAndRetry')}
       logo={(
         <div className="flex h-16 w-16 items-center justify-center rounded-lg bg-destructive/10">
           <AlertTriangle className="h-8 w-8 text-destructive" />
@@ -45,7 +45,7 @@ export default function ModelConfigurationErrorScreen({
           className="w-full rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
           onClick={() => void onRetry()}
         >
-          Retry
+          {t('common:uiText.retry')}
         </button>
       </div>
     </AuthScreenLayout>

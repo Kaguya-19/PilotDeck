@@ -73,7 +73,8 @@
     "showLess": "收起",
     "processing": "智能体运行中",
     "unread": "有未读消息",
-    "idle": "无未读消息"
+    "idle": "无未读消息",
+    "forkedFrom": "从 {{parent}} 分叉"
   },
   "tooltips": {
     "viewEnvironments": "查看环境",

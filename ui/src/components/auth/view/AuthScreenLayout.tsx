@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import type { ReactNode } from 'react';
 import { MessageSquare } from 'lucide-react';
 import { IS_PLATFORM } from '../../../constants/config';
@@ -17,6 +18,7 @@ export default function AuthScreenLayout({
   footerText,
   logo,
 }: AuthScreenLayoutProps) {
+  const { t } = useTranslation('common');
   return (
     <div className="flex min-h-screen items-center justify-center bg-background p-4">
       <div className="w-full max-w-md">
@@ -50,7 +52,7 @@ export default function AuthScreenLayout({
                 rel="noopener noreferrer"
                 className="text-xs text-muted-foreground/50 transition-colors hover:text-muted-foreground"
               >
-                PilotDeck is open source
+                {t('common:uiText.openSource')}
               </a>
             </div>
           )}

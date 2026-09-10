@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import React, { memo, useMemo, useCallback } from 'react';
 import type { Project } from '../../../types/app';
 import type { SubagentChildTool } from '../types/types';
@@ -38,6 +39,16 @@ type ToolRendererErrorBoundaryState = {
   error: Error | null;
 };
 
+function ToolRenderError({ toolName }: { toolName: string }) {
+  const { t } = useTranslation('common');
+  return (
+    <div className="my-1 rounded-lg border border-amber-200 bg-amber-50/70 px-3 py-2 text-xs text-amber-800 dark:border-amber-800/50 dark:bg-amber-950/20 dark:text-amber-200">
+      <div className="font-medium">{t('uiText.toolRenderFailed')}</div>
+      <div className="mt-0.5 opacity-80">{toolName}</div>
+    </div>
+  );
+}
+
 class ToolRendererErrorBoundary extends React.Component<
   { toolName: string; toolId?: string; children: React.ReactNode },
   ToolRendererErrorBoundaryState
@@ -68,12 +79,7 @@ class ToolRendererErrorBoundary extends React.Component<
 
   render() {
     if (this.state.error) {
-      return (
-        <div className="my-1 rounded-lg border border-amber-200 bg-amber-50/70 px-3 py-2 text-xs text-amber-800 dark:border-amber-800/50 dark:bg-amber-950/20 dark:text-amber-200">
-          <div className="font-medium">Tool output could not be rendered.</div>
-          <div className="mt-0.5 opacity-80">{this.props.toolName}</div>
-        </div>
-      );
+      return <ToolRenderError toolName={this.props.toolName} />;
     }
 
     return this.props.children;
@@ -139,8 +145,9 @@ const ToolRendererInner: React.FC<ToolRendererProps> = ({
   isSubagentContainer,
   subagentState
 }) => {
+  const { t } = useTranslation('common');
   const canonicalToolName = getCanonicalToolName(toolName);
-  const config = getToolConfig(toolName);
+  const config = getToolConfig(toolName, t);
   const displayConfig: any = mode === 'input' ? config.input : config.result;
 
   const parsedData = useMemo(() => {

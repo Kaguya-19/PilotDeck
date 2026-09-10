@@ -26,6 +26,7 @@ export type WsGatewayMethod =
   | "resume_session"
   | "new_session"
   | "close_session"
+  | "close_project_sessions"
   | "record_agent_status_message"
   | "describe_server"
   | "project_files_list"

@@ -50,9 +50,13 @@ type ProcessTraceProps = {
 export function ProcessRunHeader({
   label,
   className = '',
+  expanded,
+  onExpandedChange,
 }: {
   label: string;
   className?: string;
+  expanded?: boolean;
+  onExpandedChange?: (expanded: boolean) => void;
 }) {
   return (
     <div
@@ -60,7 +64,13 @@ export function ProcessRunHeader({
       aria-live="polite"
       className={`mb-3 border-b border-neutral-200/70 pb-1.5 text-[14px] leading-relaxed text-neutral-500 dark:border-neutral-800/80 dark:text-neutral-400 ${className}`}
     >
-      <span className="tabular-nums">{label}</span>
+      {onExpandedChange ? (
+        <button type="button" aria-expanded={expanded} onClick={() => onExpandedChange(!expanded)}
+          className="hover-brand-text flex items-center gap-1.5 text-left">
+          <ChevronRight className={`h-3.5 w-3.5 ${expanded ? 'rotate-90' : ''}`} />
+          <span className="tabular-nums">{label}</span>
+        </button>
+      ) : <span className="tabular-nums">{label}</span>}
     </div>
   );
 }

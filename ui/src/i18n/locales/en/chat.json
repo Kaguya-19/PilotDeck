@@ -1,4 +1,11 @@
 {
+  "copyBlock": {
+    "code": "Copy code",
+    "table": "Copy table",
+    "tableMarkdown": "Copy table as Markdown",
+    "copied": "Copied",
+    "failed": "Copy failed. Try again."
+  },
   "codeBlock": {
     "copy": "Copy",
     "copied": "Copied",
@@ -9,6 +16,7 @@
     "emptyDescription": "Reference a workspace file with @ when you want it included."
   },
   "inputQueue": {
+    "sending": "Sending",
     "label": "Queued messages",
     "resume": "Continue",
     "pausedAfterStop": "You stopped the current response, so the queue is paused",
@@ -33,7 +41,9 @@
     "copied": "Message copied",
     "selectFormat": "Select copy format",
     "copyAsMarkdown": "Copy as markdown",
-    "copyAsText": "Copy as text"
+    "copyAsText": "Copy as text",
+    "markdownShort": "MD",
+    "textShort": "TXT"
   },
   "edit": {
     "message": "Edit message",
@@ -371,14 +381,19 @@
       "speedLevels": {
         "standard": "Standard",
         "fast": "Fast"
-      }
-    }
+      },
+      "backToModels": "Back to models"
+    },
+    "sending": "Sending...",
+    "queueSend": "Queue message",
+    "stopping": "Stopping..."
   },
   "documentReferences": {
     "defaultPrompt": "Please answer based on the document selection I quoted.",
     "pages": "p. {{pages}}",
     "pageUnknown": "page unknown",
-    "remove": "Remove reference"
+    "remove": "Remove reference",
+    "open": "Open {{name}}"
   },
   "replyQuotes": {
     "addToChat": "Add to PilotDeck chat",
@@ -398,7 +413,10 @@
       "project": "Project",
       "user": "User",
       "other": "Other"
-    }
+    },
+    "title": "Commands",
+    "search": "Search",
+    "ariaLabel": "Available commands"
   },
   "thinkingMode": {
     "selector": {
@@ -477,7 +495,8 @@
     },
     "scroll": {
       "returnToLatest": "Back to latest"
-    }
+    },
+    "readonlyTranscript": "This transcript is read-only."
   },
   "loading": "Loading...",
   "emptyChat": {
@@ -491,7 +510,9 @@
       "plan": "Plan a refactor for this project",
       "summary": "Summarize recent changes",
       "review": "Review the most recent file I touched"
-    }
+    },
+    "readonlyTranscriptTitle": "No displayable messages in this read-only transcript",
+    "readonlyTranscriptDescription": "This read-only transcript only contains records the chat view cannot display."
   },
   "shell": {
     "selectProject": {
@@ -566,7 +587,8 @@
       "completed": "Completed",
       "stopped": "Stopped",
       "thinking": "Thinking",
-      "executingTool": "Executing {{toolName}}"
+      "executingTool": "Executing {{toolName}}",
+      "connecting": "Connecting…"
     }
   },
   "agentStatus": {
@@ -630,5 +652,32 @@
   "welcome": {
     "greetingWithProject": "What do you want us to build in {{project}}?",
     "noProject": "What's on the plan today?"
+  },
+  "fork": {
+    "missingTarget": "Cannot fork this message.",
+    "ready": "Fork created — edit the prompt and send when ready.",
+    "failed": "Fork failed.",
+    "emptyTitle": "New branch ready",
+    "emptyDescription": "This branch starts from the beginning of the original conversation. The forked prompt is waiting in the composer — edit it and send to continue here.",
+    "banner": "Forked from {{parent}}",
+    "unsupportedAttachments": "Forking messages with attachments or media is not supported yet",
+    "fromHere": "Fork from here · carries {{count}} messages"
+  },
+  "common": {
+    "remove": "Remove"
+  },
+  "fileArtifacts": {
+    "updatedSinceMessage": "This file has changed since this message. Open the current version?",
+    "browseTitle": "Browse",
+    "browse": "Browse {{name}}",
+    "download": "Download / save a copy",
+    "downloadName": "Download {{name}}",
+    "reference": "Reference in chat",
+    "referenceName": "Reference {{name}} in chat",
+    "incomplete": "Task incomplete",
+    "generated": "Generated this turn",
+    "updated": "Updated this turn",
+    "collapse": "Collapse",
+    "showAll": "View all {{count}} files"
   }
 }

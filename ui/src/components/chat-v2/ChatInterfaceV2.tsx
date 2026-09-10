@@ -1,3 +1,6 @@
+import ErrorBoundary from '../main-content/view/ErrorBoundary';
+import { useContext } from 'react';
+import { SessionViewReadyContext } from '../app-shell/useSessionIndicators';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { MessageSquare } from 'lucide-react';
@@ -16,6 +19,7 @@ import { useChatSessionState } from '../chat/hooks/useChatSessionState';
 import { useChatRealtimeHandlers } from '../chat/hooks/useChatRealtimeHandlers';
 import { useChatComposerState } from '../chat/hooks/useChatComposerState';
 import { useSessionInputQueue } from '../chat/hooks/useSessionInputQueue';
+import { isSendingInput } from '../chat/types/queuedInput';
 import {
   getEffectiveThinkingMode,
   getThinkingModeAvailability,
@@ -101,6 +105,7 @@ function ChatInterfaceV2({
     ? selectedProjectFromShell
     : (workspaceBinding ?? selectedProjectFromShell ?? defaultProject);
   const { t } = useTranslation('chat');
+  const setViewReady = useContext(SessionViewReadyContext);
   const { subscribe: contextSubscribe } = useWebSocket();
   const { tasksEnabled: _tasksEnabled, isTaskMasterInstalled: _isTaskMasterInstalled } =
     useTasksSettings();
@@ -227,6 +232,12 @@ function ChatInterfaceV2({
     sessionStore,
   });
 
+  useEffect(() => {
+    const ready = !isLoadingSessionMessages && !sessionLoadError && currentSessionId && currentSessionId === selectedSession?.id && chatMessages.length > 0;
+    setViewReady(ready ? currentSessionId : null);
+    return () => setViewReady(null);
+  }, [currentSessionId, selectedSession?.id, isLoadingSessionMessages, sessionLoadError, chatMessages.length > 0, setViewReady]);
+
   const watchedSessionId = selectedSession?.id || currentSessionId || null;
   useSessionWatch({ sessionId: watchedSessionId, ws, sendMessage });
   const inputQueue = useSessionInputQueue({
@@ -236,6 +247,13 @@ function ChatInterfaceV2({
     sendMessage,
     subscribe: subscribe || contextSubscribe,
   });
+  const sendingInputs = React.useMemo(() => inputQueue.queueState.sessionId === watchedSessionId
+    ? inputQueue.queueState.items.filter(isSendingInput)
+    : [], [inputQueue.queueState, watchedSessionId]);
+  const sendingInputIds = sendingInputs.map((item) => item.id).join(',');
+  useEffect(() => {
+    if (sendingInputIds) scheduleScrollToBottom();
+  }, [sendingInputIds, scheduleScrollToBottom]);
 
   const {
     input,
@@ -790,11 +808,7 @@ function ChatInterfaceV2({
       canSubmitWithoutModel={canSubmitWithoutModel}
       modelCatalogError={modelCatalogError}
       projectKey={selectedProject?.fullPath || selectedProject?.path || ''}
-      onModelSelectionChange={(selection) => {
-        void setModelSelection(selection).catch((error) => {
-          addToast('error', error instanceof Error ? error.message : String(error));
-        });
-      }}
+      onModelSelectionChange={setModelSelection}
       pendingPermissionRequests={pendingPermissionRequests}
       handlePermissionDecision={handlePermissionDecision}
       handleGrantToolPermission={handleGrantToolPermission}
@@ -872,48 +886,51 @@ function ChatInterfaceV2({
 
   return (
     <div className="grid h-full min-h-0 min-w-0 grid-rows-[minmax(0,1fr)_auto] overflow-hidden bg-white dark:bg-neutral-950">
-      <MessagesPaneV2
-        scrollContainerRef={scrollContainerRef}
-        showReturnToLatest={canReturnToLatest}
-        onResumeScroll={scrollToBottom}
-        onPauseScroll={pauseScrollFollowing}
-        isLoadingSessionMessages={isLoadingSessionMessages}
-        sessionLoadError={sessionLoadError}
-        onRetrySessionLoad={handleWebSocketReconnect}
-        chatMessages={chatMessages}
-        activityMessages={activityMessages}
-        visibleMessages={visibleMessages}
-        visibleMessageCount={visibleMessageCount}
-        isLoadingMoreMessages={isLoadingMoreMessages}
-        hasMoreMessages={hasMoreMessages}
-        totalMessages={totalMessages}
-        loadEarlierMessages={loadEarlierMessages}
-        loadAllMessages={loadAllMessages}
-        allMessagesLoaded={allMessagesLoaded}
-        isLoadingAllMessages={isLoadingAllMessages}
-        provider={'pilotdeck' as Provider}
-        selectedProject={selectedProject}
-        selectedSession={selectedSession}
-        createDiff={createDiff}
-        onFileOpen={onFileOpen}
-        onShowSettings={onShowSettings}
-        onGrantSessionToolPermission={handleGrantSessionToolPermission}
-        autoExpandTools={autoExpandTools}
-        showRawParameters={showRawParameters}
-        showThinking={showThinking}
-        inlineThinking={inlineThinking}
-        setInput={setInput}
-        isAssistantWorking={isLoading}
-        sessionRuntimeState={sessionRuntimeState}
-        activeRunId={activeRunId}
-        workingStatus={claudeStatus || pilotDeckStatus}
-        runMode={runMode}
-        planModeActive={effectivePermissionMode === 'plan'}
-        sessionStore={sessionStore}
-        onFork={sessionIsReadOnly ? undefined : handleFork}
-        onRegenerate={sessionIsReadOnly ? undefined : handleRegenerate}
-        forkDisabled={isForkPending}
-      />
+      <ErrorBoundary showDetails resetKeys={[selectedSession?.id, selectedProject?.name]}>
+        <MessagesPaneV2
+          scrollContainerRef={scrollContainerRef}
+          showReturnToLatest={canReturnToLatest}
+          onResumeScroll={scrollToBottom}
+          onPauseScroll={pauseScrollFollowing}
+          isLoadingSessionMessages={isLoadingSessionMessages}
+          sessionLoadError={sessionLoadError}
+          onRetrySessionLoad={handleWebSocketReconnect}
+          chatMessages={chatMessages}
+          sendingInputs={sendingInputs}
+          activityMessages={activityMessages}
+          visibleMessages={visibleMessages}
+          visibleMessageCount={visibleMessageCount}
+          isLoadingMoreMessages={isLoadingMoreMessages}
+          hasMoreMessages={hasMoreMessages}
+          totalMessages={totalMessages}
+          loadEarlierMessages={loadEarlierMessages}
+          loadAllMessages={loadAllMessages}
+          allMessagesLoaded={allMessagesLoaded}
+          isLoadingAllMessages={isLoadingAllMessages}
+          provider={'pilotdeck' as Provider}
+          selectedProject={selectedProject}
+          selectedSession={selectedSession}
+          createDiff={createDiff}
+          onFileOpen={onFileOpen}
+          onShowSettings={onShowSettings}
+          onGrantSessionToolPermission={handleGrantSessionToolPermission}
+          autoExpandTools={autoExpandTools}
+          showRawParameters={showRawParameters}
+          showThinking={showThinking}
+          inlineThinking={inlineThinking}
+          setInput={setInput}
+          isAssistantWorking={isLoading}
+          sessionRuntimeState={sessionRuntimeState}
+          activeRunId={activeRunId}
+          workingStatus={claudeStatus || pilotDeckStatus}
+          runMode={runMode}
+          planModeActive={effectivePermissionMode === 'plan'}
+          sessionStore={sessionStore}
+          onFork={sessionIsReadOnly ? undefined : handleFork}
+          onRegenerate={sessionIsReadOnly ? undefined : handleRegenerate}
+          forkDisabled={isForkPending}
+        />
+      </ErrorBoundary>
       {composerSlot}
     </div>
   );

@@ -27,6 +27,24 @@ export default defineConfig(({ mode }) => {
   const serverPort = env.SERVER_PORT || env.PORT || 3001
   const localNodeModules = (...segments) =>
     path.resolve(process.cwd(), 'node_modules', ...segments)
+  // Keep this list to direct dependencies: pnpm does not expose transitive
+  // packages at the root used by resolve.dedupe and optimizeDeps.include.
+  const codeMirrorDependencies = [
+    '@codemirror/lang-css',
+    '@codemirror/lang-html',
+    '@codemirror/lang-javascript',
+    '@codemirror/lang-json',
+    '@codemirror/lang-markdown',
+    '@codemirror/lang-python',
+    '@codemirror/language',
+    '@codemirror/merge',
+    '@codemirror/search',
+    '@codemirror/state',
+    '@codemirror/theme-one-dark',
+    '@codemirror/view',
+    '@replit/codemirror-minimap',
+    '@uiw/react-codemirror',
+  ]
 
   const disableLocalAuth =
     env.PILOTDECK_DISABLE_LOCAL_AUTH !== '0' &&
@@ -38,12 +56,20 @@ export default defineConfig(({ mode }) => {
     },
     plugins: [react()],
     resolve: {
+      // Extensions and the React wrapper must share the same CodeMirror state
+      // instance, including after dependency updates or a Vite cache rebuild.
+      dedupe: ['react', 'react-dom', ...codeMirrorDependencies],
       alias: {
         react: localNodeModules('react'),
         'react-dom': localNodeModules('react-dom'),
         'react/jsx-runtime': localNodeModules('react', 'jsx-runtime.js'),
         'react/jsx-dev-runtime': localNodeModules('react', 'jsx-dev-runtime.js'),
       }
+    },
+    optimizeDeps: {
+      // Pre-bundle the wrapper and extensions together to avoid mixing
+      // optimized and source instances in development.
+      include: codeMirrorDependencies,
     },
     server: {
       host,

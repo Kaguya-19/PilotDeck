@@ -1,3 +1,4 @@
+import { useConfirm } from '../ui/ConfirmDialog';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   DragEvent as ReactDragEvent,
@@ -122,6 +123,7 @@ export default function FilesV2({
   onHeaderDrop,
 }: FilesV2Props) {
   const { t } = useTranslation();
+  const confirm = useConfirm();
   const { files, loading, refreshFiles } = useFileTreeData(selectedProject);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [activePath, setActivePath] = useState<string | null>(null);
@@ -370,9 +372,12 @@ export default function FilesV2({
     async (node: FileTreeNode) => {
       closeContextMenu();
       if (!selectedProject) return;
-      const confirmed = window.confirm(
-        `Delete "${node.name}"?${node.type === 'directory' ? ' This will delete all contents.' : ''}`,
-      );
+      const confirmed = await confirm({
+        title: t('fileTree.deleteTitle', { name: node.name }),
+        message: t(node.type === 'directory' ? 'fileTree.deleteDirectoryBody' : 'fileTree.deleteFileBody'),
+        destructive: true,
+        confirmLabel: t('confirmDialog.delete'),
+      });
       if (!confirmed) return;
       try {
         await api.deleteFile(projectName, {
@@ -392,7 +397,7 @@ export default function FilesV2({
         console.error('Delete failed:', error);
       }
     },
-    [closeContextMenu, onFileDelete, projectName, projectRoot, refreshFiles, selectedProject],
+    [closeContextMenu, onFileDelete, projectName, projectRoot, refreshFiles, selectedProject, confirm, t],
   );
 
   const handleCopyPath = useCallback(

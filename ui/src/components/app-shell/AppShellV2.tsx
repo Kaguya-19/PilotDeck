@@ -1,8 +1,10 @@
+import { useAuth } from '../auth/context/AuthContext';
+import { SessionViewReadyContext, useSessionIndicators } from './useSessionIndicators';
+import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useMatch, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import ReactDOM from 'react-dom';
-import { Loader2, Trash2 } from 'lucide-react';
 import { useWebSocket } from '../../contexts/WebSocketContext';
 import { useDeviceSettings } from '../../hooks/useDeviceSettings';
 import { useSessionProtection } from '../../hooks/useSessionProtection';
@@ -54,49 +56,6 @@ type DeleteSessionTarget = {
 
 const SettingsComponent = Settings as unknown as (props: TypedSettingsProps) => JSX.Element;
 
-const UNREAD_IGNORED_MESSAGE_TYPES = new Set([
-  'websocket-reconnected',
-  'pending-permissions-response',
-  'session-status',
-]);
-
-const UNREAD_IGNORED_MESSAGE_KINDS = new Set([
-  'session_created',
-  'status',
-  'stream_end',
-]);
-
-const getSessionIdFromMessage = (message: unknown): string | null => {
-  if (!message || typeof message !== 'object') return null;
-  const candidate = message as {
-    sessionId?: unknown;
-    session_id?: unknown;
-    newSessionId?: unknown;
-    actualSessionId?: unknown;
-  };
-  const value =
-    candidate.sessionId ??
-    candidate.session_id ??
-    candidate.actualSessionId ??
-    candidate.newSessionId;
-  return typeof value === 'string' && value.trim() ? value : null;
-};
-
-const isUnreadWorthyMessage = (message: unknown): boolean => {
-  if (!message || typeof message !== 'object') return false;
-  const candidate = message as { kind?: unknown; type?: unknown };
-
-  if (typeof candidate.kind === 'string') {
-    return !UNREAD_IGNORED_MESSAGE_KINDS.has(candidate.kind);
-  }
-
-  if (typeof candidate.type === 'string') {
-    return !UNREAD_IGNORED_MESSAGE_TYPES.has(candidate.type);
-  }
-
-  return false;
-};
-
 // V2 shell. Reuses the same data hooks as legacy AppContent so chat, discovery,
 // auth, and project plumbing keep working unchanged — V2 just reorganizes the
 // outer chrome (sidebar + breadcrumb header per prototype/shadcn.html).
@@ -124,17 +83,18 @@ export default function AppShellV2() {
     matchProjectChat?.params.projectName ?? matchProject?.params.projectName ?? undefined;
   const sessionId =
     matchProjectChat?.params.sessionId ?? matchLegacySession?.params.sessionId ?? undefined;
-  useTranslation('common');
+  const { t } = useTranslation('common');
 
   const { isMobile } = useDeviceSettings({ trackPWA: false });
   const [desktopSidebarOpen, setDesktopSidebarOpen] = useState(true);
   const { ws, sendMessage, latestMessage, isConnected, subscribe } = useWebSocket();
   const wasConnectedRef = useRef(false);
-  const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(() => new Set());
+  const { user } = useAuth();
+  const [readySessionId, setReadySessionId] = useState<string | null>(null);
 
   const {
     activeSessions,
-    processingSessions,
+    processingSessions: localProcessingSessions,
     markSessionAsActive,
     markSessionAsInactive,
     markSessionAsProcessing,
@@ -176,6 +136,22 @@ export default function AppShellV2() {
   });
   const workspaceTab = activeTab === 'cron' || activeTab === 'skills' ? 'chat' : activeTab;
   const shellActiveTab = dedicatedTab ?? workspaceTab;
+  const { processingSessions: remoteProcessingSessions, unreadSessionIds, markRead, acknowledge, selectSession: acknowledgeNavigation } = useSessionIndicators({
+    scope: String(user?.id ?? 'local'),
+    viewedSessionId: !isSettingsRoute && shellActiveTab === 'chat' && selectedSession?.id === readySessionId ? readySessionId : null,
+    subscribe, sendMessage, isConnected,
+  });
+  // Composer callbacks cover the interval before the server sees a new send.
+  const processingSessions = useMemo(() => new Set([...localProcessingSessions, ...remoteProcessingSessions]), [localProcessingSessions, remoteProcessingSessions]);
+  useEffect(() => subscribe(message => {
+    if (message?.type === 'session-activity' && !message.activity?.processing) markSessionAsNotProcessing(message.activity?.sessionId);
+    if (message?.type === 'session-activity-snapshot' && Array.isArray(message.activities)) {
+      const running = new Set(message.activities.filter((item: any) => item.processing).map((item: any) => item.sessionId));
+      for (const id of localProcessingSessions) if (!running.has(id)) markSessionAsNotProcessing(id);
+    }
+  }), [subscribe, localProcessingSessions, markSessionAsNotProcessing]);
+
+
 
   const misroutedFileFromUrl = useMemo(() => {
     if (!sessionId) return null;
@@ -326,34 +302,6 @@ export default function AppShellV2() {
   }, [switchProject]);
 
   useEffect(() => {
-    const selectedSessionId = selectedSession?.id;
-    if (!selectedSessionId) return;
-
-    setUnreadSessionIds((previous) => {
-      if (!previous.has(selectedSessionId)) return previous;
-      const next = new Set(previous);
-      next.delete(selectedSessionId);
-      return next;
-    });
-  }, [selectedSession?.id]);
-
-  useEffect(() => {
-    return subscribe((message) => {
-      if (!isUnreadWorthyMessage(message)) return;
-
-      const messageSessionId = getSessionIdFromMessage(message);
-      if (!messageSessionId || messageSessionId === selectedSession?.id) return;
-
-      setUnreadSessionIds((previous) => {
-        if (previous.has(messageSessionId)) return previous;
-        const next = new Set(previous);
-        next.add(messageSessionId);
-        return next;
-      });
-    });
-  }, [selectedSession?.id, subscribe]);
-
-  useEffect(() => {
     if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) {
       return undefined;
     }
@@ -475,17 +423,17 @@ export default function AppShellV2() {
       const response = await api.deleteProject(target.name, true);
       if (!response.ok) {
         const body = (await response.json().catch(() => ({}))) as { error?: string };
-        throw new Error(body.error || `Failed (HTTP ${response.status})`);
+        throw new Error(body.error || t('uiText.httpFailed', { status: response.status }));
       }
       sidebarSharedProps.onProjectDelete?.(target.name);
       await refreshProjectsSilently();
       setDeleteTarget(null);
     } catch (err) {
-      setDeleteError(err instanceof Error ? err.message : 'Failed to delete project');
+      setDeleteError(err instanceof Error ? err.message : t('uiText.deleteProjectFailed'));
     } finally {
       setIsDeletingProject(false);
 	    }
-	  }, [deleteTarget, refreshProjectsSilently, sidebarSharedProps]);
+	  }, [deleteTarget, refreshProjectsSilently, sidebarSharedProps, t]);
 
 	  const [deleteSessionTarget, setDeleteSessionTarget] = useState<DeleteSessionTarget | null>(null);
 	  const [isDeletingSession, setIsDeletingSession] = useState(false);
@@ -516,25 +464,20 @@ export default function AppShellV2() {
 
 	      if (!response.ok) {
 	        const body = (await response.json().catch(() => ({}))) as { error?: string };
-	        throw new Error(body.error || `Failed (HTTP ${response.status})`);
+	        throw new Error(body.error || t('uiText.httpFailed', { status: response.status }));
 	      }
 
 	      sidebarSharedProps.onSessionDelete?.(session.id);
-	      setUnreadSessionIds((previous) => {
-	        if (!previous.has(session.id)) return previous;
-	        const next = new Set(previous);
-	        next.delete(session.id);
-	        return next;
-	      });
+	      markRead(session.id);
 	      setSessionCustomTitle(session.id, null);
 	      await refreshProjectsSilently();
 	      setDeleteSessionTarget(null);
 	    } catch (err) {
-	      setDeleteSessionError(err instanceof Error ? err.message : 'Failed to delete conversation');
+	      setDeleteSessionError(err instanceof Error ? err.message : t('uiText.deleteSessionFailed'));
 	    } finally {
 	      setIsDeletingSession(false);
 	    }
-	  }, [deleteSessionTarget, refreshProjectsSilently, sidebarSharedProps]);
+	  }, [deleteSessionTarget, refreshProjectsSilently, sidebarSharedProps, t, markRead]);
 
   const handleSelectProject = useCallback(
     (project: Project) => {
@@ -551,12 +494,7 @@ export default function AppShellV2() {
       fallbackSession?: ProjectSession,
       options?: SessionNavigationOptions,
     ) => {
-      setUnreadSessionIds((previous) => {
-        if (!previous.has(sessId)) return previous;
-        const next = new Set(previous);
-        next.delete(sessId);
-        return next;
-      });
+      acknowledgeNavigation(sessId);
       if (project.name !== selectedProject?.name) {
         handleProjectSelect(project);
       }
@@ -572,7 +510,7 @@ export default function AppShellV2() {
         setActiveTab('chat');
       }
     },
-    [handleProjectSelect, handleSessionSelect, navigate, selectedProject?.name, setActiveTab],
+    [handleProjectSelect, handleSessionSelect, navigate, selectedProject?.name, setActiveTab, acknowledgeNavigation],
   );
 
   const workspacePath = selectedSession
@@ -593,6 +531,7 @@ export default function AppShellV2() {
       // `home` is retained only for old persisted state / links. The Agent
       // surface now owns both the welcome/new-session state and transcripts.
       if (tab === 'home') {
+        acknowledgeNavigation(null);
         setSelectedSession(null);
         const target = selectedProject
           ? `/p/${encodeURIComponent(selectedProject.name)}`
@@ -616,17 +555,19 @@ export default function AppShellV2() {
       setActiveTab,
       setSelectedSession,
       workspacePath,
+      acknowledgeNavigation,
     ],
   );
 
   const handleStartNewSession = useCallback(
     (project: Project, options?: SessionNavigationOptions) => {
       didDefaultProjectRef.current = true;
+      acknowledgeNavigation(null);
       handleNewSession(project);
       navigate(`/p/${encodeURIComponent(project.name)}`);
       setActiveTab(options?.preserveActiveTab ? 'files' : 'chat');
     },
-    [handleNewSession, navigate, setActiveTab],
+    [handleNewSession, navigate, setActiveTab, acknowledgeNavigation],
   );
 
   const handleHomeNewConversation = useCallback(() => {
@@ -710,6 +651,7 @@ export default function AppShellV2() {
   );
 
   return (
+    <SessionViewReadyContext.Provider value={setReadySessionId}>
     <div className="app-root ui-v2 fixed inset-0 flex flex-col font-sans text-neutral-900 dark:text-neutral-100">
       <ConnectionBanner />
       {isSettingsRoute ? (
@@ -737,7 +679,7 @@ export default function AppShellV2() {
             type="button"
             className="fixed inset-0 bg-black/40 backdrop-blur-sm"
             onClick={() => setSidebarOpen(false)}
-            aria-label="Close sidebar"
+            aria-label={t("uiText.closeSidebar")}
           />
           <div
             className={`relative h-full w-[85vw] max-w-sm transform transition-transform duration-150 ${
@@ -750,7 +692,14 @@ export default function AppShellV2() {
         </div>
       )}
 
-      <main className="app-main flex min-h-0 min-w-0 flex-1 flex-col bg-white dark:bg-neutral-950">
+      <main
+        onClickCapture={acknowledge}
+        onKeyDownCapture={acknowledge}
+        onInputCapture={acknowledge}
+        onWheelCapture={acknowledge}
+        onTouchMoveCapture={acknowledge}
+        className="app-main flex min-h-0 min-w-0 flex-1 flex-col bg-white dark:bg-neutral-950"
+      >
         <MainAreaV2
           projects={sidebarSharedProps.projects}
           selectedProject={selectedProject}
@@ -835,6 +784,7 @@ export default function AppShellV2() {
 	          )
 	        : null}
 	    </div>
+    </SessionViewReadyContext.Provider>
 	  );
 	}
 
@@ -856,66 +806,15 @@ function DeleteProjectDialog({
   const sessionCount = project.sessions?.length ?? 0;
   const displayName = project.displayName || project.name;
 
+  const { t } = useTranslation('common');
   return (
-    <div className="fixed inset-0 z-[65] flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
-      <div className="w-full max-w-md rounded-xl border border-border bg-card text-card-foreground shadow-xl">
-        <div className="flex items-start gap-3 border-b border-border p-5">
-          <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg bg-destructive/15 text-destructive">
-            <Trash2 className="h-5 w-5" strokeWidth={1.75} />
-          </div>
-          <div className="min-w-0 flex-1">
-            <h3 className="text-base font-semibold text-foreground">Delete project?</h3>
-            <p className="mt-1 break-all text-sm text-muted-foreground">
-              <span className="font-mono text-xs">{displayName}</span>
-            </p>
-          </div>
-        </div>
-
-        <div className="space-y-3 p-5">
-          <p className="text-sm text-foreground">
-            This removes the project from PilotDeck and deletes its session metadata.
-            {sessionCount > 0 ? (
-              <>
-                {' '}
-                <span className="font-medium">
-                  {sessionCount} session{sessionCount === 1 ? '' : 's'}
-                </span>{' '}
-                will also be removed.
-              </>
-            ) : null}
-          </p>
-          <p className="text-xs text-muted-foreground">
-            Files on disk are <span className="font-medium text-foreground">not</span> deleted —
-            only PilotDeck&apos;s reference to them.
-          </p>
-          {error ? (
-            <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-              {error}
-            </div>
-          ) : null}
-        </div>
-
-        <div className="flex items-center justify-end gap-2 border-t border-border bg-muted/30 px-5 py-3">
-          <button
-            type="button"
-            onClick={onCancel}
-            disabled={isDeleting}
-            className="inline-flex h-9 items-center justify-center rounded-md border border-border bg-background px-3 text-sm font-medium text-foreground hover:bg-accent disabled:opacity-50"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={onConfirm}
-            disabled={isDeleting}
-            className="inline-flex h-9 items-center justify-center gap-2 rounded-md bg-destructive px-3 text-sm font-medium text-destructive-foreground hover:bg-destructive/90 disabled:opacity-60"
-          >
-            {isDeleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" strokeWidth={1.75} />}
-            {isDeleting ? 'Deleting…' : 'Delete project'}
-          </button>
-        </div>
-      </div>
-    </div>
+    <ConfirmDialog title={t('confirmDialog.deleteProjectTitle')} destructive busy={isDeleting} error={error}
+      confirmLabel={t('confirmDialog.deleteProject')} onCancel={onCancel} onConfirm={onConfirm}>
+      <p className="mb-3 break-all font-medium text-foreground">{displayName}</p>
+      <p>{t('confirmDialog.deleteProjectBody')}</p>
+      {sessionCount > 0 && <p className="mt-2">{t('confirmDialog.deleteSessions', { count: sessionCount })}</p>}
+      <p className="mt-3 text-xs">{t('confirmDialog.keepFiles')}</p>
+    </ConfirmDialog>
   );
 }
 
@@ -937,53 +836,12 @@ function DeleteSessionDialog({
   const projectName = target.project.displayName || target.project.name;
   const sessionTitle = sessionDisplayTitle(target.session);
 
+  const { t } = useTranslation('common');
   return (
-    <div className="fixed inset-0 z-[65] flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
-      <div className="w-full max-w-md rounded-xl border border-border bg-card text-card-foreground shadow-xl">
-        <div className="flex items-start gap-3 border-b border-border p-5">
-          <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg bg-destructive/15 text-destructive">
-            <Trash2 className="h-5 w-5" strokeWidth={1.75} />
-          </div>
-          <div className="min-w-0 flex-1">
-            <h3 className="text-base font-semibold text-foreground">Delete conversation?</h3>
-            <p className="mt-1 truncate text-sm text-muted-foreground">
-              {sessionTitle}
-            </p>
-          </div>
-        </div>
-
-        <div className="space-y-3 p-5">
-          <p className="text-sm text-foreground">
-            This removes the conversation from <span className="font-medium">{projectName}</span>.
-          </p>
-
-          {error ? (
-            <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-              {error}
-            </div>
-          ) : null}
-        </div>
-
-        <div className="flex items-center justify-end gap-2 border-t border-border bg-muted/30 px-5 py-3">
-          <button
-            type="button"
-            onClick={onCancel}
-            disabled={isDeleting}
-            className="inline-flex h-9 items-center justify-center rounded-md border border-border bg-background px-3 text-sm font-medium text-foreground hover:bg-accent disabled:opacity-50"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={onConfirm}
-            disabled={isDeleting}
-            className="inline-flex h-9 items-center justify-center gap-2 rounded-md bg-destructive px-3 text-sm font-medium text-destructive-foreground hover:bg-destructive/90 disabled:opacity-60"
-          >
-            {isDeleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" strokeWidth={1.75} />}
-            {isDeleting ? 'Deleting…' : 'Delete conversation'}
-          </button>
-        </div>
-      </div>
-    </div>
+    <ConfirmDialog title={t('confirmDialog.deleteSessionTitle')} destructive busy={isDeleting} error={error}
+      confirmLabel={t('confirmDialog.deleteSession')} onCancel={onCancel} onConfirm={onConfirm}>
+      <p className="mb-3 break-words font-medium text-foreground">{sessionTitle}</p>
+      <p>{t('confirmDialog.deleteSessionBody', { project: projectName })}</p>
+    </ConfirmDialog>
   );
 }

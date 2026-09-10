@@ -427,7 +427,7 @@ function MainAreaV2Content(props: MainAreaV2Props) {
           </div>
         ) : null}
 
-        <div className="workspace-actions ml-4 h-9 shrink-0" aria-label="Tools">
+        <div className="workspace-actions ml-4 h-9 shrink-0" aria-label={t('common:uiText.tools')}>
           <button
             type="button"
             aria-label={t('chatSearch.open', { defaultValue: 'Search current conversation' }) as string}
@@ -531,7 +531,7 @@ function MainAreaV2Content(props: MainAreaV2Props) {
                         <Icon className="h-4 w-4 shrink-0 text-neutral-400" strokeWidth={1.75} />
                         <span>{t(tab.labelKey)}</span>
                         {tab.id === 'always-on' && alwaysOnUnread ? (
-                          <span className="absolute right-2 h-2 w-2 rounded-full bg-blue-500" aria-label="Unread" />
+                          <span className="absolute right-2 h-2 w-2 rounded-full bg-blue-500" aria-label={t('common:uiText.unread')} />
                         ) : null}
                       </button>
                     );

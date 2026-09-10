@@ -1,3 +1,4 @@
+import { ConfirmDialog, useConfirm } from '../../../ui/ConfirmDialog';
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { cn } from "../../../../lib/utils";
@@ -146,24 +147,11 @@ function ClearIcon() {
   );
 }
 
-function CloseIcon() {
-  return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      width="18"
-      height="18"
-      fill="currentColor"
-      viewBox="0 0 256 256"
-    >
-      <path d="M205.66,194.34a8,8,0,0,1-11.32,11.32L128,139.31,61.66,205.66a8,8,0,0,1-11.32-11.32L116.69,128,50.34,61.66A8,8,0,0,1,61.66,50.34L128,116.69l66.34-66.35a8,8,0,0,1,11.32,11.32L139.31,128Z" />
-    </svg>
-  );
-}
-
 export default function MemoryDataSection({
   projects,
 }: MemoryDataSectionProps) {
   const { t } = useTranslation("settings");
+  const confirm = useConfirm();
   const importInputRef = useRef<HTMLInputElement>(null);
   const [actionBusy, setActionBusy] = useState(false);
   const [clearModalOpen, setClearModalOpen] = useState(false);
@@ -291,7 +279,7 @@ export default function MemoryDataSection({
     const confirmKey = targetIsAllMemory
       ? "pilotDeckConfig.panels.memory.data.confirm.importAll"
       : "pilotDeckConfig.panels.memory.data.confirm.importProject";
-    if (!window.confirm(t(confirmKey, { target: selectedTargetLabel }))) {
+    if (!await confirm({ message: t(confirmKey, { target: selectedTargetLabel }), destructive: true })) {
       return;
     }
 
@@ -460,67 +448,12 @@ export default function MemoryDataSection({
       </div>
     </section>
     {clearModalOpen ? (
-      <div
-        className="modal-backdrop"
-        role="presentation"
-        onMouseDown={(event) => {
-          if (event.target === event.currentTarget) closeClearModal();
-        }}
-      >
-        <section
-          className="modal memory-clear-modal simple-delete-modal"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="modal-title"
-        >
-          <header className="modal-header">
-            <div>
-              <h2 id="modal-title">
-                {t(
-                  "pilotDeckConfig.panels.memory.data.confirm.clearModalTitle",
-                  { name: selectedMemoryTarget },
-                )}
-              </h2>
-              <p>
-                {t(
-                  "pilotDeckConfig.panels.memory.data.confirm.clearModalDescription",
-                )}
-              </p>
-            </div>
-            <button
-              className="icon-button"
-              type="button"
-              aria-label={t(
-                "pilotDeckConfig.panels.memory.data.confirm.clearModalClose",
-              )}
-              disabled={actionBusy}
-              onClick={closeClearModal}
-            >
-              <CloseIcon />
-            </button>
-          </header>
-          <footer className="modal-actions">
-            <button
-              className="button secondary"
-              type="button"
-              disabled={actionBusy}
-              onClick={closeClearModal}
-            >
-              {t("settingsPage.actions.cancel")}
-            </button>
-            <button
-              className="button danger"
-              type="button"
-              disabled={actionBusy}
-              onClick={() => void confirmClearMemory()}
-            >
-              {t(
-                "pilotDeckConfig.panels.memory.data.confirm.clearModalConfirm",
-              )}
-            </button>
-          </footer>
-        </section>
-      </div>
+      <ConfirmDialog destructive busy={actionBusy}
+        title={t("pilotDeckConfig.panels.memory.data.confirm.clearModalTitle", { name: selectedMemoryTarget })}
+        confirmLabel={t("pilotDeckConfig.panels.memory.data.confirm.clearModalConfirm")}
+        onCancel={closeClearModal} onConfirm={() => void confirmClearMemory()}>
+        {t("pilotDeckConfig.panels.memory.data.confirm.clearModalDescription")}
+      </ConfirmDialog>
     ) : null}
     </>
   );

@@ -22,7 +22,7 @@ type UseChatHistorySearchOptions = {
   sessionId: string | null;
   captureFindShortcutInModal?: boolean;
   renderWindowKey?: string | number;
-  onNavigate?: () => void;
+  onNavigate?: (match: ChatHistorySearchMatch) => void;
 };
 
 export function useChatHistorySearch({
@@ -98,7 +98,7 @@ export function useChatHistorySearch({
     const navigation = ++navigationRef.current;
     const pending = { match, navigation, ready: false, coarseJumped: false };
     pendingRevealRef.current = pending;
-    onNavigate?.();
+    onNavigate?.(match);
     try {
       await ensureAllMessagesLoaded();
     } catch {
@@ -184,7 +184,7 @@ export function useChatHistorySearch({
         || !target.querySelector('[data-chat-search-render-pending="true"]'));
       if (canReveal) {
         scrollSearchTargetIntoView(container, target, pending.coarseJumped ? 'auto' : 'smooth');
-        onNavigate?.();
+        onNavigate?.(pending.match);
         pendingRevealRef.current = null;
       } else if (!target && !pending.coarseJumped) {
         // Only a missing row needs a virtualization jump. A mounted row may

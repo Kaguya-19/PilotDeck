@@ -1,3 +1,5 @@
+import { createPortal } from "react-dom";
+import { useModelMenuLayout } from "./useModelMenuLayout";
 import { useTranslation } from "react-i18next";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type {
@@ -13,6 +15,7 @@ import type {
 import {
   Check,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   CircleGauge,
   HelpCircle,
@@ -724,6 +727,21 @@ export default function ComposerV2({
   );
   const advancedModel =
     modelCatalog.find((item) => item.id === advancedModelId) || null;
+  const modelMenuVisible = isModelMenuOpen && Boolean(isModelCatalogLoading || modelCatalog.length > 0 || modelCatalogError);
+  const modelMenu = useModelMenuLayout(modelMenuVisible, Boolean(advancedModel), () => {
+    setIsModelMenuOpen(false);
+    setAdvancedModelId(null);
+  });
+  useLayoutEffect(() => {
+    if (!isModelMenuOpen) return;
+    if (modelMenu.inline && advancedModel) {
+      if (!modelMenu.advancedRef.current?.contains(document.activeElement)) {
+        modelMenu.advancedRef.current?.querySelector<HTMLButtonElement>('button')?.focus();
+      }
+    } else if (!advancedModel && document.activeElement === document.body) {
+      modelMenu.menuRef.current?.querySelector<HTMLInputElement>('input')?.focus();
+    }
+  }, [isModelMenuOpen, advancedModel, modelMenu.inline]);
   const advancedParams = paramsFromSelection(
     modelSelection,
     advancedModel?.id,
@@ -803,7 +821,8 @@ export default function ComposerV2({
                       }
                       openLabel={
                         t("documentReferences.open", {
-                          defaultValue: `Open ${reference.source.fileName}`,
+                          name: reference.source.fileName,
+                          defaultValue: "Open {{name}}",
                         }) as string
                       }
                       onOpen={
@@ -1480,23 +1499,12 @@ export default function ComposerV2({
                     compact && "relative",
                   )}
                 >
-                  <div
-                    className={cn(!compact && "relative")}
-                    onBlur={(event) => {
-                      const nextTarget = event.relatedTarget as Node | null;
-                      if (
-                        !nextTarget ||
-                        !event.currentTarget.contains(nextTarget)
-                      ) {
-                        setIsModelMenuOpen(false);
-                        setAdvancedModelId(null);
-                      }
-                    }}
-                  >
+                  <div>
                     <button
                       type="button"
                       disabled={!isModelCatalogLoading && modelCatalog.length === 0 && !modelCatalogError}
-                      onClick={() => setIsModelMenuOpen((open) => !open)}
+                      ref={modelMenu.triggerRef}
+                      onClick={() => { setIsModelMenuOpen((open) => !open); setAdvancedModelId(null); }}
                       className={cn(
                         "disabled:cursor-not-allowed disabled:opacity-40",
                         "pd-composer-icon-button inline-flex h-8 max-w-[220px] items-center justify-center gap-1.5 rounded-lg border border-transparent px-2 text-[13px] font-medium text-neutral-700 transition-colors hover:border-[#ddd9f2] hover:bg-[#f7f6ff] hover:text-[#4440a8] dark:text-neutral-200 dark:hover:border-violet-800 dark:hover:bg-violet-950/40 dark:hover:text-violet-200",
@@ -1520,7 +1528,7 @@ export default function ComposerV2({
                         strokeWidth={2}
                       />
                     </button>
-                    {isModelMenuOpen && (isModelCatalogLoading || modelCatalog.length > 0 || modelCatalogError) ? (
+                    {modelMenuVisible ? createPortal(
                       <div
                         role="dialog"
                         aria-label={
@@ -1528,15 +1536,12 @@ export default function ComposerV2({
                             defaultValue: "Select model",
                           }) as string
                         }
-                        className={cn(
-                          "pd-composer-model-menu absolute bottom-full z-50 mb-2 overflow-visible rounded-xl border border-violet-200 bg-white text-left shadow-xl shadow-violet-950/10 dark:border-violet-900/70 dark:bg-neutral-900",
-                          compact
-                            ? "right-0 left-auto w-[min(16rem,calc(100cqw-1.5rem))] max-w-[calc(100cqw-1.5rem)]"
-                            : "left-1/2 w-64 max-w-[calc(100vw-32px)] -translate-x-1/2",
-                        )}
+                        ref={modelMenu.menuRef}
+                        style={modelMenu.menuStyle}
+                        className="pd-composer-model-menu z-50 flex flex-col rounded-xl border border-violet-200 bg-white text-left shadow-xl shadow-violet-950/10 dark:border-violet-900/70 dark:bg-neutral-900"
                       >
-                        <div className="min-w-0 p-2">
-                          <div className="relative mb-1.5">
+                        <div className={cn("min-h-0 min-w-0 flex-col p-2", modelMenu.inline && advancedModel ? "hidden" : "flex")}>
+                          <div className="relative mb-1.5 shrink-0">
                             <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-neutral-400" />
                             <input
                               type="search"
@@ -1553,7 +1558,7 @@ export default function ComposerV2({
                               autoFocus
                             />
                           </div>
-                          <div className="max-h-64 overflow-y-auto [scrollbar-color:#c1c1c1_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-button]:h-0 [&::-webkit-scrollbar-button]:w-0 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[#c1c1c1] [&::-webkit-scrollbar-track]:bg-transparent">
+                          <div data-model-list className="min-h-0 max-h-64 overflow-y-auto [scrollbar-color:#c1c1c1_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-button]:h-0 [&::-webkit-scrollbar-button]:w-0 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[#c1c1c1] [&::-webkit-scrollbar-track]:bg-transparent">
                             {modelCatalogError ? (
                               <div className="px-3 py-3 text-[12px] text-red-500" role="alert">{modelCatalogError}</div>
                             ) : null}
@@ -1668,13 +1673,18 @@ export default function ComposerV2({
                               }
                               event.preventDefault();
                             }}
+                            ref={modelMenu.advancedRef}
+                            style={modelMenu.advancedStyle}
+                            data-side={modelMenu.side}
                             className={cn(
-                              "overflow-hidden rounded-[10px] border border-violet-300 bg-white p-[9px] text-[#505260] shadow-xl shadow-violet-950/10 dark:border-violet-800 dark:bg-neutral-900 dark:text-neutral-300",
-                              compact
-                                ? "relative mt-2 w-full min-w-0"
-                                : "absolute left-[calc(100%+8px)] top-6 w-[212px] min-w-[212px]",
+                              "min-h-0 overflow-y-auto overscroll-contain rounded-[10px] bg-white p-[9px] text-[#505260] dark:bg-neutral-900 dark:text-neutral-300",
+                              !modelMenu.inline && "border border-violet-300 shadow-xl shadow-violet-950/10 dark:border-violet-800",
                             )}
                           >
+                            {modelMenu.inline && <button type="button" className="mb-2 flex w-full items-center gap-1 rounded-md px-1 py-1.5 text-left text-xs hover:bg-violet-50 dark:hover:bg-violet-950/40"
+                              onClick={() => setAdvancedModelId(null)}>
+                              <ChevronLeft className="h-3.5 w-3.5" />{t("input.models.backToModels")}
+                            </button>}
                             {advancedModel.capabilities.reasoning ? (
                               <div>
                                 <h2 className="mb-1 text-[12px] font-bold text-[#454650] dark:text-neutral-100">
@@ -1813,7 +1823,7 @@ export default function ComposerV2({
                               : null}
                           </aside>
                         ) : null}
-                      </div>
+                      </div>, document.body
                     ) : null}
                   </div>
 

@@ -1,3 +1,4 @@
+import { createFrameBatcher } from '../../utils/frameBatcher';
 import {
   useCallback,
   useEffect,
@@ -12,6 +13,7 @@ import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
   ChevronRight,
+  Loader2,
   Folder,
   MessageSquarePlus,
   Plus,
@@ -354,7 +356,11 @@ export default function SidebarV2({
   useEffect(() => {
     if (isMobile) return;
     const appShell = sidebarRootRef.current?.closest<HTMLElement>('.app-shell');
-    appShell?.style.setProperty('--sidebar-width', `${sidebarWidth}px`);
+    if (!appShell) return;
+    // Updating an inherited custom property invalidates styles throughout the
+    // transcript. The grid width belongs only to the shell itself.
+    appShell.style.gridTemplateColumns = `${sidebarWidth}px 1px minmax(0, 1fr)`;
+    return () => { appShell.style.removeProperty('grid-template-columns'); };
   }, [isMobile, sidebarWidth]);
 
   const expandCompactSidebar = useCallback(() => {
@@ -375,26 +381,27 @@ export default function SidebarV2({
   }, []);
 
   useEffect(() => {
-    if (savedProjectsSplitRatio === null) return;
+    if (savedProjectsSplitRatio === null || projectsSplitResizing) return;
     try {
       window.localStorage.setItem(SIDEBAR_SPLIT_STORAGE_KEY, String(savedProjectsSplitRatio));
     } catch {
       // Split remains usable when persistent storage is unavailable.
     }
-  }, [savedProjectsSplitRatio]);
+  }, [savedProjectsSplitRatio, projectsSplitResizing]);
 
   useEffect(() => {
     if (!projectsSplitResizing) return undefined;
 
-    const handleMouseMove = (event: globalThis.MouseEvent) => {
+    const moveBatch = createFrameBatcher((event: globalThis.MouseEvent) => {
       const panel = projectsConversationsSplitRef.current;
       if (!panel) return;
       const rect = panel.getBoundingClientRect();
       const pointerRatio = (event.clientY - rect.top)
         / Math.max(1, rect.height - SIDEBAR_SPLITTER_HEIGHT);
       setProjectsSplitRatio(clampProjectsSplitRatio(pointerRatio));
-    };
-    const handleMouseUp = () => setProjectsSplitResizing(false);
+    });
+    const handleMouseMove = moveBatch.schedule;
+    const handleMouseUp = () => { moveBatch.flush(); setProjectsSplitResizing(false); };
 
     document.addEventListener('mousemove', handleMouseMove);
     document.addEventListener('mouseup', handleMouseUp);
@@ -402,6 +409,7 @@ export default function SidebarV2({
     document.body.style.userSelect = 'none';
 
     return () => {
+      moveBatch.cancel();
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
       document.body.style.cursor = '';
@@ -409,41 +417,37 @@ export default function SidebarV2({
     };
   }, [clampProjectsSplitRatio, projectsSplitResizing]);
 
+  const widthDragCleanupRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => widthDragCleanupRef.current?.(), []);
+
   const handleResizeStart = useCallback((event: MouseEvent<HTMLDivElement>) => {
     event.preventDefault();
+    widthDragCleanupRef.current?.();
     const startX = event.clientX;
     const startWidth = sidebarWidth;
+    let latestWidth = startWidth;
     setIsResizing(true);
-
-    const onMove = (e: globalThis.MouseEvent) => {
-      const next = Math.min(
-        SIDEBAR_MAX_WIDTH,
-        Math.max(SIDEBAR_MIN_WIDTH, startWidth + (e.clientX - startX)),
-      );
-      setSidebarWidth(next);
-    };
-
-    const onUp = () => {
-      setIsResizing(false);
+    const moveBatch = createFrameBatcher((e: globalThis.MouseEvent) => {
+      latestWidth = Math.min(SIDEBAR_MAX_WIDTH,
+        Math.max(SIDEBAR_MIN_WIDTH, startWidth + (e.clientX - startX)));
+      setSidebarWidth(latestWidth);
+    });
+    const onMove = moveBatch.schedule;
+    const cleanup = () => {
+      moveBatch.cancel();
       document.removeEventListener('mousemove', onMove);
       document.removeEventListener('mouseup', onUp);
-      // Persist the latest width by reading back from state — wrapped in a
-      // microtask so the latest setState has settled before we serialize.
-      queueMicrotask(() => {
-        try {
-          // Read directly off the DOM element rather than chasing closure state
-          // to avoid serializing a stale value.
-          const aside = document.querySelector<HTMLElement>('aside[data-sidebar-v2-root]');
-          const width = aside?.offsetWidth;
-          if (width && Number.isFinite(width)) {
-            window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(Math.round(width)));
-          }
-        } catch {
-          // localStorage may be unavailable in some environments — ignore.
-        }
-      });
+      widthDragCleanupRef.current = null;
     };
-
+    const onUp = () => {
+      moveBatch.flush();
+      cleanup();
+      setIsResizing(false);
+      try {
+        window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(Math.round(latestWidth)));
+      } catch { /* The width remains usable without persistent storage. */ }
+    };
+    widthDragCleanupRef.current = cleanup;
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup', onUp);
   }, [sidebarWidth]);
@@ -814,17 +818,15 @@ export default function SidebarV2({
                   isOptimisticRow && 'cursor-default',
                 )}
               >
-                {options.flat ? (
-                  <svg aria-hidden="true" className="icon" fill="none" height="16" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" viewBox="0 0 24 24" width="16">
-                    <path d="M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z" />
-                  </svg>
-                ) : (
-                  <span
-                    aria-label={indicatorLabel}
-                    title={indicatorLabel}
-                    className="conversation-dot"
-                  />
-                )}
+                <span className={cn('session-indicator', options.flat && 'session-indicator-flat')}
+                  data-session-indicator={sessionId} data-status={indicatorStatus} aria-label={indicatorLabel} title={indicatorLabel}>
+                  {indicatorStatus === 'processing' ? <Loader2 aria-hidden="true" className="h-3 w-3 animate-spin" />
+                    : options.flat && indicatorStatus === 'idle' ? (
+                      <svg aria-hidden="true" className="icon" fill="none" height="16" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" viewBox="0 0 24 24" width="16">
+                        <path d="M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z" />
+                      </svg>
+                    ) : <span aria-hidden="true" className="conversation-dot" />}
+                </span>
                 <div className="min-w-0">
                   <div
                     className={cn(

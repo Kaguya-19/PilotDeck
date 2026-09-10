@@ -301,7 +301,7 @@ export default function useLlmSetup({ onSaved }: UseLlmSetupOptions = {}): LlmSe
         return;
       }
       setTestStatus('success');
-      setTestMessage('Connected successfully.');
+      setTestMessage(t('common:uiText.connected'));
     } catch (err) {
       if (controller.signal.aborted || generation !== testGenerationRef.current) return;
       setTestStatus('error');
@@ -336,18 +336,18 @@ export default function useLlmSetup({ onSaved }: UseLlmSetupOptions = {}): LlmSe
       });
       setManualModelIds([]);
       setTestStatus('success');
-      setTestMessage('Connected successfully.');
+      setTestMessage(t('common:uiText.connected'));
     } catch (err) {
       setTestStatus('error');
       setTestMessage(err instanceof Error ? err.message : 'Image capability confirmation failed.');
     }
-  }, [connectionTestId]);
+  }, [connectionTestId, t]);
 
   const cancelManualImageSupport = useCallback(() => {
     setManualModelIds([]);
     setTestStatus('error');
-    setTestMessage('Image capability confirmation cancelled.');
-  }, []);
+    setTestMessage(t('common:uiText.imageConfirmationCancelled'));
+  }, [t]);
 
   const handleSave = useCallback(async () => {
     if (!selectedProvider || customProviderIdError) return;

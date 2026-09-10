@@ -79,6 +79,7 @@ type PendingSessionTitle = {
 const SESSION_LISTING_PROMPT_MAX_CHARS = 1_200;
 
 export class TurnRunner {
+  private disposed = false;
   private pendingSessionTitle: PendingSessionTitle | undefined;
 
   constructor(
@@ -96,13 +97,7 @@ export class TurnRunner {
 
   async *run(options: TurnRunnerOptions): AsyncGenerator<AgentEvent, TurnRunnerResult, unknown> {
     yield { type: "turn_started", sessionId: options.sessionId, turnId: options.turnId };
-    const artifactCollector = this.runtimeContext.collectFileArtifacts === false
-      ? undefined
-      : await FileArtifactCollector.start({
-          cwd: this.runtimeContext.cwd,
-          allowedInputPaths: options.allowedReadFiles,
-          now: this.now,
-        }).catch(() => undefined);
+    let artifactCollector: FileArtifactCollector | undefined;
     try {
       const unacknowledgedSteers = new Map<string, AgentSteerMessage>();
       const trackDrainedSteers = (steers: AgentSteerMessage[]): AgentSteerMessage[] => {
@@ -164,6 +159,16 @@ export class TurnRunner {
 
       await this.persistListingPromptMetadata(options, accepted.messages);
       yield { type: "input_accepted", sessionId: options.sessionId, turnId: options.turnId, messages: accepted.messages };
+
+      // Acknowledge durable input before scanning the workspace. The baseline
+      // still completes before hooks/model/tools can mutate any files.
+      artifactCollector = this.runtimeContext.collectFileArtifacts === false
+        ? undefined
+        : await FileArtifactCollector.start({
+            cwd: this.runtimeContext.cwd,
+            allowedInputPaths: options.allowedReadFiles,
+            now: this.now,
+          }).catch(() => undefined);
 
       const prompt = inputToPromptText(options.input);
       const userPromptHooks = await this.lifecycle?.dispatch({
@@ -297,9 +302,9 @@ export class TurnRunner {
           yield { type: "file_artifacts", sessionId: options.sessionId, turnId: options.turnId, artifacts };
         }
         for (const event of unappliedSteers) yield event;
-        if (turnCompletedEvent) yield turnCompletedEvent;
         await this.transcript.recordTurnResult(options.sessionId, options.turnId, runResult.result);
         await this.finalizeSessionMetadata(options, sessionTitle);
+        if (turnCompletedEvent) yield turnCompletedEvent;
         return runResult;
       } catch (error) {
         const unappliedSteers = closeSteerMailbox();
@@ -390,11 +395,21 @@ export class TurnRunner {
     };
   }
 
+  /** Invalidate background work before the session transcript is removed/replaced. */
+  async dispose(): Promise<void> {
+    this.disposed = true;
+    this.pendingSessionTitle?.controller.abort("session_closed");
+    this.pendingSessionTitle?.cleanup();
+    // A provider may ignore cancellation. Do not wait for its network request;
+    // the completion guard below prevents it from ever saving a late title.
+    await this.transcript.close?.();
+  }
+
   private maybeGenerateSessionTitle(
     options: TurnRunnerOptions,
     acceptedMessages: CanonicalMessage[],
   ): PendingSessionTitle | undefined {
-    if (this.turnDependencies.autoGenerateSessionTitle !== true) {
+    if (this.disposed || this.turnDependencies.autoGenerateSessionTitle !== true) {
       return undefined;
     }
     const metadataStore = this.turnDependencies.metadataStore;
@@ -428,6 +443,7 @@ export class TurnRunner {
         signal: controller.signal,
       })
         .then(async (title) => {
+          if (this.disposed || controller.signal.aborted) return;
           pending.title = title;
           if (title) {
             const snap = metadataStore.getSnapshot();
@@ -446,37 +462,13 @@ export class TurnRunner {
     return pending;
   }
 
-  private async flushReadySessionTitle(
-    options: TurnRunnerOptions,
-    pending: PendingSessionTitle | undefined,
-  ): Promise<void> {
-    if (!pending) {
-      return;
-    }
-    if (!pending.completed) {
-      // The title generation has its own timeout (SESSION_TITLE_TIMEOUT_MS).
-      // Wait for it to settle instead of discarding immediately.
-      await pending.promise;
-    }
-    if (!pending.title) {
-      return;
-    }
-    const metadataStore = this.turnDependencies.metadataStore;
-    if (!metadataStore) {
-      return;
-    }
-    const latest = metadataStore.getSnapshot();
-    if (latest.title || latest.aiTitle) {
-      return;
-    }
-    await metadataStore.saveAiTitle(pending.title, options.turnId);
-  }
-
   private async finalizeSessionMetadata(
     options: TurnRunnerOptions,
     pending?: PendingSessionTitle,
   ): Promise<void> {
-    await this.flushReadySessionTitle(options, pending);
+    // Title completion saves its own metadata. It must not hold the session
+    // slot after the reply finishes; later turns can continue while it runs.
+    pending?.cleanup();
     await this.turnDependencies.metadataStore?.reappendTail(options.turnId).catch(() => {});
   }
 

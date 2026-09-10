@@ -80,12 +80,7 @@ export default function WorkspaceStep(props: WorkspaceStepProps) {
     setIsPickingFolder(true);
     setBrowseError('');
     try {
-      if (window.pilotdeckDesktop?.pickFolder) {
-        const selectedPath = await window.pilotdeckDesktop.pickFolder();
-        if (selectedPath) handlePathChange(selectedPath);
-      } else {
-        setShowFolderBrowser(true);
-      }
+      setShowFolderBrowser(true);
     } catch (caughtError) {
       setBrowseError(
         caughtError instanceof Error ? caughtError.message : String(caughtError),
@@ -225,6 +220,7 @@ export default function WorkspaceStep(props: WorkspaceStepProps) {
 
       <FolderBrowserModal
         isOpen={showFolderBrowser}
+        initialPath={draft.workspacePath}
         autoAdvanceOnSelect={false}
         onClose={() => setShowFolderBrowser(false)}
         onFolderSelected={(selectedPath) => {

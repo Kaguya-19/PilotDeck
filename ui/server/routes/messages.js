@@ -79,7 +79,10 @@ router.get('/:sessionId/messages', async (req, res) => {
         },
       });
     }
-    return res.json({ messages: [], total: 0, hasMore: false, offset: 0, limit: null });
+    return res.status(500).json({ error: {
+      code: 'session_messages_read_failed',
+      message: 'Unable to read conversation messages. Please retry.',
+    } });
   }
 });
 

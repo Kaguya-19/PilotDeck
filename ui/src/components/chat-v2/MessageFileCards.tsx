@@ -1,3 +1,4 @@
+import { useConfirm } from '../ui/ConfirmDialog';
 import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
@@ -70,6 +71,7 @@ export function MessageFileCard({
   compact = false,
 }: MessageFileCardProps) {
   const { t } = useTranslation('chat');
+  const confirm = useConfirm();
   const workspaceBacked = file.workspaceBacked !== false;
   const relativePath = workspaceBacked ? resolveRelativePath(file.path, project) : null;
   const canBrowse = Boolean(onBrowse && workspaceBacked);
@@ -93,9 +95,9 @@ export function MessageFileCard({
           response.ok
           && currentSha256
           && currentSha256 !== file.sha256
-          && !window.confirm(t('fileArtifacts.updatedSinceMessage', {
+          && !await confirm({ message: t('fileArtifacts.updatedSinceMessage', {
             defaultValue: 'This file has changed since this message. Open the current version?',
-          }) as string)
+          }) as string, confirmLabel: t('common:confirmDialog.open') })
         ) {
           return;
         }

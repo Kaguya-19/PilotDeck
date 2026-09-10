@@ -1,3 +1,4 @@
+import { recordUiDiagnostic, reloadUi } from '../../lib/uiDiagnostics';
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { Dispatch, ReactNode, RefObject, SetStateAction } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -15,6 +16,8 @@ import type { SessionStore } from '../../stores/useSessionStore';
 import { getSessionRequestParams, isReadOnlySession, type Project, type ProjectSession, type SessionProvider } from '../../types/app';
 import { getIntrinsicMessageKey } from '../chat/utils/messageKeys';
 import MessageRowV2 from './MessageRowV2';
+import SendingMessages from './SendingMessages';
+import type { QueuedInputSummary } from '../chat/types/queuedInput';
 import AssistantReplyQuoteAction from './AssistantReplyQuoteAction';
 import SubagentDetailModal from './SubagentDetailModal';
 import ChatHistorySearchBar from './ChatHistorySearchBar';
@@ -26,6 +29,7 @@ import { ProcessLiveStatus, ProcessRunHeader, type ProcessTraceStep } from './Pr
 import { formatProcessDuration } from './processTraceUtils';
 import {
   buildRenderableMessageItems,
+  foldCompletedTurns,
   getLiveProcessDetailMessages,
   getLiveProcessGroupStep,
   getLiveProcessGroups,
@@ -50,6 +54,7 @@ type MessagesPaneV2Props = {
   sessionLoadError?: string | null;
   onRetrySessionLoad?: () => void;
   chatMessages: ChatMessage[];
+  sendingInputs?: QueuedInputSummary[];
   activityMessages?: ChatMessage[];
   visibleMessages: ChatMessage[];
   visibleMessageCount: number;
@@ -175,6 +180,7 @@ function getMessageTextLength(message: ChatMessage): number {
 
 // eslint-disable-next-line react-refresh/only-export-components
 export function estimateMessageItemHeight(item: RenderableMessageItem): number {
+  if (item.turnTrace) return 50;
   const textLength = getMessageTextLength(item.message);
   const roughLines = Math.ceil(textLength / 92);
   const baseHeight = item.message.type === 'user' ? 64 : 92;
@@ -233,6 +239,7 @@ function MeasuredMessageItem({
   message,
   isLast,
   compactBottomSpacing = false,
+  flushBottomSpacing = false,
   onHeightChange,
   children,
 }: {
@@ -240,6 +247,7 @@ function MeasuredMessageItem({
   message: ChatMessage;
   isLast: boolean;
   compactBottomSpacing?: boolean;
+  flushBottomSpacing?: boolean;
   onHeightChange: (itemKey: string, height: number) => void;
   children: ReactNode;
 }) {
@@ -279,7 +287,7 @@ function MeasuredMessageItem({
   return (
     <div
       ref={itemRef}
-      className={`chat-message ${isLast ? '' : compactBottomSpacing ? 'pb-2' : 'pb-4'}`}
+      className={`chat-message ${isLast || flushBottomSpacing ? '' : compactBottomSpacing ? 'pb-2' : 'pb-4'}`}
       data-message-key={itemKey}
       data-message-timestamp={message.timestamp ? String(message.timestamp) : undefined}
     >
@@ -333,6 +341,7 @@ function MessagesPaneV2({
   sessionLoadError,
   onRetrySessionLoad,
   chatMessages,
+  sendingInputs = [],
   activityMessages = [],
   visibleMessages,
   visibleMessageCount,
@@ -438,7 +447,7 @@ function MessagesPaneV2({
     t('emptyChat.prompts.review', { defaultValue: 'Review the most recent file I touched' }),
   ];
 
-  const isEmpty = !isLoadingSessionMessages && chatMessages.length === 0;
+  const isEmpty = !isLoadingSessionMessages && chatMessages.length === 0 && sendingInputs.length === 0;
   const hasSessionLoadError = Boolean(!isLoadingSessionMessages && sessionLoadError && chatMessages.length === 0);
   const isNewConversationEmpty = isEmpty && !selectedSession;
   const isExistingConversationEmpty = isEmpty && Boolean(selectedSession) && !hasSessionLoadError;
@@ -539,7 +548,8 @@ function MessagesPaneV2({
     return groupsByAnchor;
   }, [liveProcessGroups]);
   const renderableMessageItems = useMemo(
-    () => buildRenderableMessageItems(renderableMessages, { isAssistantWorking }),
+    () => foldCompletedTurns(renderableMessages,
+      buildRenderableMessageItems(renderableMessages, { isAssistantWorking }), isAssistantWorking),
     [isAssistantWorking, renderableMessages],
   );
   const keyedMessageItems = useMemo<KeyedRenderableMessageItem[]>(
@@ -564,7 +574,13 @@ function MessagesPaneV2({
     void heightVersion;
     return keyedMessageItems.map((item) => measuredHeightsRef.current.get(item.itemKey) ?? item.estimatedHeight);
   }, [heightVersion, keyedMessageItems]);
-  const shouldVirtualizeMessages = keyedMessageItems.length > MESSAGE_VIRTUALIZATION_THRESHOLD;
+  const shouldVirtualizeMessages = useMemo(() => (
+    keyedMessageItems.length > MESSAGE_VIRTUALIZATION_THRESHOLD
+    // A modest number of long answers can be heavier than hundreds of short
+    // messages. Keep small conversations intact for ordinary text selection.
+    || (keyedMessageItems.length > 40
+      && keyedMessageItems.reduce((height, item) => height + item.estimatedHeight, 0) > 20_000)
+  ), [keyedMessageItems]);
   // Keep the reader's row mounted when prepending history changes the virtual
   // offsets. The shared scroll controller then corrects any measured remainder.
   const virtualSnapshotRef = useRef<{ scope: string; keys: string[]; heights: number[] } | null>(null);
@@ -1010,6 +1026,46 @@ function MessagesPaneV2({
       return true;
     })();
 
+    const renderRow = (rowItem: RenderableMessageItem, inTrace = false) => (
+      <MessageRowV2
+        message={rowItem.message}
+        prevMessage={previousMessage}
+        nextMessage={nextMessage}
+        beforeProcessAttachments={rowItem.beforeProcessAttachments}
+        afterProcessAttachments={rowItem.afterProcessAttachments}
+        provider={provider}
+        selectedProject={selectedProject}
+        createDiff={createDiff}
+        onFileOpen={onFileOpen}
+        onShowSettings={onShowSettings}
+        onGrantSessionToolPermission={onGrantSessionToolPermission}
+        autoExpandTools={autoExpandTools}
+        showRawParameters={showRawParameters}
+        showThinking={showThinking}
+        inlineThinking={inlineThinking}
+        isProcessExpanded={isProcessExpanded}
+        onProcessExpandedChange={handleProcessExpandedChange}
+        isToolSectionExpanded={isToolSectionExpanded}
+        onToolSectionExpandedChange={handleToolSectionExpandedChange}
+        onOpenSubagentDetail={handleOpenSubagentDetail}
+        subagentActivityById={subagentActivityById}
+        subagentThinkingById={subagentThinkingById}
+        isSessionRunning={!inTrace && isAssistantWorking}
+        sessionRuntimeState={inTrace ? 'inactive' : messageSessionRuntimeState}
+        onFork={onFork}
+        forkCarriedMessageCount={forkCarriedMessageCount}
+        forkDisabled={forkDisabled}
+        showAssistantActions={!inTrace && showAssistantActions}
+        canEdit={Boolean(
+          onRegenerate
+          && !sessionIsReadOnly
+          && !inTrace
+          && item.itemKey === lastUserMessageItemKey
+        )}
+        onRegenerate={onRegenerate}
+      />
+    );
+
     return (
       <Fragment key={item.itemKey}>
         {liveProcessHeaderIndex === 0 && item.renderIndex === 0 ? (
@@ -1024,6 +1080,7 @@ function MessagesPaneV2({
           message={item.message}
           isLast={isLast}
           compactBottomSpacing={anchoredLiveGroups.length > 0 || rendersLiveHeaderAfterItem}
+          flushBottomSpacing={Boolean(item.turnTrace && !isProcessExpanded(`${messageWindowScope}:${item.turnTrace.id}`))}
           onHeightChange={handleMeasuredItemHeight}
         >
           {item.beforeRunAttachment ? (
@@ -1032,42 +1089,23 @@ function MessagesPaneV2({
               t={t}
             />
           ) : null}
-          <MessageRowV2
-            message={item.message}
-            prevMessage={previousMessage}
-            nextMessage={nextMessage}
-            beforeProcessAttachments={item.beforeProcessAttachments}
-            afterProcessAttachments={item.afterProcessAttachments}
-            provider={provider}
-            selectedProject={selectedProject}
-            createDiff={createDiff}
-            onFileOpen={onFileOpen}
-            onShowSettings={onShowSettings}
-            onGrantSessionToolPermission={onGrantSessionToolPermission}
-            autoExpandTools={autoExpandTools}
-            showRawParameters={showRawParameters}
-            showThinking={showThinking}
-            inlineThinking={inlineThinking}
-            isProcessExpanded={isProcessExpanded}
-            onProcessExpandedChange={handleProcessExpandedChange}
-            isToolSectionExpanded={isToolSectionExpanded}
-            onToolSectionExpandedChange={handleToolSectionExpandedChange}
-            onOpenSubagentDetail={handleOpenSubagentDetail}
-            subagentActivityById={subagentActivityById}
-            subagentThinkingById={subagentThinkingById}
-            isSessionRunning={isAssistantWorking}
-            sessionRuntimeState={messageSessionRuntimeState}
-            onFork={onFork}
-            forkCarriedMessageCount={forkCarriedMessageCount}
-            forkDisabled={forkDisabled}
-            showAssistantActions={showAssistantActions}
-            canEdit={Boolean(
-              onRegenerate
-              && !sessionIsReadOnly
-              && item.itemKey === lastUserMessageItemKey
-            )}
-            onRegenerate={onRegenerate}
-          />
+          {item.turnTrace ? (
+            <>
+              <CompletedProcessHeader durationMs={item.turnTrace.durationMs} t={t}
+                expanded={isProcessExpanded(`${messageWindowScope}:${item.turnTrace.id}`)}
+                onExpandedChange={(expanded) => handleProcessExpandedChange(`${messageWindowScope}:${item.turnTrace!.id}`, expanded)} />
+              {isProcessExpanded(`${messageWindowScope}:${item.turnTrace.id}`) ? (
+                <div className="space-y-4" data-turn-trace={item.turnTrace.id}>
+                  {item.turnTrace.items.map((child) => {
+                    const childKey = `${messageWindowScope}:${getMessageKey(child.message, child.originalIndex)}`;
+                    return <div key={childKey} className="chat-message" data-message-key={childKey}>
+                      {renderRow(child, true)}
+                    </div>;
+                  })}
+                </div>
+              ) : null}
+            </>
+          ) : renderRow(item)}
           {rendersLiveHeaderAfterItem ? (
             <LiveProcessHeader
               activities={nonSubagentLiveActivities}
@@ -1090,6 +1128,8 @@ function MessagesPaneV2({
       </Fragment>
     );
   }, [
+    messageWindowScope,
+    getMessageKey,
     autoExpandTools,
     activeRunId,
     createDiff,
@@ -1127,15 +1167,20 @@ function MessagesPaneV2({
   ]);
 
   const keyedMessagesForSearch = useMemo<SearchableChatMessageInput[]>(() => {
-    return keyedMessageItems.map((item) => (
-      {
-        message: item.message,
-        messageKey: item.itemKey,
+    return keyedMessageItems.flatMap((item) => (
+      item.turnTrace ? item.turnTrace.items.map((child) => ({
+        message: child.message,
+        messageKey: `${messageWindowScope}:${getMessageKey(child.message, child.originalIndex)}`,
         messageIndex: item.renderIndex,
-      }
+      })) : [{ message: item.message, messageKey: item.itemKey, messageIndex: item.renderIndex }]
     ));
-  }, [keyedMessageItems]);
+  }, [keyedMessageItems, messageWindowScope, getMessageKey]);
 
+  const revealSearchTrace = useCallback((match: { messageIndex: number }) => {
+    onPauseScroll?.();
+    const trace = keyedMessageItems[match.messageIndex]?.turnTrace;
+    if (trace) handleProcessExpandedChange(`${messageWindowScope}:${trace.id}`, true);
+  }, [onPauseScroll, keyedMessageItems, messageWindowScope, handleProcessExpandedChange]);
   const chatHistorySearch = useChatHistorySearch({
     scrollContainerRef,
     keyedMessages: keyedMessagesForSearch,
@@ -1145,12 +1190,49 @@ function MessagesPaneV2({
     loadAllMessages,
     sessionId,
     renderWindowKey: `${virtualWindow.startIndex}:${virtualWindow.endIndex}`,
-    onNavigate: onPauseScroll,
+    onNavigate: revealSearchTrace,
   });
   const searchIsRenderedByShell = useRegisterChatHistorySearchControls(chatHistorySearch);
+  const [hasLayoutWarning, setHasLayoutWarning] = useState(false);
+  useEffect(() => {
+    setHasLayoutWarning(false);
+    if (isAssistantWorking || isLoadingSessionMessages || keyedMessageItems.length === 0) return;
+    // Check after completion/refresh layout has settled. Never interpret a
+    // hidden tab/panel, or an ordinary empty conversation, as a rendering fault.
+    const timer = window.setTimeout(() => {
+      const node = scrollContainerRef.current;
+      if (!node || node.clientHeight <= 0 || !node.getClientRects().length
+        || document.visibilityState === 'hidden') return;
+      const viewport = node.getBoundingClientRect();
+      const hasVisibleRow = Array.from(node.querySelectorAll<HTMLElement>('[data-message-key]'))
+        .some((row) => {
+          const rect = row.getBoundingClientRect();
+          return rect.height > 0 && rect.bottom > viewport.top && rect.top < viewport.bottom;
+        });
+      if (hasVisibleRow) return;
+      recordUiDiagnostic('chat-empty-viewport', {
+        messages: chatMessages.length, renderItems: keyedMessageItems.length,
+        windowStart: virtualWindow.startIndex, windowEnd: virtualWindow.endIndex,
+        scrollTop: node.scrollTop, scrollHeight: node.scrollHeight,
+        viewportHeight: node.clientHeight, virtualized: shouldVirtualizeMessages,
+      });
+      setHasLayoutWarning(true);
+    }, 800);
+    return () => window.clearTimeout(timer);
+  }, [isAssistantWorking, isLoadingSessionMessages, keyedMessageItems, chatMessages.length,
+    scrollContainerRef, virtualWindow.startIndex, virtualWindow.endIndex, shouldVirtualizeMessages]);
+
 
   return (
     <div className="relative min-h-0 flex-1 overflow-hidden">
+      {hasLayoutWarning ? (
+        <div role="alert" className="absolute inset-x-4 top-4 z-20 mx-auto flex max-w-xl items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200">
+          <span>{t('common:uiText.chatLayoutError')}</span>
+          <button type="button" onClick={reloadUi} className="shrink-0 rounded px-2 py-1 underline underline-offset-2 hover:bg-amber-100 dark:hover:bg-amber-900">
+            {t('common:uiText.reloadInterface')}
+          </button>
+        </div>
+      ) : null}
       {chatHistorySearch.isOpen && !searchIsRenderedByShell ? (
         <ChatHistorySearchBar
           query={chatHistorySearch.query}
@@ -1332,7 +1414,7 @@ function MessagesPaneV2({
           <div
             className={shouldReserveResponseSpace ? 'chat-current-turn-reserve' : undefined}
             data-chat-response-reserved-space={shouldReserveResponseSpace ? 'true' : undefined}
-            style={shouldReserveResponseSpace ? { minHeight: reservedSpaceTarget } : undefined}
+            style={shouldReserveResponseSpace && sendingInputs.length === 0 ? { minHeight: reservedSpaceTarget } : undefined}
           >
             {latestUserRenderIndex >= 0
               ? windowedMessageItems
@@ -1372,6 +1454,7 @@ function MessagesPaneV2({
               </ProcessLiveStatus>
             ) : null}
           </div>
+          <SendingMessages items={sendingInputs} />
         </div>
       )}
 
@@ -1600,8 +1683,12 @@ function LiveProcessHeader({
 function CompletedProcessHeader({
   durationMs,
   t,
+  expanded,
+  onExpandedChange,
 }: {
   durationMs: number;
+  expanded?: boolean;
+  onExpandedChange?: (expanded: boolean) => void;
   t: (key: string, options?: Record<string, unknown>) => string;
 }) {
   const duration = formatProcessDuration(durationMs);
@@ -1610,5 +1697,5 @@ function CompletedProcessHeader({
     defaultValue: `Processed ${duration}`,
   });
 
-  return <ProcessRunHeader label={label} />;
+  return <ProcessRunHeader label={label} expanded={expanded} onExpandedChange={onExpandedChange} />;
 }

@@ -1226,9 +1226,8 @@
   }
 
   .app-shell {
-    --sidebar-width: 220px;
     display: grid;
-    grid-template-columns: var(--sidebar-width) 1px minmax(0, 1fr);
+    grid-template-columns: 220px 1px minmax(0, 1fr);
     grid-template-rows: 62px minmax(0, 1fr);
     width: 100%;
     height: 100%;
@@ -1663,7 +1662,7 @@
     width: 100%;
     min-width: 0;
     min-height: 32px;
-    grid-template-columns: 8px minmax(0, 1fr);
+    grid-template-columns: 12px minmax(0, 1fr);
     align-items: center;
     gap: 5px;
     padding: 6px 7px;
@@ -1687,6 +1686,24 @@
     background: linear-gradient(90deg, #efecff, #edf4ff);
     color: #3f3a91;
   }
+
+  .session-indicator {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 12px;
+    height: 16px;
+    flex-shrink: 0;
+    color: #8a84a8;
+  }
+  .session-indicator-flat { width: 16px; }
+  .session-indicator[data-status="unread"] .conversation-dot {
+    width: 6px;
+    height: 6px;
+    background: #7060e8;
+  }
+  .dark .session-indicator { color: #a1a1aa; }
+  .dark .session-indicator[data-status="unread"] .conversation-dot { background: #a78bfa; }
 
   .conversation-dot {
     width: 5px;
@@ -2610,4 +2627,28 @@
     background: radial-gradient(circle at center, #665ee8 0 3px, #fff 3.25px 100%);
     box-shadow: 0 0 0 1px rgba(102, 94, 232, 0.18);
   }
+}
+
+/* Block copy controls float above content without adding a toolbar row. */
+.markdown-copy-controls {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+
+.markdown-copy-block:hover > .markdown-copy-controls,
+.markdown-copy-block:focus-within > .markdown-copy-controls {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+@media (hover: none) {
+  .markdown-copy-controls {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+.markdown-copy-table th:last-child {
+  padding-inline-end: 3.5rem;
 }

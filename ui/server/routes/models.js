@@ -1,6 +1,6 @@
 import express from 'express';
 import { getModelConfigurationState } from '../services/modelConfigurationState.js';
-import { getPilotDeckGateway } from '../pilotdeck-bridge.js';
+import { getAcceptedModelSelection, recordAcceptedModelSelection, getPilotDeckGateway } from '../pilotdeck-bridge.js';
 
 const router = express.Router();
 
@@ -25,18 +25,23 @@ export function createSessionModelHandlers() {
       try {
         const gateway = await getPilotDeckGateway();
         if (!(await hasCapability(gateway, 'session_model_get'))) return unavailable(res, 'session_model_get');
-        return res.json(await gateway.sessionModelGet({
+        const result = await gateway.sessionModelGet({
           projectKey: stringParam(req.query.projectKey), sessionKey: stringParam(req.query.sessionKey),
-        }));
+        });
+        // `saved` is execution history for legacy sessions; acceptedSelection is
+        // the composer's last successful send, which can still be queued.
+        return res.json({...result, acceptedSelection: getAcceptedModelSelection(result.projectKey, result.sessionKey)});
       } catch (error) { return sendError(res, error, req.id); }
     },
     async set(req, res) {
       try {
         const gateway = await getPilotDeckGateway();
         if (!(await hasCapability(gateway, 'session_model_set'))) return unavailable(res, 'session_model_set');
-        return res.json(await gateway.sessionModelSet({
+        const result = await gateway.sessionModelSet({
           projectKey: stringParam(req.body?.projectKey), sessionKey: stringParam(req.body?.sessionKey), selection: req.body?.selection,
-        }));
+        });
+        recordAcceptedModelSelection(result.projectKey, result.sessionKey, req.body?.selection, 'explicit-model-setting');
+        return res.json(result);
       } catch (error) { return sendError(res, error, req.id); }
     },
     async clear(req, res) {
@@ -46,6 +51,7 @@ export function createSessionModelHandlers() {
         await gateway.sessionModelClear({
           projectKey: stringParam(req.query.projectKey), sessionKey: stringParam(req.query.sessionKey),
         });
+        recordAcceptedModelSelection(stringParam(req.query.projectKey), stringParam(req.query.sessionKey), null, 'explicit-model-clear');
         return res.status(204).end();
       } catch (error) { return sendError(res, error, req.id); }
     },

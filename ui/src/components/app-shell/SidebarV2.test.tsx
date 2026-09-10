@@ -11,6 +11,7 @@ vi.mock('react-router-dom', () => ({
 
 vi.mock('lucide-react', () => ({
   ChevronRight: () => null,
+  Loader2: () => <svg data-testid="running-indicator" />,
   Folder: () => null,
   GitBranch: () => null,
   MessageSquarePlus: () => null,
@@ -240,4 +241,13 @@ describe('SidebarV2 layout', () => {
     }));
     expect(onStartNewSession).toHaveBeenLastCalledWith(general);
   });
+});
+
+it('renders running, unread and idle indicators in the same slot', () => {
+  const withSessions = {...project, sessions:[{id:'running',title:'Running'}, {id:'unread',title:'Unread'}, {id:'idle',title:'Idle'}]};
+  const view = renderSidebar(withSessions, {projects:[withSessions],selectedSession:{id:'running'},processingSessions:new Set(['running']),unreadSessionIds:new Set(['running','unread'])});
+  expect(view.container.querySelector('[data-session-indicator="running"]')?.getAttribute('data-status')).toBe('processing');
+  expect(screen.getByTestId('running-indicator')).toBeTruthy();
+  expect(view.container.querySelector('[data-session-indicator="unread"]')?.getAttribute('data-status')).toBe('unread');
+  expect(view.container.querySelector('[data-session-indicator="idle"]')?.getAttribute('data-status')).toBe('idle');
 });

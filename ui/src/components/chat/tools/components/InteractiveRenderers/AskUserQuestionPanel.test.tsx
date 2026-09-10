@@ -1,3 +1,5 @@
+import { I18nextProvider } from 'react-i18next';
+import { createTestI18n } from '../../../../../i18n/testInstance';
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -15,7 +17,8 @@ afterEach(() => {
 });
 
 describe('AskUserQuestionPanel IME behavior', () => {
-  it('does not submit the Other input when Enter confirms IME composition', () => {
+  it.each(['en', 'zh-CN'])('does not submit an IME confirmation in %s', async (language) => {
+    const i18n = await createTestI18n(language);
     const onDecision = vi.fn();
     const request = {
       requestId: 'request-1',
@@ -30,10 +33,10 @@ describe('AskUserQuestionPanel IME behavior', () => {
       },
     };
 
-    render(<AskUserQuestionPanel request={request} onDecision={onDecision} />);
+    render(<I18nextProvider i18n={i18n}><AskUserQuestionPanel request={request} onDecision={onDecision} /></I18nextProvider>);
 
-    fireEvent.click(screen.getByText('Other...'));
-    const otherInput = screen.getByPlaceholderText('Type your answer...');
+    fireEvent.click(screen.getByText(i18n.t('uiText.other')));
+    const otherInput = screen.getByPlaceholderText(i18n.t('uiText.typeAnswer'));
     fireEvent.change(otherInput, { target: { value: 'nihao' } });
 
     fireEvent.keyDown(otherInput, {
