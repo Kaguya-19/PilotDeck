@@ -38,6 +38,7 @@ export type ProcessRunAttachment = {
 };
 
 export type RenderableMessageItem = {
+  turnTrace?: { id: string; durationMs: number; items: RenderableMessageItem[] };
   message: ChatMessage;
   originalIndex: number;
   beforeRunAttachment: ProcessRunAttachment | null;
@@ -395,6 +396,8 @@ export function isEmptyAssistantShell(message: ChatMessage): boolean {
     !message.isTaskNotification &&
     !message.isAgentActivity &&
     !message.isAgentActivitySummary &&
+    !message.artifacts?.length &&
+    !message.images?.length &&
     typeof message.content === 'string' &&
     message.content.trim().length === 0
   );
@@ -891,6 +894,71 @@ export function buildRenderableMessageItems(
     .filter((item) => !collapsedIndices.has(item.originalIndex))
     .filter((item) => !isEmptyRenderableMessageItem(item))
     .sort((a, b) => a.originalIndex - b.originalIndex);
+}
+
+/** Fold only completed turns with a final answer. Keep interrupted/unfinished work visible. */
+export function foldCompletedTurns(
+  messages: ChatMessage[],
+  items: RenderableMessageItem[],
+  isAssistantWorking: boolean,
+): RenderableMessageItem[] {
+  const turns = createMessageTurns(messages);
+  attachSummariesToTurns(messages, turns);
+  const result: RenderableMessageItem[] = [];
+  let itemCursor = 0;
+  for (const [turnIndex, turn] of turns.entries()) {
+    const turnItems: RenderableMessageItem[] = [];
+    while (itemCursor < items.length && items[itemCursor].originalIndex < turn.end) {
+      turnItems.push(items[itemCursor++]);
+    }
+    const raw = messages.slice(turn.start, turn.end);
+    const last = [...raw].reverse().find((message) =>
+      !message.isAgentActivity && !message.isAgentActivitySummary && !message.isCompactBoundary
+      && !isEmptyAssistantShell(message),
+    );
+    const finalItem = turnItems.find((item) => item.message === last);
+    const abnormal = raw.some((message) => message.type === 'error' || message.isInterruptedNotice
+      || message.isInteractivePrompt || message.isStreaming
+      || (message.isAgentActivitySummary && message.state && message.state !== 'completed'));
+    const hasFinal = last?.type === 'assistant' && !last.isThinking && !last.isToolUse
+      && !last.isSubagentContainer && !last.isTaskNotification
+      && (Boolean(last.content?.trim()) || Boolean(last.artifacts?.length));
+    if ((isAssistantWorking && turnIndex === turns.length - 1) || abnormal || !hasFinal || !finalItem) {
+      result.push(...turnItems);
+      continue;
+    }
+    const clean = (item: RenderableMessageItem): RenderableMessageItem => ({
+      ...item, beforeRunAttachment: null, afterRunAttachment: null,
+      beforeProcessAttachments: [], afterProcessAttachments: [],
+    });
+    const traceItems: RenderableMessageItem[] = [];
+    for (const item of turnItems) {
+      if (item.message.type !== 'user' && item !== finalItem) {
+        traceItems.push({ ...item, beforeRunAttachment: null, afterRunAttachment: null });
+      } else if (item.beforeProcessAttachments.length || item.afterProcessAttachments.length) {
+        // Process summaries may be hosted on either the user or the final answer.
+        // Move these into the trace while leaving the final answer/artifacts intact.
+        traceItems.push({
+          ...item, beforeRunAttachment: null, afterRunAttachment: null,
+          message: { id: `trace-attachments-${item.message.id}`, type: 'assistant', content: '', timestamp: item.message.timestamp },
+        });
+      }
+    }
+    if (!traceItems.length) {
+      result.push(...turnItems);
+      continue;
+    }
+    const id = `turn-trace-${getStableMessagePart(messages[turn.start], String(turn.start))}`;
+    result.push(...turnItems.filter((item) => item.message.type === 'user').map(clean));
+    result.push({
+      ...clean(finalItem),
+      originalIndex: turn.start + 0.01,
+      message: { id, type: 'assistant', content: '', timestamp: last!.timestamp },
+      turnTrace: { id, durationMs: getTurnRunDurationMs(messages, turn) ?? 0, items: traceItems },
+    });
+    result.push(clean(finalItem));
+  }
+  return result;
 }
 
 export function getLiveProcessDetailMessages(messages: ChatMessage[]): ChatMessage[] {

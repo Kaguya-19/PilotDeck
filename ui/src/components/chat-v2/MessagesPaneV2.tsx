@@ -28,6 +28,7 @@ import { ProcessLiveStatus, ProcessRunHeader, type ProcessTraceStep } from './Pr
 import { formatProcessDuration } from './processTraceUtils';
 import {
   buildRenderableMessageItems,
+  foldCompletedTurns,
   getLiveProcessDetailMessages,
   getLiveProcessGroupStep,
   getLiveProcessGroups,
@@ -178,6 +179,7 @@ function getMessageTextLength(message: ChatMessage): number {
 
 // eslint-disable-next-line react-refresh/only-export-components
 export function estimateMessageItemHeight(item: RenderableMessageItem): number {
+  if (item.turnTrace) return 50;
   const textLength = getMessageTextLength(item.message);
   const roughLines = Math.ceil(textLength / 92);
   const baseHeight = item.message.type === 'user' ? 64 : 92;
@@ -543,7 +545,8 @@ function MessagesPaneV2({
     return groupsByAnchor;
   }, [liveProcessGroups]);
   const renderableMessageItems = useMemo(
-    () => buildRenderableMessageItems(renderableMessages, { isAssistantWorking }),
+    () => foldCompletedTurns(renderableMessages,
+      buildRenderableMessageItems(renderableMessages, { isAssistantWorking }), isAssistantWorking),
     [isAssistantWorking, renderableMessages],
   );
   const keyedMessageItems = useMemo<KeyedRenderableMessageItem[]>(
@@ -1014,6 +1017,46 @@ function MessagesPaneV2({
       return true;
     })();
 
+    const renderRow = (rowItem: RenderableMessageItem, inTrace = false) => (
+      <MessageRowV2
+        message={rowItem.message}
+        prevMessage={previousMessage}
+        nextMessage={nextMessage}
+        beforeProcessAttachments={rowItem.beforeProcessAttachments}
+        afterProcessAttachments={rowItem.afterProcessAttachments}
+        provider={provider}
+        selectedProject={selectedProject}
+        createDiff={createDiff}
+        onFileOpen={onFileOpen}
+        onShowSettings={onShowSettings}
+        onGrantSessionToolPermission={onGrantSessionToolPermission}
+        autoExpandTools={autoExpandTools}
+        showRawParameters={showRawParameters}
+        showThinking={showThinking}
+        inlineThinking={inlineThinking}
+        isProcessExpanded={isProcessExpanded}
+        onProcessExpandedChange={handleProcessExpandedChange}
+        isToolSectionExpanded={isToolSectionExpanded}
+        onToolSectionExpandedChange={handleToolSectionExpandedChange}
+        onOpenSubagentDetail={handleOpenSubagentDetail}
+        subagentActivityById={subagentActivityById}
+        subagentThinkingById={subagentThinkingById}
+        isSessionRunning={!inTrace && isAssistantWorking}
+        sessionRuntimeState={inTrace ? 'inactive' : messageSessionRuntimeState}
+        onFork={onFork}
+        forkCarriedMessageCount={forkCarriedMessageCount}
+        forkDisabled={forkDisabled}
+        showAssistantActions={!inTrace && showAssistantActions}
+        canEdit={Boolean(
+          onRegenerate
+          && !sessionIsReadOnly
+          && !inTrace
+          && item.itemKey === lastUserMessageItemKey
+        )}
+        onRegenerate={onRegenerate}
+      />
+    );
+
     return (
       <Fragment key={item.itemKey}>
         {liveProcessHeaderIndex === 0 && item.renderIndex === 0 ? (
@@ -1036,42 +1079,23 @@ function MessagesPaneV2({
               t={t}
             />
           ) : null}
-          <MessageRowV2
-            message={item.message}
-            prevMessage={previousMessage}
-            nextMessage={nextMessage}
-            beforeProcessAttachments={item.beforeProcessAttachments}
-            afterProcessAttachments={item.afterProcessAttachments}
-            provider={provider}
-            selectedProject={selectedProject}
-            createDiff={createDiff}
-            onFileOpen={onFileOpen}
-            onShowSettings={onShowSettings}
-            onGrantSessionToolPermission={onGrantSessionToolPermission}
-            autoExpandTools={autoExpandTools}
-            showRawParameters={showRawParameters}
-            showThinking={showThinking}
-            inlineThinking={inlineThinking}
-            isProcessExpanded={isProcessExpanded}
-            onProcessExpandedChange={handleProcessExpandedChange}
-            isToolSectionExpanded={isToolSectionExpanded}
-            onToolSectionExpandedChange={handleToolSectionExpandedChange}
-            onOpenSubagentDetail={handleOpenSubagentDetail}
-            subagentActivityById={subagentActivityById}
-            subagentThinkingById={subagentThinkingById}
-            isSessionRunning={isAssistantWorking}
-            sessionRuntimeState={messageSessionRuntimeState}
-            onFork={onFork}
-            forkCarriedMessageCount={forkCarriedMessageCount}
-            forkDisabled={forkDisabled}
-            showAssistantActions={showAssistantActions}
-            canEdit={Boolean(
-              onRegenerate
-              && !sessionIsReadOnly
-              && item.itemKey === lastUserMessageItemKey
-            )}
-            onRegenerate={onRegenerate}
-          />
+          {item.turnTrace ? (
+            <>
+              <CompletedProcessHeader durationMs={item.turnTrace.durationMs} t={t}
+                expanded={isProcessExpanded(`${messageWindowScope}:${item.turnTrace.id}`)}
+                onExpandedChange={(expanded) => handleProcessExpandedChange(`${messageWindowScope}:${item.turnTrace!.id}`, expanded)} />
+              {isProcessExpanded(`${messageWindowScope}:${item.turnTrace.id}`) ? (
+                <div className="space-y-4" data-turn-trace={item.turnTrace.id}>
+                  {item.turnTrace.items.map((child) => {
+                    const childKey = `${messageWindowScope}:${getMessageKey(child.message, child.originalIndex)}`;
+                    return <div key={childKey} className="chat-message" data-message-key={childKey}>
+                      {renderRow(child, true)}
+                    </div>;
+                  })}
+                </div>
+              ) : null}
+            </>
+          ) : renderRow(item)}
           {rendersLiveHeaderAfterItem ? (
             <LiveProcessHeader
               activities={nonSubagentLiveActivities}
@@ -1094,6 +1118,8 @@ function MessagesPaneV2({
       </Fragment>
     );
   }, [
+    messageWindowScope,
+    getMessageKey,
     autoExpandTools,
     activeRunId,
     createDiff,
@@ -1131,15 +1157,20 @@ function MessagesPaneV2({
   ]);
 
   const keyedMessagesForSearch = useMemo<SearchableChatMessageInput[]>(() => {
-    return keyedMessageItems.map((item) => (
-      {
-        message: item.message,
-        messageKey: item.itemKey,
+    return keyedMessageItems.flatMap((item) => (
+      item.turnTrace ? item.turnTrace.items.map((child) => ({
+        message: child.message,
+        messageKey: `${messageWindowScope}:${getMessageKey(child.message, child.originalIndex)}`,
         messageIndex: item.renderIndex,
-      }
+      })) : [{ message: item.message, messageKey: item.itemKey, messageIndex: item.renderIndex }]
     ));
-  }, [keyedMessageItems]);
+  }, [keyedMessageItems, messageWindowScope, getMessageKey]);
 
+  const revealSearchTrace = useCallback((match: { messageIndex: number }) => {
+    onPauseScroll?.();
+    const trace = keyedMessageItems[match.messageIndex]?.turnTrace;
+    if (trace) handleProcessExpandedChange(`${messageWindowScope}:${trace.id}`, true);
+  }, [onPauseScroll, keyedMessageItems, messageWindowScope, handleProcessExpandedChange]);
   const chatHistorySearch = useChatHistorySearch({
     scrollContainerRef,
     keyedMessages: keyedMessagesForSearch,
@@ -1149,7 +1180,7 @@ function MessagesPaneV2({
     loadAllMessages,
     sessionId,
     renderWindowKey: `${virtualWindow.startIndex}:${virtualWindow.endIndex}`,
-    onNavigate: onPauseScroll,
+    onNavigate: revealSearchTrace,
   });
   const searchIsRenderedByShell = useRegisterChatHistorySearchControls(chatHistorySearch);
 
@@ -1605,8 +1636,12 @@ function LiveProcessHeader({
 function CompletedProcessHeader({
   durationMs,
   t,
+  expanded,
+  onExpandedChange,
 }: {
   durationMs: number;
+  expanded?: boolean;
+  onExpandedChange?: (expanded: boolean) => void;
   t: (key: string, options?: Record<string, unknown>) => string;
 }) {
   const duration = formatProcessDuration(durationMs);
@@ -1615,5 +1650,5 @@ function CompletedProcessHeader({
     defaultValue: `Processed ${duration}`,
   });
 
-  return <ProcessRunHeader label={label} />;
+  return <ProcessRunHeader label={label} expanded={expanded} onExpandedChange={onExpandedChange} />;
 }

@@ -5,6 +5,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { FindShortcutProvider } from '../../contexts/FindShortcutContext';
 import type { ChatMessage, ChatRunMode, SessionRuntimeState } from '../chat/types/types';
 import MessagesPaneV2 from './MessagesPaneV2';
+import { ThinkingBlock } from './ThinkingBlock';
 import type { QueuedInputSummary } from '../chat/types/queuedInput';
 import {
   getChatResponseReserveTarget,
@@ -34,6 +35,23 @@ beforeAll(() => {
 
 afterEach(() => {
   cleanup();
+});
+
+describe('ThinkingBlock phase transitions', () => {
+  it('opens while streaming, respects manual collapse, and closes once on completion', () => {
+    const view = render(<ThinkingBlock content="First thought" isStreaming />);
+    const toggle = screen.getByRole('button');
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    fireEvent.click(toggle);
+    view.rerender(<ThinkingBlock content="First thought and more" isStreaming />);
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(toggle);
+    view.rerender(<ThinkingBlock content="Completed thought" isStreaming={false} />);
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(toggle);
+    view.rerender(<ThinkingBlock content="Completed thought, persisted" isStreaming={false} />);
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+  });
 });
 
 describe('getContextStatus', () => {
@@ -966,6 +984,9 @@ describe('MessagesPaneV2 render behavior', () => {
       },
     ];
     rerender(createPaneElement({ messages: completedMessages }));
+    const turnToggle = screen.getByRole('button', { name: /^Processed / });
+    expect(turnToggle.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(turnToggle);
 
     const summary = screen.getByText('Explored 1 file');
     const completedButton = summary.closest('button');
@@ -1041,6 +1062,9 @@ describe('MessagesPaneV2 render behavior', () => {
       },
     ];
     rerender(createPaneElement({ messages: persistedMessages }));
+    const turnToggle = screen.getByRole('button', { name: /^Processed / });
+    expect(turnToggle.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(turnToggle);
 
     const completedProcessButton = screen.getByText('Ran 1 command').closest('button');
     expect(completedProcessButton?.getAttribute('aria-expanded')).toBe('true');
@@ -1077,6 +1101,9 @@ describe('MessagesPaneV2 render behavior', () => {
     ];
 
     renderPane({ messages });
+    const turnToggle = screen.getByRole('button', { name: /^Processed / });
+    expect(turnToggle.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(turnToggle);
 
     const summary = screen.getByText('Explored 1 file');
     const processButton = summary.closest('button');
@@ -1302,6 +1329,9 @@ describe('MessagesPaneV2 render behavior', () => {
     ];
 
     renderPane({ messages });
+    const turnToggle = screen.getByRole('button', { name: /^Processed / });
+    expect(turnToggle.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(turnToggle);
 
     const firstAssistant = screen.getByText('I will inspect first.');
     const readSummary = screen.getByText('Explored 1 file');
@@ -1414,6 +1444,9 @@ describe('MessagesPaneV2 render behavior', () => {
     ];
 
     const { container } = renderPane({ messages });
+    const turnToggle = screen.getByRole('button', { name: /^Processed / });
+    expect(turnToggle.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(turnToggle);
 
     expect(screen.queryByText('Tool error')).toBeNull();
     expect(screen.queryByText('FailedTool.tsx')).toBeNull();
@@ -1552,11 +1585,55 @@ describe('MessagesPaneV2 render behavior', () => {
       },
     ];
 
-    renderPane({ messages });
+    renderPane({ messages, isAssistantWorking: true });
 
     expect(screen.getByText('First assistant line.').closest('.chat-message')?.className).toContain('pb-4');
     expect(screen.getByText('First assistant line.').closest('.chat-message')?.className).not.toContain('pb-8');
   });
+  it('collapses the whole turn only at completion and preserves manual expansion on refresh', () => {
+    const messages: ChatMessage[] = [
+      makeMessage(0),
+      { ...makeMessage(1), content: 'Intermediate inspection.' },
+      { ...makeMessage(3), content: 'Final answer.' },
+    ];
+    const view = renderPane({ messages, isAssistantWorking: true });
+    expect(screen.getByText('Intermediate inspection.')).toBeTruthy();
+    view.rerender(createPaneElement({ messages }));
+    expect(screen.queryByText('Intermediate inspection.')).toBeNull();
+    expect(screen.getByText('Final answer.')).toBeTruthy();
+    const toggle = screen.getByRole('button', { name: /^Processed / });
+    fireEvent.click(toggle);
+    expect(screen.getByText('Intermediate inspection.')).toBeTruthy();
+    view.rerender(createPaneElement({ messages: messages.map((message) => ({ ...message })) }));
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(screen.getByText('Final answer.')).toBeTruthy();
+    fireEvent.click(toggle);
+    expect(screen.queryByText('Intermediate inspection.')).toBeNull();
+  });
+
+  it('reveals a completed trace when searching for intermediate assistant text', async () => {
+    renderPane({ messages: [makeMessage(0),
+      { ...makeMessage(1), content: 'Intermediate unique needle.' },
+      { ...makeMessage(3), content: 'Final answer.' },
+    ] });
+    expect(screen.queryByText('Intermediate unique needle.')).toBeNull();
+    fireEvent.keyDown(document, { key: 'f', ctrlKey: true });
+    const input = screen.getByRole('search').querySelector('input')!;
+    fireEvent.change(input, { target: { value: 'unique needle' } });
+    await waitFor(() => expect(screen.getByRole('button', { name: /^Processed / }).getAttribute('aria-expanded')).toBe('true'));
+    await waitFor(() => expect(document.querySelector('mark.chat-history-search-highlight-active')?.textContent).toBe('unique needle'));
+  });
+
+  it.each(['error', 'interrupted', 'no-final'])('keeps %s turns visible', (kind) => {
+    const messages: ChatMessage[] = [makeMessage(0), { ...makeMessage(1), content: 'Working details.' }];
+    if (kind === 'error') messages.push({ ...makeMessage(2), type: 'error', content: 'Connection failed.' });
+    if (kind === 'interrupted') messages.push({ ...makeMessage(2), type: 'assistant', isInterruptedNotice: true, content: 'Stopped.' });
+    if (kind === 'no-final') messages.push({ ...makeMessage(2), type: 'assistant', isToolUse: true, toolName: 'Bash', toolInput: { command: 'pwd' }, content: '' });
+    renderPane({ messages });
+    expect(screen.getByText('Working details.')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /^Processed / })).toBeNull();
+  });
+
 });
 
 describe('chat response reserved space', () => {

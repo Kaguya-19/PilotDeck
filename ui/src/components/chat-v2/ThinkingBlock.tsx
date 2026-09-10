@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { ChevronRight, Loader2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { Markdown } from '../chat/view/subcomponents/Markdown';
@@ -12,8 +12,9 @@ export function ThinkingBlock({ content, isStreaming, inline, projectName, onFil
   projectName?: string;
   onFileOpen?: (path: string) => void;
 }) {
-  // Completion updates this same block; it must not close underneath its reader.
+  // Only phase transitions change the default; token updates preserve manual toggles.
   const [expanded, setExpanded] = useState(isStreaming);
+  useEffect(() => setExpanded(isStreaming), [isStreaming]);
   const { t } = useTranslation('chat');
   const text = useTypewriter(content, isStreaming, 4);
   return (

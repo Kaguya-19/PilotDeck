@@ -4,6 +4,7 @@ import type { ChatMessage } from '../chat/types/types';
 import { normalizedToChatMessages } from '../chat/hooks/useChatMessages';
 import {
   buildRenderableMessageItems,
+  foldCompletedTurns,
   getLiveProcessGroups,
   hasPendingWebFetchInRunningGroup,
   shouldShowWebFetchWaitingHint,
@@ -594,5 +595,48 @@ describe('processGrouping', () => {
       normalizedTool('read-1', 'Read', { file_path: '/repo/src/App.tsx' }, 100),
       empty,
     ]).map((message) => message.id)).toEqual(['u1', 'read-1', 'a-empty']);
+  });
+});
+
+
+describe('completed turn folding', () => {
+  const fold = (messages: ChatMessage[], working = false) => foldCompletedTurns(
+    messages, buildRenderableMessageItems(messages, { isAssistantWorking: working }), working,
+  );
+
+  it('moves user/final-hosted process attachments inside the trace without modifying messages', () => {
+    const messages = [user('u'), thinking('t'), tool('tool', 'Read'), assistant('final', 'Answer')];
+    const original = JSON.stringify(messages);
+    const items = fold(messages);
+    expect(items.map((item) => item.message.id)).toEqual(['u', 'turn-trace-u', 'final']);
+    expect(items[0].afterRunAttachment).toBeNull();
+    expect(items[2].beforeProcessAttachments).toEqual([]);
+    expect(items[1].turnTrace?.items.flatMap((item) => [...item.beforeProcessAttachments, ...item.afterProcessAttachments])).toHaveLength(1);
+    expect(JSON.stringify(messages)).toBe(original);
+  });
+
+  it('retains an artifact-only final reply outside the trace', () => {
+    const final = { ...assistant('final', ''), artifacts: [{
+      id: 'file', name: 'result.md', path: '/result.md', operation: 'created' as const,
+      source: 'tool' as const, status: 'complete' as const, size: 12, sha256: 'hash', createdAt: timestamp(1000),
+    }] };
+    const items = fold([user('u'), assistant('intermediate', 'Writing a file'), final]);
+    expect(items.at(-1)?.message).toBe(final);
+    expect(items[1].turnTrace?.items[0].message.content).toBe('Writing a file');
+  });
+
+  it('folds historical turns while leaving the current running turn expanded', () => {
+    const messages = [user('u1'), thinking('t1'), assistant('a1', 'First answer'),
+      user('u2'), assistant('interim', 'Still working'), assistant('a2', 'More work')];
+    const items = fold(messages, true);
+    expect(items.filter((item) => item.turnTrace)).toHaveLength(1);
+    expect(items.some((item) => item.message.id === 'interim')).toBe(true);
+  });
+
+  it.each(['failed', 'cancelled'])('does not conceal a %s run behind a previous prose response', (state) => {
+    const messages = [user('u'), thinking('t'), assistant('a', 'Partial reply'), {
+      ...assistant('summary', ''), isAgentActivitySummary: true, state, startedAt: timestamp(0), endedAt: timestamp(2000),
+    }];
+    expect(fold(messages).some((item) => item.turnTrace)).toBe(false);
   });
 });
