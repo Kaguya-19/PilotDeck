@@ -144,6 +144,9 @@ test("AgentLoop capability adapters expose consumer-specific ports and retain a 
 
   assert.ok(Object.isFrozen(capabilities.toolExecution));
   assert.ok(Object.isFrozen(capabilities.tools));
+  assert.ok(Object.isFrozen(capabilities.model.metadata));
+  assert.equal(capabilities.model.execution, capabilities.model.invoker);
+  assert.equal(capabilities.model.budget, capabilities.model.tokenAccounting);
   assert.ok(Object.isFrozen(capabilities.interaction));
   assert.ok(Object.isFrozen(capabilities.planMode));
   assert.ok(Object.isFrozen(capabilities.subagent));
@@ -158,6 +161,25 @@ test("AgentLoop capability adapters expose consumer-specific ports and retain a 
   assert.equal(capabilities.tools.elicitation, capabilities.interaction.elicitation);
   assert.equal(capabilities.tools.planFileManager, capabilities.planMode.planFileManager);
   assert.equal(capabilities.tools.oneShotSubagentPort, capabilities.subagent.oneShot);
+});
+
+test("AgentLoop capabilities accept an explicit model port without a router", async () => {
+  const model: ModelInvokerPort = {
+    async prepare({ request }) {
+      return { request, provider: request.provider, model: request.model };
+    },
+    async *stream() {
+      yield { type: "message_end", finishReason: "stop" } as const;
+    },
+  };
+  const capabilities = createAgentTurnCapabilities(config, {
+    ports: { model, tools: { list: () => [], executeAll: async () => [] } },
+  });
+  assert.equal(capabilities.model.execution, model);
+  assert.equal(capabilities.model.routing, undefined);
+  const loop = new AgentLoop(config, capabilities);
+  const run = loop.run({ sessionId: "s1", turnId: "t1", messages: [] });
+  while (!(await run.next()).done) {}
 });
 
 test("AgentLoop tool execution port preserves injected method binding", async () => {
@@ -186,6 +208,30 @@ test("AgentLoop tool execution port preserves injected method binding", async ()
   await capabilities.toolExecution.executeAll([], {} as never, {} as never);
   assert.deepEqual(capabilities.tools.port.list(), []);
   await capabilities.tools.port.executeAll([], {} as never, {} as never);
+});
+
+test("AgentLoop budget view preserves TokenAccountingRuntime method binding", () => {
+  const marker = Symbol("budget");
+  const tokenAccounting = {
+    marker,
+    estimateRequestInput(this: { marker: symbol }) {
+      assert.equal(this.marker, marker);
+      return 1;
+    },
+    async evaluateRequestBudget(this: { marker: symbol }) {
+      assert.equal(this.marker, marker);
+      return {};
+    },
+  } as never;
+  const capabilities = createAgentTurnCapabilities(config, {
+    router: {} as AgentRuntimeDependencies["router"],
+    tokenAccounting,
+    tools: {
+      registry: { list: () => [] } as never,
+      scheduler: { executeAll: async () => [] },
+    },
+  });
+  assert.equal(capabilities.model.budget?.estimateRequestInput({} as never), 1);
 });
 
 test("AgentLoop capability composition supplies a no-op context port when no runtime is provided", async () => {

@@ -31,7 +31,7 @@ PilotDeck；宿主产品的 session、turn、permission、tool、checkpoint、SO
 
 6. [AgentLoop Modular Framework TRD](trd/03-agent-loop-modular.zh.md)
 
-   说明 `ModelInvokerPort`、`ToolPort`、`AgentContextRuntime`、session projection、scope lifecycle、
+   说明五类 model consumer ports、`ToolPort`、`AgentContextRuntime`、session projection、scope lifecycle、
    sidecar factory、context module 和 capability module 的实现边界。
 
 7. [PilotDeck DSH 风格模块化 Roadmap](trd/04-dsh-modularization-roadmap.zh.md)
@@ -87,6 +87,9 @@ descriptors、permission context、seed state 和 execution identity。
 
 - AgentLoop 通过冻结的 `AgentTurnContextPort` 和 `LifecycleDispatchPort` 消费 context/lifecycle；完整 runtime
   仍由 session scope 持有和释放。
+- AgentLoop 的模型面向 consumer ports 分层：`ModelExecutionPort` 是必需核心，`AgentTurnRoutingPort`、
+  `ModelMetadataPort`、`ModelBudgetPort` 与 `AuxiliaryModelPort` 均可独立注入；Router 只是兼容 facade，
+  不拥有 AgentLoop 或 provider registry。第三方 provider 只能通过 adapter 接入 canonical request/event contract。
 - Session durable backend 由 `ProjectSessionPersistenceProvider` 定义；application 在启动时组合
   `ProjectSessionDataPlane`，再把 catalog、fork、replacement、search 分别交给对应 consumer。旧
   `ProjectSessionStorageProvider` optional capability bag 仅作兼容入口。
@@ -95,6 +98,27 @@ descriptors、permission context、seed state 和 execution identity。
   都绑定获取时 generation，retired plugin 等全部旧 lease 释放后才 dispose。
 - `PluginContributionSnapshot` 与原 acquisition API 暂时保留为 deprecated adapter；生产 session/context/command
   路径不再依赖完整 aggregate。
+
+模型依赖方向固定为：
+
+```text
+provider client / SDK
+        -> provider adapter（native 或 host）
+        -> ModelExecutionPort
+        -> createAgentTurnCapabilities()
+        -> AgentLoop
+
+AgentTurnRoutingPort / ModelMetadataPort / ModelBudgetPort / AuxiliaryModelPort
+        -> application composition（可与 execution provider 分开选择）
+Router facade --------------------------^（legacy/default adapter，可选）
+```
+
+`ModelExecutionPort` 是 AgentLoop 的核心 consumer contract。直接构造 capabilities 时 Router 不是必需 owner，但完整
+`AgentRuntimeDependencies`/session/Gateway composition 仍保留 Router 依赖。显式 execution provider 可以绕过 Router，空
+Router 不能提供模型执行。`ModelInvokerPort`、旧 aggregate 字段和 `PreparedModelInvocation.opaque` 仅在兼容
+adapter 中保留，直到 native/sidecar/session/subagent/Gateway 回归证明可以删除。详见
+[AgentLoop Modular Framework TRD](trd/03-agent-loop-modular.zh.md)、[接入开发 SOP](agent-loop-development-sop.zh.md)
+和[当前执行 Roadmap](trd/05-dsh-pilotdeck-current-roadmap.zh.md)。
 
 Workflow、Agent Terminal、Goal round driver、SQLite query 与跨平台 sandbox 是独立功能扩展，不属于本轮
 边界收窄；本轮不迁移任何 Plan/Todo、Cron、Always-On、Goal、Session 或 Gateway 状态 owner。

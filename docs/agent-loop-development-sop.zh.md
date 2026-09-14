@@ -38,7 +38,7 @@ PilotDeck 的模块划分参考 DeepSeek Harness DSH `v0.1.2-alpha.2` 的能力�
 | DSH 能力族 | 典型职责 | PilotDeck 对应边界 | 接入规则 |
 | --- | --- | --- | --- |
 | `core` | scope、session、system-prompt、tools、agent、agent-loop | AgentLoop 核心和宿主 session/context/tool port | 核心只消费 port；不依赖具体 provider |
-| `llm` | 消息词汇、LLM registry、provider adapter、retry、token meter | `ModelInvokerPort` 和 model module | provider 协议只在 adapter 内转换为 canonical model events |
+| `llm` | 消息词汇、LLM registry、provider adapter、retry、token meter | `ModelExecutionPort`、`AgentTurnRoutingPort`、`ModelMetadataPort`、`ModelBudgetPort`、`AuxiliaryModelPort` 和 model module | provider 协议只在 adapter 内转换为 canonical model request/events；Router 只是可选兼容 facade |
 | `context` | workspace 指令、文件/会话引用、时间和运行位置 | `AgentContextRuntime` / context module | 模型可见上下文由宿主组装并可恢复，sidecar 不自行拼接宿主提示词 |
 | `interaction` | approval、permission preset、user question、ask-user tool | permission module、交互能力和 `canPrompt` | 决策由宿主持有；未配置时不得默认放行 |
 | 执行能力族 | fs、shell、terminal、code-runtime、subprocess、sandbox、web、lsp、skill、subagent、jobs、workflow、goal、todo、plan、attachment、spill | capability/tool module | 通过 `ToolPort` 或 capability descriptor 暴露；副作用、并发和超时由宿主执行层控制 |
@@ -65,6 +65,34 @@ DSH 的三个可复用约定必须保留：
 因此，DSH 的 `core`、`llm`、`context`、`interaction` 等能力族是 PilotDeck 的模块设计参考；`session`、`api`、`bundle` 等仍然是宿主或部署层。只有在需要跨进程调用时，才把对应能力投影为 `hostModules.context`、`hostModules.capability` 或 model module，并通过 capabilities 协商。
 
 产物：模块归属表、Definition/Provider/Consumer 关系图、profile/capability 选择说明。
+
+### 模型 provider 接入规则
+
+AgentLoop-facing model contract 按以下依赖方向固定：
+
+```text
+第三方 client
+        -> provider adapter
+        -> ModelExecutionPort
+        -> AgentTurnCapabilities
+        -> AgentLoop
+```
+
+`ModelExecutionPort` 是核心必需能力；`AgentTurnRoutingPort`、metadata、budget 和 auxiliary port 可分别注入，不能通过一个宽
+`tools`/`router` 对象间接暴露。Router 可以为 legacy/native composition 提供默认 adapter，但不再是 AgentLoop 执行模型
+的必需 owner。这里的 no-Router 仅适用于直接构造 capabilities 的 AgentLoop consumer；`AgentRuntimeDependencies` 和
+完整 session/Gateway composition 仍保留 Router 作为 legacy 必填资源。显式 execution port 存在时，AgentLoop 不得读取
+Router 私有状态；没有 routing port 时直接使用 prepared request 的 provider/model，不执行 fallback 或 sticky policy。
+
+自定义 provider adapter 必须负责：canonical request/event 转换、provider/model override、usage 和 request id 映射、
+`AbortSignal`/deadline 传递、provider error 与空/畸形 stream 映射，以及可选 limits/protocol/prompt-cache metadata。
+core 不得直接 import 第三方 SDK。provider 不得拥有 Session、Gateway、Router registry、AgentLoop 状态或 dispose；provider
+specific state 也不得进入 Module Protocol 或 durable Session event。当前仓库只提供 Router/native/host adapter contract，
+不内置具体第三方 provider adapter。
+
+adapter 不复制 AgentLoop retry、permission、tool policy、compaction 状态机或 session 持久化。retry 保持在 agent step
+boundary，token accounting 由独立 budget/meter consumer 提供，bundle/profile 才负责 provider selection、generation、lease
+和 teardown。`PreparedModelInvocation.opaque` 仅为兼容字段，新 adapter 不得依赖它。
 
 ## 3. 代码修改范围控制
 

@@ -31,6 +31,14 @@ import type { GoalPort } from "../../goal/protocol/types.js";
 export type AgentRuntimePorts = {
   model?: ModelInvokerPort;
   tools?: ToolPort;
+  metadata?: import("../loop/AgentTurnCapabilities.js").ModelMetadataPort;
+  /** Optional routing policy view used by AgentLoop after model execution is selected. */
+  routing?: Pick<AgentRouterRuntime, "materializeRequest" | "invalidateSticky"> & {
+    /** @deprecated Use auxiliaryModel for secondary model calls. */
+    stream?: AgentRouterRuntime["stream"];
+  };
+  /** Optional secondary model client for tool and subagent calls. */
+  auxiliaryModel?: import("../loop/AgentTurnCapabilities.js").AuxiliaryModelPort;
 };
 
 /**

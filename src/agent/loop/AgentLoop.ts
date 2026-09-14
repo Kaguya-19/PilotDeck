@@ -204,7 +204,7 @@ export class AgentLoop {
       throw new TypeError("AgentLoop requires an AgentTurnCapabilities view.");
     }
     this.capabilities = capabilities;
-    this.modelPort = this.capabilities.model.invoker;
+    this.modelPort = this.capabilities.model.execution;
     this.toolPort = this.capabilities.toolExecution;
   }
 
@@ -384,7 +384,7 @@ export class AgentLoop {
       return { error, result };
     };
 
-    const stickyInfo = this.capabilities.model.routing.invalidateSticky?.(input.sessionId);
+    const stickyInfo = this.capabilities.model.routing?.invalidateSticky?.(input.sessionId);
     let previousTier: string | undefined = stickyInfo?.previousTier;
     const executionRunId = input.execution?.runId
       ?? this.capabilities.clock.uuid?.()
@@ -670,7 +670,7 @@ export class AgentLoop {
       }
 
       const calibrationRequest = prepared.request;
-      const requestInputEstimate = this.capabilities.model.tokenAccounting?.estimateRequestInput?.(calibrationRequest);
+      const requestInputEstimate = this.capabilities.model.budget?.estimateRequestInput?.(calibrationRequest);
       const calibrationRequestFingerprint = requestFingerprint(calibrationRequest);
       const assembler = createModelMessageAssemblerState();
       let executedRequest: { provider: string; model: string; fingerprint?: string } | undefined;
@@ -2126,8 +2126,8 @@ export class AgentLoop {
       runtimeContextSurface: this.config.runtimeContextSurface,
       provider: requestProvider,
       model: requestModel,
-      protocol: this.capabilities.model.getModelProtocol?.(requestProvider),
-      supportsPromptCache: this.capabilities.model.getModelSupportsPromptCache?.(requestProvider, requestModel),
+      protocol: this.capabilities.model.metadata.getModelProtocol?.(requestProvider),
+      supportsPromptCache: this.capabilities.model.metadata.getModelSupportsPromptCache?.(requestProvider, requestModel),
       permissionMode: this.config.permissionMode,
       runMode: this.config.runMode ?? "agent",
       additionalWorkingDirectories: this.config.permissionContext.additionalWorkingDirectories,
@@ -2204,7 +2204,7 @@ export class AgentLoop {
       reservedOutputTokens: number;
     },
   ): ((candidateMessages: CanonicalMessage[]) => Promise<TokenBudgetSnapshot>) | undefined {
-    const tokenAccounting = this.capabilities.model.tokenAccounting;
+    const tokenAccounting = this.capabilities.model.budget;
     const maxContextTokens = options.maxContextTokens;
     if (!tokenAccounting || !maxContextTokens) {
       return undefined;
@@ -2223,7 +2223,7 @@ export class AgentLoop {
           cachePlan: candidateRequest.cachePlan,
         };
         const preparedDecision = options.prepared.opaque as RouterDecision | undefined;
-        candidateRequest = preparedDecision && this.capabilities.model.routing.materializeRequest
+        candidateRequest = preparedDecision && this.capabilities.model.routing?.materializeRequest
           ? this.capabilities.model.routing.materializeRequest(preparedDecision, materializedRequest)
           : {
               ...materializedRequest,
@@ -2273,10 +2273,10 @@ export class AgentLoop {
   }
 
   private getModelTokenLimits(provider: string, model: string): { maxContextTokens?: number; maxOutputTokens?: number } | undefined {
-    const combined = this.capabilities.model.getModelTokenLimits?.(provider, model);
+    const combined = this.capabilities.model.metadata.getModelTokenLimits?.(provider, model);
     if (combined) return combined;
-    const maxContextTokens = this.capabilities.model.getModelMaxContextTokens?.(provider, model);
-    const maxOutputTokens = this.capabilities.model.getModelMaxOutputTokens?.(provider, model);
+    const maxContextTokens = this.capabilities.model.metadata.getModelMaxContextTokens?.(provider, model);
+    const maxOutputTokens = this.capabilities.model.metadata.getModelMaxOutputTokens?.(provider, model);
     if (maxContextTokens === undefined && maxOutputTokens === undefined) return undefined;
     return { maxContextTokens, maxOutputTokens };
   }
@@ -2286,7 +2286,7 @@ export class AgentLoop {
     return transient
       ?? this.getBaselineSubagentTokenLimits(provider, model)?.maxContextTokens
       ?? this.currentConfigMaxContextTokens()
-      ?? this.capabilities.model.getModelMaxContextTokens?.(provider, model)
+      ?? this.capabilities.model.metadata.getModelMaxContextTokens?.(provider, model)
       ?? this.getModelTokenLimits(provider, model)?.maxContextTokens
       ?? 1_000_000;
   }
@@ -2463,6 +2463,19 @@ export class AgentLoop {
       canPrompt,
       ...(planDirectoryPath ? { planDirectoryPath } : {}),
     };
+    const auxiliaryModel = this.capabilities.model.auxiliary
+      ?? (this.capabilities.model.routing?.stream
+        ? {
+            stream: (request: CanonicalModelRequest, signal?: AbortSignal) =>
+              this.capabilities.model.routing!.stream!(request, {
+                sessionId: input.sessionId,
+                turnId: input.turnId,
+                projectPath: this.config.cwd,
+                abortSignal: signal,
+                isMainAgent: false,
+              }),
+          }
+        : undefined);
     return {
       sessionId: input.sessionId,
       turnId: input.turnId,
@@ -2491,16 +2504,7 @@ export class AgentLoop {
       // fallback mode, `web_fetch` extraction) get a thin adapter that
       // funnels into the router's stream so subagents inherit fallback /
       // zero-usage retry.
-      model: {
-        stream: (request, signal) =>
-          this.capabilities.model.routing.stream(request, {
-            sessionId: input.sessionId,
-            turnId: input.turnId,
-            projectPath: this.config.cwd,
-            abortSignal: signal,
-            isMainAgent: false,
-          }),
-      },
+      ...(auxiliaryModel ? { model: auxiliaryModel } : {}),
       elicitation: this.capabilities.interaction.elicitation,
       fileHistory: this.capabilities.toolExecution.fileHistory,
       subagentDepth: this.config.subagentDepth ?? 0,

@@ -841,7 +841,7 @@ class SidecarTurnProtocol {
     const context = modelExecutionContext(call, this.options.input, this.options.config, this.options.input.abortSignal);
     if (operation === "prepare") {
       const request = canonicalModelRequest(call.payload.request);
-      const prepared = await this.options.capabilities.model.invoker.prepare({ request, context });
+      const prepared = await this.options.capabilities.model.execution.prepare({ request, context });
       this.modelPreparations.set(preparationId, prepared);
       return { prepared: serializablePreparedInvocation(prepared) };
     }
@@ -849,7 +849,7 @@ class SidecarTurnProtocol {
       const prepared = this.modelPreparations.get(preparationId);
       if (!prepared) throw new Error(`Unknown sidecar model preparation: ${preparationId}`);
       const events: CanonicalModelEvent[] = [];
-      for await (const event of this.options.capabilities.model.invoker.stream({ prepared, context })) events.push(event);
+      for await (const event of this.options.capabilities.model.execution.stream({ prepared, context })) events.push(event);
       return { events };
     }
     throw new Error(`Unsupported sidecar model operation: ${operation}`);
@@ -1207,6 +1207,19 @@ function toolRuntimeContext(
   const remote = asRecord(value);
   const planDirectoryPath = capabilities.planMode.planFileManager?.getPlanDirectoryPath();
   const fileState = checkpoint.toolContextState();
+  const auxiliaryModel = capabilities.model.auxiliary
+    ?? (capabilities.model.routing?.stream
+      ? {
+          stream: (request: CanonicalModelRequest, signal?: AbortSignal) =>
+            capabilities.model.routing!.stream!(request, {
+              sessionId: input.sessionId,
+              turnId: input.turnId,
+              projectPath: config.cwd,
+              abortSignal: signal,
+              isMainAgent: false,
+            }),
+        }
+      : undefined);
   return {
     sessionId: input.sessionId,
     turnId: input.turnId,
@@ -1226,15 +1239,7 @@ function toolRuntimeContext(
     ...(capabilities.clock.now ? { now: capabilities.clock.now } : {}),
     env: buildTurnEnvironment(config.env, config.cwd, input.sessionId, input.turnId),
     ...(config.maxResultBytes ? { maxResultBytes: config.maxResultBytes } : {}),
-    model: {
-      stream: (request, signal) => capabilities.model.routing.stream(request, {
-        sessionId: input.sessionId,
-        turnId: input.turnId,
-        projectPath: config.cwd,
-        abortSignal: signal,
-        isMainAgent: false,
-      }),
-    },
+    ...(auxiliaryModel ? { model: auxiliaryModel } : {}),
     ...(capabilities.interaction.elicitation ? { elicitation: capabilities.interaction.elicitation } : {}),
     ...(capabilities.toolExecution.fileHistory ? { fileHistory: capabilities.toolExecution.fileHistory } : {}),
     ...(config.subagentDepth !== undefined ? { subagentDepth: config.subagentDepth } : {}),

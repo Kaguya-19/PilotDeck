@@ -1,7 +1,7 @@
 # DSH 与 PilotDeck 当前架构核对及执行 Roadmap
 
-状态：执行稿（2026-09-13 决策更新）
-核对日期：2026-09-13
+状态：执行稿（2026-09-14 模型栈解耦更新）
+核对日期：2026-09-14
 适用分支：`Kaguya-19/refactor/core_agent_loop_0831`
 
 核对源码基线：DSH `0a53fb55bea101816fa226bb964ae2bed71c343b`
@@ -12,10 +12,27 @@
 [04 DSH 风格模块化 Roadmap](04-dsh-modularization-roadmap.zh.md) 的排期功能；04 保留为
 决策、对拍和已完成切片的审计历史。
 
+### 2026-09-14 模型栈可插拔解耦
+
+参考 DSH 的 `llm`、`llm-retry`、`token-meter` 与 bundle 分层，AgentLoop-facing model view
+现按 execution、routing、metadata、budget、auxiliary 五类 consumer port 组织。显式
+直接构造 capabilities 时，`ModelExecutionPort` 可以在没有 Router 的情况下装配；`AgentRuntimeDependencies`、session
+scope 和 Local Gateway native composition 仍将 Router 作为 legacy 必填/默认资源。Router 仍作为 legacy
+routing/compatibility facade 保留一个兼容周期。第三方 provider adapter 只通过稳定的 model port contract 接入，负责
+provider/model 选择和 canonical stream 转换，provider registry、session、
+lifecycle 与 dispose 仍归 application composition。
+
+旧 `model.invoker`、`model.routing`、`model.tokenAccounting` 及 metadata lookup 字段暂保留为
+deprecated adapter；新生产代码使用 `model.execution`、`model.routing?`、`model.metadata`、
+`model.budget?` 与 `model.auxiliary?`。实际 routing 视图名称为 `AgentTurnRoutingPort`；缺失 metadata 使用明确 conservative fallback，不回读
+Router 私有状态；`PreparedModelInvocation.opaque` 仅用于兼容旧 Router adapter。二次模型调用
+优先消费 `AuxiliaryModelPort`，未注入时才由兼容 routing facade 提供 turn-scoped fallback。
+
 ### 2026-09-13 路线决策
 
 本路线固定在当前单一 Local Gateway 产品组合基线上：不做第二个完整 deployment（headless、remote 或 SDK），
-不做第二模型或第二 routing provider，也不为这些目标建立 R5-U/R4 的 provider matrix。P1（`PARITY-H` 与
+不把第二模型或第二 routing provider 作为产品目标，也不为这些目标建立 provider 产品矩阵。R4 的窄 port seam 与可选
+integration 仍按本路线维护。P1（`PARITY-H` 与
 R5-Z parity coverage）完成后，下一主线是设计新的通用 Workflow 模块（`WF-D`）；当前已经完成不接入既有领域 owner
 的核心 runtime vertical slice，后续只冻结 Definition、caller/adapter contract、run owner、状态真源、状态机、
 故障 settlement 和 ownership matrix，不立即接入领域 caller。
@@ -143,7 +160,7 @@ DSH `0.1.2-alpha.2` 的参考价值是 ownership discipline，不是 Cordis 本�
 | Session persistence / projection | M3 native | `SessionRuntime` -> persistence -> `SessionProjectionDriver` -> checkpoint/replay | 第二 persistence backend、外部 query/retention policy 仅在出现产品 consumer 后立项。 |
 | Session read-side（catalog / history / search） | M2 native | `SessionCatalogPort`、`SessionTranscriptReaderPort`、`SessionSearchPort`；`ProjectSessionReadSideBundle` 组合 catalog/history，`createProjectSessionSearchPort()` 选择 search；Gateway、Web、Always-On、CLI/channel consumer 和 `ProjectAutomationBundle` composition | catalog/search 仅在 selected provider 明确声明时可跨 backend 枚举或查询，未声明即 fail-closed；没有统一跨 backend query/retention contract。Web fork/replace 分别归 provider-owned write capability（R5-E/R5-F）；sidechain 的原子改写、资产复制和路径约束仍不是 read-side capability。 |
 | Scope / agent publication | M3 native | scoped services、factory transaction、`AgentHandle`、live event owner | 不需要且不应强行把所有 contribution 合进一个 global registry。 |
-| Core AgentLoop | M2 native/direct | capability view、native/direct provider、factory definition、session/child composition | model/routing/token policy 仍是同一个 native provider group；只有有独立替换需求时再拆 Definition。 |
+| Core AgentLoop | M2 native/direct | capability view、`ModelExecutionPort`、`AgentTurnRoutingPort`、`ModelMetadataPort`、`ModelBudgetPort`、`AuxiliaryModelPort`、native/direct provider、session/child composition | Router facade、retry、fallback、health、cache、judge 与 orchestration 仍由 native composition 拥有；旧聚合字段仅保留兼容周期。 |
 | Router session policy / custom router | M2 native | `RouterSessionStatePort`、`RouterSessionCustomRouterPort`、`ProjectRouterRuntimeBundle`；`createLocalGateway({ routerSessionState, routerSessionCustomRouterFactory })` 可分别选择跨 generation volatile state 与 per-generation registry | state 只拥有 routing policy cache，custom-router registry 只拥有 session registration index；两者不写 Session durable truth，custom-router contribution disposal 仍归 plugin/session lease | 未定义跨项目 routing cache、remote router deployment 或 generic policy registry；外部 state provider 由 application 保持，不由 registry 清理 |
 | Model / tool / context / permission | M2 native + host callback | durable wrapper、host port、sidecar module_call dispatch、session operation ledger；`createLocalGateway({ modelInvocationProviderFactory })` 可选择 model invocation provider | 同一存活 TCP sidecar process 的 reconnect/replay、binding replacement、pending permission/question host reply、`resume`/`ack`、实例重启 -> host reconciliation 与 late host capability result 的单一 terminal 已验证。R5-Z 已使 host-confirmed capability result 驱动 permission transition，并使 submit-time `runMode` 与 context callback 一律读取 host config；forged wire mode 无法绕过 host `ask` gate。P1 comparator、oracle 与完整 plan-mode deterministic parity 已验收；默认 deployment 没有非幂等 side effect status-query provider，stdio 可恢复性与 remote deployment parity 未完成。 |
 | Context storage / compaction / prompt cache | M2 native | `InstructionStoragePort`、`ToolResultSpillPort`、`CompactionPort`、`PromptCacheCoordinatorPort`、`ProjectContextStorageBundle`；`createLocalGateway({ contextStorage, compactionProviderFactory, promptCacheCoordinatorFactory })` 在 project generation 冻结 provider，经 `ProjectSessionRuntimeBundle` 传至 `SessionContextRuntimeBundle` | provider 只拥有 I/O、compaction stage 或 session-scoped cache generation；`InstructionDiscovery` 继续拥有层级与 prompt 顺序，`ToolResultBudget` 与 `CompactionOrchestrator` 继续拥有 policy，session/turn state 不移入 provider；没有远程 context storage 产品需求。 |
@@ -583,7 +600,7 @@ state owner（durable/live/volatile）、failure mapping + teardown。禁止用�
 | 明确不做 | R5-U deployment profile/bundle 收敛 | 用户明确不做第二个完整 deployment（headless、remote 或 SDK） | 保持当前 Local Gateway 组合根、既有 runtime profile、provider selection、boot rollback 和 shutdown ownership；不扩展第二部署矩阵 | 不复制 Cordis patch API，不创建第二份 deployment state，不为 package 对称性增加 provider |
 | P1 | R2-D 产品侧非幂等副作用 status query | 某个实际 tool/provider 有 idempotency key 与状态查询 owner | process restart 后以该产品 owner 的 known/unknown 结果收敛，不自动重试副作用 | 不为没有真实 owner 的 tool 虚构通用 status API |
 | P2 | R3-B remote or queued subagent | 出现真实异进程 child provider 与 run owner | provider lease、restart、late terminal、sidechain 和 settlement 的端到端语义 | 不把 continuable inbox 或 child Session 复制到 sidecar |
-| 明确不做 | R4 model/routing provider | 用户明确不做第二模型或第二 routing provider | 保持当前 native model/routing provider group；只维护现有 prepared-request、retry、token、health contract，不拆出第二 provider matrix | 不因目录对称、DSH 包数量或抽象完整性拆分当前实现 |
+| R4-A/B（当前 seam；provider 产品按需） | 模型 execution/routing 解耦与第三方 provider adapter contract | 需要独立 execution provider 或 routing policy 时可复用窄 port；本轮不做第二模型产品或第二 routing provider 产品 | 保持当前 native Router facade 作为默认 composition，同时允许显式 execution port、metadata/budget/auxiliary 独立注入；维护 prepared-request、retry、token、health contract | 不因目录对称、DSH 包数量或抽象完整性增加第二 provider matrix |
 | WF-D（核心已完成） | 通用 Workflow 模块设计与 runtime vertical slice | R5-Z / PARITY-H 等 P1 验收完成后，已有多个 workflow-like caller 需要共享 run/step/recovery 语义 | `WorkflowDefinition`、caller/adapter contract、caller-owned run/event truth、DAG 状态机、pause/resume/cancel/deadline/dispose、late completion、failure/unknown settlement、JSONL/InMemory EventStore、control composition 和 focused contract matrix 已落地；领域 adapter 按真实 caller 另行立项 | 不实现 generic registry，不迁移 Plan/Todo、Cron、Always-On、Goal durable state，不接管 Session/Gateway/AgentTurnInbox owner；没有明确 caller 不进入领域 adapter implementation |
 | 按需 | R5 产品能力 | 有明确 caller、run owner、durable/live state 和 recovery requirement | 针对 storage、attachment、sandbox 等形成独立 Definition/Provider/Consumer/Composition；Workflow 设计完成后再按 caller 选择 adapter | 不预建 generic registry 或第二 backend |
 
@@ -599,7 +616,7 @@ state owner（durable/live/volatile）、failure mapping + teardown。禁止用�
    scenario：`enter_plan_mode` -> host callback -> next turn -> `exit_plan_mode` 必须同时对拍 policy、callback 和终态，
    不只对拍文本。`ask` host write-gate、forged context、R5-Y cwd canonicalization、R5-X host checkpoint 与 R2-A
    active-stream lifecycle 继续作为回归门槛。之后仅在出现实际 side-effect owner 时落地 R2-D 的第一个非幂等
-   `status-query` provider；`R5-S` 只有在 provenance 或第二 provider 需求出现时才继续扩展。这一波不修改 `AgentLoop.ts`，
+   `status-query` provider；`R5-S` 只有在 provenance 或明确 provider metadata 需求出现时才继续扩展。这一波不修改 `AgentLoop.ts`，
    不引入第二套 Session truth。
 3. **Wave 2：通用 Workflow 核心（P1 后）**。`WF-D` 的独立 core vertical slice 已实现：与现有
    Plan/Todo、Cron、Always-On、Goal 解耦的 Definition、JSONL/InMemory event store、caller-owned run handle、control
@@ -608,8 +625,9 @@ state owner（durable/live/volatile）、failure mapping + teardown。禁止用�
 4. **Wave 3：按 caller 选择 Workflow adapter（按需）**。只有在 `WF-D` 有明确 caller、run owner 和 recovery
    requirement 后，才为一个真实 caller 实现 adapter/provider/consumer/composition；先验证一个最小 vertical slice，再决定
    是否扩展到其他 workflow-like runtime。Plan/Todo、Cron、Always-On、Goal 各自保留原 owner，adapter 只做投影或调用边界。
-5. **明确不做的路线**。不做第二个完整 deployment（headless、remote 或 SDK），不做第二模型或第二 routing provider，
-   不启动 R5-U/R4；当前 Local Gateway、native model/routing group 和现有 profile/boot ownership 作为唯一产品组合基线。
+5. **明确不做的路线**。不做第二个完整 deployment（headless、remote 或 SDK），不做第二模型产品或第二 routing policy
+   产品，不启动 R5-U；R4 的 execution/routing seam 与可选第三方 provider adapter 仅作为可复用架构 contract，当前 Local Gateway、
+   native Router facade 和现有 profile/boot ownership 仍是唯一产品组合基线。
 6. **其他按需产品线（不预排）**。LSP 的 remote provider、持久 server pool、插件 manifest 自动装配和 editor consumer
    只有出现实际部署/调用方时再立项；跨 provider query/retention、第二 persistence backend、distributed scheduler、
    跨平台 enforcing sandbox、durable terminal、remote subagent 仍各自独立立项；缺少 caller 或唯一 state owner 时保持
@@ -1049,11 +1067,31 @@ terminal。该工作包不宣称 sidecar process restart 可恢复 child side ef
    capability-tool-port、OneShotSubagentPort、SubAgentSession、TCP sidecar transport、Local Gateway deployment
    与 Gateway timeout focused suites 共 59/59 通过。
 
-### R4：第二 model/routing provider
+### R4：模型栈可插拔解耦
 
-开始条件：host/remote model provider 或另一种 routing policy 需要独立替换。届时才从当前 model capability group
-抽出路由 policy Definition；必须固定 prepared-request snapshot、retry、token accounting、sticky invalidation 和
-provider-health lifecycle。Session 与 Gateway 不得成为 policy owner。
+R4 首段已完成 AgentLoop consumer seam：显式 `ModelExecutionPort`、可选 metadata/budget/auxiliary port 与 Router
+facade 兼容适配。直接构造 capabilities 时，AgentLoop 可以在没有 Router 的情况下由独立 execution provider 完成
+`prepare/stream`；`AgentRuntimeDependencies`、session scope 和 Local Gateway 的 native/session composition 目前仍把
+Router 作为 legacy 必填/默认资源，这两个层次不能混为一谈。
+
+| 阶段 | Definition / Provider | Consumer / Composition | 退出条件 |
+| --- | --- | --- | --- |
+| R4-A execution/routing seam（已完成） | `ModelExecutionPort`、`AgentTurnRoutingPort`、prepared invocation snapshot；legacy Router adapter | `createAgentTurnCapabilities()` 冻结 ports，AgentLoop 只消费 execution；Router 为可选 facade | 直接 capabilities composition 可无 Router；legacy provider selection、retry、compaction 与 parity 不变 |
+| R4-B external provider adapter contract（按需） | 第三方 provider adapter；canonical request/event、usage/error/abort/deadline mapping | provider client 只依赖 adapter；core 不 import SDK | adapter 不暴露 registry/session/lifecycle，不把 provider state 放入 wire 或 durable event |
+
+职责矩阵保持稳定：execution provider 做单次模型调用，routing provider 做 selection/materialization/sticky policy，metadata
+provider 做 limits/protocol/cache capability，budget provider 做 token accounting，auxiliary provider 做二次模型调用；retry
+仍在 AgentLoop step boundary，token meter 是独立 consumer，bundle/profile 负责 generation、lease、rollback 和 dispose。
+Session 与 Gateway 不成为 model policy owner；第三方 provider adapter 仍是可选 integration，不改变核心 AgentLoop。
+
+兼容字段退出条件：新生产代码不得新增 deprecated optional capability bag、旧 `model.invoker`/`model.routing`/
+`model.tokenAccounting` 或 aggregate snapshot 的读取；这些字段只能留在 composition/adapter 兼容层。删除前必须通过
+native、sidecar、session、subagent、Gateway 及模型 override/compact/retry 回归，并确认所有 consumer 已切换到窄 port。
+`PreparedModelInvocation.opaque` 最后再删，且需证明 legacy Router adapter 不再需要跨 generation 的 request snapshot。
+
+当前证据：Node 22 `pnpm build` 通过；model/ports focused suites **20/20**；Loop parity **32/32**、Gateway parity
+**32/32**，两者 `failed=0`、`blocked=0`、`oracleFailures=0`。这些数字证明当前 seam 的行为兼容，不代表第三方
+或远程 provider 已成为产品默认，也不代表 Local Gateway 已完全移除 Router。
 
 ### R5：按产品需求独立立项
 
@@ -1294,8 +1332,8 @@ reconciliation，也不证明远程 subagent，因此不改变 R2/R3 的开始�
 
 - 不引入 Cordis，不按 DSH package 数量改造 PilotDeck。
 - 不将 `SessionRuntime`、Gateway、Router、ToolRuntime 或 child inbox 迁入 AgentLoop、sidecar 或 bundle。
-- 不在没有第二 consumer 时构建 generic extension registry、profile patch matrix、remote subagent registry 或
-  model-policy 细分接口。
+- 不在没有明确 caller/owner 时构建 generic extension registry、profile patch matrix、remote subagent registry 或
+  第二套 model-policy 产品；R4 已定义的 execution/routing/metadata/budget/auxiliary 窄 port 仅作为兼容架构 seam。
 - 不做第二个完整 deployment，不做第二模型或第二 routing provider；当前 Local Gateway 与 native model/routing
   group 是唯一产品组合基线。
 - P1 完成前不将 Workflow core 接入领域 caller；当前 core vertical slice 不迁移 Plan/Todo、Cron、Always-On、Goal

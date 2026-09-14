@@ -29,6 +29,7 @@ import type { PlanFileManager } from "../../tool/builtin/planFile.js";
 import type { PlanTodoPort } from "../../plan-todo/runtime/PlanTodoPort.js";
 import type { GoalPort } from "../../goal/protocol/types.js";
 import type { ModelInvokerPort, ToolPort } from "../modules/protocol.js";
+import type { CanonicalModelEvent, CanonicalModelRequest } from "../../model/index.js";
 import type { AgentLoopOperationLedger } from "../modules/transport/operationLedger.js";
 import { createRouterModelInvokerPort, createToolSchedulerPort } from "../modules/adapters.js";
 
@@ -36,8 +37,42 @@ const AGENT_TURN_CAPABILITIES = Symbol("pilotdeck.agent-turn-capabilities");
 
 export type AgentTurnRoutingPort = Pick<
   AgentRouterRuntime,
-  "stream" | "materializeRequest" | "invalidateSticky"
+  "materializeRequest" | "invalidateSticky"
+> & {
+  /** @deprecated Use AuxiliaryModelPort for secondary model calls. */
+  stream?: AgentRouterRuntime["stream"];
+};
+
+/** Narrow composition input for direct AgentLoop construction. */
+export type AgentTurnCapabilityComposition = Omit<Partial<AgentRuntimeDependencies>, "tools"> & {
+  tools?: Partial<AgentRuntimeDependencies["tools"]>;
+};
+
+/** Primary model execution contract consumed by the loop. */
+export type ModelExecutionPort = ModelInvokerPort;
+
+/** Model metadata lookup kept independent from execution and routing policy. */
+export type ModelMetadataPort = Readonly<{
+  getModelMaxContextTokens?: (provider: string, model: string) => number | undefined;
+  getModelMaxOutputTokens?: (provider: string, model: string) => number | undefined;
+  getModelTokenLimits?: (provider: string, model: string) => {
+    maxContextTokens: number;
+    maxOutputTokens?: number;
+  } | undefined;
+  getModelProtocol?: (provider: string) => ModelProtocol | undefined;
+  getModelSupportsPromptCache?: (provider: string, model: string) => boolean | undefined;
+}>;
+
+/** Token estimation and budget evaluation consumed by compaction logic. */
+export type ModelBudgetPort = Pick<
+  TokenAccountingRuntime,
+  "estimateRequestInput" | "evaluateRequestBudget"
 >;
+
+/** Secondary model client for tools and subagent helpers. */
+export type AuxiliaryModelPort = Readonly<{
+  stream(request: CanonicalModelRequest, signal?: AbortSignal): AsyncIterable<CanonicalModelEvent>;
+}>;
 
 export type AgentTurnContextPort = Pick<
   {
@@ -53,17 +88,25 @@ export type AgentTurnContextPort = Pick<
 export type LifecycleDispatchPort = Pick<LifecycleRuntime, "dispatch">;
 
 export type AgentTurnModelCapabilities = {
-  invoker: ModelInvokerPort;
-  routing: AgentTurnRoutingPort;
-  tokenAccounting?: TokenAccountingRuntime;
-  getModelMaxContextTokens?: (provider: string, model: string) => number | undefined;
-  getModelMaxOutputTokens?: (provider: string, model: string) => number | undefined;
-  getModelTokenLimits?: (provider: string, model: string) => {
-    maxContextTokens: number;
-    maxOutputTokens?: number;
-  } | undefined;
-  getModelProtocol?: (provider: string) => ModelProtocol | undefined;
-  getModelSupportsPromptCache?: (provider: string, model: string) => boolean | undefined;
+  execution: ModelExecutionPort;
+  routing?: AgentTurnRoutingPort;
+  metadata: ModelMetadataPort;
+  budget?: ModelBudgetPort;
+  auxiliary?: AuxiliaryModelPort;
+  /** @deprecated Use execution. */
+  invoker: ModelExecutionPort;
+  /** @deprecated Use budget. */
+  tokenAccounting?: ModelBudgetPort;
+  /** @deprecated Use metadata. */
+  getModelMaxContextTokens?: ModelMetadataPort["getModelMaxContextTokens"];
+  /** @deprecated Use metadata. */
+  getModelMaxOutputTokens?: ModelMetadataPort["getModelMaxOutputTokens"];
+  /** @deprecated Use metadata. */
+  getModelTokenLimits?: ModelMetadataPort["getModelTokenLimits"];
+  /** @deprecated Use metadata. */
+  getModelProtocol?: ModelMetadataPort["getModelProtocol"];
+  /** @deprecated Use metadata. */
+  getModelSupportsPromptCache?: ModelMetadataPort["getModelSupportsPromptCache"];
 };
 
 export type ToolExecutionPort = ToolPort & {
@@ -129,16 +172,40 @@ export type AgentTurnCapabilities = Readonly<{
  */
 export function createAgentTurnCapabilities(
   config: AgentRuntimeConfig,
-  dependencies: AgentRuntimeDependencies,
+  dependencies: AgentTurnCapabilityComposition,
 ): AgentTurnCapabilities {
-  const model = dependencies.ports?.model ?? createRouterModelInvokerPort(dependencies.router, {
-    isMainAgent: !config.isSubagent,
-    projectPath: config.cwd,
+  const model = dependencies.ports?.model
+    ?? (dependencies.router
+      ? createRouterModelInvokerPort(dependencies.router, {
+          isMainAgent: !config.isSubagent,
+          projectPath: config.cwd,
+        })
+      : undefined);
+  if (!model) throw new TypeError("AgentLoop composition requires a model execution port or router.");
+  const registry = dependencies.tools?.registry;
+  const scheduler = dependencies.tools?.scheduler;
+  const toolExecution = dependencies.ports?.tools
+    ?? (registry && scheduler
+      ? createToolSchedulerPort(registry, scheduler)
+      : undefined);
+  if (!toolExecution) throw new TypeError("AgentLoop composition requires a tool execution port.");
+  const routing = dependencies.ports?.routing ?? dependencies.router;
+  const budget = dependencies.tokenAccounting
+    ? Object.freeze({
+        estimateRequestInput: (request: CanonicalModelRequest) =>
+          dependencies.tokenAccounting!.estimateRequestInput.call(dependencies.tokenAccounting, request),
+        evaluateRequestBudget: (request: CanonicalModelRequest, options: Parameters<TokenAccountingRuntime["evaluateRequestBudget"]>[1]) =>
+          dependencies.tokenAccounting!.evaluateRequestBudget.call(dependencies.tokenAccounting, request, options),
+      })
+    : undefined;
+  const metadata = dependencies.ports?.metadata ?? Object.freeze({
+    getModelMaxContextTokens: dependencies.getModelMaxContextTokens,
+    getModelMaxOutputTokens: dependencies.getModelMaxOutputTokens,
+    getModelTokenLimits: dependencies.getModelTokenLimits,
+    getModelProtocol: dependencies.getModelProtocol,
+    getModelSupportsPromptCache: dependencies.getModelSupportsPromptCache,
   });
-  const toolExecution = dependencies.ports?.tools ?? createToolSchedulerPort(
-    dependencies.tools.registry,
-    dependencies.tools.scheduler,
-  );
+  const auxiliary = dependencies.ports?.auxiliaryModel;
   const context = dependencies.context
     ? createAgentTurnContextPort(dependencies.context)
     : createNoopAgentTurnContextPort();
@@ -168,14 +235,18 @@ export function createAgentTurnCapabilities(
   return Object.freeze({
     [AGENT_TURN_CAPABILITIES]: true as const,
     model: Object.freeze({
+      execution: model,
+      routing,
+      metadata,
+      budget,
+      auxiliary,
       invoker: model,
-      routing: dependencies.router,
-      tokenAccounting: dependencies.tokenAccounting,
-      getModelMaxContextTokens: dependencies.getModelMaxContextTokens,
-      getModelMaxOutputTokens: dependencies.getModelMaxOutputTokens,
-      getModelTokenLimits: dependencies.getModelTokenLimits,
-      getModelProtocol: dependencies.getModelProtocol,
-      getModelSupportsPromptCache: dependencies.getModelSupportsPromptCache,
+      tokenAccounting: budget,
+      getModelMaxContextTokens: metadata.getModelMaxContextTokens,
+      getModelMaxOutputTokens: metadata.getModelMaxOutputTokens,
+      getModelTokenLimits: metadata.getModelTokenLimits,
+      getModelProtocol: metadata.getModelProtocol,
+      getModelSupportsPromptCache: metadata.getModelSupportsPromptCache,
     }),
     toolExecution: toolExecutionView,
     permission: dependencies.permission,

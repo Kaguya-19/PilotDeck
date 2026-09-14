@@ -184,6 +184,23 @@ limits，并只用本次 execute 的 `preparationId` 与随后的 `stream` 关�
 物化对象和校准 token state 继续由宿主保存；它们不能进入 Protocol payload、Session event 或
 跨 execute 的缓存。
 
+#### 本地 model ports 与 wire module 的关系
+
+AgentLoop 内部的五类 model port 不等于五个 Module Protocol endpoint：
+
+| 本地 consumer port | wire 映射 | 责任边界 |
+| --- | --- | --- |
+| `ModelExecutionPort` | 现有 `model.prepare` / `model.stream` | 传递 canonical request、stream event、usage、错误和 deadline |
+| `AgentTurnRoutingPort` | 由 host/local composition 决定 | provider selection、materialization、sticky invalidation；不新增 wire method |
+| `ModelMetadataPort` | 由 host/local composition 决定 | limits、protocol、prompt-cache capability；缺失时按 conservative fallback |
+| `ModelBudgetPort` | 由 host context/token-meter composition 决定 | input estimation 与 budget evaluation；不把 evaluator 或校准状态序列化 |
+| `AuxiliaryModelPort` | 由 host capability/context composition 决定 | 工具、subagent、提取器的二次调用；不改变主 turn 的 execution |
+
+因此，Module Protocol v2 的字段和 version 不变。wire payload 不得携带 `RouterDecision`、provider registry、Router
+opaque runtime、Session/lifecycle owner、第三方 SDK 对象或 `budgetEvaluator`。显式 `ModelExecutionPort` 可以在没有
+Router 的情况下直接执行；空 Router 不能充当 model execution provider。sidecar 仍只代理已经存在的 `model.prepare`
+和 `model.stream`，routing/metadata/budget/auxiliary 的实现由宿主组合层选择。
+
 ### 4.2 Streaming execute
 
 accepted response 在 unary 字段之外返回 `streamId` 和初始 `cursor`。后续 event 至少包含：

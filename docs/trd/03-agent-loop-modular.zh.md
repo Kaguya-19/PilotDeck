@@ -9,7 +9,13 @@
 ```text
 Session -> TurnRunner -> AgentLoop
                          ├─ AgentContextRuntime
-                         ├─ ModelInvokerPort
+                         ├─ AgentTurnContextPort
+                         ├─ LifecycleDispatchPort
+                         ├─ ModelExecutionPort
+                         ├─ AgentTurnRoutingPort (optional)
+                         ├─ ModelMetadataPort (optional)
+                         ├─ ModelBudgetPort (optional)
+                         ├─ AuxiliaryModelPort (optional)
                          └─ ToolPort
                               ↑
                     legacy Router/Scheduler adapters
@@ -17,10 +23,16 @@ Session -> TurnRunner -> AgentLoop
 
 ## 接口
 
-- `ModelInvokerPort.prepare()` 负责返回已解析的 provider/model/request/limits；`stream()` 只返回 canonical model events。
+- `ModelExecutionPort.prepare()` 负责一次调用的 canonical request，`stream()` 只返回 canonical model events；这是 AgentLoop
+  的唯一必需模型能力。`AgentTurnRoutingPort`、`ModelMetadataPort`、`ModelBudgetPort` 和 `AuxiliaryModelPort` 是可独立替换的
+  consumer port，不要求共享同一个 provider 或 Router。
+- `ModelInvokerPort` 是底层兼容 contract；旧 `model.invoker`、`model.routing` 和 `model.tokenAccounting` 字段只在
+  composition/adapter 层保留，标记为 deprecated。`PreparedModelInvocation.opaque` 只供旧 Router adapter 兼容，新的
+  execution provider 不得依赖它。
 - `ToolPort.list()` 提供当前工具定义；`executeAll()` 保留现有 scheduler 的批量、并发和结果顺序语义。
 - sidecar 可通过宿主声明的 `context` module 调用当前 session 的 ContextRuntime；system prompt、skill catalog 和上下文策略不在 sidecar 内复制。
-- `AgentRuntimeDependencies.ports` 可注入自定义 Port；未注入时自动包装现有 Router、ToolRegistry 和 ToolScheduler。
+- `AgentRuntimeDependencies.ports` 可注入自定义 Port；未注入时由 composition 按显式 execution port、legacy Router
+  adapter 和本地 registry 的优先级构造兼容实现。显式 `ModelExecutionPort` 存在时不要求 Router。
 - `AgentLoopInput.execution.runId` 由宿主提供，缺省值只用于兼容直接调用方。
 
 ### Capability / Tool 能力族
@@ -57,21 +69,38 @@ Host consumer 不拼接宿主 system prompt，不实现压缩策略，也不序�
 
 ### LLM / Model 能力族
 
-Model 的路由决策和调用同样与 transport 分离：
+Model 的执行、路由、元数据、预算和二次调用与 transport 分离，并按 DSH `llm`、`llm-retry`、`token-meter` 和
+bundle 的边界组织。当前代码将 routing 视图命名为 `AgentTurnRoutingPort`；它是 AgentLoop-facing 的窄类型，
+不是独立 Router runtime：
 
 | 角色 | 代码入口 | Ownership |
 | --- | --- | --- |
-| Definition | `ModelInvokerPort`（`src/agent/modules/protocol.ts`） | 只暴露 prepare 和 canonical event stream |
-| Native provider | `src/agent/modules/llm/routerModelInvokerAdapter.ts` | 持有 Router decision、request materialization 和 provider execution |
-| Host consumer | `src/agent/modules/llm/hostModelInvokerPort.ts` | 将 canonical model request 投影为宿主 `model` module call |
-| Composition | `createSidecarPorts()` | 组合 host model consumer，不实现 provider 策略 |
+| Definition | `ModelExecutionPort`、`AgentTurnRoutingPort`、`ModelMetadataPort`、`ModelBudgetPort`、`AuxiliaryModelPort` | 定义 AgentLoop-facing consumer contract，不持有 provider state |
+| Native provider | `routerModelInvokerAdapter.ts`、`hostModelInvokerPort.ts` 或其他由调用方提供的 `ModelInvokerPort` | 将 provider 协议转换为 canonical request/event；legacy adapter 可持有 Router materialization |
+| Host consumer | `src/agent/modules/llm/hostModelInvokerPort.ts` | 将 `ModelExecutionPort.prepare/stream` 投影为宿主 `model` module call |
+| Composition | `createAgentTurnCapabilities()` / `createSidecarPorts()` | 从宽依赖解析并冻结各 port；决定 Router facade、metadata/budget/auxiliary 的默认适配 |
 
 Host consumer 只传递 canonical request 和可序列化 execution context，不传递 `AbortSignal`。宿主成功响应
 必须包含 canonical `events`；缺失时以 `INVALID_MODEL_RESPONSE` 失败，不能把非法模型响应静默解释为空流。
 每个 `prepare()` 还生成仅限本次 sidecar execute 的 `preparationId`；同一 prepared invocation 的 retry 必须复用它，
-宿主据此复用第一次 Router `prepare()` 得到的 decision。该 ID 不是 Session/turn state，不携带 Router opaque data，
+宿主据此复用第一次路由/请求物化得到的 snapshot。该 ID 不是 Session/turn state，不携带 Router opaque data，
 不跨 operation 保存；每个新的 `prepare()` 即使在固定 UUID test provider 下也得到不同 ID。
-原 `adapters.ts` 继续作为兼容导出 facade，不再承载 Router provider 实现。
+直接构造 `AgentTurnCapabilities` 并显式注入 `ModelExecutionPort` 时，AgentLoop consumer 可以没有 Router；但
+`AgentRuntimeDependencies`、session scope 和 Local Gateway 的 native composition 目前仍要求/默认创建 Router。没有
+routing port 时直接使用 request 或 `prepare()` 返回的 provider/model，不执行 fallback、sticky invalidation 或私有 Router
+查询。原 `adapters.ts` 继续作为兼容导出 facade。
+
+`ModelMetadataPort` 提供 context/output limits、provider protocol 和 prompt-cache capability；缺失时分别使用既有 config
+fallback、请求/config cap、canonical protocol fallback，以及“不支持 prompt cache”。`ModelBudgetPort` 只负责 input
+估算和预算评估所需 token accounting，不替 AgentLoop 决定是否 compact。`AuxiliaryModelPort` 服务工具、subagent 和
+提取器的二次调用；未注入时可由 Router facade 提供 turn-scoped 兼容适配，但不得改变主 turn 的 provider、retry 或 usage。
+
+第三方 provider adapter 是可选 integration。它只接收显式 provider/model、`AbortSignal`、turn/session metadata 和
+deadline，并将 provider 的 text、tool-call、reasoning、finish、error、usage 与 request id 映射为 canonical vocabulary。
+它不暴露 registry、Session、Gateway、Router 或 lifecycle dispose，也不把 provider-specific state 放进 Module Protocol。
+
+职责边界固定为：adapter 做协议/事件转换，AgentLoop 保留 turn 状态机，retry 仍在 step boundary，token meter/usage 是
+独立 consumer，bundle/profile 负责 provider selection、generation、lease、rollback 和 dispose。
 
 ### Interaction / Permission 能力族
 
