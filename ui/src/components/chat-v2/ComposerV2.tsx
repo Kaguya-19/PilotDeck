@@ -727,6 +727,23 @@ export default function ComposerV2({
       ),
     [modelCatalog, normalizedModelQuery],
   );
+  const modelGroups = useMemo(() => {
+    const groups = new Map<string, ChatModelCatalogItem[]>();
+    const autoModels: ChatModelCatalogItem[] = [];
+    for (const item of filteredModels) {
+      if (item.id === "router/auto") {
+        autoModels.push(item);
+        continue;
+      }
+      const models = groups.get(item.provider) ?? [];
+      models.push(item);
+      groups.set(item.provider, models);
+    }
+    return [
+      ...(autoModels.length ? [{ provider: null, models: autoModels }] : []),
+      ...Array.from(groups, ([provider, models]) => ({ provider, models })),
+    ];
+  }, [filteredModels]);
   const advancedModel =
     modelCatalog.find((item) => item.id === advancedModelId) || null;
   const modelMenuVisible = isModelMenuOpen && Boolean(isModelCatalogLoading || modelCatalog.length > 0 || modelCatalogError);
@@ -1575,86 +1592,100 @@ export default function ComposerV2({
                                 })}
                               </div>
                             ) : (
-                              filteredModels.map((item) => {
-                                const isAuto = item.id === "router/auto";
-                                const isSelected = item.id === selectedModelId;
-                                const hasAdvanced = Boolean(
-                                  item.capabilities.reasoning ||
-                                  item.capabilities.temperature ||
-                                  item.capabilities.speed,
-                                );
-                                return (
-                                  <div
-                                    key={item.id}
-                                    className={cn(
-                                      "group flex items-center rounded-lg text-[#343640] transition-colors hover:bg-[#f7f6ff] hover:text-[#373390] dark:text-neutral-200 dark:hover:bg-violet-950/40 dark:hover:text-violet-200",
-                                      isSelected
-                                        ? "bg-[#eeecff] font-[650] text-[#393393] hover:bg-[#eeecff] dark:bg-violet-950/70 dark:text-violet-200 dark:hover:bg-violet-950/70"
-                                        : "",
-                                      !item.available &&
-                                        !isAuto &&
-                                        "opacity-45",
-                                    )}
-                                  >
-                                    <button
-                                      type="button"
-                                      disabled={!item.available}
-                                      onClick={() => {
-                                        onModelSelectionChange(
-                                          isAuto
-                                            ? { mode: "auto" }
-                                            : buildExplicitSelection(
-                                                item,
-                                                preserveParamsForModel(
-                                                  item,
-                                                  modelSelection,
-                                                ),
-                                              ),
-                                        );
-                                        setIsModelMenuOpen(false);
-                                        setAdvancedModelId(null);
-                                      }}
-                                      className="flex h-[27px] min-w-0 flex-1 items-center truncate border-0 bg-transparent pl-[9px] pr-0 text-left text-[12px] text-inherit"
-                                      title={`${item.displayName} · ${item.provider}`}
-                                    >
-                                      {item.displayName}
-                                    </button>
-                                    {hasAdvanced ? (
-                                      <button
-                                        type="button"
-                                        onMouseDown={(event) =>
-                                          event.preventDefault()
-                                        }
-                                        onClick={() =>
-                                          setAdvancedModelId((current) =>
-                                            current === item.id
-                                              ? null
-                                              : item.id,
-                                          )
-                                        }
+                              modelGroups.map(({ provider, models }) => (
+                                <div
+                                  key={provider === null ? "auto" : `provider:${provider}`}
+                                  role="group"
+                                  aria-label={provider ?? (t("input.models.auto", { defaultValue: "Auto" }) as string)}
+                                  className="mb-1 last:mb-0"
+                                >
+                                  {provider !== null ? (
+                                    <div className="sticky top-0 z-10 truncate bg-white px-[9px] pb-1 pt-2 text-[10px] font-medium text-neutral-400 dark:bg-neutral-900 dark:text-neutral-500" title={provider}>
+                                      {provider}
+                                    </div>
+                                  ) : null}
+                                  {models.map((item) => {
+                                    const isAuto = item.id === "router/auto";
+                                    const isSelected = item.id === selectedModelId;
+                                    const hasAdvanced = Boolean(
+                                      item.capabilities.reasoning ||
+                                      item.capabilities.temperature ||
+                                      item.capabilities.speed,
+                                    );
+                                    return (
+                                      <div
+                                        key={item.id}
                                         className={cn(
-                                          "mr-1 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-neutral-400 transition hover:bg-violet-100 hover:text-violet-700 dark:hover:bg-violet-950/60 dark:hover:text-violet-200",
-                                          advancedModelId === item.id &&
-                                            "bg-violet-100 text-violet-700 dark:bg-violet-950/60 dark:text-violet-200",
+                                          "group flex items-center rounded-lg text-[#343640] transition-colors hover:bg-[#f7f6ff] hover:text-[#373390] dark:text-neutral-200 dark:hover:bg-violet-950/40 dark:hover:text-violet-200",
+                                          isSelected
+                                            ? "bg-[#eeecff] font-[650] text-[#393393] hover:bg-[#eeecff] dark:bg-violet-950/70 dark:text-violet-200 dark:hover:bg-violet-950/70"
+                                            : "",
+                                          !item.available &&
+                                            !isAuto &&
+                                            "opacity-45",
                                         )}
-                                        title={
-                                          t("input.models.advanced", {
-                                            defaultValue: "Advanced settings",
-                                          }) as string
-                                        }
-                                        aria-expanded={
-                                          advancedModelId === item.id
-                                        }
                                       >
-                                        <ChevronRight
-                                          className="h-3.5 w-3.5"
-                                          strokeWidth={2}
-                                        />
-                                      </button>
-                                    ) : null}
-                                  </div>
-                                );
-                              })
+                                        <button
+                                          type="button"
+                                          disabled={!item.available}
+                                          onClick={() => {
+                                            onModelSelectionChange(
+                                              isAuto
+                                                ? { mode: "auto" }
+                                                : buildExplicitSelection(
+                                                    item,
+                                                    preserveParamsForModel(
+                                                      item,
+                                                      modelSelection,
+                                                    ),
+                                                  ),
+                                            );
+                                            setIsModelMenuOpen(false);
+                                            setAdvancedModelId(null);
+                                          }}
+                                          className="flex h-[27px] min-w-0 flex-1 items-center truncate border-0 bg-transparent pl-[9px] pr-0 text-left text-[12px] text-inherit"
+                                          title={`${item.displayName} · ${item.provider}`}
+                                        >
+                                          {item.displayName}
+                                        </button>
+                                        {hasAdvanced ? (
+                                          <button
+                                            type="button"
+                                            onMouseDown={(event) =>
+                                              event.preventDefault()
+                                            }
+                                            onClick={() =>
+                                              setAdvancedModelId((current) =>
+                                                current === item.id
+                                                  ? null
+                                                  : item.id,
+                                              )
+                                            }
+                                            className={cn(
+                                              "mr-1 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-neutral-400 transition hover:bg-violet-100 hover:text-violet-700 dark:hover:bg-violet-950/60 dark:hover:text-violet-200",
+                                              advancedModelId === item.id &&
+                                                "bg-violet-100 text-violet-700 dark:bg-violet-950/60 dark:text-violet-200",
+                                            )}
+                                            title={
+                                              t("input.models.advanced", {
+                                                defaultValue: "Advanced settings",
+                                              }) as string
+                                            }
+                                            aria-expanded={
+                                              advancedModelId === item.id
+                                            }
+                                          >
+                                            <ChevronRight
+                                              className="h-3.5 w-3.5"
+                                              strokeWidth={2}
+                                            />
+                                          </button>
+                                        ) : null}
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              ))
                             )}
                           </div>
                         </div>
