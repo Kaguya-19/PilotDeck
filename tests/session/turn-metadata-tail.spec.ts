@@ -9,6 +9,7 @@ import { TurnRunner } from "../../src/agent/turn/TurnRunner.js";
 import type { LifecycleRuntime } from "../../src/lifecycle/index.js";
 import { SessionMetadataStore } from "../../src/session/metadata/SessionMetadataStore.js";
 import { InMemoryTranscriptWriter } from "../../src/session/transcript/InMemoryTranscriptWriter.js";
+import type { SessionTitlePort } from "../../src/session/title/SessionTitlePort.js";
 
 const NOW = "2026-08-16T09:00:00.000Z";
 
@@ -78,6 +79,48 @@ test("TurnRunner appends session metadata after successful and failed accepted t
   }
 });
 
+test("SessionMetadataStore does not advance its snapshot when persistence fails", async () => {
+  const transcript = new InMemoryTranscriptWriter();
+  transcript.recordSessionMetadata = async () => {
+    throw new Error("metadata persistence unavailable");
+  };
+  const metadataStore = new SessionMetadataStore({
+    transcript,
+    sessionId: "metadata-failure",
+    now: () => new Date(NOW),
+  });
+
+  await assert.rejects(
+    metadataStore.saveTitle("must not become visible", "turn-failed"),
+    /metadata persistence unavailable/,
+  );
+  assert.deepEqual(metadataStore.getSnapshot(), { linkedPullRequest: undefined });
+});
+
+test("SessionMetadataStore marks explicit titles as user-pinned", async () => {
+  const transcript = new InMemoryTranscriptWriter();
+  const store = new SessionMetadataStore({ transcript, sessionId: "pinned-session", now: () => new Date(NOW) });
+  await store.saveTitle("My pinned title", "rename-turn");
+  assert.equal(store.getSnapshot().title, "My pinned title");
+  assert.equal(store.getSnapshot().titleSource, "user");
+  assert.equal(store.getSnapshot().titleSourceTurnId, "rename-turn");
+});
+
+test("SessionMetadataStore snapshots do not expose mutable title provenance", async () => {
+  const transcript = new InMemoryTranscriptWriter();
+  const store = new SessionMetadataStore({ transcript, sessionId: "snapshot-session", now: () => new Date(NOW) });
+  await store.saveAiTitle("Generated", "title-turn", {
+    titleProviderId: "provider",
+    titleModel: { provider: "model-provider", model: "model" },
+    titleMessageSequences: [2, 4],
+  });
+  const snapshot = store.getSnapshot();
+  snapshot.titleModel!.model = "mutated";
+  snapshot.titleMessageSequences!.push(99);
+  assert.deepEqual(store.getSnapshot().titleModel, { provider: "model-provider", model: "model" });
+  assert.deepEqual(store.getSnapshot().titleMessageSequences, [2, 4]);
+});
+
 test("TurnRunner persists a bounded prompt when title generation produces no title", async () => {
   const sessionId = "untitled-session";
   const transcript = new InMemoryTranscriptWriter();
@@ -131,6 +174,54 @@ test("TurnRunner persists a bounded prompt when title generation produces no tit
     assert.equal(lastEntry.metadata.lastPrompt, prompt);
     assert.equal(lastEntry.metadata.isSnapshot, true);
   }
+});
+
+test("TurnRunner records title provider provenance and accepted-input sequence", async () => {
+  const sessionId = "title-provenance-session";
+  const transcript = new InMemoryTranscriptWriter();
+  const metadataStore = new SessionMetadataStore({ transcript, sessionId, now: () => new Date(NOW) });
+  const successfulResult = result(sessionId);
+  const provider: SessionTitlePort = {
+    providerId: "test-title-provider",
+    modelProvenance: { provider: "test-model-provider", model: "title-model" },
+    async generate(input) {
+      assert.deepEqual(input.messageSequences, [2]);
+      return "Generated title";
+    },
+  };
+  const loop = {
+    async *run(input: AgentLoopInput): AsyncGenerator<AgentEvent, AgentLoopRunResult, unknown> {
+      yield { type: "turn_completed", sessionId: input.sessionId, turnId: input.turnId, result: successfulResult };
+      return { result: successfulResult, messages: input.messages };
+    },
+    snapshotFileState: () => ({}),
+  } as unknown as AgentLoop;
+  const runner = new TurnRunner(
+    loop,
+    transcript,
+    undefined,
+    () => new Date(NOW),
+    undefined,
+    { cwd: process.cwd(), transcriptPath: "", collectFileArtifacts: false },
+    { metadataStore, autoGenerateSessionTitle: true, sessionTitleProvider: provider },
+  );
+
+  for await (const _event of runner.run({
+    sessionId,
+    turnId: "turn-title",
+    messages: [],
+    input: { type: "text", text: "Explain the title provenance" },
+  })) {}
+
+  const snapshot = metadataStore.getSnapshot();
+  assert.equal(snapshot.aiTitle, "Generated title");
+  assert.equal(snapshot.titleSource, "provider");
+  assert.equal(snapshot.titleProviderId, "test-title-provider");
+  assert.deepEqual(snapshot.titleModel, { provider: "test-model-provider", model: "title-model" });
+  // The transcript records turn_started before accepted_input; the latter's
+  // sequence is the durable input snapshot used for title provenance.
+  assert.deepEqual(snapshot.titleMessageSequences, [2]);
+  assert.equal(snapshot.titleSourceTurnId, "turn-title");
 });
 
 test("TurnRunner updates lastPrompt on subsequent accepted turns", async () => {

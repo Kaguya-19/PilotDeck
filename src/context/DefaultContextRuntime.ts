@@ -1,27 +1,36 @@
 import type { CanonicalMessage } from "../model/index.js";
-import { ToolResultBudget } from "./budget/ToolResultBudget.js";
-import type { TokenBudgetManager, TokenBudgetSnapshot } from "./budget/TokenBudgetManager.js";
-import type { AutoCompactionPolicy } from "./compaction/AutoCompactionPolicy.js";
 import {
-  type CompactionEngine,
-  type CompactionResult,
-  buildPostCompactMessages,
-  truncateHeadPreservingCheckpoint,
-} from "./compaction/CompactionEngine.js";
-import { buildCachePlan } from "./cache/CachePlan.js";
+  LEGACY_RUNTIME_CONTEXT_SURFACE,
+  type RuntimeContextSurface,
+} from "./RuntimeContextSurface.js";
+import { ToolResultBudget } from "./budget/ToolResultBudget.js";
+import type { TokenBudgetManager } from "./budget/TokenBudgetManager.js";
+import type { AutoCompactionPolicy } from "./compaction/AutoCompactionPolicy.js";
+import type { CompactionEngine } from "./compaction/CompactionEngine.js";
+import type { AutoCompactResult, CompactionAutoCompactInput, CompactionPort } from "./compaction/CompactionPort.js";
+import { createNativeCompactionPort } from "./compaction/NativeCompactionPort.js";
+import { withCompactionOrchestrator } from "./compaction/CompactionOrchestrator.js";
+import { PromptCacheCoordinator } from "./cache/PromptCacheCoordinator.js";
+import type { PromptCacheCoordinatorPort } from "./cache/PromptCacheCoordinatorPort.js";
 import type { MicroCompactionEngine } from "./compaction/MicroCompactionEngine.js";
 import type { SnipEngine } from "./compaction/SnipEngine.js";
-import { ensureTrailingUserMessage } from "./compaction/toolPairIntegrity.js";
+import { isRealUserRequestMessage } from "./compaction/toolPairIntegrity.js";
 import type { ContextOverflowRecovery } from "./recovery/ContextOverflowRecovery.js";
 import { NullExtensionResolver, type ExtensionResolver } from "./extension/ExtensionResolver.js";
 import type { InstructionDiscovery, InstructionScope } from "./instructions/InstructionDiscovery.js";
 import { MemoryAttachmentBuilder } from "./memory/MemoryAttachmentBuilder.js";
 import type { MemoryResolver } from "./memory/MemoryResolver.js";
 import { PromptAssembler } from "./prompt/PromptAssembler.js";
+import {
+  PromptContributionRegistry,
+  renderPromptContributionSections,
+  renderPromptRuntimeContextSections,
+} from "./prompt/PromptContributionRegistry.js";
 import { MessageProjector } from "./projection/MessageProjector.js";
 import type {
   ContextCaptureTurnInput,
   ContextDiagnostic,
+  ContextInstructionSnapshotLayer,
   ContextPrepareInput,
   ContextRecoveryDecision,
   ContextRecoveryInput,
@@ -32,25 +41,22 @@ import type {
 } from "./protocol/types.js";
 
 export type CompactionTier = "micro" | "snip" | "full" | "emergency";
-
-export type AutoCompactResult =
-  | { type: "skipped"; snapshot: TokenBudgetSnapshot }
-  | {
-      type: "compacted";
-      messages: CanonicalMessage[];
-      tier: CompactionTier;
-      snapshot: TokenBudgetSnapshot;
-      result?: CompactionResult;
-      /** Set when every emergency tier ran but the request still cannot fit. */
-      error?: "context_overflow_after_emergency_compaction";
-    };
+export type { AutoCompactResult } from "./compaction/CompactionPort.js";
+export type { RuntimeContextSurface } from "./RuntimeContextSurface.js";
 
 export type DefaultContextRuntimeOptions = {
   extension?: ExtensionResolver;
   promptAssembler?: PromptAssembler;
+  promptContributions?: PromptContributionRegistry;
   messageProjector?: MessageProjector;
   toolResultBudget?: ToolResultBudget;
   memoryResolver?: MemoryResolver;
+  /** Dynamic runtime-context projection. Defaults to the native-compatible system prompt path. */
+  runtimeContextSurface?: RuntimeContextSurface;
+  /** Application-selected owner for session prompt-cache generations. */
+  promptCacheCoordinator?: PromptCacheCoordinatorPort;
+  /** Context-level compaction provider. Preferred over the legacy per-stage options below. */
+  compaction?: CompactionPort;
   /** A2 — token budget manager (provider-aware tokenizer fallback). */
   tokenBudget?: TokenBudgetManager;
   /** A5 — full-conversation compaction engine (summarize via model call). */
@@ -89,30 +95,22 @@ const DEFAULT_MAX_CONTEXT_TOKENS = 8192;
 const DEFAULT_TRUNCATE_FIRST_RATIO = 0.5;
 const DEFAULT_TRUNCATE_SECOND_RATIO = 0.25;
 const DEFAULT_MEMORY_RETRIEVAL_TIMEOUT_MS = 30_000;
-const POST_COMPACTION_TARGET_RATIO = 0.60;
-// Keep the emergency tail at the lower end of the plan's 5%-10% range. This
-// matches the previous relaxed compaction behaviour and leaves enough room
-// for large, stable system/tool definitions in small model contexts.
-const EMERGENCY_KEEP_TAIL_RATIO = 0.05;
-const EMERGENCY_SUMMARY_MAX_OUTPUT_TOKENS = 1_536;
-const EMERGENCY_TOOL_RESULT_TOKENS = 256;
-const EMERGENCY_HEAD_KEEP_RATIO = 0.10;
-
 export class DefaultContextRuntime implements ContextRuntime {
   private readonly extension: ExtensionResolver;
   private readonly promptAssembler: PromptAssembler;
+  private readonly promptContributions?: PromptContributionRegistry;
   private readonly messageProjector: MessageProjector;
   private readonly toolResultBudget?: ToolResultBudget;
   private readonly memoryResolver?: MemoryResolver;
   private readonly memoryAttachmentBuilder?: MemoryAttachmentBuilder;
+  private readonly runtimeContextSurface: RuntimeContextSurface;
+  /** Legacy inspection fields retained while consumers migrate to CompactionPort. */
   readonly tokenBudget?: TokenBudgetManager;
   readonly compactionEngine?: CompactionEngine;
   readonly autoCompactionPolicy?: AutoCompactionPolicy;
-  private readonly cachePlanState = new Map<string, { fingerprint: string; generation: number }>();
-  private readonly cacheResetSessions = new Set<string>();
-  private readonly microCompaction?: MicroCompactionEngine;
-  private readonly snipEngine?: SnipEngine;
-  private readonly overflowRecovery?: ContextOverflowRecovery;
+  private readonly compaction?: CompactionPort;
+  private readonly promptCacheCoordinator: PromptCacheCoordinatorPort;
+  private readonly promptCacheSessions = new Set<string>();
   private readonly instructionDiscovery?: InstructionDiscovery;
   private readonly projectRoot?: string;
   private readonly maxContextTokens: number;
@@ -124,18 +122,28 @@ export class DefaultContextRuntime implements ContextRuntime {
   constructor(options: DefaultContextRuntimeOptions = {}) {
     this.extension = options.extension ?? new NullExtensionResolver();
     this.promptAssembler = options.promptAssembler ?? new PromptAssembler(this.extension);
+    this.promptContributions = options.promptContributions;
     this.messageProjector = options.messageProjector ?? new MessageProjector();
     this.toolResultBudget = options.toolResultBudget;
     this.memoryResolver = options.memoryResolver;
     this.memoryAttachmentBuilder = options.memoryResolver
       ? new MemoryAttachmentBuilder(options.memoryResolver)
       : undefined;
+    this.runtimeContextSurface = options.runtimeContextSurface ?? LEGACY_RUNTIME_CONTEXT_SURFACE;
+    this.promptCacheCoordinator = options.promptCacheCoordinator ?? new PromptCacheCoordinator();
     this.tokenBudget = options.tokenBudget;
     this.compactionEngine = options.compactionEngine;
     this.autoCompactionPolicy = options.autoCompactionPolicy;
-    this.microCompaction = options.microCompaction;
-    this.snipEngine = options.snipEngine;
-    this.overflowRecovery = options.overflowRecovery;
+    const compaction = options.compaction ?? createNativeCompactionPort({
+      ...options,
+      log: logAutoCompactEvent,
+    });
+    this.compaction = compaction
+      ? withCompactionOrchestrator(compaction, {
+          maxContextTokens: options.maxContextTokens ?? DEFAULT_MAX_CONTEXT_TOKENS,
+          log: logAutoCompactEvent,
+        })
+      : undefined;
     this.instructionDiscovery = options.instructionDiscovery;
     this.projectRoot = options.projectRoot;
     this.maxContextTokens = options.maxContextTokens ?? DEFAULT_MAX_CONTEXT_TOKENS;
@@ -147,6 +155,7 @@ export class DefaultContextRuntime implements ContextRuntime {
 
   async prepareForModel(input: ContextPrepareInput): Promise<ModelContext> {
     const diagnostics: ContextDiagnostic[] = [];
+    const runtimeContextSurface = input.runtimeContextSurface ?? this.runtimeContextSurface;
 
     const projection = this.messageProjector.project({
       messages: input.messages,
@@ -161,6 +170,39 @@ export class DefaultContextRuntime implements ContextRuntime {
       });
     }
 
+    const contributionSnapshot = this.promptContributions
+      ? await this.promptContributions.snapshot({
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          cwd: input.cwd,
+          provider: input.provider,
+          model: input.model,
+          permissionMode: input.permissionMode,
+          runMode: input.runMode,
+          additionalWorkingDirectories: input.additionalWorkingDirectories,
+          abortSignal: input.abortSignal,
+        }, {
+          toolSchemas: { snapshot: () => input.tools },
+          variables: {
+            cwd: input.cwd,
+            provider: input.provider,
+            model: input.model,
+            permission_mode: input.permissionMode,
+            run_mode: input.runMode,
+            session_id: input.sessionId,
+            turn_id: input.turnId,
+          },
+        })
+      : undefined;
+    const contributedSections = contributionSnapshot
+      ? renderPromptContributionSections(contributionSnapshot)
+      : [];
+    const registeredRuntimeContexts = contributionSnapshot
+      ? renderPromptRuntimeContextSections(contributionSnapshot)
+      : [];
+    const effectiveTools = contributionSnapshot
+      ? [...contributionSnapshot.tools]
+      : input.tools;
     const prompt = this.promptAssembler.assemble({
       cwd: input.cwd,
       provider: input.provider,
@@ -168,13 +210,28 @@ export class DefaultContextRuntime implements ContextRuntime {
       permissionMode: input.permissionMode,
       runMode: input.runMode,
       additionalWorkingDirectories: input.additionalWorkingDirectories,
-      tools: input.tools,
+      tools: effectiveTools,
       customSystemPrompt: input.customSystemPrompt,
       appendSystemPrompt: input.appendSystemPrompt,
+      includeUserContextInSystemPrompt: runtimeContextSurface === "system_prompt",
       now: this.now,
     });
-
-    const parts = [...prompt.parts];
+    const hasCompleteContribution = contributionSnapshot?.sections.some((section) => section.complete) === true;
+    const parts = hasCompleteContribution
+      ? [...contributedSections]
+      : [...prompt.parts, ...contributedSections];
+    const runtimeContexts = [
+      ...prompt.sections.userContext.map((text, index) => ({
+        name: `pilotdeck:user-context:${index}`,
+        text,
+      })),
+      ...registeredRuntimeContexts.map(({ name, text }) => ({ name, text })),
+    ];
+    if (runtimeContextSurface === "system_prompt") {
+      for (const context of registeredRuntimeContexts) {
+        parts.push(context.text);
+      }
+    }
     if (this.memoryAttachmentBuilder) {
       const memory = await this.memoryAttachmentBuilder.build({
         query: extractRecentUserText(projection.messages) ?? "",
@@ -184,10 +241,16 @@ export class DefaultContextRuntime implements ContextRuntime {
         signal: input.abortSignal,
         timeoutMs: this.memoryRetrievalTimeoutMs,
       });
-      for (const block of memory.attachments) {
-        for (const content of block.content) {
+      for (const [blockIndex, block] of memory.attachments.entries()) {
+        for (const [contentIndex, content] of block.content.entries()) {
           if (content.type === "text" && content.text.trim().length > 0) {
-            parts.push(content.text);
+            if (runtimeContextSurface === "system_prompt") {
+              parts.push(content.text);
+            }
+            runtimeContexts.push({
+              name: `pilotdeck:memory:${blockIndex}:${contentIndex}`,
+              text: content.text,
+            });
           }
         }
       }
@@ -199,24 +262,34 @@ export class DefaultContextRuntime implements ContextRuntime {
         });
       }
       if (input.abortSignal?.aborted) {
+        const runtimeContextMessages = this.buildRuntimeContextMessages(runtimeContexts, runtimeContextSurface);
+        const projectedMessages = insertBeforeLatestUserRequest(projection.messages, runtimeContextMessages);
         return {
-          messages: projection.messages,
+          messages: projectedMessages,
           systemPrompt: parts.join("\n\n"),
           systemPromptParts: parts,
-          tools: input.tools,
+          tools: effectiveTools,
           diagnostics,
           boundaries: [],
           metadata: {
             droppedCount: projection.droppedCount,
-            toolCount: input.tools.length,
+            toolCount: effectiveTools.length,
+          },
+          materialization: {
+            ...(input.stepId !== undefined ? { stepId: input.stepId } : {}),
+            promptGeneration: contributionSnapshot?.generation,
+            runtimeContexts,
+            ...(runtimeContextMessages.length > 0 ? { runtimeContextMessages } : {}),
           },
         };
       }
     }
 
+    let instructionLayers: ContextInstructionSnapshotLayer[] | undefined;
     if (this.instructionDiscovery) {
       try {
         const layers = await this.instructionDiscovery.discover();
+        instructionLayers = layers.map((layer) => ({ ...layer }));
         if (layers.length > 0) {
           const blocks = layers.map(l => {
             const desc = instructionScopeDescription(l.scope);
@@ -238,54 +311,41 @@ export class DefaultContextRuntime implements ContextRuntime {
     }
 
     const joined = parts.join("\n\n");
+    const runtimeContextMessages = this.buildRuntimeContextMessages(runtimeContexts, runtimeContextSurface);
+    const projectedMessages = insertBeforeLatestUserRequest(projection.messages, runtimeContextMessages);
 
     const cachePlanInput = {
       provider: input.provider,
       model: input.model,
       systemPrompt: joined,
-      tools: input.tools,
-      messages: projection.messages,
+      tools: effectiveTools,
+      messages: projectedMessages,
       enabled: input.protocol === "anthropic" && input.supportsPromptCache === true,
     };
-    const cachePlanFingerprint = buildCachePlan(cachePlanInput, 0)?.fingerprint;
-    const cachePlan = buildCachePlan(
-      cachePlanInput,
-      this.nextCachePlanGeneration(
-        input.sessionId,
-        cachePlanFingerprint,
-        this.cacheResetSessions.delete(input.sessionId),
-      ),
-    );
+    this.trackPromptCacheSession(input.sessionId);
+    const cachePlan = this.promptCacheCoordinator.createPlan(input.sessionId, cachePlanInput);
 
     return {
-      messages: projection.messages,
+      messages: projectedMessages,
       systemPrompt: joined,
       systemPromptParts: parts,
-      tools: input.tools,
+      tools: effectiveTools,
       diagnostics,
       boundaries: [],
       metadata: {
         droppedCount: projection.droppedCount,
-        toolCount: input.tools.length,
+        toolCount: effectiveTools.length,
+      },
+      materialization: {
+        ...(input.stepId !== undefined ? { stepId: input.stepId } : {}),
+        promptGeneration: contributionSnapshot?.generation,
+        runtimeContexts,
+        ...(runtimeContextMessages.length > 0 ? { runtimeContextMessages } : {}),
+        instructionLayers,
       },
       cacheBreakpoints: cachePlan?.messages,
       cachePlan,
     };
-  }
-
-  private nextCachePlanGeneration(sessionId: string, fingerprint: string | undefined, forceReset = false): number {
-    const previous = this.cachePlanState.get(sessionId);
-    if (!fingerprint) return previous?.generation ?? 0;
-    if (forceReset || fingerprint !== previous?.fingerprint) {
-      const generation = (previous?.generation ?? 0) + 1;
-      this.cachePlanState.set(sessionId, { fingerprint, generation });
-      return generation;
-    }
-    return previous.generation;
-  }
-
-  private markCachePlanReset(sessionId: string): void {
-    if (sessionId) this.cacheResetSessions.add(sessionId);
   }
 
   async applyToolResults(input: ContextToolResultInput): Promise<ContextToolResultResult> {
@@ -317,6 +377,24 @@ export class DefaultContextRuntime implements ContextRuntime {
     return { messages: [...input.messages, ...appendedMessages], appendedMessages, diagnostics };
   }
 
+  private buildRuntimeContextMessages(
+    contexts: Array<{ name: string; text: string }>,
+    runtimeContextSurface: RuntimeContextSurface = this.runtimeContextSurface,
+  ): CanonicalMessage[] {
+    if (runtimeContextSurface !== "user_message" || contexts.length === 0) return [];
+    return [{
+      role: "user",
+      content: contexts.map((context) => ({
+        type: "text" as const,
+        text: `<runtime-context name="${escapeXmlAttribute(context.name)}">\n${context.text}\n</runtime-context>`,
+      })),
+      metadata: {
+        synthetic: true,
+        purpose: "runtime_context",
+      },
+    }];
+  }
+
   async captureTurn(input: ContextCaptureTurnInput): Promise<void> {
     if (!this.memoryResolver) return;
     if (isAlwaysOnSession(input.sessionId)) return;
@@ -333,33 +411,41 @@ export class DefaultContextRuntime implements ContextRuntime {
     }
   }
 
-  async tryAutoCompact(input: {
-    sessionId?: string;
-    turnId?: string;
-    messages: CanonicalMessage[];
-    abortSignal?: AbortSignal;
-    maxContextTokens?: number;
-    reservedOutputTokens?: number;
-    allowFallbackOnFailure?: boolean;
-    budgetEvaluator?: (messages: CanonicalMessage[]) => Promise<TokenBudgetSnapshot>;
-  }): Promise<AutoCompactResult> {
+  dispose(): void {
+    for (const sessionId of this.promptCacheSessions) {
+      this.promptCacheCoordinator.release(sessionId);
+    }
+    this.promptCacheSessions.clear();
+  }
+
+  async tryAutoCompact(input: CompactionAutoCompactInput): Promise<AutoCompactResult> {
     const sessionId = input.sessionId ?? "";
     const turnId = input.turnId ?? "";
-    const log = (stage: string, details: Record<string, unknown> = {}) => {
-      logAutoCompactEvent(stage, { sessionId, turnId }, details);
-    };
-    const effectiveMaxContextTokens = input.maxContextTokens ?? this.maxContextTokens;
-    if (!this.autoCompactionPolicy || !this.tokenBudget) {
-      log("disabled", {
-        hasAutoCompactionPolicy: Boolean(this.autoCompactionPolicy),
-        hasTokenBudget: Boolean(this.tokenBudget),
-        maxContextTokens: effectiveMaxContextTokens,
+    if (this.compaction?.autoCompact) {
+      const result = await this.compaction.autoCompact(input);
+      if (result.type === "compacted") {
+        this.trackPromptCacheSession(sessionId);
+        this.promptCacheCoordinator.reset(sessionId);
+      }
+      return result;
+    }
+    // Constructor composition normally guarantees autoCompact for every
+    // configured stage provider. Keep the no-provider result explicit for
+    // callers that disable compaction entirely.
+    if (!this.compaction) {
+      logAutoCompactEvent("disabled", {
+        sessionId,
+        turnId,
+      }, {
+        hasAutoCompactionPolicy: false,
+        hasTokenBudget: false,
+        maxContextTokens: input.maxContextTokens ?? this.maxContextTokens,
       });
       return {
         type: "skipped",
         snapshot: {
           tokens: 0,
-          maxContextTokens: effectiveMaxContextTokens,
+          maxContextTokens: input.maxContextTokens ?? this.maxContextTokens,
           warningRatio: 0,
           blockingRatio: 0,
           state: "ok",
@@ -367,327 +453,17 @@ export class DefaultContextRuntime implements ContextRuntime {
         },
       };
     }
-    let messages = input.messages;
-    const budgetOptions = { reservedOutputTokens: input.reservedOutputTokens };
-    const evaluateBudget = (candidate: CanonicalMessage[]) =>
-      input.budgetEvaluator
-        ? input.budgetEvaluator(candidate)
-        : Promise.resolve(this.tokenBudget!.evaluate(candidate, effectiveMaxContextTokens, {
-            ...budgetOptions,
-          }));
-    const initialSnapshot = await evaluateBudget(messages);
-    let currentSnapshot = initialSnapshot;
-    const decision = this.autoCompactionPolicy.evaluateSnapshot(initialSnapshot);
-    if (decision.type !== "trigger") {
-      log("policy_skip", {
-        decisionType: decision.type,
-        snapshot: describeTokenBudgetSnapshot(decision.snapshot),
-      });
-      return { type: "skipped", snapshot: decision.snapshot };
-    }
-    log("policy_trigger", {
-      reason: decision.reason,
-      snapshot: describeTokenBudgetSnapshot(initialSnapshot),
-      messages: messages.length,
-      reservedOutputTokens: input.reservedOutputTokens,
-    });
-
-    // 80% pressure: deterministic, whitelist-only tool-result projection.
-    if (this.microCompaction) {
-      const micro = this.microCompaction.apply({ messages, trimToTokens: 768 });
-      messages = micro.messages;
-      const microSnapshot = await evaluateBudget(messages);
-      currentSnapshot = microSnapshot;
-      log("pre_summary_prune", {
-        rewritten: micro.rewritten,
-        rewrittenBytes: micro.rewrittenBytes,
-        snapshot: describeTokenBudgetSnapshot(microSnapshot),
-      });
-      if (microSnapshot.ratio < 0.90) {
-        if (micro.rewritten === 0) {
-          return { type: "skipped", snapshot: microSnapshot };
-        }
-        this.markCachePlanReset(sessionId);
-        return {
-          type: "compacted",
-          messages: ensureTrailingUserMessage(messages),
-          tier: "micro",
-          snapshot: microSnapshot,
-        };
-      }
-    }
-
-    // A warning-level context is usable after the deterministic phase. This
-    // guard also preserves the 80%-90% no-summary contract when a caller did
-    // not configure a micro-compaction engine.
-    if (currentSnapshot.ratio < 0.90) {
-      return { type: "skipped", snapshot: currentSnapshot };
-    }
-
-    if (!this.compactionEngine) {
-      log("full_compaction_unavailable", { snapshot: describeTokenBudgetSnapshot(currentSnapshot) });
-      return { type: "skipped", snapshot: currentSnapshot };
-    }
-
-    log("full_compaction_started", {
-      messages: messages.length,
-      snapshot: describeTokenBudgetSnapshot(currentSnapshot),
-    });
-    const effectiveContextTokens = Math.max(
-      1,
-      Math.floor(currentSnapshot.effectiveContextTokens ?? currentSnapshot.maxContextTokens),
-    );
-    const targetPostTokens = Math.max(1, Math.floor(effectiveContextTokens * POST_COMPACTION_TARGET_RATIO));
-    const result = await this.compactionEngine.run({
-      trigger: "auto",
-      messages,
-      effectiveContextTokens,
-      targetPostTokens,
-      signal: input.abortSignal,
-      sessionId,
-      turnId,
-    });
-    const summarySucceeded = compactionSummarySucceeded(result);
-    if (result.error) {
-      log("full_compaction_no_summary", { error: result.error, preTokens: result.preTokens });
-    } else if (!result.summaryMessage) {
-      // A protected early turn can legitimately leave the normal summary
-      // prefix empty. That is not a successful compaction: keep going through
-      // post-summary snip and the emergency tiers instead of sending the
-      // unchanged oversized transcript to the model.
-      log("full_compaction_no_summary", {
-        reason: "no_summarizable_live_turns",
-        preTokens: result.preTokens,
-      });
-    }
-
-    let finalResult: CompactionResult | undefined = summarySucceeded ? result : undefined;
-    let postMessages = summarySucceeded
-      ? ensureTrailingUserMessage(buildPostCompactMessages(result))
-      : messages;
-    // A failed summary leaves the transcript byte-for-byte unchanged. Recount
-    // that same request before deciding whether the 90% emergency tier is needed.
-    let snapshot = await evaluateBudget(postMessages);
-    let snipApplied = false;
-    if (summarySucceeded && snapshot.ratio > POST_COMPACTION_TARGET_RATIO && this.snipEngine) {
-      const messageTokens = this.tokenBudget?.estimateMessagesTokens(postMessages);
-      const nonMessageTokens = messageTokens === undefined
-        ? 0
-        : Math.max(0, snapshot.tokens - messageTokens);
-      const messageTarget = Math.max(1, targetPostTokens - nonMessageTokens);
-      const snipTargetTokens = messageTokens !== undefined
-        ? Math.min(messageTokens, messageTarget)
-        : targetPostTokens;
-      const snip = this.snipEngine.snip(postMessages, {
-        targetTotalTokens: snipTargetTokens,
-      });
-      postMessages = snip.messages;
-      snapshot = await evaluateBudget(postMessages);
-      snipApplied = snip.applied;
-      log("post_summary_snip", {
-        applied: snip.applied,
-        turnsSnipped: snip.turnsSnipped,
-        targetPostTokens,
-        snipTargetTokens,
-        snapshot: describeTokenBudgetSnapshot(snapshot),
-      });
-    }
-
-    let emergencyApplied = false;
-    if (snapshot.ratio >= 0.90) {
-      const emergency = await this.runEmergencyCompaction({
-        messages: postMessages,
-        input,
-        evaluateBudget,
-        effectiveContextTokens,
-        targetPostTokens,
-        sessionId,
-        turnId,
-        log,
-      });
-      if (emergency) {
-        emergencyApplied = emergency.changed;
-        finalResult = emergency.result ?? finalResult;
-        postMessages = emergency.messages;
-        snapshot = emergency.snapshot;
-        if (emergency.diagnostics && finalResult) {
-          finalResult.diagnostics.push(...emergency.diagnostics);
-        }
-      }
-    }
-
-    const overflowAfterEmergency = snapshot.ratio >= 1;
-    if (!summarySucceeded && !snipApplied && !emergencyApplied && !overflowAfterEmergency) {
-      log("full_compaction_skipped", {
-        reason: "no_effective_change",
-        targetPostTokens,
-        snapshot: describeTokenBudgetSnapshot(currentSnapshot),
-      });
-      return { type: "skipped", snapshot: currentSnapshot };
-    }
-
-    if (snapshot.ratio > POST_COMPACTION_TARGET_RATIO && finalResult) {
-      finalResult.diagnostics.push({
-        code: "compaction_target_not_reached",
-        severity: "warning",
-        message:
-          `Compaction remained above the ${Math.round(POST_COMPACTION_TARGET_RATIO * 100)}% target ` +
-          `(tokens=${snapshot.tokens}, target=${targetPostTokens}, ratio=${snapshot.ratio.toFixed(3)}). ` +
-          "Protected checkpoints, tool turns, or the required recent tail may account for the remainder.",
-      });
-    }
-
-    log("full_compaction_completed", {
-      snapshot: describeTokenBudgetSnapshot(snapshot),
-      summarySucceeded: finalResult ? compactionSummarySucceeded(finalResult) : false,
-      summaryGenerated: finalResult?.summaryGenerated === true,
-      checkpointMerged: finalResult?.checkpointMerged === true,
-      targetPostTokens,
-      preTokens: finalResult?.preTokens ?? result.preTokens,
-      postTokens: finalResult?.postTokens,
-    });
-    if (summarySucceeded || snipApplied || emergencyApplied) {
-      this.markCachePlanReset(sessionId);
-    }
-    // 90% is the protection threshold that triggers emergency work, not a
-    // hard provider overflow. If the final prompt is still below the actual
-    // effective input budget, it remains sendable and should not be converted
-    // into a fatal context error merely because static tool definitions consume
-    // the remaining safety margin.
-    if (overflowAfterEmergency) {
-      const diagnostic: ContextDiagnostic = {
-        code: "context_overflow_after_emergency_compaction",
-        severity: "error",
-        message:
-          `Context remains over the effective input budget after emergency compaction ` +
-          `(tokens=${snapshot.tokens}, max=${snapshot.maxContextTokens}, ratio=${snapshot.ratio.toFixed(3)}). ` +
-          "The stable checkpoint, current request, tool protocol, and required tail are the remaining sources.",
-      };
-      finalResult?.diagnostics.push(diagnostic);
-      log("context_overflow_after_emergency_compaction", {
-        snapshot: describeTokenBudgetSnapshot(snapshot),
-        diagnostic: diagnostic.message,
-      });
-    }
-    return {
-      type: "compacted",
-      messages: postMessages,
-      tier: snapshot.ratio >= 0.90 ? "emergency" : "full",
-      snapshot,
-      ...(finalResult ? { result: finalResult } : {}),
-      ...(overflowAfterEmergency ? { error: "context_overflow_after_emergency_compaction" as const } : {}),
-    };
-  }
-
-  private async runEmergencyCompaction(options: {
-    messages: CanonicalMessage[];
-    input: { abortSignal?: AbortSignal };
-    evaluateBudget: (messages: CanonicalMessage[]) => Promise<TokenBudgetSnapshot>;
-    effectiveContextTokens: number;
-    targetPostTokens: number;
-    sessionId: string;
-    turnId: string;
-    log: (stage: string, details?: Record<string, unknown>) => void;
-  }): Promise<{
-    messages: CanonicalMessage[];
-    snapshot: TokenBudgetSnapshot;
-    changed: boolean;
-    result?: CompactionResult;
-    diagnostics?: ContextDiagnostic[];
-  } | undefined> {
-    let messages = options.messages;
-    let snapshot = await options.evaluateBudget(messages);
-    let changed = false;
-    let emergencyResult: CompactionResult | undefined;
-    if (snapshot.ratio < 0.90) return { messages, snapshot, changed };
-
-    // Emergency summary is the only normal path allowed to rewrite the
-    // checkpoint prefix. It is intentionally short and marked as a cache reset.
-    if (this.compactionEngine) {
-      emergencyResult = await this.compactionEngine.run({
-        trigger: "reactive",
-        messages,
-        keepTailRatio: EMERGENCY_KEEP_TAIL_RATIO,
-        effectiveContextTokens: options.effectiveContextTokens,
-        targetPostTokens: options.targetPostTokens,
-        protectedToolNames: null,
-        maxOutputTokens: EMERGENCY_SUMMARY_MAX_OUTPUT_TOKENS,
-        cacheReset: true,
-        signal: options.input.abortSignal,
-        sessionId: options.sessionId,
-        turnId: options.turnId,
-      });
-      if (emergencyResult.summaryMessage && emergencyResult.error === undefined) {
-        messages = ensureTrailingUserMessage(buildPostCompactMessages({
-          ...emergencyResult,
-          cacheReset: true,
-          stablePrefix: [],
-        }));
-        changed = true;
-        snapshot = await options.evaluateBudget(messages);
-        options.log("emergency_summary", {
-          snapshot: describeTokenBudgetSnapshot(snapshot),
-          cacheReset: true,
-        });
-        if (snapshot.ratio < 0.90) return { messages, snapshot, changed, result: emergencyResult };
-      }
-    }
-
-    const persistedEmergencyResult = emergencyResult?.summaryMessage && emergencyResult.error === undefined
-      ? emergencyResult
-      : undefined;
-    const projected = this.microCompaction?.apply({
-      messages,
-      trimToTokens: EMERGENCY_TOOL_RESULT_TOKENS,
-      keepLatest: 1,
-      protectedToolNames: null,
-    });
-    if (projected) {
-      messages = projected.messages;
-      changed ||= projected.rewritten > 0;
-      snapshot = await options.evaluateBudget(messages);
-      options.log("emergency_tool_projection", {
-        rewritten: projected.rewritten,
-        snapshot: describeTokenBudgetSnapshot(snapshot),
-      });
-      if (snapshot.ratio < 0.90) {
-        return {
-          messages,
-          snapshot,
-          changed,
-          result: persistedEmergencyResult,
-        };
-      }
-    }
-
-    const truncated = truncateHeadPreservingCheckpoint(messages, EMERGENCY_HEAD_KEEP_RATIO);
-    changed ||= !sameMessageSequence(messages, truncated);
-    messages = truncated;
-    snapshot = await options.evaluateBudget(messages);
-    const diagnostics: ContextDiagnostic[] = [{
-      code: "context_hard_truncate",
-      severity: "error",
-      message:
-        `Emergency head truncation kept approximately ${Math.round(EMERGENCY_HEAD_KEEP_RATIO * 100)}% ` +
-        `of the live history (tokens=${snapshot.tokens}, max=${snapshot.maxContextTokens}). ` +
-        "Earlier live turns may be unavailable outside the durable transcript.",
-    }];
-    options.log("emergency_head_truncate", {
-      snapshot: describeTokenBudgetSnapshot(snapshot),
-      keepRatio: EMERGENCY_HEAD_KEEP_RATIO,
-    });
-    return {
-      messages,
-      snapshot,
-      changed,
-      result: persistedEmergencyResult,
-      diagnostics,
-    };
+    // Defensive compatibility path for externally mutated provider objects.
+    // Normal construction never reaches the legacy inline implementation.
+    return (withCompactionOrchestrator(this.compaction, {
+      maxContextTokens: input.maxContextTokens ?? this.maxContextTokens,
+      log: logAutoCompactEvent,
+    }).autoCompact!)(input);
   }
 
   async recoverFromModelError(input: ContextRecoveryInput): Promise<ContextRecoveryDecision> {
-    if (this.overflowRecovery) {
-      return this.overflowRecovery.decide(input);
+    if (this.compaction?.recovery) {
+      return this.compaction.recovery.decide(input);
     }
     // Fallback: inline logic when no ContextOverflowRecovery is injected.
     if (input.error.recoverableViaImageStrip) {
@@ -724,6 +500,33 @@ export class DefaultContextRuntime implements ContextRuntime {
       reason: "ptl-first-attempt",
     };
   }
+
+  private trackPromptCacheSession(sessionId: string): void {
+    if (sessionId) this.promptCacheSessions.add(sessionId);
+  }
+}
+
+function insertBeforeLatestUserRequest(
+  messages: CanonicalMessage[],
+  additions: CanonicalMessage[],
+): CanonicalMessage[] {
+  if (additions.length === 0) return messages;
+  let insertionIndex = messages.length;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (isRealUserRequestMessage(messages[index]!)) {
+      insertionIndex = index;
+      break;
+    }
+  }
+  return [
+    ...messages.slice(0, insertionIndex),
+    ...additions,
+    ...messages.slice(insertionIndex),
+  ];
+}
+
+function escapeXmlAttribute(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
 }
 
 function isAlwaysOnSession(sessionId: string): boolean {
@@ -764,10 +567,6 @@ function extractRecentUserText(messages: CanonicalMessage[]): string | undefined
   return undefined;
 }
 
-function sameMessageSequence(left: CanonicalMessage[], right: CanonicalMessage[]): boolean {
-  return left.length === right.length && left.every((message, index) => message === right[index]);
-}
-
 function logAutoCompactEvent(
   stage: string,
   context: { sessionId?: string; turnId?: string },
@@ -783,32 +582,4 @@ function logAutoCompactEvent(
   } catch {
     console.warn(`[context:auto-compact] ${stage}`);
   }
-}
-
-function describeTokenBudgetSnapshot(snapshot: TokenBudgetSnapshot): Record<string, unknown> {
-  return {
-    tokens: snapshot.tokens,
-    displayTokens: snapshot.displayTokens,
-    estimateSource: snapshot.estimateSource,
-    usageTokens: snapshot.usageTokens,
-    localEstimateTokens: snapshot.localEstimateTokens,
-    calibrationActualInputTokens: snapshot.calibrationActualInputTokens,
-    calibrationEstimatedInputTokens: snapshot.calibrationEstimatedInputTokens,
-    totalContextTokens: snapshot.totalContextTokens,
-    maxContextTokens: snapshot.maxContextTokens,
-    effectiveContextTokens: snapshot.effectiveContextTokens,
-    maxOutputTokens: snapshot.maxOutputTokens,
-    warningRatio: snapshot.warningRatio,
-    blockingRatio: snapshot.blockingRatio,
-    state: snapshot.state,
-    ratio: snapshot.ratio,
-    source: snapshot.source,
-    exact: snapshot.exact,
-    reservedOutputTokens: snapshot.reservedOutputTokens,
-  };
-}
-
-function compactionSummarySucceeded(result: CompactionResult): boolean {
-  return result.error === undefined
-    && result.summaryMessage !== undefined;
 }

@@ -79,6 +79,11 @@ export class GatewayBrowserClient {
     return this.hello?.serverInfo;
   }
 
+  /** Binding issued to this connection; pass it to a new client on reconnect. */
+  get interactionBinding(): WebHelloOk["interactionBinding"] | undefined {
+    return this.hello?.interactionBinding;
+  }
+
   async connect(): Promise<WebHelloOk> {
     if (this.closed) {
       throw new Error("GatewayBrowserClient was closed.");
@@ -238,8 +243,13 @@ export class GatewayBrowserClient {
     sessionKey: string;
     requestId: string;
     answer: import("./protocol.js").WebElicitationAnswer;
+    interactionBinding?: { connectionId: string; generation: number };
   }) {
     return this.request<{ delivered: boolean }>("elicitation_respond", input);
+  }
+
+  reconnectInteraction(input: import("./protocol.js").WebReconnectInteractionInput) {
+    return this.request<import("./protocol.js").WebReconnectInteractionResult>("reconnect_interaction", input);
   }
 
   readSessionMessages(

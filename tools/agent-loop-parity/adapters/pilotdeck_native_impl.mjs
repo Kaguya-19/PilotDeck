@@ -29,10 +29,12 @@ for (const name of scenario.tools ?? []) {
         ? { type: "deny", message: "Deterministic permission denial.", reason: { type: "tool", toolName: name, message: "denied" } }
         : { type: "allow", reason: { type: "tool", toolName: name, message: "allowed" } };
     },
-    execute: async (input) => {
-      push("tool.call", { name, arguments: input });
+    execute: async (input, context) => {
+      const concurrencySafe = ["lookup", "summarize"].includes(name);
+      const toolCallId = context.currentToolCallId;
+      push("tool.call", { name, arguments: input, toolCallId, concurrencySafe, sideEffectCount: 0 });
       const result = await post("/tools/execute", { scenarioId: scenario.scenarioId, q: scenario.q, name, arguments: input, permissionAllowed: !scenario.permission?.deny?.includes(name), runKey });
-      push("tool.result", { result });
+      push("tool.result", { result: { ...result, toolCallId }, toolCallId, concurrencySafe, sideEffectCount: result.data?.sideEffectCount ?? 0 });
       if (result.type === "error") throw Object.assign(new Error(result.error.message), { code: result.error.code });
       return { content: [{ type: "text", text: JSON.stringify(result.data) }], data: result.data };
     },

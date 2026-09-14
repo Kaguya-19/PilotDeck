@@ -4,6 +4,7 @@ import { homedir, tmpdir } from "node:os";
 import { basename, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ChannelAttachment, Gateway, GatewayChannelKey, GatewayEvent } from "../../../gateway/index.js";
+import type { SessionSearchPort } from "../../../session/search/SessionSearchPort.js";
 import type { ChannelAdapter, ChannelHandle, ChannelLogger, ChannelStartDeps } from "../protocol/ChannelAdapter.js";
 import { WeComSessionMapper, type WeComSessionMapperScopeInput, type WeComSessionMapperState } from "./WeComSessionMapper.js";
 import { renderWeComEvent } from "./wecom-render.js";
@@ -177,6 +178,8 @@ export class WeComChannel implements ChannelAdapter {
 
   private gateway?: Gateway;
   private logger?: ChannelLogger;
+  private sessionSearch?: SessionSearchPort;
+  private pilotHome?: string;
   private ws: any = null;
   private pending = new Map<string, PendingRequest>();
   private replyReqIds = new Map<string, string>();
@@ -232,6 +235,8 @@ export class WeComChannel implements ChannelAdapter {
   async start(deps: ChannelStartDeps): Promise<ChannelHandle> {
     this.gateway = deps.gateway;
     this.logger = deps.logger;
+    this.sessionSearch = deps.sessionSearch;
+    this.pilotHome = deps.pilotHome;
 
     if (!this.webSocketCtor) {
       this.logger?.error?.("wecom: `ws` package not installed; run `npm install ws`");
@@ -533,6 +538,8 @@ export class WeComChannel implements ChannelAdapter {
       bindProject: (projectKey) => { this.mapper.bindProject(scopeInput, projectKey); this.onStateChange?.(this.mapper.snapshot()); },
       getProject: () => this.mapper.getProject(scopeInput),
       resetSession: () => { this.mapper.resolve({ ...scopeInput, text: "/new" }); this.onStateChange?.(this.mapper.snapshot()); },
+      sessionSearch: this.sessionSearch,
+      pilotHome: this.pilotHome,
       logger: this.logger,
     });
   }

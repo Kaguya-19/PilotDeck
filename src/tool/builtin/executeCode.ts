@@ -1,15 +1,21 @@
 import { createServer, type AddressInfo, type Server, type Socket } from "node:net";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import path from "node:path";
-import { spawn, type ChildProcessByStdio } from "node:child_process";
-import { randomBytes } from "node:crypto";
-import type { Readable } from "node:stream";
 import type { PilotDeckToolDefinition, PilotDeckToolRuntimeContext } from "../protocol/types.js";
 import { contentToText, type PilotDeckToolResult } from "../protocol/result.js";
 import type { PilotDeckToolValidationIssue } from "../protocol/schema.js";
 import { isReadOnlyShellCommand } from "./bash/permissions.js";
 import { collectPythonSyntaxDiagnostics } from "./filesystem/syntaxDiagnostics.js";
+import { createNodeExecutionWorkspacePort } from "../execution-world/NodeExecutionWorkspacePort.js";
+import type { ExecutionWorkspacePort } from "../execution-world/ExecutionWorkspacePort.js";
+import { createNodeCodeRuntimePort } from "../execution-world/NodeCodeRuntimePort.js";
+import type { CodeRuntimePort } from "../execution-world/CodeRuntimePort.js";
+import type { SandboxPolicy, SandboxPort } from "../execution-world/SandboxPort.js";
+import {
+  createNodeExecutionTransportPort,
+  setExecuteCodeTransportOverrideForTests,
+  type ExecutionRpcTransport,
+  type ExecutionTransportPort,
+} from "../execution-world/ExecutionTransportPort.js";
 
 type ExecuteCodeInput = {
   code: string;
@@ -38,6 +44,17 @@ export type ExecuteCodeOutput = {
 export type CreateExecuteCodeToolOptions = {
   /** Defaults to true. False removes the web_search Python helper and RPC capability. */
   webSearch?: boolean;
+  /** Private temporary workspace provider; composition roots may replace the Node provider. */
+  executionWorkspace?: ExecutionWorkspacePort;
+  /** Code process provider; the builtin retains Python RPC and tool-dispatch ownership. */
+  codeRuntime?: CodeRuntimePort;
+  /** Private RPC transport provider; the builtin retains protocol and dispatch ownership. */
+  executionTransport?: ExecutionTransportPort;
+  /** Optional per-run sandbox adapter. Omission preserves the legacy unconfined execution path. */
+  sandbox?: {
+    port: SandboxPort;
+    resolvePolicy(input: { workspaceRoot: string; executionRoot: string }): SandboxPolicy;
+  };
 };
 
 type RpcRequest = {
@@ -54,17 +71,10 @@ type RpcResponse = {
   code?: string;
 };
 
-type RpcTransport =
-  | { kind: "uds"; socketPath: string }
-  | { kind: "tcp"; host: "127.0.0.1"; port: number; token: string };
+type RpcTransport = ExecutionRpcTransport;
 
 export type ExecuteCodeTransportKind = RpcTransport["kind"];
-
-let executeCodeTransportOverride: ExecuteCodeTransportKind | undefined;
-
-export function setExecuteCodeTransportOverrideForTests(kind: ExecuteCodeTransportKind | undefined): void {
-  executeCodeTransportOverride = kind;
-}
+export { setExecuteCodeTransportOverrideForTests };
 
 export async function handleExecuteCodeRpcLineForTests(
   line: string,
@@ -130,6 +140,10 @@ export function createExecuteCodeTool(
 ): PilotDeckToolDefinition<ExecuteCodeInput, ExecuteCodeOutput> {
   const webSearchEnabled = options.webSearch !== false;
   const allowedTools = resolveExecuteCodeAllowedTools(options);
+  const executionWorkspace = options.executionWorkspace ?? createNodeExecutionWorkspacePort();
+  const codeRuntime = options.codeRuntime ?? createNodeCodeRuntimePort();
+  const executionTransport = options.executionTransport ?? createNodeExecutionTransportPort();
+  const sandbox = options.sandbox;
   const availableHelpers = [
     ...(webSearchEnabled ? ["web_search"] : []),
     ...EXECUTE_CODE_BASE_ALLOWED_TOOLS,
@@ -187,6 +201,10 @@ export function createExecuteCodeTool(
       const result = await runExecuteCode(input, context, startedAt, {
         allowedTools,
         webSearchEnabled,
+        executionWorkspace,
+        codeRuntime,
+        executionTransport,
+        sandbox,
       });
       return {
         content: [{ type: "text", text: formatExecuteCodeResult(result) }],
@@ -327,25 +345,6 @@ function stripPythonCommentsAndStrings(code: string): string {
   return output;
 }
 
-function createRpcTransport(): RpcTransport {
-  const kind = executeCodeTransportOverride ?? (process.platform === "win32" ? "tcp" : "uds");
-  if (kind === "tcp") {
-    return {
-      kind: "tcp",
-      host: "127.0.0.1",
-      port: 0,
-      token: randomBytes(32).toString("hex"),
-    };
-  }
-  return {
-    kind: "uds",
-    socketPath: path.join(
-      process.platform === "darwin" ? "/tmp" : tmpdir(),
-      `pilotdeck_rpc_${process.pid}_${Date.now()}_${Math.random().toString(16).slice(2)}.sock`,
-    ),
-  };
-}
-
 async function runExecuteCode(
   input: ExecuteCodeInput,
   context: PilotDeckToolRuntimeContext,
@@ -353,6 +352,10 @@ async function runExecuteCode(
   options: {
     allowedTools: ReadonlySet<string>;
     webSearchEnabled: boolean;
+    executionWorkspace: ExecutionWorkspacePort;
+    codeRuntime: CodeRuntimePort;
+    executionTransport: ExecutionTransportPort;
+    sandbox?: NonNullable<CreateExecuteCodeToolOptions["sandbox"]>;
   },
 ): Promise<ExecuteCodeOutput> {
   const timeoutSeconds = input.timeout_seconds ?? DEFAULT_TIMEOUT_SECONDS;
@@ -372,34 +375,38 @@ async function runExecuteCode(
     );
   }
 
-  const python = await findPython3(context.env);
+  const python = await options.codeRuntime.resolveExecutable(["python3", "python"], context.env, context.abortSignal);
   if (!python) {
     return buildOutput("unsupported", "", "execute_code requires python3 on PATH.", startedAt, toolCallsMade, toolCallLog);
   }
 
-  const tempRoot = await mkdtemp(path.join(tmpdir(), "pilotdeck_execute_code_"));
-  let transport = createRpcTransport();
+  const executionWorkspace = await options.executionWorkspace.create({
+    prefix: "pilotdeck_execute_code_",
+    signal: context.abortSignal,
+  });
+  const tempRoot = executionWorkspace.root;
+  const sandboxPolicy = options.sandbox?.resolvePolicy({
+    workspaceRoot: context.cwd,
+    executionRoot: tempRoot,
+  });
+  // RPC helpers execute through the host ToolRuntime rather than the confined
+  // Python child. Remove host-side mutation paths under a constrained policy.
+  const rpcAllowedTools = restrictSandboxedRpcTools(options.allowedTools, sandboxPolicy);
+  let transport = options.executionTransport.create();
   let server: Server | undefined;
-  let child: ChildProcessByStdio<null, Readable, Readable> | undefined;
-  let settled = false;
-  let status: ExecuteCodeStatus = "success";
-  let statusError: string | undefined;
 
   const cleanup = async () => {
     await closeServer(server);
-    await rm(tempRoot, { recursive: true, force: true });
-    if (transport.kind === "uds") {
-      await rm(transport.socketPath, { force: true });
-    }
+    await executionWorkspace.cleanup();
+    await options.executionTransport.cleanup(transport);
   };
 
   try {
-    await writeFile(
-      path.join(tempRoot, "pilotdeck_tools.py"),
+    await executionWorkspace.writeText(
+      "pilotdeck_tools.py",
       generatePilotDeckToolsModule(transport.kind, options.webSearchEnabled),
-      "utf8",
     );
-    await writeFile(path.join(tempRoot, "script.py"), input.code, "utf8");
+    await executionWorkspace.writeText("script.py", input.code);
 
     server = createRpcServer({
       context,
@@ -412,57 +419,61 @@ async function runExecuteCode(
       },
       canCallTool: () => toolCallsMade < maxToolCalls,
       expectedToken: transport.kind === "tcp" ? transport.token : undefined,
-      allowedTools: options.allowedTools,
+      allowedTools: rpcAllowedTools,
     });
     transport = await listen(server, transport);
 
-    child = spawn(python, [path.join(tempRoot, "script.py")], {
+    const command = {
+      executable: python,
+      args: [path.join(tempRoot, "script.py")],
       cwd: context.cwd,
       env: buildChildEnv(context.env ?? process.env, transport, tempRoot, context.cwd),
-      stdio: ["ignore", "pipe", "pipe"],
-      detached: true,
-    });
-
-    const activeChild = child;
-    const stdout = collectHeadTail(activeChild.stdout, MAX_STDOUT_BYTES);
-    const stderr = collectHead(activeChild.stderr, MAX_STDERR_BYTES);
-
-    const timeout = setTimeout(() => {
-      if (!settled) {
-        status = "timeout";
-        statusError = `Script timed out after ${timeoutSeconds}s and was killed.`;
-        killProcess(activeChild, true);
-      }
-    }, timeoutSeconds * 1000);
-
-    const abortHandler = () => {
-      if (!settled) {
-        status = "cancelled";
-        statusError = "Script execution was cancelled.";
-        killProcess(activeChild, true);
-      }
     };
-    context.abortSignal?.addEventListener("abort", abortHandler, { once: true });
-
-    const exit = await waitForExit(activeChild);
-    settled = true;
-    clearTimeout(timeout);
-    context.abortSignal?.removeEventListener("abort", abortHandler);
-
-    const stdoutText = await stdout;
-    const stderrText = await stderr;
-    if (status === "success" && exit.code !== 0) {
-      status = "error";
-      statusError = stderrText || `Script exited with code ${exit.code ?? "unknown"}.`;
-    }
-
-    const output = status === "error" && stderrText ? `${stdoutText}\n--- stderr ---\n${stderrText}`.trim() : stdoutText;
+    const sandboxedCommand = options.sandbox
+      ? await options.sandbox.port.prepare({
+          ...command,
+          policy: sandboxPolicy!,
+          signal: context.abortSignal,
+        })
+      : command;
+    const execution = await options.codeRuntime.run({
+      ...sandboxedCommand,
+      timeoutMs: timeoutSeconds * 1000,
+      signal: context.abortSignal,
+      stdoutMaxBytes: MAX_STDOUT_BYTES,
+      stderrMaxBytes: MAX_STDERR_BYTES,
+    });
+    const status = execution.cancelled ? "cancelled"
+      : execution.timedOut ? "timeout"
+        : execution.exitCode !== 0 ? "error"
+          : "success";
+    const statusError = status === "cancelled" ? "Script execution was cancelled."
+      : status === "timeout" ? `Script timed out after ${timeoutSeconds}s and was killed.`
+        : status === "error" ? execution.stderr || `Script exited with code ${execution.exitCode ?? "unknown"}.`
+          : undefined;
+    const output = status === "error" && execution.stderr
+      ? `${execution.stdout}\n--- stderr ---\n${execution.stderr}`.trim()
+      : execution.stdout;
     return buildOutput(status, stripAnsi(output), statusError ? stripAnsi(statusError) : undefined, startedAt, toolCallsMade, toolCallLog);
   } catch (error) {
     return buildOutput("error", "", error instanceof Error ? error.message : String(error), startedAt, toolCallsMade, toolCallLog);
   } finally {
     await cleanup();
   }
+}
+
+function restrictSandboxedRpcTools(
+  allowedTools: ReadonlySet<string>,
+  policy: SandboxPolicy | undefined,
+): ReadonlySet<string> {
+  if (!policy || policy.mode === "danger-full-access") return allowedTools;
+  const confined = new Set(allowedTools);
+  // These all execute outside the Python child, so Seatbelt on the child
+  // cannot enforce their side effects. Do not let RPC become an escape hatch.
+  confined.delete("bash");
+  confined.delete("write_file");
+  confined.delete("edit_file");
+  return confined;
 }
 
 function createRpcServer(options: {
@@ -736,19 +747,6 @@ def _call(tool_name, args):
     return response
 `;
 
-async function findPython3(env: NodeJS.ProcessEnv | undefined): Promise<string | undefined> {
-  const candidates = ["python3", "python"];
-  for (const candidate of candidates) {
-    const result = await new Promise<boolean>((resolve) => {
-      const child = spawn(candidate, ["--version"], { env, stdio: "ignore" });
-      child.on("error", () => resolve(false));
-      child.on("exit", (code) => resolve(code === 0));
-    });
-    if (result) return candidate;
-  }
-  return undefined;
-}
-
 function buildChildEnv(
   source: NodeJS.ProcessEnv,
   transport: RpcTransport,
@@ -768,95 +766,6 @@ function buildChildEnv(
   }
   env.PYTHONDONTWRITEBYTECODE = "1";
   return env;
-}
-
-function collectHead(stream: NodeJS.ReadableStream, maxBytes: number): Promise<string> {
-  return new Promise((resolve) => {
-    const chunks: Buffer[] = [];
-    let total = 0;
-    stream.on("data", (chunk: Buffer | string) => {
-      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-      if (total < maxBytes) {
-        chunks.push(buffer.subarray(0, maxBytes - total));
-      }
-      total += buffer.byteLength;
-    });
-    stream.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-    stream.on("error", () => resolve(Buffer.concat(chunks).toString("utf8")));
-  });
-}
-
-function collectHeadTail(stream: NodeJS.ReadableStream, maxBytes: number): Promise<string> {
-  const headBytes = Math.floor(maxBytes * 0.4);
-  const tailBytes = maxBytes - headBytes;
-  return new Promise((resolve) => {
-    const head: Buffer[] = [];
-    const tail: Buffer[] = [];
-    let headCollected = 0;
-    let tailCollected = 0;
-    let total = 0;
-    stream.on("data", (chunk: Buffer | string) => {
-      let buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-      total += buffer.byteLength;
-      if (headCollected < headBytes) {
-        const keep = Math.min(buffer.byteLength, headBytes - headCollected);
-        head.push(buffer.subarray(0, keep));
-        headCollected += keep;
-        buffer = buffer.subarray(keep);
-      }
-      if (buffer.byteLength > 0) {
-        tail.push(buffer);
-        tailCollected += buffer.byteLength;
-        while (tailCollected > tailBytes && tail.length > 0) {
-          const first = tail[0]!;
-          const overflow = tailCollected - tailBytes;
-          if (overflow >= first.byteLength) {
-            tail.shift();
-            tailCollected -= first.byteLength;
-          } else {
-            tail[0] = first.subarray(overflow);
-            tailCollected -= overflow;
-          }
-        }
-      }
-    });
-    const finish = () => {
-      const headText = Buffer.concat(head).toString("utf8");
-      const tailText = Buffer.concat(tail).toString("utf8");
-      if (total > maxBytes && tailText) {
-        const omitted = Math.max(0, total - Buffer.byteLength(headText) - Buffer.byteLength(tailText));
-        resolve(`${headText}\n\n... [OUTPUT TRUNCATED - ${omitted.toLocaleString()} bytes omitted out of ${total.toLocaleString()} total] ...\n\n${tailText}`);
-      } else {
-        resolve(headText + tailText);
-      }
-    };
-    stream.on("end", finish);
-    stream.on("error", finish);
-  });
-}
-
-function waitForExit(child: ChildProcessByStdio<null, Readable, Readable>): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
-  return new Promise((resolve, reject) => {
-    child.on("error", reject);
-    child.on("exit", (code, signal) => resolve({ code, signal }));
-  });
-}
-
-function killProcess(child: ChildProcessByStdio<null, Readable, Readable> | undefined, escalate: boolean): void {
-  if (!child || child.killed) return;
-  try {
-    if (process.platform !== "win32" && child.pid) {
-      process.kill(-child.pid, "SIGTERM");
-      if (escalate) setTimeout(() => {
-        try { process.kill(-child.pid!, "SIGKILL"); } catch { /* noop */ }
-      }, 500).unref();
-    } else {
-      child.kill("SIGTERM");
-      if (escalate) setTimeout(() => child?.kill("SIGKILL"), 500).unref();
-    }
-  } catch {
-    try { child.kill("SIGKILL"); } catch { /* noop */ }
-  }
 }
 
 function listen(server: Server, transport: RpcTransport): Promise<RpcTransport> {

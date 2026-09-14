@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import type { AgentTurnResult } from "../../src/agent/protocol/result.js";
+import { createNodeSessionCatalog } from "../../src/session/catalog/NodeSessionCatalog.js";
 import { createAgentProjectSessionStorage } from "../../src/session/storage/ProjectSessionStorage.js";
 import {
   readSubagentWebMessages,
@@ -12,6 +13,7 @@ import {
 } from "../../src/web/server/readSessionMessages.js";
 
 const createdAt = "2026-08-02T00:00:00.000Z";
+const sessionCatalog = createNodeSessionCatalog();
 
 function completedTurn(sessionId: string, turnId: string): AgentTurnResult {
   return {
@@ -124,7 +126,7 @@ test("web history restores structured records around a visible compact boundary"
       completedTurn(sessionKey, "turn-new"),
     );
 
-    const replay = await readWebSessionMessages({ sessionKey }, { projectRoot, pilotHome });
+    const replay = await readWebSessionMessages({ sessionKey }, { projectRoot, pilotHome, sessionCatalog });
     const text = replay.messages.map((message) => message.text ?? "").join("\n");
     const compactBoundaries = replay.messages.filter((message) => message.kind === "compact_boundary");
     const compactBoundary = compactBoundaries[0];
@@ -240,7 +242,7 @@ test("subagent history keeps execution messages around its compact boundary", as
 
     const replay = await readSubagentWebMessages(
       { sessionKey, subagentId },
-      { projectRoot, pilotHome },
+      { projectRoot, pilotHome, sessionCatalog },
     );
     const text = replay.messages.map((message) => message.text ?? "").join("\n");
     const boundaryIndex = replay.messages.findIndex((message) => message.kind === "compact_boundary");

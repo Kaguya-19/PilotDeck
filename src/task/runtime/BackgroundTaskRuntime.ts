@@ -4,9 +4,9 @@
  * LocalShellTask behaviour (T1-T11).
  *
  * Process model:
- *   - `start(spec)` spawns a *detached* child via `spawn(command, { shell:
- *     true, detached: true })` and immediately calls `child.unref()` so the
- *     PilotDeck process can exit without waiting for the child. (T11)
+ *   - `start(spec)` asks the injected detached-shell provider to spawn a
+ *     *detached* child and immediately returns a task handle so the PilotDeck
+ *     process can exit without waiting for the child. (T11)
  *   - stdout / stderr are piped into a `TaskOutputStore` (1 MB ring buffer
  *     + optional disk spill). The runtime never blocks on the stream — the
  *     child runs free until either it exits or `stop` is called.
@@ -21,73 +21,79 @@
  * console group rather than a Unix process group.
  */
 
-import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { TaskOutputStore } from "../storage/TaskOutputStore.js";
 import type {
+  BackgroundTaskSnapshotStore,
+  PersistedBackgroundTask,
+} from "../storage/BackgroundTaskSnapshotStore.js";
+import {
+  createNodeDetachedShellPort,
+  type DetachedShellHandle,
+  type DetachedShellPort,
+} from "../../tool/execution-world/DetachedShellPort.js";
+import type {
+  BackgroundTaskPort,
+  BackgroundTaskAccess,
+  StartTaskSpec,
+  StopTaskOptions,
+  WaitTaskOptions,
+  WaitTaskResult,
+} from "./BackgroundTaskPort.js";
+import {
+  BackgroundTaskCompletionEventBus,
+  type BackgroundTaskCompletionEvent,
+  type BackgroundTaskCompletionHandler,
+  type BackgroundTaskCompletionSubscription,
+} from "./BackgroundTaskCompletionEvents.js";
+import type {
   PilotDeckBackgroundBashTask,
-  PilotDeckBackgroundTaskStatus,
   PilotDeckBackgroundTaskKind,
   PilotDeckBackgroundTaskListFilter,
   PilotDeckTaskOutputSlice,
 } from "../protocol/types.js";
 
-export type BackgroundTaskCompletionEvent = {
-  sessionId?: string;
-  taskId: string;
-  status: Extract<PilotDeckBackgroundTaskStatus, "completed" | "failed" | "cancelled">;
-  exitCode?: number | null;
-  outputPreview: string;
-  totalBytes: number;
-  startedAt: string;
-  endedAt: string;
-};
-
-export type BackgroundTaskCompletionHandler = (event: BackgroundTaskCompletionEvent) => void;
+/** Compatibility exports for consumers that imported task request types from the native provider. */
+export type {
+  BackgroundTaskPort,
+  BackgroundTaskAccess,
+  StartTaskSpec,
+  StopTaskOptions,
+  WaitTaskOptions,
+  WaitTaskResult,
+} from "./BackgroundTaskPort.js";
+export type {
+  BackgroundTaskCompletionEvent,
+  BackgroundTaskCompletionHandler,
+  BackgroundTaskCompletionSubscription,
+} from "./BackgroundTaskCompletionEvents.js";
 
 export type BackgroundTaskRuntimeOptions = {
   /** Optional dir under which to spill output (default: in-memory only). */
   diskSpillDir?: string;
   /** Override `now()` for deterministic tests. */
   now?: () => Date;
-  /** Override the spawn function (used by tests). */
-  spawn?: typeof spawn;
+  /** Execution-world detached shell provider. */
+  shell?: DetachedShellPort;
+  /** Compatibility override for the native provider's spawn function. */
+  spawn?: typeof import("node:child_process").spawn;
   /** Hard cap on simultaneous tasks (default: 32). */
   maxTasks?: number;
   /** Optional completion sink for hosts that want one-shot background task notifications. */
   onCompletion?: BackgroundTaskCompletionHandler;
+  /** Optional diagnostic sink for failures from live completion observers. */
+  onCompletionSubscriberError?: (error: unknown, event: BackgroundTaskCompletionEvent) => void;
   /** Maximum bytes included in completion output previews (default: 4000). */
   completionPreviewBytes?: number;
-};
-
-export type StartTaskSpec = {
-  command: string;
-  cwd: string;
-  env?: NodeJS.ProcessEnv;
-  sessionId?: string;
-  agentId?: string;
-  kind?: PilotDeckBackgroundTaskKind;
-};
-
-export type StopTaskOptions = {
-  graceMs?: number;
-};
-
-export type WaitTaskOptions = {
-  timeoutMs?: number;
-  abortSignal?: AbortSignal;
-};
-
-export type WaitTaskResult = {
-  task: PilotDeckBackgroundBashTask;
-  timedOut: boolean;
-  outcome: "completed" | "timeout" | "aborted";
-  waitedMs: number;
+  /** Project-owned durable metadata and output-recovery boundary. */
+  snapshotStore?: BackgroundTaskSnapshotStore;
+  /** Fail-closed persistence diagnostics; live task cleanup still continues. */
+  onDiagnostic?: (error: unknown) => void;
 };
 
 type RuntimeEntry = {
   task: PilotDeckBackgroundBashTask;
-  child?: ChildProcess;
+  child?: DetachedShellHandle;
   output: TaskOutputStore;
   /** Resolved when the child has fully exited (success, failure, or kill). */
   done: Promise<void>;
@@ -97,27 +103,64 @@ const DEFAULT_GRACE_MS = 5_000;
 const DEFAULT_MAX_TASKS = 32;
 const DEFAULT_COMPLETION_PREVIEW_BYTES = 4_000;
 
-export class BackgroundTaskRuntime {
+export class BackgroundTaskStateUnknownError extends Error {
+  constructor(taskId: string) {
+    super(`Task ${taskId} has an unknown restored state and cannot be waited or stopped.`);
+    this.name = "BackgroundTaskStateUnknownError";
+  }
+}
+
+export class BackgroundTaskRuntime implements BackgroundTaskPort {
   private readonly entries = new Map<string, RuntimeEntry>();
+  private readonly completionEvents: BackgroundTaskCompletionEventBus;
+  private state: "active" | "draining" | "disposed" = "active";
+  private activeStarts = 0;
+  private startDrainPromise?: Promise<void>;
+  private resolveStartDrain?: () => void;
+  private disposePromise?: Promise<void>;
   private readonly options: Required<
-    Pick<BackgroundTaskRuntimeOptions, "now" | "spawn" | "maxTasks">
+    Pick<BackgroundTaskRuntimeOptions, "now" | "maxTasks" | "shell">
   > &
-    Pick<BackgroundTaskRuntimeOptions, "diskSpillDir" | "onCompletion" | "completionPreviewBytes">;
+    Pick<
+      BackgroundTaskRuntimeOptions,
+      "diskSpillDir" | "onCompletion" | "completionPreviewBytes" | "snapshotStore" | "onDiagnostic"
+    >;
 
   constructor(options: BackgroundTaskRuntimeOptions = {}) {
+    if (options.snapshotStore && !options.diskSpillDir) {
+      throw new TypeError("Background task durable recovery requires diskSpillDir for output recovery.");
+    }
     this.options = {
       now: options.now ?? (() => new Date()),
-      spawn: options.spawn ?? spawn,
+      shell: options.shell ?? createNodeDetachedShellPort(options.spawn),
       maxTasks: options.maxTasks ?? DEFAULT_MAX_TASKS,
       diskSpillDir: options.diskSpillDir,
       onCompletion: options.onCompletion,
       completionPreviewBytes: options.completionPreviewBytes ?? DEFAULT_COMPLETION_PREVIEW_BYTES,
+      snapshotStore: options.snapshotStore,
+      onDiagnostic: options.onDiagnostic,
     };
+    this.completionEvents = new BackgroundTaskCompletionEventBus({
+      onSubscriberError: options.onCompletionSubscriberError,
+    });
+    this.restoreSnapshots();
   }
 
-  list(filter: PilotDeckBackgroundTaskListFilter = {}): PilotDeckBackgroundBashTask[] {
+  /** Subscribe to volatile task settlement events without exposing process internals. */
+  subscribeCompletionEvents(handler: BackgroundTaskCompletionHandler): BackgroundTaskCompletionSubscription {
+    if (this.state !== "active") {
+      throw new Error(`Cannot subscribe to background task completion events; runtime is ${this.state}.`);
+    }
+    return this.completionEvents.subscribe(handler);
+  }
+
+  list(
+    filter: PilotDeckBackgroundTaskListFilter = {},
+    access?: BackgroundTaskAccess,
+  ): PilotDeckBackgroundBashTask[] {
     const result: PilotDeckBackgroundBashTask[] = [];
     for (const entry of this.entries.values()) {
+      if (!canAccessTask(entry.task, access)) continue;
       if (filter.agentId && entry.task.agentId !== filter.agentId) continue;
       if (filter.kind && entry.task.kind !== filter.kind) continue;
       if (filter.status) {
@@ -129,15 +172,27 @@ export class BackgroundTaskRuntime {
     return result;
   }
 
-  get(taskId: string): PilotDeckBackgroundBashTask | undefined {
-    return this.entries.get(taskId)?.task;
+  get(taskId: string, access?: BackgroundTaskAccess): PilotDeckBackgroundBashTask | undefined {
+    return this.findEntry(taskId, access)?.task;
   }
 
-  async wait(taskId: string, options: WaitTaskOptions = {}): Promise<WaitTaskResult | undefined> {
-    const entry = this.entries.get(taskId);
+  async wait(
+    taskId: string,
+    options: WaitTaskOptions = {},
+    access?: BackgroundTaskAccess,
+  ): Promise<WaitTaskResult | undefined> {
+    const entry = this.findEntry(taskId, access);
     if (!entry) return undefined;
 
     const startedAt = Date.now();
+    if (entry.task.status === "unknown") {
+      return {
+        task: entry.task,
+        timedOut: false,
+        outcome: "unknown",
+        waitedMs: Date.now() - startedAt,
+      };
+    }
     const timeoutMs = Math.max(0, Math.floor(options.timeoutMs ?? 0));
     const timeoutPromise = timeoutMs > 0
       ? new Promise<"timeout">((resolve) => {
@@ -183,7 +238,27 @@ export class BackgroundTaskRuntime {
    * and `completed` / `failed` / `cancelled` later via the `exit` listener.
    */
   async start(spec: StartTaskSpec): Promise<PilotDeckBackgroundBashTask> {
-    if (this.entries.size >= this.options.maxTasks) {
+    if (this.state !== "active") {
+      throw new Error(`Background task runtime is ${this.state}; refusing a new task.`);
+    }
+    this.activeStarts += 1;
+    try {
+      return await this.startTask(spec);
+    } finally {
+      this.activeStarts -= 1;
+      if (this.activeStarts === 0) {
+        this.resolveStartDrain?.();
+        this.resolveStartDrain = undefined;
+        this.startDrainPromise = undefined;
+      }
+    }
+  }
+
+  private async startTask(spec: StartTaskSpec): Promise<PilotDeckBackgroundBashTask> {
+    const activeTaskCount = [...this.entries.values()].filter((entry) =>
+      entry.task.status === "pending" || entry.task.status === "running",
+    ).length;
+    if (activeTaskCount >= this.options.maxTasks) {
       throw new Error(
         `BackgroundTaskRuntime: max tasks (${this.options.maxTasks}) exceeded.`,
       );
@@ -218,61 +293,81 @@ export class BackgroundTaskRuntime {
       resolveDone = resolve;
     });
 
-    let child: ChildProcess;
+    const entry: RuntimeEntry = { task, output, done };
+    this.entries.set(taskId, entry);
     try {
-      child = this.options.spawn(spec.command, {
+      // Admission becomes durable before a provider can create a child.
+      await this.persistEntry(entry);
+    } catch (error) {
+      this.entries.delete(taskId);
+      await output.close();
+      throw error;
+    }
+
+    let child: DetachedShellHandle;
+    try {
+      child = await this.options.shell.start({
+        command: spec.command,
         cwd: spec.cwd,
         env: spec.env,
-        shell: true,
-        stdio: ["ignore", "pipe", "pipe"],
-        detached: true,
+        onStdout: (chunk) => this.appendOutput(entry, chunk),
+        onStderr: (chunk) => this.appendOutput(entry, chunk),
+        onError: (err) => this.appendOutput(entry, Buffer.from(`error: ${err.message}\n`)),
       });
-      child.unref();
     } catch (err) {
       task.status = "failed";
       task.completionStatusSentInAttachment = true;
       task.endedAt = this.options.now();
       const message = err instanceof Error ? err.message : String(err);
-      output.append(Buffer.from(`spawn error: ${message}\n`));
-      task.outputBytes = output.totalBytes();
-      this.entries.set(taskId, { task, output, done: Promise.resolve() });
-      this.notifyCompletion(task, output);
+      this.appendOutput(entry, Buffer.from(`spawn error: ${message}\n`));
+      await this.settleEntry(entry);
       resolveDone();
       return task;
     }
 
+    entry.child = child;
     task.status = "running";
     task.pid = typeof child.pid === "number" ? child.pid : undefined;
 
-    child.stdout?.on("data", (chunk: Buffer | string) => {
-      output.append(chunk);
-      task.outputBytes = output.totalBytes();
-    });
-    child.stderr?.on("data", (chunk: Buffer | string) => {
-      output.append(chunk);
-      task.outputBytes = output.totalBytes();
-    });
-    child.on("error", (err: Error) => {
-      output.append(Buffer.from(`error: ${err.message}\n`));
-      task.outputBytes = output.totalBytes();
-    });
-    child.on("exit", (code, signal) => {
-      task.endedAt = this.options.now();
-      task.exitCode = code ?? null;
-      task.outputBytes = output.totalBytes();
-      if (task.interrupted || signal === "SIGTERM" || signal === "SIGKILL") {
-        task.status = "cancelled";
-      } else if (typeof code === "number" && code === 0) {
-        task.status = "completed";
-      } else {
+    child.exit.then(
+      ({ exitCode: code, exitSignal: signal }) => {
+        task.endedAt = this.options.now();
+        task.exitCode = code ?? null;
+        task.outputBytes = output.totalBytes();
+        if (task.interrupted || signal === "SIGTERM" || signal === "SIGKILL") {
+          task.status = "cancelled";
+        } else if (typeof code === "number" && code === 0) {
+          task.status = "completed";
+        } else {
+          task.status = "failed";
+        }
+        task.completionStatusSentInAttachment = true;
+        void this.settleEntry(entry).finally(resolveDone);
+      },
+      (error: unknown) => {
+        task.endedAt = this.options.now();
+        task.exitCode = null;
         task.status = "failed";
-      }
-      task.completionStatusSentInAttachment = true;
-      this.notifyCompletion(task, output);
-      resolveDone();
-    });
+        const message = error instanceof Error ? error.message : String(error);
+        this.appendOutput(entry, Buffer.from(`exit error: ${message}\n`));
+        task.completionStatusSentInAttachment = true;
+        void this.settleEntry(entry).finally(resolveDone);
+      },
+    );
 
-    this.entries.set(taskId, { task, child, output, done });
+    try {
+      // Synchronous provider output may arrive before start() resolves.
+      await this.persistEntry(entry, { flushOutput: true });
+    } catch (error) {
+      task.interrupted = true;
+      this.reportDiagnostic(error);
+      try {
+        child.terminate("SIGTERM");
+      } catch {
+        // The provider may have already reported an exit.
+      }
+      throw error;
+    }
     return task;
   }
 
@@ -280,15 +375,20 @@ export class BackgroundTaskRuntime {
    * Stop a task: SIGTERM, wait `graceMs`, then SIGKILL if still alive.
    * Idempotent: stopping an already-finished task is a no-op.
    */
-  async stop(taskId: string, options: StopTaskOptions = {}): Promise<void> {
-    const entry = this.entries.get(taskId);
+  async stop(
+    taskId: string,
+    options: StopTaskOptions = {},
+    access?: BackgroundTaskAccess,
+  ): Promise<void> {
+    const entry = this.findEntry(taskId, access);
     if (!entry) throw new Error(`Unknown taskId: ${taskId}`);
     const { task, child, done } = entry;
+    if (task.status === "unknown") throw new BackgroundTaskStateUnknownError(taskId);
     if (task.status !== "running") return;
     if (!child) return;
     task.interrupted = true;
     try {
-      child.kill("SIGTERM");
+      child.terminate("SIGTERM");
     } catch {
       // child already exited
     }
@@ -299,7 +399,7 @@ export class BackgroundTaskRuntime {
       new Promise<void>((resolve) => {
         timer = setTimeout(() => {
           try {
-            child.kill("SIGKILL");
+            child.terminate("SIGKILL");
           } catch {
             // already exited between the timer firing and kill()
           }
@@ -325,8 +425,33 @@ export class BackgroundTaskRuntime {
     await Promise.all(targets.map((e) => this.stop(e.task.taskId)));
   }
 
-  getOutput(taskId: string, offset: number, maxBytes?: number): PilotDeckTaskOutputSlice {
-    const entry = this.entries.get(taskId);
+  /**
+   * Composition-owner lifecycle: stop admitting tasks, settle starts already
+   * accepted by the detached-shell provider, then terminate and drain all
+   * running children. Output remains readable until this promise resolves.
+   */
+  dispose(): Promise<void> {
+    if (this.disposePromise) return this.disposePromise;
+    this.state = "draining";
+    this.disposePromise = (async () => {
+      await this.whenStartsDrained();
+      await this.killAll();
+      await Promise.all([...this.entries.values()].map((entry) => entry.done));
+      await Promise.all([...this.entries.values()].map((entry) => entry.output.close()));
+      await this.options.snapshotStore?.flush();
+      this.completionEvents.dispose();
+      this.state = "disposed";
+    })();
+    return this.disposePromise;
+  }
+
+  getOutput(
+    taskId: string,
+    offset: number,
+    maxBytes?: number,
+    access?: BackgroundTaskAccess,
+  ): PilotDeckTaskOutputSlice {
+    const entry = this.findEntry(taskId, access);
     if (!entry) throw new Error(`Unknown taskId: ${taskId}`);
     return entry.output.readSlice(offset, maxBytes);
   }
@@ -339,26 +464,143 @@ export class BackgroundTaskRuntime {
     return entry.task;
   }
 
-  private notifyCompletion(task: PilotDeckBackgroundBashTask, output: TaskOutputStore): void {
-    if (!this.options.onCompletion || !task.endedAt) {
+  private whenStartsDrained(): Promise<void> {
+    if (this.activeStarts === 0) return Promise.resolve();
+    if (!this.startDrainPromise) {
+      this.startDrainPromise = new Promise<void>((resolve) => {
+        this.resolveStartDrain = resolve;
+      });
+    }
+    return this.startDrainPromise;
+  }
+
+  private findEntry(taskId: string, access?: BackgroundTaskAccess): RuntimeEntry | undefined {
+    const entry = this.entries.get(taskId);
+    return entry && canAccessTask(entry.task, access) ? entry : undefined;
+  }
+
+  private restoreSnapshots(): void {
+    const store = this.options.snapshotStore;
+    if (!store) return;
+    for (const snapshot of store.load()) {
+      const task = restoreTask(snapshot.task);
+      const wasUnsettled = task.status === "pending" || task.status === "running";
+      if (wasUnsettled) {
+        task.status = "unknown";
+        task.pid = undefined;
+        task.exitCode = undefined;
+        task.endedAt = undefined;
+        task.completionStatusSentInAttachment = false;
+      }
+      const output = new TaskOutputStore({
+        taskId: task.taskId,
+        diskSpillDir: this.options.diskSpillDir,
+        restore: { expectedTotalBytes: snapshot.output.totalBytes },
+      });
+      const entry: RuntimeEntry = { task, output, done: Promise.resolve() };
+      this.entries.set(task.taskId, entry);
+      if (wasUnsettled) {
+        // The live runtime never exposes the old running state. Persisting the
+        // reconciliation is best effort here; a later successful write keeps
+        // future restarts fail-closed even after this process exits quickly.
+        void this.persistEntry(entry).catch((error) => this.reportDiagnostic(error));
+      }
+    }
+  }
+
+  private appendOutput(entry: RuntimeEntry, chunk: Buffer | string): void {
+    entry.output.append(chunk);
+    entry.task.outputBytes = entry.output.totalBytes();
+    void this.persistEntry(entry).catch((error) => this.reportDiagnostic(error));
+  }
+
+  private async settleEntry(entry: RuntimeEntry): Promise<void> {
+    entry.task.outputBytes = entry.output.totalBytes();
+    try {
+      await this.persistEntry(entry, { flushOutput: true });
+    } catch (error) {
+      this.reportDiagnostic(error);
       return;
     }
+    this.notifyCompletion(entry.task, entry.output);
+  }
+
+  private async persistEntry(
+    entry: RuntimeEntry,
+    options: { flushOutput?: boolean } = {},
+  ): Promise<void> {
+    const store = this.options.snapshotStore;
+    if (!store) return;
+    if (options.flushOutput) await entry.output.flush();
+    entry.task.outputBytes = entry.output.totalBytes();
+    await store.write({
+      task: persistTask(entry.task),
+      output: {
+        totalBytes: entry.output.totalBytes(),
+        persisted: entry.output.hasDurableOutput(),
+      },
+    });
+  }
+
+  private reportDiagnostic(error: unknown): void {
+    try {
+      this.options.onDiagnostic?.(error);
+    } catch {
+      // Diagnostic observers cannot change task cleanup or completion state.
+    }
+  }
+
+  private notifyCompletion(task: PilotDeckBackgroundBashTask, output: TaskOutputStore): void {
+    if (!task.endedAt || !isTerminalTaskStatus(task.status)) return;
     const previewBytes = Math.max(0, this.options.completionPreviewBytes ?? DEFAULT_COMPLETION_PREVIEW_BYTES);
     const totalBytes = output.totalBytes();
     const slice = output.readSlice(Math.max(0, totalBytes - previewBytes), previewBytes);
+    const event: BackgroundTaskCompletionEvent = {
+      taskId: task.taskId,
+      sessionId: task.sessionId,
+      status: task.status as BackgroundTaskCompletionEvent["status"],
+      exitCode: task.exitCode,
+      outputPreview: slice.content,
+      totalBytes,
+      startedAt: task.startedAt.toISOString(),
+      endedAt: task.endedAt.toISOString(),
+    };
     try {
-      this.options.onCompletion({
-        taskId: task.taskId,
-        sessionId: task.sessionId,
-        status: task.status as BackgroundTaskCompletionEvent["status"],
-        exitCode: task.exitCode,
-        outputPreview: slice.content,
-        totalBytes,
-        startedAt: task.startedAt.toISOString(),
-        endedAt: task.endedAt.toISOString(),
-      });
+      this.options.onCompletion?.(event);
     } catch {
       // Completion notifications are best-effort and must never break task cleanup.
     }
+    this.completionEvents.emit(event);
   }
+}
+
+function canAccessTask(
+  task: PilotDeckBackgroundBashTask,
+  access: BackgroundTaskAccess | undefined,
+): boolean {
+  return access === undefined || task.sessionId === access.sessionId;
+}
+
+function isTerminalTaskStatus(
+  status: PilotDeckBackgroundBashTask["status"],
+): status is Extract<PilotDeckBackgroundBashTask["status"], "completed" | "failed" | "cancelled"> {
+  return status === "completed" || status === "failed" || status === "cancelled";
+}
+
+function persistTask(task: PilotDeckBackgroundBashTask): PersistedBackgroundTask["task"] {
+  const { startedAt, endedAt, ...rest } = task;
+  return {
+    ...rest,
+    startedAt: startedAt.toISOString(),
+    ...(endedAt ? { endedAt: endedAt.toISOString() } : {}),
+  };
+}
+
+function restoreTask(snapshot: PersistedBackgroundTask["task"]): PilotDeckBackgroundBashTask {
+  const { startedAt, endedAt, ...rest } = snapshot;
+  return {
+    ...rest,
+    startedAt: new Date(startedAt),
+    ...(endedAt ? { endedAt: new Date(endedAt) } : {}),
+  };
 }

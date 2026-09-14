@@ -3,16 +3,69 @@ export const MODULE_PROTOCOL_VERSION = "2.0" as const;
 export type ModuleOutcome = "completed" | "failed" | "cancelled" | "result_unknown";
 export type ModuleExecuteProfile = "unary" | "streaming" | "side_effect" | "tool";
 export type ModuleRetryability = "safe" | "unsafe" | "retry_after_status";
-export type HostContextModuleMethod =
-  | "prepare_for_model"
-  | "apply_tool_results"
-  | "recover_from_model_error"
-  | "capture_turn";
-export type HostCapabilityModuleMethod = "execute" | "execute_batch";
+
+/** Host-advertised context operations supported by Module Protocol v2. */
+export const HOST_CONTEXT_MODULE_METHODS = [
+  "prepare_for_model",
+  "apply_tool_results",
+  "recover_from_model_error",
+  "capture_turn",
+  "try_auto_compact",
+] as const;
+
+/** Host-advertised model operations supported by Module Protocol v2. */
+export const HOST_MODEL_MODULE_METHODS = ["prepare", "stream"] as const;
+
+/** Host-advertised capability operations supported by Module Protocol v2. */
+export const HOST_CAPABILITY_MODULE_METHODS = ["execute", "execute_batch", "plan_todo"] as const;
+
+/** Host-advertised permission operations supported by Module Protocol v2. */
+export const HOST_PERMISSION_MODULE_METHODS = ["decide"] as const;
+
+/** Host-advertised lifecycle operations supported by Module Protocol v2. */
+export const HOST_LIFECYCLE_MODULE_METHODS = ["dispatch"] as const;
+
+/** Host-advertised volatile agent-event operations supported by Module Protocol v2. */
+export const HOST_EVENT_MODULE_METHODS = ["emit"] as const;
+
+export type HostContextModuleMethod = (typeof HOST_CONTEXT_MODULE_METHODS)[number];
+export type HostModelModuleMethod = (typeof HOST_MODEL_MODULE_METHODS)[number];
+export type HostCapabilityModuleMethod = (typeof HOST_CAPABILITY_MODULE_METHODS)[number];
+export type HostPermissionModuleMethod = (typeof HOST_PERMISSION_MODULE_METHODS)[number];
+export type HostLifecycleModuleMethod = (typeof HOST_LIFECYCLE_MODULE_METHODS)[number];
+export type HostEventModuleMethod = (typeof HOST_EVENT_MODULE_METHODS)[number];
 export type HostModuleCapabilities = {
+  model?: { methods: HostModelModuleMethod[] };
   context?: { methods: HostContextModuleMethod[] };
   capability?: { methods: HostCapabilityModuleMethod[] };
+  permission?: { methods: HostPermissionModuleMethod[] };
+  lifecycle?: { methods: HostLifecycleModuleMethod[] };
+  event?: { methods: HostEventModuleMethod[] };
 };
+
+export function readHostModelModuleMethods(value: unknown): HostModelModuleMethod[] {
+  return readHostModuleMethods(value, HOST_MODEL_MODULE_METHODS);
+}
+
+export function readHostContextModuleMethods(value: unknown): HostContextModuleMethod[] {
+  return readHostModuleMethods(value, HOST_CONTEXT_MODULE_METHODS);
+}
+
+export function readHostCapabilityModuleMethods(value: unknown): HostCapabilityModuleMethod[] {
+  return readHostModuleMethods(value, HOST_CAPABILITY_MODULE_METHODS);
+}
+
+export function readHostPermissionModuleMethods(value: unknown): HostPermissionModuleMethod[] {
+  return readHostModuleMethods(value, HOST_PERMISSION_MODULE_METHODS);
+}
+
+export function readHostLifecycleModuleMethods(value: unknown): HostLifecycleModuleMethod[] {
+  return readHostModuleMethods(value, HOST_LIFECYCLE_MODULE_METHODS);
+}
+
+export function readHostEventModuleMethods(value: unknown): HostEventModuleMethod[] {
+  return readHostModuleMethods(value, HOST_EVENT_MODULE_METHODS);
+}
 export type ModuleOperationState =
   | "pending"
   | "running"
@@ -97,7 +150,8 @@ export type ModuleCallRequest = ModuleMessageBase & {
   runId: string;
   operationId: string;
   requestId: string;
-  module: "model" | "capability" | "permission" | "checkpoint" | "context";
+  idempotencyKey?: string;
+  module: "model" | "capability" | "permission" | "checkpoint" | "context" | "lifecycle" | "event";
   payload: Record<string, unknown>;
 };
 
@@ -140,6 +194,7 @@ export type ModuleEvent = ModuleMessageBase & {
   toolCallId?: string;
   final: boolean;
   outcome?: ModuleOutcome;
+  code?: string;
   error?: Record<string, unknown>;
   payload: Record<string, unknown>;
 };
@@ -174,417 +229,148 @@ export type ModuleOperationSnapshot = {
 export type ModuleProtocolValidation = { ok: true } | { ok: false; code: string; message: string };
 
 export function validateModuleMessage(value: unknown): ModuleProtocolValidation {
-  if (!value || typeof value !== "object") return invalid("INVALID_MESSAGE", "Module message must be an object.");
+  if (!isRecord(value)) return invalid("INVALID_MESSAGE", "Module message must be an object.");
   const message = value as Record<string, unknown>;
   if (message.kind !== "request" && message.kind !== "response" && message.kind !== "event" && message.kind !== "error") {
     return invalid("INVALID_KIND", "Module message kind is invalid.");
   }
-  if (message.kind === "request" && typeof message.messageId !== "string") {
-    return invalid("MISSING_MESSAGE_ID", "Request messageId is required.");
+  if (message.kind !== "event" && !isId(message.messageId)) {
+    return invalid("MISSING_MESSAGE_ID", "Message messageId is required.");
   }
-  if (message.kind === "request" && message.method === "execute") {
-    for (const field of ["runId", "operationId", "requestId", "payload"]) {
-      if (!(field in message)) return invalid("MISSING_EXECUTE_FIELD", `Execute request field ${field} is required.`);
-    }
-    if ("attemptId" in message || "stepId" in message) return invalid("UNSUPPORTED_FIELD", "attemptId and stepId are not public fields.");
+  if (message.kind === "event" && message.messageId !== undefined && !isId(message.messageId)) {
+    return invalid("INVALID_EVENT_FIELD", "Event messageId is invalid.");
   }
-  if (message.kind === "request" && message.method === "module_call") {
-    for (const field of ["runId", "operationId", "requestId", "module", "payload"]) {
-      if (!(field in message)) return invalid("MISSING_MODULE_CALL_FIELD", `Module call field ${field} is required.`);
+  if (message.kind === "request") {
+    if (message.method === "execute") {
+      for (const field of ["runId", "operationId", "requestId"] as const) {
+        if (!isId(message[field])) return invalid("MISSING_EXECUTE_FIELD", `Execute request field ${field} is required.`);
+      }
+      if (!isRecord(message.payload)) return invalid("MISSING_EXECUTE_FIELD", "Execute request field payload is required.");
+      if (message.idempotencyKey !== undefined && !isId(message.idempotencyKey)) return invalid("INVALID_EXECUTE_FIELD", "Execute request idempotencyKey is invalid.");
+      if (message.operationDeadline !== undefined && typeof message.operationDeadline !== "string") return invalid("INVALID_EXECUTE_FIELD", "Execute request operationDeadline is invalid.");
+      if (message.attemptDeadline !== undefined && typeof message.attemptDeadline !== "string") return invalid("INVALID_EXECUTE_FIELD", "Execute request attemptDeadline is invalid.");
+      if ("attemptId" in message || "stepId" in message) return invalid("UNSUPPORTED_FIELD", "attemptId and stepId are not public fields.");
+      return { ok: true };
     }
-    if (!["model", "capability", "permission", "checkpoint", "context"].includes(String(message.module))) {
-      return invalid("INVALID_MODULE", "Module call target is invalid.");
+    if (message.method === "module_call") {
+      for (const field of ["runId", "operationId", "requestId"] as const) {
+        if (!isId(message[field])) return invalid("MISSING_MODULE_CALL_FIELD", `Module call field ${field} is required.`);
+      }
+      if (!isRecord(message.payload)) return invalid("MISSING_MODULE_CALL_FIELD", "Module call field payload is required.");
+      if (message.idempotencyKey !== undefined && !isId(message.idempotencyKey)) return invalid("INVALID_MODULE_CALL_FIELD", "Module call idempotencyKey is invalid.");
+      if (!MODULE_CALL_TARGETS.includes(message.module as ModuleCallRequest["module"])) {
+        return invalid("INVALID_MODULE", "Module call target is invalid.");
+      }
+      return { ok: true };
     }
+    if (message.method === "cancel") {
+      if (!isId(message.runId) || !isId(message.operationId) || typeof message.reason !== "string" || message.reason.length === 0) {
+        return invalid("INVALID_CANCEL_REQUEST", "Cancel requires runId, operationId, and reason.");
+      }
+      if (message.requestId !== undefined && !isId(message.requestId)) return invalid("INVALID_CANCEL_REQUEST", "Cancel requestId is invalid.");
+      return { ok: true };
+    }
+    if (message.method === "status") {
+      return isId(message.requestId)
+        ? { ok: true }
+        : invalid("INVALID_STATUS_REQUEST", "Status requires requestId.");
+    }
+    if (message.method === "resume") {
+      if (!isId(message.streamId) || !isBinding(message.previousBinding) || !isResumeSequence(message.lastAppliedSequence)) {
+        return invalid("INVALID_RESUME_REQUEST", "Resume requires streamId, previousBinding, and lastAppliedSequence.");
+      }
+      return { ok: true };
+    }
+    if (message.method === "ack") {
+      if (!isId(message.streamId) || !isSequence(message.lastAppliedSequence)) {
+        return invalid("INVALID_ACK_REQUEST", "Ack requires streamId and lastAppliedSequence.");
+      }
+      return { ok: true };
+    }
+    if (message.method === "hello" || message.method === "capabilities") {
+      return isRecord(message.payload)
+        ? { ok: true }
+        : invalid("INVALID_HANDSHAKE_REQUEST", "Handshake requires payload.");
+    }
+    return invalid("INVALID_METHOD", "Module request method is invalid.");
   }
   if (message.kind === "event") {
-    for (const field of ["eventType", "streamId", "sequence", "runId", "operationId", "requestId", "final", "payload"]) {
-      if (!(field in message)) return invalid("MISSING_EVENT_FIELD", `Event field ${field} is required.`);
+    for (const field of ["eventType", "streamId", "runId", "operationId", "requestId"] as const) {
+      if (!isId(message[field])) return invalid("MISSING_EVENT_FIELD", `Event field ${field} is required.`);
     }
-    if (message.final === true && typeof message.outcome !== "string") return invalid("MISSING_OUTCOME", "Final event requires outcome.");
+    if (!isSequence(message.sequence) || typeof message.final !== "boolean" || !isRecord(message.payload)) {
+      return invalid("MISSING_EVENT_FIELD", "Event sequence, final, and payload are required.");
+    }
+    if (message.final === true && !isOutcome(message.outcome)) return invalid("MISSING_OUTCOME", "Final event requires outcome.");
+    if (message.outcome !== undefined && !isOutcome(message.outcome)) return invalid("INVALID_OUTCOME", "Event outcome is invalid.");
+    if (message.code !== undefined && !isId(message.code)) return invalid("INVALID_EVENT_FIELD", "Event code is invalid.");
     if ("moduleInstanceId" in message || "connectionGeneration" in message) return invalid("UNSUPPORTED_FIELD", "Connection binding belongs to transport context.");
+    return { ok: true };
   }
-  if (message.kind === "response" && message.final === true && typeof message.outcome !== "string") {
-    return invalid("MISSING_OUTCOME", "Final response requires outcome.");
+  if (message.kind === "response") {
+    if (!isId(message.inReplyTo) || typeof message.ok !== "boolean") {
+      return invalid("INVALID_RESPONSE", "Response requires inReplyTo and ok.");
+    }
+    if (message.final === true && !isOutcome(message.outcome)) return invalid("MISSING_OUTCOME", "Final response requires outcome.");
+    if (message.outcome !== undefined && !isOutcome(message.outcome)) return invalid("INVALID_OUTCOME", "Response outcome is invalid.");
+    return { ok: true };
+  }
+  if (!isId(message.code) || typeof message.message !== "string" || message.message.length === 0) {
+    return invalid("INVALID_ERROR", "Error requires code and message.");
+  }
+  if (message.retryability !== "safe" && message.retryability !== "unsafe" && message.retryability !== "retry_after_status") {
+    return invalid("INVALID_ERROR", "Error retryability is invalid.");
   }
   return { ok: true };
+}
+
+const MODULE_CALL_TARGETS: ModuleCallRequest["module"][] = [
+  "model",
+  "capability",
+  "permission",
+  "checkpoint",
+  "context",
+  "lifecycle",
+  "event",
+];
+
+function readHostModuleMethods<Method extends string>(
+  value: unknown,
+  supported: readonly Method[],
+): Method[] {
+  return Array.isArray(value)
+    ? value.filter((method): method is Method => typeof method === "string" && supported.includes(method as Method))
+    : [];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isId(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function isSequence(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+function isResumeSequence(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= -1;
+}
+
+function isOutcome(value: unknown): value is ModuleOutcome {
+  return value === "completed" || value === "failed" || value === "cancelled" || value === "result_unknown";
+}
+
+function isBinding(value: unknown): value is ModuleBinding {
+  return isRecord(value) && isId(value.moduleInstanceId) && isId(value.connectionGeneration);
 }
 
 function invalid(code: string, message: string): ModuleProtocolValidation {
   return { ok: false, code, message };
 }
 
-type OperationRecord = {
-  snapshot: ModuleOperationSnapshot;
-  finalRequestIds: Set<string>;
-  streamSequences: Map<string, number>;
-};
-
-/** Host-owned operation state and stream de-duplication for direct adapters. */
-export class ModuleOperationHost {
-  private readonly operations = new Map<string, OperationRecord>();
-
-  constructor(private readonly now: () => Date = () => new Date()) {}
-
-  accept(request: Pick<ModuleExecuteRequest, "runId" | "operationId" | "requestId">): ModuleOperationSnapshot {
-    const existing = this.operations.get(request.operationId);
-    if (existing) {
-      if (existing.snapshot.runId !== request.runId) throw new Error("OPERATION_RUN_MISMATCH");
-      if (!existing.snapshot.requestIds.includes(request.requestId)) existing.snapshot.requestIds.push(request.requestId);
-      existing.snapshot.state = existing.snapshot.state === "pending" ? "running" : existing.snapshot.state;
-      existing.snapshot.updatedAt = this.now().toISOString();
-      return cloneSnapshot(existing.snapshot);
-    }
-    const snapshot: ModuleOperationSnapshot = {
-      runId: request.runId,
-      operationId: request.operationId,
-      state: "running",
-      requestIds: [request.requestId],
-      cancelRequested: false,
-      updatedAt: this.now().toISOString(),
-    };
-    this.operations.set(request.operationId, { snapshot, finalRequestIds: new Set(), streamSequences: new Map() });
-    return cloneSnapshot(snapshot);
-  }
-
-  recordFinal(operationId: string, requestId: string, outcome: ModuleOutcome): ModuleOperationSnapshot {
-    const record = this.require(operationId);
-    if (record.finalRequestIds.has(requestId)) return cloneSnapshot(record.snapshot);
-    if (record.snapshot.outcome) return cloneSnapshot(record.snapshot);
-    record.finalRequestIds.add(requestId);
-    record.snapshot.outcome = outcome;
-    record.snapshot.state = outcome === "completed" ? "completed" : outcome === "cancelled" ? "cancelled" : outcome === "result_unknown" ? "resolving" : "failed";
-    record.snapshot.updatedAt = this.now().toISOString();
-    return cloneSnapshot(record.snapshot);
-  }
-
-  expire(operationId: string, requestId: string): ModuleOperationSnapshot {
-    return this.recordFinal(operationId, requestId, "failed");
-  }
-
-  markResolving(operationId: string): ModuleOperationSnapshot {
-    const record = this.require(operationId);
-    if (!record.snapshot.outcome) {
-      record.snapshot.state = "resolving";
-      record.snapshot.updatedAt = this.now().toISOString();
-    }
-    return cloneSnapshot(record.snapshot);
-  }
-
-  requestCancel(operationId: string): ModuleOperationSnapshot {
-    const record = this.require(operationId);
-    if (!record.snapshot.outcome) {
-      record.snapshot.cancelRequested = true;
-      record.snapshot.state = "cancel_requested";
-      record.snapshot.updatedAt = this.now().toISOString();
-    }
-    return cloneSnapshot(record.snapshot);
-  }
-
-  acceptSequence(operationId: string, streamId: string, sequence: number): { accepted: boolean; gap: boolean } {
-    const record = this.require(operationId);
-    const previous = record.streamSequences.get(streamId);
-    if (previous !== undefined && sequence <= previous) return { accepted: false, gap: false };
-    const gap = previous !== undefined && sequence > previous + 1;
-    if (!gap) record.streamSequences.set(streamId, sequence);
-    return { accepted: !gap, gap };
-  }
-
-  status(operationId: string): ModuleOperationSnapshot | undefined {
-    const record = this.operations.get(operationId);
-    return record ? cloneSnapshot(record.snapshot) : undefined;
-  }
-
-  private require(operationId: string): OperationRecord {
-    const record = this.operations.get(operationId);
-    if (!record) throw new Error(`UNKNOWN_OPERATION:${operationId}`);
-    return record;
-  }
-}
-
-export type InProcessModuleHandler = {
-  capabilities: ModuleCapabilities;
-  execute(request: ModuleExecuteRequest): AsyncIterable<{
-    eventType: string;
-    payload: Record<string, unknown>;
-    final?: boolean;
-    outcome?: ModuleOutcome;
-    toolCallId?: string;
-  }>;
-  cancel?(request: Extract<ModuleControlRequest, { method: "cancel" }>): Promise<void> | void;
-};
-
-export type InProcessModuleOptions = {
-  moduleId: string;
-  moduleInstanceId?: string;
-  now?: () => Date;
-  uuid?: () => string;
-};
-
-/** Direct, transport-free v2 adapter used by AgentLoop and contract tests. */
-export class InProcessModuleAdapter {
-  readonly moduleId: string;
-  readonly moduleInstanceId: string;
-  readonly connectionGeneration: string;
-  private readonly host: ModuleOperationHost;
-  private readonly streams = new Map<string, ModuleEvent[]>();
-  private readonly requestOperations = new Map<string, string>();
-  private readonly uuid: () => string;
-  private readonly now: () => Date;
-
-  constructor(
-    private readonly handler: InProcessModuleHandler,
-    options: InProcessModuleOptions,
-  ) {
-    this.moduleId = options.moduleId;
-    this.moduleInstanceId = options.moduleInstanceId ?? options.uuid?.() ?? `${options.moduleId}-instance`;
-    this.connectionGeneration = options.uuid?.() ?? `${this.moduleInstanceId}-connection`;
-    this.host = new ModuleOperationHost(options.now);
-    this.uuid = options.uuid ?? (() => Math.random().toString(36).slice(2));
-    this.now = options.now ?? (() => new Date());
-  }
-
-  hello(request: ModuleHandshakeRequest): ModuleResponse {
-    return {
-      kind: "response",
-      messageId: this.nextId("hello"),
-      inReplyTo: request.messageId,
-      ok: true,
-      protocolVersion: MODULE_PROTOCOL_VERSION,
-      moduleId: this.moduleId,
-      moduleInstanceId: this.moduleInstanceId,
-      connectionGeneration: this.connectionGeneration,
-      capabilitiesVersion: this.handler.capabilities.capabilitiesVersion,
-      payload: {},
-    };
-  }
-
-  capabilities(request: ModuleHandshakeRequest): ModuleResponse {
-    return {
-      kind: "response",
-      messageId: this.nextId("capabilities"),
-      inReplyTo: request.messageId,
-      ok: true,
-      protocolVersion: MODULE_PROTOCOL_VERSION,
-      moduleId: this.moduleId,
-      moduleInstanceId: this.moduleInstanceId,
-      connectionGeneration: this.connectionGeneration,
-      capabilitiesVersion: this.handler.capabilities.capabilitiesVersion,
-      payload: this.handler.capabilities as unknown as Record<string, unknown>,
-    };
-  }
-
-  async *execute(request: ModuleExecuteRequest): AsyncGenerator<ModuleResponse | ModuleEvent | ModuleError> {
-    const validation = validateModuleMessage(request);
-    if (!validation.ok) {
-      yield { kind: "error", messageId: this.nextId("error"), code: validation.code, message: validation.message, retryability: "unsafe" };
-      return;
-    }
-    this.host.accept(request);
-    this.requestOperations.set(request.requestId, request.operationId);
-    const deadline = request.attemptDeadline ?? request.operationDeadline;
-    if (deadline && Date.parse(deadline) <= this.now().getTime()) {
-      this.host.expire(request.operationId, request.requestId);
-      yield {
-        kind: "response",
-        messageId: this.nextId("deadline"),
-        inReplyTo: request.messageId,
-        requestId: request.requestId,
-        ok: false,
-        final: true,
-        outcome: "failed",
-        code: "DEADLINE_EXCEEDED",
-      };
-      return;
-    }
-    const executeMethod = this.handler.capabilities.methods.find((method) => method.name === "execute");
-    const streaming = executeMethod?.profiles?.includes("streaming") === true;
-    if (!streaming) {
-      let payload: Record<string, unknown> = {};
-      let outcome: ModuleOutcome = "completed";
-      try {
-        for await (const item of this.handler.execute(request)) {
-          payload = item.payload;
-          if (item.outcome) outcome = item.outcome;
-        }
-        this.host.recordFinal(request.operationId, request.requestId, outcome);
-        yield {
-          kind: "response",
-          messageId: this.nextId("completed"),
-          inReplyTo: request.messageId,
-          requestId: request.requestId,
-          ok: outcome === "completed",
-          final: true,
-          outcome,
-          payload,
-        };
-      } catch (error) {
-        this.host.recordFinal(request.operationId, request.requestId, "failed");
-        yield {
-          kind: "response",
-          messageId: this.nextId("failed"),
-          inReplyTo: request.messageId,
-          requestId: request.requestId,
-          ok: false,
-          final: true,
-          outcome: "failed",
-          code: "MODULE_EXECUTION_FAILED",
-          error: { message: error instanceof Error ? error.message : String(error) },
-        };
-      }
-      return;
-    }
-    const streamId = this.nextId("stream");
-    const accepted: ModuleResponse = {
-      kind: "response",
-      messageId: this.nextId("accepted"),
-      inReplyTo: request.messageId,
-      requestId: request.requestId,
-      ok: true,
-      streamId,
-      cursor: 0,
-    };
-    yield accepted;
-    const history: ModuleEvent[] = [];
-    this.streams.set(streamId, history);
-    let sequence = 0;
-    let finalSeen = false;
-    try {
-      for await (const item of this.handler.execute(request)) {
-        if (finalSeen) continue;
-        const event: ModuleEvent = {
-          kind: "event",
-          eventType: item.eventType,
-          streamId,
-          sequence: sequence++,
-          runId: request.runId,
-          operationId: request.operationId,
-          requestId: request.requestId,
-          ...(item.toolCallId ? { toolCallId: item.toolCallId } : {}),
-          final: item.final === true,
-          ...(item.outcome ? { outcome: item.outcome } : {}),
-          payload: item.payload,
-        };
-        const acceptedSequence = this.host.acceptSequence(request.operationId, streamId, event.sequence);
-        if (!acceptedSequence.accepted) {
-          if (acceptedSequence.gap) throw new Error("SEQUENCE_GAP");
-          continue;
-        }
-        history.push(event);
-        if (event.final) {
-          finalSeen = true;
-          this.host.recordFinal(request.operationId, request.requestId, event.outcome ?? "completed");
-        }
-        yield event;
-      }
-      if (!finalSeen) {
-        const event: ModuleEvent = {
-          kind: "event",
-          eventType: "execute.completed",
-          streamId,
-          sequence: sequence++,
-          runId: request.runId,
-          operationId: request.operationId,
-          requestId: request.requestId,
-          final: true,
-          outcome: "completed",
-          payload: {},
-        };
-        history.push(event);
-        this.host.recordFinal(request.operationId, request.requestId, "completed");
-        yield event;
-      }
-    } catch (error) {
-      this.host.recordFinal(request.operationId, request.requestId, "failed");
-      yield {
-        kind: "error",
-        messageId: this.nextId("error"),
-        code: "MODULE_EXECUTION_FAILED",
-        message: error instanceof Error ? error.message : String(error),
-        retryability: "retry_after_status",
-      };
-    }
-  }
-
-  cancel(request: Extract<ModuleControlRequest, { method: "cancel" }>): ModuleResponse {
-    let snapshot: ModuleOperationSnapshot;
-    try {
-      snapshot = this.host.requestCancel(request.operationId);
-    } catch {
-      return {
-        kind: "response",
-        messageId: this.nextId("cancel"),
-        inReplyTo: request.messageId,
-        ok: false,
-        code: "UNKNOWN_OPERATION",
-      };
-    }
-    void this.handler.cancel?.(request);
-    return {
-      kind: "response",
-      messageId: this.nextId("cancel"),
-      inReplyTo: request.messageId,
-      ok: true,
-      requestId: request.requestId,
-      payload: snapshot as unknown as Record<string, unknown>,
-    };
-  }
-
-  status(request: Extract<ModuleControlRequest, { method: "status" }>): ModuleResponse {
-    const operationId = this.requestOperations.get(request.requestId);
-    const snapshot = operationId ? this.host.status(operationId) : undefined;
-    return {
-      kind: "response",
-      messageId: this.nextId("status"),
-      inReplyTo: request.messageId,
-      requestId: request.requestId,
-      ok: snapshot !== undefined,
-      ...(snapshot ? { payload: snapshot as unknown as Record<string, unknown> } : { code: "UNKNOWN_REQUEST" }),
-    };
-  }
-
-  resume(request: Extract<ModuleControlRequest, { method: "resume" }>): ModuleResponse | ModuleEvent[] {
-    if (request.previousBinding.moduleInstanceId !== this.moduleInstanceId
-      || request.previousBinding.connectionGeneration !== this.connectionGeneration) {
-      return {
-        kind: "response",
-        messageId: this.nextId("resume"),
-        inReplyTo: request.messageId,
-        ok: false,
-        code: "BINDING_MISMATCH",
-      };
-    }
-    const history = this.streams.get(request.streamId);
-    if (!history) {
-      return {
-        kind: "response",
-        messageId: this.nextId("resume"),
-        inReplyTo: request.messageId,
-        ok: false,
-        code: "CURSOR_EXPIRED",
-      };
-    }
-    const replay = history.filter((event) => event.sequence > request.lastAppliedSequence);
-    return replay;
-  }
-
-  ack(request: Extract<ModuleControlRequest, { method: "ack" }>): ModuleResponse {
-    return {
-      kind: "response",
-      messageId: this.nextId("ack"),
-      inReplyTo: request.messageId,
-      ok: this.streams.has(request.streamId),
-      ...(this.streams.has(request.streamId) ? {} : { code: "CURSOR_EXPIRED" }),
-    };
-  }
-
-  private nextId(prefix: string): string {
-    return `${prefix}-${this.uuid()}`;
-  }
-}
-
-function cloneSnapshot(snapshot: ModuleOperationSnapshot): ModuleOperationSnapshot {
-  return { ...snapshot, requestIds: [...snapshot.requestIds] };
-}
 
 /** Narrow model adapter contract used by AgentLoop. */
 export type ModelExecutionContext = {

@@ -6,6 +6,8 @@ export type PilotDeckCommandOptions = {
   env?: NodeJS.ProcessEnv;
   timeoutMs: number;
   signal?: AbortSignal;
+  /** Optional UTF-8 payload written to stdin before waiting for exit. */
+  stdin?: string;
   /** Called on each stdout chunk as it arrives. Errors thrown by the callback are swallowed. */
   onStdout?: (chunk: string) => void;
   /** Called on each stderr chunk as it arrives. Errors thrown by the callback are swallowed. */
@@ -39,7 +41,7 @@ export class NodeShellCommandRunner implements PilotDeckCommandRunner {
         shell: true,
         detached: !isWindows,
         windowsHide: isWindows,
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: ["pipe", "pipe", "pipe"],
       });
 
       let stdout = "";
@@ -145,6 +147,16 @@ export class NodeShellCommandRunner implements PilotDeckCommandRunner {
           }
         }
       });
+      child.stdin?.on("error", (error) => {
+        // A command can exit before this runner closes its input. EPIPE is the
+        // normal result of that race; process exit still owns the outcome.
+        if (isBrokenPipeError(error) || settled) return;
+        stdout += stdoutDecoder.flush();
+        stderr += stderrDecoder.flush();
+        cleanup();
+        reject(error);
+      });
+      child.stdin?.end(options.stdin ?? "");
       child.on("error", (error) => {
         stdout += stdoutDecoder.flush();
         stderr += stderrDecoder.flush();
@@ -176,6 +188,10 @@ export class NodeShellCommandRunner implements PilotDeckCommandRunner {
       });
     });
   }
+}
+
+function isBrokenPipeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error && error.code === "EPIPE";
 }
 
 export type ShellOutputDecoder = {

@@ -1,13 +1,18 @@
-import { spawn } from "node:child_process";
 import path from "node:path";
 import { parse as parseCsv } from "csv-parse/sync";
 import { parseFragment as parseHtmlFragment, type ParserError } from "parse5";
 import { LineCounter, parseDocument } from "yaml";
+import { createNodeSubprocessPort, type SubprocessPort } from "../../execution-world/SubprocessPort.js";
 
 export type SyntaxDiagnostic = {
   line: number;
   column: number;
   message: string;
+};
+
+export type SyntaxDiagnosticsOptions = {
+  /** Direct executable provider used by language checkers. */
+  subprocess?: Pick<SubprocessPort, "executeFile">;
 };
 
 type CheckerResult = {
@@ -71,9 +76,10 @@ except ValueError as exc:
 export async function formatSyntaxDiagnostics(
   filePath: string,
   content: string,
+  options: SyntaxDiagnosticsOptions = {},
 ): Promise<string | undefined> {
   try {
-    const diagnostics = await collectSyntaxDiagnostics(filePath, content);
+    const diagnostics = await collectSyntaxDiagnostics(filePath, content, options);
     if (diagnostics.length === 0) {
       return undefined;
     }
@@ -91,6 +97,7 @@ export async function formatSyntaxDiagnostics(
 async function collectSyntaxDiagnostics(
   filePath: string,
   content: string,
+  options: SyntaxDiagnosticsOptions,
 ): Promise<SyntaxDiagnostic[]> {
   const extension = path.extname(filePath).toLowerCase();
   const filename = path.basename(filePath).toLowerCase();
@@ -101,10 +108,10 @@ async function collectSyntaxDiagnostics(
     return await collectTypeScriptDiagnostics(filePath, content, extension);
   }
   if (PYTHON_EXTENSIONS.has(extension)) {
-    return await collectPythonDiagnostics(filePath, content);
+    return await collectPythonDiagnostics(filePath, content, options);
   }
   if (BASH_EXTENSIONS.has(extension) || BASH_FILENAMES.has(filename)) {
-    return await collectBashDiagnostics(content);
+    return await collectBashDiagnostics(content, options);
   }
   if (YAML_EXTENSIONS.has(extension)) {
     return collectYamlDiagnostics(content);
@@ -172,8 +179,9 @@ async function collectTypeScriptDiagnostics(
 export async function collectPythonSyntaxDiagnostics(
   filePath: string,
   content: string,
+  options: SyntaxDiagnosticsOptions = {},
 ): Promise<SyntaxDiagnostic[]> {
-  const result = await runChecker("python3", ["-c", PYTHON_SYNTAX_CHECKER, filePath], content);
+  const result = await runChecker("python3", ["-c", PYTHON_SYNTAX_CHECKER, filePath], content, options);
   if (!result || result.timedOut || result.code === 0) {
     return [];
   }
@@ -191,12 +199,13 @@ export async function collectPythonSyntaxDiagnostics(
 async function collectPythonDiagnostics(
   filePath: string,
   content: string,
+  options: SyntaxDiagnosticsOptions,
 ): Promise<SyntaxDiagnostic[]> {
-  return collectPythonSyntaxDiagnostics(filePath, content);
+  return collectPythonSyntaxDiagnostics(filePath, content, options);
 }
 
-async function collectBashDiagnostics(content: string): Promise<SyntaxDiagnostic[]> {
-  const result = await runChecker("bash", ["-n", "-s"], content);
+async function collectBashDiagnostics(content: string, options: SyntaxDiagnosticsOptions): Promise<SyntaxDiagnostic[]> {
+  const result = await runChecker("bash", ["-n", "-s"], content, options);
   if (!result || result.timedOut || result.code === 0) {
     return [];
   }
@@ -392,59 +401,28 @@ async function runChecker(
   command: string,
   args: string[],
   input: string,
+  options: SyntaxDiagnosticsOptions,
 ): Promise<CheckerResult | undefined> {
-  return await new Promise((resolve) => {
-    let settled = false;
-    let stdout = "";
-    let stderr = "";
-    const child = spawn(command, args, {
-      stdio: ["pipe", "pipe", "pipe"],
+  const subprocess = options.subprocess ?? createNodeSubprocessPort();
+  if (!subprocess.executeFile) return undefined;
+  try {
+    const result = await subprocess.executeFile({
+      executable: command,
+      args,
+      cwd: process.cwd(),
+      env: process.env,
+      timeoutMs: CHECKER_TIMEOUT_MS,
+      stdin: input,
     });
-
-    const finish = (result: CheckerResult | undefined): void => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      clearTimeout(timer);
-      resolve(result);
+    return {
+      code: result.exitCode,
+      stdout: result.stdout.slice(0, MAX_CHECKER_OUTPUT_BYTES),
+      stderr: result.stderr.slice(0, MAX_CHECKER_OUTPUT_BYTES),
+      timedOut: result.timedOut,
     };
-
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      finish({
-        code: null,
-        stdout,
-        stderr,
-        timedOut: true,
-      });
-    }, CHECKER_TIMEOUT_MS);
-
-    child.on("error", () => finish(undefined));
-    child.stdout.on("data", (chunk: Buffer) => {
-      stdout = appendCapped(stdout, chunk);
-    });
-    child.stderr.on("data", (chunk: Buffer) => {
-      stderr = appendCapped(stderr, chunk);
-    });
-    child.on("close", (code) => {
-      finish({
-        code,
-        stdout,
-        stderr,
-        timedOut: false,
-      });
-    });
-
-    child.stdin.end(input);
-  });
-}
-
-function appendCapped(current: string, chunk: Buffer): string {
-  if (current.length >= MAX_CHECKER_OUTPUT_BYTES) {
-    return current;
+  } catch {
+    return undefined;
   }
-  return `${current}${chunk.toString("utf8")}`.slice(0, MAX_CHECKER_OUTPUT_BYTES);
 }
 
 function parseJsonLineColumn(message: string): { line: number; column: number } | undefined {

@@ -144,11 +144,15 @@ export function createTodoWriteTool(): PilotDeckToolDefinition<TodoWriteInput, T
 
       if (Array.isArray(input.todos)) {
         mode = "structured";
-        todos = context.planTodo?.writeTodos(input.todos, { merge, reason }) ?? normalizeTodoUpdatesForFallback(input.todos);
+        todos = context.planTodo
+          ? await context.planTodo.writeTodos(input.todos, { turnId: context.turnId, merge, reason })
+          : normalizeTodoUpdatesForFallback(input.todos);
       } else if (typeof input.markdown === "string") {
         mode = "markdown";
         todos = parseTodoMarkdown(input.markdown);
-        todos = context.planTodo?.recordTodoWrite(input.markdown, todos, { reason }) ?? todos;
+        todos = context.planTodo
+          ? await context.planTodo.recordTodoWrite(input.markdown, todos, { turnId: context.turnId, reason })
+          : todos;
       }
       snapshot = context.planTodo?.getSnapshot();
       const diagnostics = snapshot?.todoDiagnostics;

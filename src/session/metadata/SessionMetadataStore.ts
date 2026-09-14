@@ -20,15 +20,31 @@ export class SessionMetadataStore {
   }
 
   async saveTitle(title: string, turnId = "metadata"): Promise<void> {
-    await this.record(turnId, { title, updatedAt: this.now().toISOString() });
+    await this.record(turnId, { title, titleSource: "user", titleSourceTurnId: turnId, updatedAt: this.now().toISOString() });
   }
 
-  async saveAiTitle(aiTitle: string, turnId = "metadata"): Promise<void> {
+  async saveAiTitle(
+    aiTitle: string,
+    turnId = "metadata",
+    provenance: Pick<SessionMetadataValue, "titleProviderId" | "titleModel" | "titleMessageSequences"> = {},
+  ): Promise<void> {
     if (this.metadata.title) {
-      await this.record(turnId, { aiTitle, updatedAt: this.now().toISOString() });
+      // A custom title is the durable user pin. Keep its source semantics
+      // intact even if a previously-started provider finishes late.
+      await this.record(turnId, {
+        aiTitle,
+        ...provenance,
+        updatedAt: this.now().toISOString(),
+      });
       return;
     }
-    await this.record(turnId, { aiTitle, updatedAt: this.now().toISOString() });
+    await this.record(turnId, {
+      aiTitle,
+      titleSource: provenance.titleProviderId ? "provider" : "fallback",
+      titleSourceTurnId: turnId,
+      ...provenance,
+      updatedAt: this.now().toISOString(),
+    });
   }
 
   async saveTag(tag: string, turnId = "metadata"): Promise<void> {
@@ -78,11 +94,11 @@ export class SessionMetadataStore {
   }
 
   async record(turnId: string, metadata: SessionMetadataValue): Promise<void> {
-    this.metadata = mergeMetadata(this.metadata, metadata);
     if (!this.options.transcript.recordSessionMetadata) {
       throw new Error("Transcript writer does not support session metadata entries.");
     }
     await this.options.transcript.recordSessionMetadata(this.options.sessionId, turnId, metadata);
+    this.metadata = mergeMetadata(this.metadata, metadata);
   }
 }
 
@@ -99,5 +115,7 @@ function cloneMetadata(metadata: SessionMetadataValue): SessionMetadataValue {
   return {
     ...metadata,
     linkedPullRequest: metadata.linkedPullRequest ? { ...metadata.linkedPullRequest } : undefined,
+    ...(metadata.titleModel ? { titleModel: { ...metadata.titleModel } } : {}),
+    ...(metadata.titleMessageSequences ? { titleMessageSequences: [...metadata.titleMessageSequences] } : {}),
   };
 }

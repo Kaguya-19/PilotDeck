@@ -7,7 +7,7 @@ import { countTokens } from "../../context/budget/tokenizer.js";
 
 export { countTokens };
 
-export function countMessagesTokens(messages: CanonicalMessage[]): number {
+export function countMessagesTokens(messages: readonly CanonicalMessage[]): number {
   const chunks: string[] = [];
   for (const msg of messages) {
     for (const block of msg.content) {
@@ -30,7 +30,7 @@ export function countMessagesTokens(messages: CanonicalMessage[]): number {
   return countTokens(chunks.join("\n"));
 }
 
-export function countResponseTokens(events: CanonicalModelEvent[]): number {
+export function countResponseTokens(events: readonly CanonicalModelEvent[]): number {
   const chunks: string[] = [];
   for (const event of events) {
     if (event.type === "text_delta") {

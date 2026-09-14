@@ -1,0 +1,97 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import type { AgentInput, AgentSession, AgentSubmitOptions } from "../../src/agent/index.js";
+import { InProcessGateway } from "../../src/gateway/client/InProcessGateway.js";
+import { GatewaySessionPermissionModeRegistry } from "../../src/gateway/permission/GatewaySessionPermissionModeRegistry.js";
+import { SessionRouter } from "../../src/gateway/SessionRouter.js";
+
+test("Gateway carries successful plan transitions into later turns and restores on exit", async () => {
+  const modes = new GatewaySessionPermissionModeRegistry();
+  const submittedModes: Array<string | undefined> = [];
+  let submitCount = 0;
+  const session = fakeSession(() => {
+    submitCount += 1;
+    if (submitCount === 1) return "plan";
+    if (submitCount === 3) return "default";
+    return undefined;
+  }, (mode) => submittedModes.push(mode));
+  const router = new SessionRouter({ idleSweepIntervalMs: 0, createSession: () => session });
+  const gateway = new InProcessGateway(router, {
+    uuid: (() => {
+      let next = 0;
+      return () => `run-${++next}`;
+    })(),
+    permissionModes: modes,
+  });
+
+  for (let index = 0; index < 4; index += 1) {
+    for await (const _event of gateway.submitTurn({
+      sessionKey: "session-mode",
+      channelKey: "test",
+      message: `turn-${index}`,
+    })) {
+      // Drain the stream so Gateway finalization records the live mode.
+    }
+  }
+
+  assert.deepEqual(submittedModes.slice(1), ["plan", "plan", "default"]);
+  assert.equal(modes.get("session-mode"), "default");
+
+  await gateway.closeSession({ sessionKey: "session-mode" });
+  assert.equal(modes.get("session-mode"), undefined);
+});
+
+test("permission mode registry clears volatile session state", () => {
+  const registry = new GatewaySessionPermissionModeRegistry();
+  registry.set("session-a", "plan");
+  assert.equal(registry.get("session-a"), "plan");
+  registry.clear("session-a");
+  assert.equal(registry.get("session-a"), undefined);
+  registry.set("session-b", "default");
+  registry.dispose();
+  assert.equal(registry.get("session-b"), undefined);
+});
+
+function fakeSession(
+  requestedMode: () => "plan" | "default" | undefined,
+  observeMode: (mode: string | undefined) => void,
+): AgentSession {
+  return {
+    async *submit(_input: AgentInput, options: AgentSubmitOptions = {}) {
+      observeMode(options.permissionMode);
+      const turnId = options.turnId ?? "turn-mode";
+      yield { type: "turn_started", sessionId: "session-mode", turnId };
+      const mode = requestedMode();
+      if (mode) {
+        yield { type: "mode_change_requested", sessionId: "session-mode", turnId, mode };
+      }
+      yield {
+        type: "turn_completed",
+        sessionId: "session-mode",
+        turnId,
+        result: {
+          type: "success",
+          sessionId: "session-mode",
+          turnId: options.turnId,
+          stopReason: "completed",
+          usage: {},
+          permissionDenials: [],
+          turns: 1,
+          startedAt: "2026-09-12T00:00:00.000Z",
+          completedAt: "2026-09-12T00:00:01.000Z",
+        },
+      };
+    },
+    abort() {},
+    snapshot() {
+      return {
+        sessionId: "session-mode",
+        messages: [],
+        usage: {},
+        status: "idle",
+        permissionDenials: [],
+      };
+    },
+  } as unknown as AgentSession;
+}

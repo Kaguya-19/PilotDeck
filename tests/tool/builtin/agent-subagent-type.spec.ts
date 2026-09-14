@@ -78,6 +78,32 @@ test("agent tool defaults general-purpose to explore in ask mode", async () => {
   assert.deepEqual(calls, ["explore"]);
 });
 
+test("agent tool keeps host-owned one-shot sidechain references in its result", async () => {
+  const tool = createAgentTool();
+  const result = await tool.execute(
+    { description: "inspect transcript", prompt: "inspect", subagent_type: "explore" },
+    baseContext({
+      depth: 0,
+      maxSubagentDepth: 1,
+      listDefinitions: () => [{ id: "explore", description: "explore" }],
+      isAllowedDefinition: (id) => id === "explore",
+      fork: async () => ({
+        markdown: "Scope: test\nResult: ok",
+        usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+        turns: 1,
+        durationMs: 1,
+        subagentSessionId: "parent::sub::child-1",
+        transcriptRelativePath: "sessions/parent/subagents/child-1.jsonl",
+      }),
+    }),
+  );
+
+  assert.equal(result.data?.subagentSessionId, "parent::sub::child-1");
+  assert.equal(result.data?.transcriptRelativePath, "sessions/parent/subagents/child-1.jsonl");
+  assert.equal(result.metadata?.subagentSessionId, "parent::sub::child-1");
+  assert.equal(result.metadata?.transcriptRelativePath, "sessions/parent/subagents/child-1.jsonl");
+});
+
 test("agent tool preserves unknown custom fallback subagent names", async () => {
   const requests: string[] = [];
   const model: PilotDeckToolModelClient = {

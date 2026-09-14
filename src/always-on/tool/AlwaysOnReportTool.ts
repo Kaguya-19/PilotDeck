@@ -31,6 +31,7 @@ export function createAlwaysOnReportTool(
     description:
       "Persist the work-report markdown for the current Always-On execution turn. Missing required sections are filled by the runtime fallback; do not fight the contract.",
     kind: "session",
+    requiredRuntimeCapabilities: ["always_on_run_context"],
     inputSchema: {
       type: "object",
       required: ["content"],

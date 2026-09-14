@@ -3,11 +3,20 @@ import type { PilotDeckToolDefinition } from "../protocol/types.js";
 import { PilotDeckToolRuntimeError } from "../protocol/errors.js";
 import { resolvePilotDeckWorkspacePath } from "./filesystem/pathSafety.js";
 import { ripgrepFiles } from "./filesystem/ripgrepFiles.js";
+import { createNodeFsPort } from "../execution-world/NodeFsPort.js";
+import type { FsPort } from "../execution-world/FsPort.js";
+import { createNodeSubprocessPort } from "../execution-world/SubprocessPort.js";
+import type { SubprocessPort } from "../execution-world/SubprocessPort.js";
 
 export type GlobInput = {
   pattern: string;
   path?: string;
   limit?: number;
+};
+
+export type CreateGlobToolOptions = {
+  fs?: FsPort;
+  subprocess?: Pick<SubprocessPort, "executeFile">;
 };
 
 export function extractGlobBaseDirectory(pattern: string): {
@@ -45,7 +54,9 @@ export function extractGlobBaseDirectory(pattern: string): {
   return { baseDir, relativePattern };
 }
 
-export function createGlobTool(): PilotDeckToolDefinition<GlobInput> {
+export function createGlobTool(options: CreateGlobToolOptions = {}): PilotDeckToolDefinition<GlobInput> {
+  const fs = options.fs ?? createNodeFsPort();
+  const subprocess = options.subprocess ?? createNodeSubprocessPort();
   return {
     name: "glob",
     aliases: ["Glob"],
@@ -109,6 +120,8 @@ export function createGlobTool(): PilotDeckToolDefinition<GlobInput> {
         limit: input.limit,
         env: context.env,
         signal: context.abortSignal,
+        fs,
+        subprocess,
       });
       const workspacePrefix = resolvedSearchPath.relativePath === "." ? "" : `${resolvedSearchPath.relativePath}/`;
       const workspaceFiles = result.files.map((file) => `${workspacePrefix}${file}`);

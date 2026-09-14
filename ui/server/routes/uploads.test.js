@@ -8,6 +8,27 @@ afterEach(() => {
 });
 
 describe('upload routes', () => {
+  it('consumes an injected upload lifecycle provider for HTTP creation and cancellation', async () => {
+    const calls = [];
+    const lifecycle = createLifecycle(calls);
+    const { app } = await createUploadsApp(lifecycle);
+
+    const created = await request(app, '/api/uploads', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'idempotency-key': 'retry-1' },
+      body: JSON.stringify({ projectKey: '/project', files: [{ clientFileId: 'note' }] }),
+    });
+    const cancelled = await request(app, '/api/uploads/upload-1', { method: 'DELETE' });
+
+    expect(created.status).toBe(201);
+    expect(JSON.parse(created.text).uploadId).toBe('upload-1');
+    expect(cancelled.status).toBe(204);
+    expect(calls).toEqual([
+      ['create', '/project', [{ clientFileId: 'note' }], 'retry-1'],
+      ['cancel', 'upload-1'],
+    ]);
+  });
+
   it('does not miss a terminal event emitted while loading the SSE snapshot', async () => {
     const { app, store } = await createUploadsApp();
     const created = uploadRecord('created');
@@ -56,12 +77,35 @@ describe('upload routes', () => {
   });
 });
 
-async function createUploadsApp() {
-  const { default: routes, uploadStore } = await import('./uploads.js');
+async function createUploadsApp(lifecycle) {
+  const { default: routes, uploadStore, createUploadRoutes } = await import('./uploads.js');
   const app = express();
   app.use(express.json());
-  app.use('/api/uploads', routes);
+  app.use('/api/uploads', lifecycle ? createUploadRoutes(lifecycle) : routes);
   return { app, store: uploadStore };
+}
+
+function createLifecycle(calls) {
+  return {
+    async create(projectKey, files, idempotencyKey) {
+      calls.push(['create', projectKey, files, idempotencyKey]);
+      return uploadRecord('created');
+    },
+    async get(uploadId) {
+      calls.push(['get', uploadId]);
+      return uploadRecord('created');
+    },
+    async writePart() { throw new Error('not used'); },
+    async complete() { return uploadRecord('completed'); },
+    async cancel(uploadId) {
+      calls.push(['cancel', uploadId]);
+      return uploadRecord('cancelled');
+    },
+    async fail() { return uploadRecord('failed'); },
+    subscribe() { return () => {}; },
+    async cleanupExpired() { return 0; },
+    async acquireAttachmentLease() { throw new Error('not used'); },
+  };
 }
 
 function uploadRecord(status) {

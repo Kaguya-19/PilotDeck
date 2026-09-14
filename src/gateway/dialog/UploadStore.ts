@@ -1,46 +1,26 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
-import { mkdir, open, readFile, readdir, realpath, rename, rm, stat } from "node:fs/promises";
+import { link, mkdir, open, readFile, readdir, realpath, rename, rm, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { EventEmitter } from "node:events";
 import { Transform, type Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { DialogGatewayError } from "./errors.js";
+import type { UploadArtifactLease, UploadedAttachment } from "./UploadArtifactLeasePort.js";
+import type {
+  UploadLifecyclePort,
+  UploadManifestEntry,
+  UploadRecord,
+  UploadStatus,
+} from "./UploadLifecyclePort.js";
 
-export type UploadStatus = "created" | "uploading" | "completed" | "failed" | "cancelled" | "expired";
-export type UploadManifestEntry = {
-  clientFileId: string;
-  name: string;
-  relativePath: string;
-  size: number;
-  mimeType?: string;
-  sha256?: string;
-};
-export type UploadedAttachment = {
-  attachmentId: string;
-  name: string;
-  relativePath: string;
-  mimeType?: string;
-  bytes: number;
-  sha256: string;
-  path: string;
-};
-export type UploadRecord = {
-  uploadId: string;
-  projectKey: string;
-  status: UploadStatus;
-  manifest: UploadManifestEntry[];
-  totalBytes: number;
-  uploadedBytes: number;
-  createdAt: string;
-  updatedAt: string;
-  expiresAt: string;
-  idempotencyKeyHash?: string;
-  attachments?: UploadedAttachment[];
-  receivedClientFileIds?: string[];
-  errorCode?: string;
-  errorMessage?: string;
-};
+export type { UploadArtifactLease, UploadedAttachment } from "./UploadArtifactLeasePort.js";
+export type {
+  UploadLifecyclePort,
+  UploadManifestEntry,
+  UploadRecord,
+  UploadStatus,
+} from "./UploadLifecyclePort.js";
 
 export type UploadStoreOptions = {
   resolveProject: (projectKey: string) => Promise<string>;
@@ -52,6 +32,8 @@ export type UploadStoreOptions = {
   maxFiles?: number;
   maxConcurrentPerProject?: number;
   retentionMs?: number;
+  /** Maximum lifetime of a crash-orphaned Gateway artifact lease. */
+  leaseRetentionMs?: number;
 };
 
 const DEFAULTS = {
@@ -60,9 +42,11 @@ const DEFAULTS = {
   maxFiles: 500,
   maxConcurrentPerProject: 3,
   retentionMs: 24 * 60 * 60 * 1000,
+  leaseRetentionMs: 6 * 60 * 60 * 1000,
 };
 
-export class UploadStore {
+/** Native filesystem provider for the UploadLifecyclePort. */
+export class UploadStore implements UploadLifecyclePort {
   private readonly events = new EventEmitter();
   private readonly updates = new Map<string, Promise<void>>();
   private readonly projectCreates = new Map<string, Promise<void>>();
@@ -241,11 +225,67 @@ export class UploadStore {
         await rm(this.taskDir(record), { recursive: true, force: true });
         count += 1;
       }
+      await this.cleanupExpiredLeases(canonical);
     }
     return count;
   }
 
   async verifyAttachment(uploadId: string, projectKey: string, attachmentIds?: string[]): Promise<UploadedAttachment[]> {
+    return (await this.getVerifiedAttachments(uploadId, projectKey, attachmentIds)).attachments;
+  }
+
+  /**
+   * Creates a process-independent hard-link lease for verified artifacts.
+   *
+   * UI cleanup may remove the completed upload while a Gateway turn is still
+   * running. The lease gives that turn stable paths without moving upload
+   * ownership or retention policy out of this provider.
+   */
+  async acquireAttachmentLease(
+    uploadId: string,
+    projectKey: string,
+    attachmentIds?: string[],
+  ): Promise<UploadArtifactLease> {
+    const { record, attachments } = await this.getVerifiedAttachments(uploadId, projectKey, attachmentIds);
+    const leaseDir = this.leaseDir(record, randomUUID());
+    const leaseExpiresAt = new Date(
+      this.now().getTime() + (this.options.leaseRetentionMs ?? DEFAULTS.leaseRetentionMs),
+    ).toISOString();
+    await mkdir(leaseDir, { recursive: true });
+    try {
+      await this.writeLeaseExpiry(leaseDir, leaseExpiresAt);
+      for (const attachment of attachments) {
+        await link(attachment.path, join(leaseDir, attachment.attachmentId));
+      }
+    } catch (error) {
+      await rm(leaseDir, { recursive: true, force: true });
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        throw new DialogGatewayError(
+          "ATTACHMENT_TAMPERED",
+          "Attachment artifact became unavailable while acquiring its Gateway lease.",
+        );
+      }
+      throw error;
+    }
+
+    let released: Promise<void> | undefined;
+    return {
+      attachments: attachments.map((attachment) => ({
+        ...attachment,
+        path: join(leaseDir, attachment.attachmentId),
+      })),
+      release: () => {
+        released ??= rm(leaseDir, { recursive: true, force: true });
+        return released;
+      },
+    };
+  }
+
+  private async getVerifiedAttachments(
+    uploadId: string,
+    projectKey: string,
+    attachmentIds?: string[],
+  ): Promise<{ record: UploadRecord; attachments: UploadedAttachment[] }> {
     const record = await this.get(uploadId);
     const canonicalProject = await realpath(await this.options.resolveProject(projectKey));
     if (record.projectKey !== canonicalProject) throw new DialogGatewayError("PROJECT_PATH_FORBIDDEN", "Upload belongs to another project.");
@@ -260,7 +300,7 @@ export class UploadStore {
         throw new DialogGatewayError("ATTACHMENT_TAMPERED", `Attachment integrity check failed: ${attachment.attachmentId}`);
       }
     }
-    return attachments;
+    return { record, attachments };
   }
 
   private async mutate(record: UploadRecord, mutate: (record: UploadRecord) => void): Promise<UploadRecord> {
@@ -288,6 +328,11 @@ export class UploadStore {
   private taskDir(record: Pick<UploadRecord, "projectKey" | "uploadId">): string { return join(record.projectKey, ".tmp", "chat-uploads", record.uploadId); }
   private filesDir(record: Pick<UploadRecord, "projectKey" | "uploadId">): string { return join(this.taskDir(record), "files"); }
   private metadataPath(record: Pick<UploadRecord, "projectKey" | "uploadId">): string { return join(this.taskDir(record), "metadata.json"); }
+  private leaseRoot(projectKey: string): string { return join(projectKey, ".tmp", "chat-upload-leases"); }
+  private leaseDir(record: Pick<UploadRecord, "projectKey" | "uploadId">, leaseId: string): string {
+    return join(this.leaseRoot(record.projectKey), record.uploadId, leaseId);
+  }
+  private leaseMetadataPath(leaseDir: string): string { return join(leaseDir, "lease.json"); }
   private async write(record: UploadRecord): Promise<void> {
     const path = this.metadataPath(record);
     await mkdir(dirname(path), { recursive: true });
@@ -311,6 +356,41 @@ export class UploadStore {
   private async expireIfNeeded(record: UploadRecord): Promise<UploadRecord> {
     if (Date.parse(record.expiresAt) > this.now().getTime() || record.status === "expired") return record;
     return this.mutate(record, (next) => { next.status = "expired"; next.errorCode = "ATTACHMENT_EXPIRED"; next.errorMessage = "Upload expired."; });
+  }
+  private async writeLeaseExpiry(leaseDir: string, expiresAt: string): Promise<void> {
+    const path = this.leaseMetadataPath(leaseDir);
+    const handle = await open(path, "wx", 0o600);
+    try {
+      await handle.writeFile(`${JSON.stringify({ expiresAt })}\n`, "utf8");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  }
+  private async cleanupExpiredLeases(projectKey: string): Promise<void> {
+    const root = this.leaseRoot(projectKey);
+    const uploadIds = await readdir(root).catch(() => []);
+    for (const uploadId of uploadIds.filter(isSafeUploadId)) {
+      const leasesRoot = join(root, uploadId);
+      const leaseIds = await readdir(leasesRoot).catch(() => []);
+      for (const leaseId of leaseIds.filter(isSafeUploadId)) {
+        const leaseDir = join(leasesRoot, leaseId);
+        const metadata = await this.readLeaseExpiry(leaseDir);
+        if (metadata && Date.parse(metadata.expiresAt) > this.now().getTime()) continue;
+        await rm(leaseDir, { recursive: true, force: true });
+      }
+      if ((await readdir(leasesRoot).catch(() => [])).length === 0) {
+        await rm(leasesRoot, { recursive: true, force: true });
+      }
+    }
+  }
+  private async readLeaseExpiry(leaseDir: string): Promise<{ expiresAt: string } | undefined> {
+    try {
+      const raw = JSON.parse(await readFile(this.leaseMetadataPath(leaseDir), "utf8")) as { expiresAt?: unknown };
+      return typeof raw.expiresAt === "string" ? { expiresAt: raw.expiresAt } : undefined;
+    } catch {
+      return undefined;
+    }
   }
 }
 

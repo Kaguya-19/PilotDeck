@@ -2,17 +2,17 @@
  * `task_*` builtin tools — public surface for the C5 background task
  * runtime (§6.5.5 step 4-5).
  *
- *   - task_create  → `BackgroundTaskRuntime.start`
- *   - task_list    → `BackgroundTaskRuntime.list`
- *   - task_output  → `BackgroundTaskRuntime.getOutput` (incremental polling)
- *   - task_wait    → `BackgroundTaskRuntime.wait` + final output slice
- *   - task_stop    → `BackgroundTaskRuntime.stop`
+ *   - task_create  → `BackgroundTaskPort.start`
+ *   - task_list    → `BackgroundTaskPort.list`
+ *   - task_output  → `BackgroundTaskPort.getOutput` (incremental polling)
+ *   - task_wait    → `BackgroundTaskPort.wait` + final output slice
+ *   - task_stop    → `BackgroundTaskPort.stop`
  *
  * The runtime is injected once at registry construction (no per-call
  * lookup); tools without a runtime hand back `unsupported_tool`.
  */
 
-import type { BackgroundTaskRuntime } from "../../task/runtime/BackgroundTaskRuntime.js";
+import type { BackgroundTaskPort } from "../../task/runtime/BackgroundTaskPort.js";
 import type {
   PilotDeckBackgroundBashTask,
   PilotDeckBackgroundTaskKind,
@@ -23,6 +23,7 @@ import { PilotDeckToolRuntimeError } from "../protocol/errors.js";
 import type {
   PilotDeckToolDefinition,
   PilotDeckToolExecutionOutput,
+  PilotDeckToolRuntimeContext,
 } from "../protocol/types.js";
 
 export type TaskCreateInput = {
@@ -86,6 +87,7 @@ export type TaskWaitInput = {
 export type TaskWaitResult = TaskOutputResult & {
   waitedMs: number;
   timedOut: boolean;
+  outcome: "completed" | "timeout" | "aborted" | "unknown";
 };
 
 export type TaskStopInput = {
@@ -106,11 +108,11 @@ const TERMINAL_TASK_STATUSES = new Set<PilotDeckBackgroundTaskStatus>([
 const DEFAULT_TASK_WAIT_TIMEOUT_MS = 600_000;
 const MAX_TASK_WAIT_TIMEOUT_MS = 600_000;
 
-function ensureRuntime(runtime: BackgroundTaskRuntime | undefined): BackgroundTaskRuntime {
+function ensureRuntime(runtime: BackgroundTaskPort | undefined): BackgroundTaskPort {
   if (!runtime) {
     throw new PilotDeckToolRuntimeError(
       "unsupported_tool",
-      "task_* tools require a BackgroundTaskRuntime. Configure one via createBuiltinRegistry({ backgroundTasks: { runtime } }).",
+      "task_* tools require a background-task provider. Configure one via createBuiltinRegistry({ backgroundTasks: { runtime } }).",
     );
   }
   return runtime;
@@ -120,11 +122,20 @@ function isTerminalTaskStatus(status: PilotDeckBackgroundTaskStatus): boolean {
   return TERMINAL_TASK_STATUSES.has(status);
 }
 
+function taskAccess(context: Pick<PilotDeckToolRuntimeContext, "sessionId">) {
+  return { sessionId: context.sessionId };
+}
+
 function formatTaskOutputText(data: TaskOutputResult, requestedOffset: number): string {
   const exitCode = data.exitCode ?? "null";
   const header = `task_output taskId=${data.taskId} status=${data.status} offset=${requestedOffset} nextOffset=${data.nextOffset} totalBytes=${data.totalBytes} truncated=${data.truncated} exitCode=${exitCode}`;
   const hasNewOutput = data.content.length > 0;
   const isFinished = isTerminalTaskStatus(data.status) && data.nextOffset >= data.totalBytes;
+
+  if (data.status === "unknown") {
+    const body = hasNewOutput ? `\n${data.content}` : "";
+    return `${header}${body}\nTask state is unknown after runtime recovery; it cannot be waited or stopped. Inspect persisted output only.`;
+  }
 
   if (!hasNewOutput) {
     const message = isFinished
@@ -147,6 +158,9 @@ function formatTaskWaitText(data: TaskWaitResult, requestedOffset: number): stri
   const isFinished = isTerminalTaskStatus(data.status) && data.nextOffset >= data.totalBytes;
   const body = hasNewOutput ? `\n${data.content}` : "";
 
+  if (data.outcome === "unknown" || data.status === "unknown") {
+    return `${header}${body}\nTask state is unknown after runtime recovery; it cannot be waited or stopped. Inspect persisted output only.`;
+  }
   if (isFinished) {
     return `${header}${body}\nTask finished; no further polling is needed.`;
   }
@@ -157,7 +171,7 @@ function formatTaskWaitText(data: TaskWaitResult, requestedOffset: number): stri
 }
 
 export function createTaskCreateTool(
-  runtime?: BackgroundTaskRuntime,
+  runtime?: BackgroundTaskPort,
 ): PilotDeckToolDefinition<TaskCreateInput, TaskCreateOutput> {
   return {
     name: "task_create",
@@ -209,7 +223,7 @@ export function createTaskCreateTool(
 }
 
 export function createTaskListTool(
-  runtime?: BackgroundTaskRuntime,
+  runtime?: BackgroundTaskPort,
 ): PilotDeckToolDefinition<TaskListInput, TaskListOutput> {
   return {
     name: "task_list",
@@ -237,14 +251,14 @@ export function createTaskListTool(
     },
     isReadOnly: () => true,
     isConcurrencySafe: () => true,
-    execute: async (input): Promise<PilotDeckToolExecutionOutput<TaskListOutput>> => {
+    execute: async (input, context): Promise<PilotDeckToolExecutionOutput<TaskListOutput>> => {
       const rt = ensureRuntime(runtime);
       const filter: PilotDeckBackgroundTaskListFilter = {
         agentId: input.agentId,
         status: input.status,
         kind: input.kind,
       };
-      const tasks = rt.list(filter).map((t) => ({
+      const tasks = rt.list(filter, taskAccess(context)).map((t) => ({
         taskId: t.taskId,
         agentId: t.agentId,
         kind: t.kind,
@@ -280,14 +294,17 @@ function formatTaskListText(tasks: TaskListOutput["tasks"]): string {
       `- taskId=${task.taskId} status=${task.status} kind=${task.kind} pid=${pid} exitCode=${exitCode} outputBytes=${task.outputBytes} interrupted=${task.interrupted} command=${JSON.stringify(command)}`,
     );
     if (!isTerminalTaskStatus(task.status) || task.outputBytes > 0) {
-      lines.push(`  next: use task_output({ taskId: "${task.taskId}", offset: 0 }) to inspect output, or task_wait for a finite running task.`);
+      const next = task.status === "unknown"
+        ? "inspect persisted output only; task_wait and task_stop are unavailable"
+        : "use task_output({ taskId: \"" + task.taskId + "\", offset: 0 }) to inspect output, or task_wait for a finite running task";
+      lines.push(`  next: ${next}.`);
     }
   }
   return lines.join("\n");
 }
 
 export function createTaskOutputTool(
-  runtime?: BackgroundTaskRuntime,
+  runtime?: BackgroundTaskPort,
 ): PilotDeckToolDefinition<TaskOutputInput, TaskOutputResult> {
   return {
     name: "task_output",
@@ -317,9 +334,10 @@ export function createTaskOutputTool(
     maxResultBytes: 200_000,
     isReadOnly: () => true,
     isConcurrencySafe: () => true,
-    execute: async (input): Promise<PilotDeckToolExecutionOutput<TaskOutputResult>> => {
+    execute: async (input, context): Promise<PilotDeckToolExecutionOutput<TaskOutputResult>> => {
       const rt = ensureRuntime(runtime);
-      const task = rt.get(input.taskId);
+      const access = taskAccess(context);
+      const task = rt.get(input.taskId, access);
       if (!task) {
         throw new PilotDeckToolRuntimeError(
           "invalid_tool_input",
@@ -327,7 +345,7 @@ export function createTaskOutputTool(
         );
       }
       const requestedOffset = input.offset ?? 0;
-      const slice = rt.getOutput(input.taskId, requestedOffset, input.maxBytes);
+      const slice = rt.getOutput(input.taskId, requestedOffset, input.maxBytes, access);
       const data: TaskOutputResult = {
         taskId: input.taskId,
         content: slice.content,
@@ -346,7 +364,7 @@ export function createTaskOutputTool(
 }
 
 export function createTaskWaitTool(
-  runtime?: BackgroundTaskRuntime,
+  runtime?: BackgroundTaskPort,
 ): PilotDeckToolDefinition<TaskWaitInput, TaskWaitResult> {
   return {
     name: "task_wait",
@@ -403,7 +421,8 @@ export function createTaskWaitTool(
     },
     execute: async (input, context): Promise<PilotDeckToolExecutionOutput<TaskWaitResult>> => {
       const rt = ensureRuntime(runtime);
-      const task = rt.get(input.taskId);
+      const access = taskAccess(context);
+      const task = rt.get(input.taskId, access);
       if (!task) {
         throw new PilotDeckToolRuntimeError(
           "invalid_tool_input",
@@ -414,7 +433,7 @@ export function createTaskWaitTool(
       const waited = await rt.wait(input.taskId, {
         timeoutMs: input.timeoutMs ?? DEFAULT_TASK_WAIT_TIMEOUT_MS,
         abortSignal: context.abortSignal,
-      });
+      }, access);
       if (!waited) {
         throw new PilotDeckToolRuntimeError(
           "invalid_tool_input",
@@ -427,7 +446,7 @@ export function createTaskWaitTool(
           `task_wait aborted before task ${input.taskId} finished.`,
         );
       }
-      const slice = rt.getOutput(input.taskId, requestedOffset, input.maxBytes);
+      const slice = rt.getOutput(input.taskId, requestedOffset, input.maxBytes, access);
       const data: TaskWaitResult = {
         taskId: input.taskId,
         content: slice.content,
@@ -438,6 +457,7 @@ export function createTaskWaitTool(
         exitCode: waited.task.exitCode,
         waitedMs: waited.waitedMs,
         timedOut: waited.timedOut,
+        outcome: waited.outcome,
       };
       return {
         content: [{ type: "text", text: formatTaskWaitText(data, requestedOffset) }],
@@ -448,7 +468,7 @@ export function createTaskWaitTool(
 }
 
 export function createTaskStopTool(
-  runtime?: BackgroundTaskRuntime,
+  runtime?: BackgroundTaskPort,
 ): PilotDeckToolDefinition<TaskStopInput, TaskStopResult> {
   return {
     name: "task_stop",
@@ -473,17 +493,24 @@ export function createTaskStopTool(
     isReadOnly: () => false,
     isConcurrencySafe: () => true,
     isDestructive: () => true,
-    execute: async (input): Promise<PilotDeckToolExecutionOutput<TaskStopResult>> => {
+    execute: async (input, context): Promise<PilotDeckToolExecutionOutput<TaskStopResult>> => {
       const rt = ensureRuntime(runtime);
-      const task = rt.get(input.taskId);
+      const access = taskAccess(context);
+      const task = rt.get(input.taskId, access);
       if (!task) {
         throw new PilotDeckToolRuntimeError(
           "invalid_tool_input",
           `Unknown taskId: ${input.taskId}`,
         );
       }
-      await rt.stop(input.taskId, { graceMs: input.graceMs });
-      const after = rt.get(input.taskId)!;
+      if (task.status === "unknown") {
+        throw new PilotDeckToolRuntimeError(
+          "invalid_tool_input",
+          `Task ${input.taskId} has an unknown restored state and cannot be stopped.`,
+        );
+      }
+      await rt.stop(input.taskId, { graceMs: input.graceMs }, access);
+      const after = rt.get(input.taskId, access)!;
       return {
         content: [{ type: "text", text: `task_stop taskId=${input.taskId} status=${after.status}` }],
         data: { taskId: input.taskId, status: after.status },
@@ -493,7 +520,7 @@ export function createTaskStopTool(
 }
 
 export type CreateTaskToolsOptions = {
-  runtime: BackgroundTaskRuntime;
+  runtime: BackgroundTaskPort;
 };
 
 export function createTaskTools(options: CreateTaskToolsOptions): {

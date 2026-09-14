@@ -59,7 +59,7 @@ test("terminal turns return accepted but unapplied guidance before completion", 
     current = await stream.next();
   }
   assert.equal(current.done, false);
-  assert.deepEqual(session.steer({
+  assert.deepEqual(await session.steer({
     turnId: "turn-1",
     itemId: "queue-1",
     message: {
@@ -72,7 +72,7 @@ test("terminal turns return accepted but unapplied guidance before completion", 
   assert.equal(unapplied.done, false);
   assert.equal(unapplied.value?.type, "steer_unapplied");
   assert.equal(unapplied.value?.type === "steer_unapplied" ? unapplied.value.itemId : undefined, "queue-1");
-  assert.deepEqual(session.steer({
+  assert.deepEqual(await session.steer({
     turnId: "turn-1",
     itemId: "queue-2",
     message: {
@@ -133,7 +133,7 @@ test("a partially persisted guidance batch applies only durable messages and ret
 
   let current = await stream.next();
   while (!current.done && current.value.type !== "model_request_started") current = await stream.next();
-  assert.deepEqual(session.steer({
+  assert.deepEqual(await session.steer({
     turnId: "turn-1",
     itemId: "queue-1",
     message: {
@@ -142,7 +142,7 @@ test("a partially persisted guidance batch applies only durable messages and ret
       metadata: { queueItemId: "queue-1" },
     },
   }), { accepted: true });
-  assert.deepEqual(session.steer({
+  assert.deepEqual(await session.steer({
     turnId: "turn-1",
     itemId: "queue-2",
     message: {

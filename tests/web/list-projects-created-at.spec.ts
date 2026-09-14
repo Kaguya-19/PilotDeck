@@ -5,7 +5,10 @@ import { tmpdir } from "node:os";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createCollisionResistantProjectId, createProjectId } from "../../src/pilot/paths.js";
+import { createNodeSessionCatalog } from "../../src/session/catalog/NodeSessionCatalog.js";
 import { describeWebProject, listWebProjects } from "../../src/web/server/listProjects.js";
+
+const sessionCatalog = createNodeSessionCatalog();
 
 test("project summaries expose registration creation time for list and describe", async () => {
   const root = await mkdtemp(join(tmpdir(), "pilotdeck-created-at-"));
@@ -18,8 +21,8 @@ test("project summaries expose registration creation time for list and describe"
   await writeFile(join(storageDir, ".cwd"), `${projectRoot}\n`, "utf8");
   const expectedCreatedAt = (await stat(storageDir)).birthtimeMs;
 
-  const listed = await listWebProjects({ pilotHome });
-  const described = await describeWebProject(projectRoot, { pilotHome });
+  const listed = await listWebProjects({ pilotHome, sessionCatalog });
+  const described = await describeWebProject(projectRoot, { pilotHome, sessionCatalog });
 
   assert.equal(listed.projects[0]?.createdAt, expectedCreatedAt);
   assert.equal(described.createdAt, expectedCreatedAt);
@@ -43,7 +46,7 @@ test("describe resolves the marked project when legacy ids collide", async () =>
   await writeFile(join(secondStorageDir, ".cwd"), `${secondProjectRoot}\n`, "utf8");
 
   const expectedCreatedAt = (await stat(secondStorageDir)).birthtimeMs;
-  const described = await describeWebProject(secondProjectRoot, { pilotHome });
+  const described = await describeWebProject(secondProjectRoot, { pilotHome, sessionCatalog });
 
   assert.equal(described.createdAt, expectedCreatedAt);
 });

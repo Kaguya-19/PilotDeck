@@ -26,7 +26,7 @@ test("provider and model overrides retain configured temperature, speed, and thi
       bypassAvailable: true,
     }),
   };
-  const loop = new AgentLoop(config, {
+  const loop = AgentLoop.fromDependencies(config, {
     router: {} as AgentRuntimeDependencies["router"],
     tools: {
       registry: new ToolRegistry(),
@@ -70,7 +70,7 @@ test("plan-mode reminder is appended after projection and recent3 cache indices 
       bypassAvailable: true,
     }),
   };
-  const loop = new AgentLoop(config, {
+  const loop = AgentLoop.fromDependencies(config, {
     router: {} as AgentRuntimeDependencies["router"],
     context: new DefaultContextRuntime(),
     tools: {
@@ -118,7 +118,7 @@ test("plan-mode reminder does not consume the context message limit", async () =
     }),
     maxContextMessages: 1,
   };
-  const loop = new AgentLoop(config, {
+  const loop = AgentLoop.fromDependencies(config, {
     router: {} as AgentRuntimeDependencies["router"],
     context: new DefaultContextRuntime(),
     tools: {
@@ -170,7 +170,7 @@ test("plan-mode memory retrieval uses the real user request", async () => {
       bypassAvailable: true,
     }),
   };
-  const loop = new AgentLoop(config, {
+  const loop = AgentLoop.fromDependencies(config, {
     router: {} as AgentRuntimeDependencies["router"],
     context: new DefaultContextRuntime({ memoryResolver }),
     tools: {

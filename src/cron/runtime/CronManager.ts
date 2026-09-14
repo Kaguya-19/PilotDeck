@@ -1,8 +1,5 @@
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
-import type { Dirent } from "node:fs";
 import { resolve } from "node:path";
 import type { SessionConfigOverrides } from "../../always-on/runtime/SessionConfigOverrides.js";
-import type { Gateway } from "../../gateway/index.js";
 import type { TelemetryClient } from "../../telemetry/index.js";
 import type { PilotDeckToolDefinition } from "../../tool/index.js";
 import type { CronConfig } from "../config/parseCronConfig.js";
@@ -23,14 +20,15 @@ import type {
   CronUpdateInput,
   CronUpdateResult,
 } from "../protocol/types.js";
-import { resolveCronPaths } from "../storage/CronPaths.js";
-import { createCronCreateTool } from "../tool/CronCreateTool.js";
-import { createCronDeleteTool } from "../tool/CronDeleteTool.js";
-import { createCronListTool } from "../tool/CronListTool.js";
-import { createCronStopTool } from "../tool/CronStopTool.js";
-import { migrateCronStores } from "../storage/CronStoreMigration.js";
+import { createCronToolDefinitions } from "../tool/createCronToolDefinitions.js";
 import { CronRuntime, type CronRuntimeLogger } from "./CronRuntime.js";
 import type { CronTurnEventHandler } from "./CronFire.js";
+import type { CronControlPort } from "./CronControlPort.js";
+import type { CronAgentGatewayPort } from "./CronAgentGatewayPort.js";
+import {
+  createNativeCronProjectStorageProvider,
+  type CronProjectStorageProvider,
+} from "./CronProjectStorageProvider.js";
 
 export type CreateCronManagerOptions = {
   config: CronConfig;
@@ -42,38 +40,43 @@ export type CreateCronManagerOptions = {
   telemetry?: TelemetryClient;
   onResultDelivery?: CronResultDeliveryHandler;
   onTurnEvent?: CronTurnEventHandler;
+  /** Application-selected provider for each project's Cron durable records. */
+  cronStorageProvider?: CronProjectStorageProvider;
 };
 
-export class CronManager {
+/** Native multi-project CronControlPort provider and lifecycle owner. */
+export class CronManager implements CronControlPort {
   readonly config: CronConfig;
 
   private readonly pilotHome: string;
   private readonly runtimes = new Map<string, CronRuntime>();
   private readonly starting = new Map<string, Promise<void>>();
   private readonly tools: PilotDeckToolDefinition[];
-  private gateway?: Gateway;
+  private readonly cronStorageProvider: CronProjectStorageProvider;
+  private agentGateway?: CronAgentGatewayPort;
   private started = false;
 
   constructor(private readonly options: CreateCronManagerOptions) {
     this.config = options.config;
     this.pilotHome = resolve(options.pilotHome);
-    this.tools = [
-      createCronCreateTool(this),
-      createCronListTool(this),
-      createCronDeleteTool(this),
-      createCronStopTool(this),
-    ];
+    this.cronStorageProvider = options.cronStorageProvider ?? createNativeCronProjectStorageProvider();
+    this.tools = createCronToolDefinitions(this);
   }
 
   getTools(): PilotDeckToolDefinition[] {
     return this.config.enabled ? [...this.tools] : [];
   }
 
-  bindGateway(gateway: Gateway): void {
-    if (this.gateway) {
-      throw new Error("CronManager.bindGateway already called.");
+  bindAgentGateway(agentGateway: CronAgentGatewayPort): void {
+    if (this.agentGateway) {
+      throw new Error("CronManager.bindAgentGateway already called.");
     }
-    this.gateway = gateway;
+    this.agentGateway = agentGateway;
+  }
+
+  /** @deprecated Use bindAgentGateway; the parameter is intentionally only the turn facade. */
+  bindGateway(agentGateway: CronAgentGatewayPort): void {
+    this.bindAgentGateway(agentGateway);
   }
 
   async start(): Promise<void> {
@@ -81,15 +84,18 @@ export class CronManager {
       this.options.logger?.info("cron disabled in config; manager is a no-op.");
       return;
     }
-    if (!this.gateway) {
-      throw new Error("CronManager.start called before bindGateway.");
+    if (!this.agentGateway) {
+      throw new Error("CronManager.start called before bindAgentGateway.");
     }
-    await migrateCronStores({
+    await this.cronStorageProvider.migrateLegacy({
       pilotHome: this.pilotHome,
       logger: this.options.logger,
     });
     this.started = true;
-    const projectKeys = await discoverCronProjectKeys(this.pilotHome, this.options.logger);
+    const projectKeys = await this.cronStorageProvider.listProjectKeys({
+      pilotHome: this.pilotHome,
+      logger: this.options.logger,
+    });
     for (const projectKey of projectKeys) {
       await this.ensureRuntime(projectKey);
     }
@@ -192,11 +198,15 @@ export class CronManager {
       onResultDelivery: this.options.onResultDelivery,
       onTurnEvent: this.options.onTurnEvent,
       activeRunCount: () => this.activeRunCount(),
+      cronStorageProvider: this.cronStorageProvider,
       skipToolCreation: true,
     });
-    if (this.gateway) runtime.bindGateway(this.gateway);
+    if (this.agentGateway) runtime.bindAgentGateway(this.agentGateway);
     this.runtimes.set(projectKey, runtime);
-    await writeProjectMarker(runtime.paths.projectDir, projectKey);
+    await this.cronStorageProvider.recordProjectKey({
+      pilotHome: this.pilotHome,
+      projectKey,
+    });
 
     if (this.started) {
       const pending = runtime.start().finally(() => this.starting.delete(projectKey));
@@ -265,73 +275,4 @@ function requireProjectKey(projectKey: string | undefined): string {
     throw new Error("Cron task creation requires a projectKey.");
   }
   return resolve(projectKey);
-}
-
-async function discoverCronProjectKeys(
-  pilotHome: string,
-  logger?: CronRuntimeLogger,
-): Promise<string[]> {
-  const projectsDir = resolve(pilotHome, "cron", "projects");
-  let entries: Dirent<string>[];
-  try {
-    entries = await readdir(projectsDir, { withFileTypes: true });
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw error;
-  }
-  const projectKeys = new Set<string>();
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    const projectDir = resolve(projectsDir, entry.name);
-    try {
-      const raw = await readFile(resolve(projectDir, "tasks.json"), "utf-8");
-      const parsed = JSON.parse(raw) as { tasks?: Array<{ projectKey?: unknown }> };
-      for (const task of parsed.tasks ?? []) {
-        if (typeof task.projectKey === "string" && task.projectKey.trim()) {
-          projectKeys.add(resolve(task.projectKey));
-        }
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-        logger?.warn("cron project discovery skipped unreadable task store", {
-          projectDir: entry.name,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-    }
-    try {
-      const raw = await readFile(resolve(projectDir, "run-history.jsonl"), "utf-8");
-      for (const line of raw.split("\n")) {
-        if (!line.trim()) continue;
-        try {
-          const run = JSON.parse(line) as { projectKey?: unknown };
-          if (typeof run.projectKey === "string" && run.projectKey.trim()) {
-            projectKeys.add(resolve(run.projectKey));
-          }
-        } catch {
-          // Preserve unreadable migration leftovers, but continue discovering
-          // project keys from the remaining valid records.
-        }
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-        logger?.warn("cron project discovery skipped unreadable run history", {
-          projectDir: entry.name,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-    }
-    try {
-      const marker = (await readFile(resolve(projectDir, ".cwd"), "utf-8")).trim();
-      if (marker) projectKeys.add(resolve(marker));
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
-  }
-  return [...projectKeys].sort();
-}
-
-async function writeProjectMarker(projectDir: string, projectKey: string): Promise<void> {
-  await mkdir(projectDir, { recursive: true });
-  await writeFile(resolve(projectDir, ".cwd"), `${projectKey}\n`, "utf-8");
 }

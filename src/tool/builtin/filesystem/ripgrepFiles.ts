@@ -1,5 +1,7 @@
-import { statSync } from "node:fs";
 import path from "node:path";
+import { createNodeFsPort } from "../../execution-world/NodeFsPort.js";
+import type { FsPort } from "../../execution-world/FsPort.js";
+import type { SubprocessPort } from "../../execution-world/SubprocessPort.js";
 import {
   isIgnoredPath,
   normalizeRelativePath,
@@ -16,6 +18,8 @@ export type RipgrepFilesInput = {
   limit?: number;
   env?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
+  fs?: Pick<FsPort, "stat">;
+  subprocess?: Pick<SubprocessPort, "executeFile">;
 };
 
 export type RipgrepFilesResult = {
@@ -24,7 +28,11 @@ export type RipgrepFilesResult = {
   truncated: boolean;
 };
 
-export function normalizeRipgrepGlobPattern(pattern: string, cwd?: string): string {
+export async function normalizeRipgrepGlobPattern(
+  pattern: string,
+  cwd: string | undefined,
+  fs: Pick<FsPort, "stat"> = createNodeFsPort(),
+): Promise<string> {
   let normalized = "";
   for (let index = 0; index < pattern.length; index += 1) {
     const char = pattern[index];
@@ -33,7 +41,7 @@ export function normalizeRipgrepGlobPattern(pattern: string, cwd?: string): stri
       continue;
     }
 
-    normalized += shouldTreatBackslashAsPathSeparator(pattern, index, normalized, cwd)
+    normalized += await shouldTreatBackslashAsPathSeparator(pattern, index, normalized, cwd, fs)
       ? "/"
       : "\\";
   }
@@ -48,12 +56,13 @@ export async function ripgrepFiles(input: RipgrepFilesInput): Promise<RipgrepFil
       "--hidden",
       "--no-ignore",
       "--glob",
-      normalizeRipgrepGlobPattern(input.pattern, input.cwd),
+      await normalizeRipgrepGlobPattern(input.pattern, input.cwd, input.fs ?? createNodeFsPort()),
       "--sort=modified",
       ".",
     ],
     env: input.env,
     signal: input.signal,
+    subprocess: input.subprocess,
     toolName: "glob",
   });
   const limit = input.limit ?? DEFAULT_LIMIT;
@@ -68,12 +77,13 @@ export async function ripgrepFiles(input: RipgrepFilesInput): Promise<RipgrepFil
   };
 }
 
-function shouldTreatBackslashAsPathSeparator(
+async function shouldTreatBackslashAsPathSeparator(
   pattern: string,
   index: number,
   normalizedPrefix: string,
   cwd: string | undefined,
-): boolean {
+  fs: Pick<FsPort, "stat">,
+): Promise<boolean> {
   const next = pattern[index + 1];
   if (!next) {
     return false;
@@ -91,7 +101,7 @@ function shouldTreatBackslashAsPathSeparator(
     return true;
   }
 
-  return cwd !== undefined && staticPrefixIsDirectory(normalizedPrefix, cwd);
+  return cwd !== undefined && staticPrefixIsDirectory(normalizedPrefix, cwd, fs);
 }
 
 function startsGlobstarPathSegment(pattern: string, index: number): boolean {
@@ -104,17 +114,22 @@ function lastPathSegment(pattern: string): string {
   return lastSeparator === -1 ? pattern : pattern.slice(lastSeparator + 1);
 }
 
-function staticPrefixIsDirectory(prefix: string, cwd: string): boolean {
+async function staticPrefixIsDirectory(
+  prefix: string,
+  cwd: string,
+  fs: Pick<FsPort, "stat">,
+): Promise<boolean> {
   if (prefix.length === 0 || hasUnescapedGlobSpecialChars(prefix)) {
     return false;
   }
 
   try {
-    return statSync(path.resolve(cwd, prefix)).isDirectory();
+    return (await fs.stat(path.resolve(cwd, prefix))).kind === "directory";
   } catch {
     return false;
   }
 }
+
 
 function hasUnescapedGlobSpecialChars(value: string): boolean {
   for (let index = 0; index < value.length; index += 1) {

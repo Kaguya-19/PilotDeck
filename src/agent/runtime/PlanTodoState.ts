@@ -1,11 +1,13 @@
 import type {
   PilotDeckTodoDiagnostics,
   PilotDeckPlanTodoStateHandle,
+  PilotDeckPlanTodoMutationOptions,
   PilotDeckPlanTodoStateSnapshot,
   PilotDeckTodoItem,
   PilotDeckTodoUpdate,
   PilotDeckTodoWriteHistoryEntry,
 } from "../../tool/protocol/types.js";
+import type { PlanTodoPort } from "../../plan-todo/runtime/PlanTodoPort.js";
 
 type SessionPlanTodoState = {
   approvedPlan?: string;
@@ -20,9 +22,8 @@ type SessionPlanTodoState = {
   lastWrite?: PilotDeckTodoDiagnostics["lastWrite"];
 };
 
-export type PlanTodoStateManager = {
-  forSession(sessionId: string): PilotDeckPlanTodoStateHandle;
-};
+/** @deprecated Use the durable PlanTodoPort provider in production composition. */
+export type PlanTodoStateManager = PlanTodoPort;
 
 const TODO_WRITE_TOOL_NAME = "todo_write";
 const VALID_TODO_STATUSES = new Set<PilotDeckTodoItem["status"]>([
@@ -257,7 +258,7 @@ export function createPlanTodoStateManager(): PlanTodoStateManager {
       const state = ensureState(sessionId);
       return {
         getSnapshot: () => snapshot(state),
-        markPlanApproved(plan: string) {
+        async markPlanApproved(plan: string, _mutation: PilotDeckPlanTodoMutationOptions) {
           state.approvedPlan = plan.trim() || undefined;
           state.requiresInitialization = Boolean(state.approvedPlan);
           state.toolCallsSinceLastTodoWrite = 0;
@@ -269,10 +270,17 @@ export function createPlanTodoStateManager(): PlanTodoStateManager {
           state.completedWithoutActiveCount = 0;
           state.lastWrite = undefined;
         },
-        recordTodoWrite(markdown: string, todos: PilotDeckTodoItem[], options?: { reason?: string }) {
+        async recordTodoWrite(
+          markdown: string,
+          todos: PilotDeckTodoItem[],
+          options: PilotDeckPlanTodoMutationOptions & { reason?: string },
+        ) {
           return recordWrite(state, replaceTodos(todos), { mode: "markdown", markdown, reason: options?.reason });
         },
-        writeTodos(todos: PilotDeckTodoUpdate[], options?: { markdown?: string; merge?: boolean; reason?: string }) {
+        async writeTodos(
+          todos: PilotDeckTodoUpdate[],
+          options: PilotDeckPlanTodoMutationOptions & { markdown?: string; merge?: boolean; reason?: string },
+        ) {
           const nextTodos = options?.merge ? mergeTodos(state.todos, todos) : replaceTodos(todos);
           return recordWrite(state, nextTodos, {
             mode: "structured",
@@ -281,7 +289,7 @@ export function createPlanTodoStateManager(): PlanTodoStateManager {
             reason: options?.reason,
           });
         },
-        markToolProgressChanged(toolName: string) {
+        async markToolProgressChanged(toolName: string, _mutation: PilotDeckPlanTodoMutationOptions) {
           if (!state.approvedPlan || toolName === TODO_WRITE_TOOL_NAME) {
             return;
           }

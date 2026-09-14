@@ -2,6 +2,8 @@ import type { PilotDeckToolDefinition } from "../protocol/types.js";
 import { PilotDeckToolRuntimeError } from "../protocol/errors.js";
 import { NodeShellCommandRunner, type PilotDeckCommandRunner } from "./bash/commandRunner.js";
 import { classifyBashPermission, isReadOnlyShellCommand } from "./bash/permissions.js";
+import { createNodeShellPort, type ShellPort } from "../execution-world/ShellPort.js";
+import type { SubprocessPort } from "../execution-world/SubprocessPort.js";
 
 export type BashInput = {
   command: string;
@@ -11,6 +13,10 @@ export type BashInput = {
 
 export type CreateBashToolOptions = {
   runner?: PilotDeckCommandRunner;
+  /** Optional shell execution-world provider. */
+  shell?: ShellPort;
+  /** Optional compatibility provider; `shell` is the preferred seam. */
+  subprocess?: SubprocessPort;
   defaultTimeoutMs?: number;
   maxTimeoutMs?: number;
 };
@@ -71,7 +77,7 @@ const LONG_LIVED_COMMAND_PATTERNS = [
 ];
 
 export function createBashTool(options?: CreateBashToolOptions): PilotDeckToolDefinition<BashInput, BashOutput> {
-  const runner = options?.runner ?? new NodeShellCommandRunner();
+  const shell = createBashShell(options);
   const defaultTimeoutMs = options?.defaultTimeoutMs ?? 30_000;
   const maxTimeoutMs = options?.maxTimeoutMs ?? 600_000;
 
@@ -137,7 +143,8 @@ export function createBashTool(options?: CreateBashToolOptions): PilotDeckToolDe
             }
           }
         : undefined;
-      const result = await runner.run(command, {
+      const result = await shell.execute({
+        command,
         cwd: context.cwd,
         env: context.env,
         timeoutMs,
@@ -187,6 +194,13 @@ export function createBashTool(options?: CreateBashToolOptions): PilotDeckToolDe
       };
     },
   };
+}
+
+function createBashShell(options?: CreateBashToolOptions): ShellPort {
+  if (options?.shell) return options.shell;
+  if (options?.subprocess) return createNodeShellPort(options.subprocess);
+  const runner = options?.runner ?? new NodeShellCommandRunner();
+  return createNodeShellPort({ execute: (request) => runner.run(request.command, request) });
 }
 
 function buildBashOutputAssertions(

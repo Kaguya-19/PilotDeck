@@ -5,6 +5,10 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { getPilotProjectChatDir } from "../../src/pilot/paths.js";
+import {
+  createNodeSessionSearchPort,
+  searchNodeSessionHistory,
+} from "../../src/session/search/NodeSessionSearchPort.js";
 import { searchChatHistory } from "../../src/session/search/searchChatHistory.js";
 import { listProjectSessions, searchSessionsByTitle } from "../../src/session/storage/SessionList.js";
 
@@ -75,7 +79,7 @@ test("lists historical sessions whose large inline image hides metadata from the
       ],
     );
 
-    const search = await searchChatHistory({ projectRoot, pilotHome, query: "findable" });
+    const search = await createNodeSessionSearchPort().search({ projectRoot, pilotHome, query: "findable" });
     assert.equal(search.matches.length, 1);
     assert.equal(search.matches[0].sessionId, largeSessionId);
     assert.equal(search.matches[0].sessionTitle, largeTitle);
@@ -251,6 +255,33 @@ test("uses a prompt-only tail snapshot without requiring a generated title", asy
     const [session] = await listProjectSessions({ projectRoot, pilotHome });
     assert.equal(session?.summary, "Latest prompt");
     assert.equal(session?.firstPrompt, "First prompt");
+  } finally {
+    await rm(projectRoot, { recursive: true, force: true });
+    await rm(pilotHome, { recursive: true, force: true });
+  }
+});
+
+test("keeps the legacy history-search facade equivalent to the Node provider", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "pilotdeck-search-compat-project-"));
+  const pilotHome = await mkdtemp(join(tmpdir(), "pilotdeck-search-compat-home-"));
+  try {
+    const chatDir = getPilotProjectChatDir(projectRoot, pilotHome);
+    await mkdir(chatDir, { recursive: true });
+    const sessionId = "web:s_search-compat";
+    await writeFile(
+      join(chatDir, `${sessionId}.jsonl`),
+      `${JSON.stringify(entry("accepted_input", sessionId, 1, {
+        messages: [{ role: "user", content: [{ type: "text", text: "Search facade compatibility" }] }],
+      }))}\n`,
+    );
+    const input = { projectRoot, pilotHome, query: "facade compatibility" };
+
+    const providerResult = await searchNodeSessionHistory(input);
+    const portResult = await createNodeSessionSearchPort().search(input);
+    const legacyResult = await searchChatHistory(input);
+
+    assert.deepEqual(portResult, providerResult);
+    assert.deepEqual(legacyResult, providerResult);
   } finally {
     await rm(projectRoot, { recursive: true, force: true });
     await rm(pilotHome, { recursive: true, force: true });

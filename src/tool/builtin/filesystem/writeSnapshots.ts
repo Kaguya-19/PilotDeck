@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
-import { stat } from "node:fs/promises";
 import type {
   PilotDeckToolRuntimeContext,
   PilotDeckWriteSnapshotEntry,
 } from "../../protocol/types.js";
 import { PilotDeckToolRuntimeError } from "../../protocol/errors.js";
+import { createNodeFsPort } from "../../execution-world/NodeFsPort.js";
+import type { FsPort } from "../../execution-world/FsPort.js";
 import { readTextFile } from "./readTextFile.js";
 
 export function getWriteSnapshot(
@@ -47,8 +48,9 @@ export function invalidateReadFileState(
 export async function validateWriteSnapshotFresh(
   context: PilotDeckToolRuntimeContext,
   absolutePath: string,
+  fs: Pick<FsPort, "stat" | "readFile"> = createNodeFsPort(),
 ): Promise<{ exists: boolean }> {
-  const fileStat = await stat(absolutePath).catch((error: unknown) => {
+  const fileStat = await fs.stat(absolutePath).catch((error: unknown) => {
     if (isNodeError(error) && error.code === "ENOENT") {
       return undefined;
     }
@@ -59,7 +61,7 @@ export async function validateWriteSnapshotFresh(
     return { exists: false };
   }
 
-  if (!fileStat.isFile()) {
+  if (fileStat.kind !== "file") {
     throw new PilotDeckToolRuntimeError("file_conflict", `${absolutePath} is not a regular file.`);
   }
 
@@ -78,7 +80,7 @@ export async function validateWriteSnapshotFresh(
 
   const isFullRead = snapshot.offset === undefined && snapshot.limit === undefined;
   if (isFullRead) {
-    const previousContent = await readTextFile(absolutePath);
+    const previousContent = await readTextFile(absolutePath, fs);
     const currentHash = hashText(previousContent);
     if (currentHash === snapshot.contentHash) {
       return { exists: true };
@@ -99,8 +101,9 @@ export async function validateWriteSnapshotFresh(
 export async function ensureWriteSnapshotFresh(
   context: PilotDeckToolRuntimeContext,
   absolutePath: string,
+  fs: Pick<FsPort, "stat" | "readFile"> = createNodeFsPort(),
 ): Promise<{ exists: boolean; previousContent: string | null; mtimeMs: number | null }> {
-  const fileStat = await stat(absolutePath).catch((error: unknown) => {
+  const fileStat = await fs.stat(absolutePath).catch((error: unknown) => {
     if (isNodeError(error) && error.code === "ENOENT") {
       return undefined;
     }
@@ -111,7 +114,7 @@ export async function ensureWriteSnapshotFresh(
     return { exists: false, previousContent: null, mtimeMs: null };
   }
 
-  if (!fileStat.isFile()) {
+  if (fileStat.kind !== "file") {
     throw new PilotDeckToolRuntimeError("file_conflict", `${absolutePath} is not a regular file.`);
   }
 
@@ -124,7 +127,7 @@ export async function ensureWriteSnapshotFresh(
   }
 
   const normalizedMtime = Math.floor(fileStat.mtimeMs);
-  const previousContent = await readTextFile(absolutePath);
+  const previousContent = await readTextFile(absolutePath, fs);
   const isFullRead = snapshot.offset === undefined && snapshot.limit === undefined;
 
   if (normalizedMtime !== snapshot.mtimeMs) {

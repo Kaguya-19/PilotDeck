@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { CronResultDelivery } from "../../../cron/index.js";
 import type { ChannelAttachment, Gateway } from "../../../gateway/index.js";
+import type { SessionSearchPort } from "../../../session/search/SessionSearchPort.js";
 import type { ChannelAdapter, ChannelHandle, ChannelLogger, ChannelStartDeps } from "../protocol/ChannelAdapter.js";
 import { executeChannelCommand, resolveCommand } from "../protocol/ChannelCommandRegistry.js";
 import { guessMimeTypeFromName, ImAttachmentDelivery, type PreparedImAttachment } from "../protocol/ImAttachmentDelivery.js";
@@ -148,6 +149,8 @@ export class FeishuChannel implements ChannelAdapter {
 
   private gateway?: Gateway;
   private logger?: ChannelLogger;
+  private sessionSearch?: SessionSearchPort;
+  private pilotHome?: string;
 
   private tokenCache?: { value: string; expiresAt: number };
   private tokenInflight?: Promise<string>;
@@ -186,6 +189,8 @@ export class FeishuChannel implements ChannelAdapter {
   async start(deps: ChannelStartDeps): Promise<ChannelHandle> {
     this.gateway = deps.gateway;
     this.logger = deps.logger;
+    this.sessionSearch = deps.sessionSearch;
+    this.pilotHome = deps.pilotHome;
 
     const cfg = deps.config?.adapters?.feishu;
     if (cfg) {
@@ -488,6 +493,8 @@ export class FeishuChannel implements ChannelAdapter {
         bindProject: (projectKey) => { this.mapper.bindProject(chatId, projectKey); this.onStateChange?.(this.mapper.snapshot()); },
         getProject: () => this.mapper.getProject(chatId),
         resetSession: () => { this.mapper.resolve({ chatId, text: "/new" }); this.onStateChange?.(this.mapper.snapshot()); },
+        sessionSearch: this.sessionSearch,
+        pilotHome: this.pilotHome,
         logger: this.logger as any,
       });
       if (handled) return;

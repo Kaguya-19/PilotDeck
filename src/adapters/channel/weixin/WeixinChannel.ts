@@ -6,6 +6,7 @@ import { ILinkClient, loginWithQR, MessageItemType } from "weixin-ilink";
 import type { ClientOptions, GetUpdatesResp, WeixinMessage, LoginResult } from "weixin-ilink";
 import type { CronResultDelivery } from "../../../cron/index.js";
 import type { ChannelAttachment, Gateway, GatewayChannelKey, GatewayOutboundAttachment } from "../../../gateway/index.js";
+import type { SessionSearchPort } from "../../../session/search/SessionSearchPort.js";
 import type { ChannelAdapter, ChannelHandle, ChannelLogger, ChannelStartDeps } from "../protocol/ChannelAdapter.js";
 import type { ChannelRuntimeStatusReporter } from "../protocol/ChannelRuntimeStatus.js";
 import { executeChannelCommand } from "../protocol/ChannelCommandRegistry.js";
@@ -113,6 +114,8 @@ export class WeixinChannel implements ChannelAdapter {
 
   private gateway?: Gateway;
   private logger?: ChannelLogger;
+  private sessionSearch?: SessionSearchPort;
+  private pilotHome?: string;
   private reportChannelStatus?: ChannelRuntimeStatusReporter;
   private client?: WeixinIlinkClient;
   private loopAbort = new AbortController();
@@ -152,6 +155,8 @@ export class WeixinChannel implements ChannelAdapter {
   async start(deps: ChannelStartDeps): Promise<ChannelHandle> {
     this.gateway = deps.gateway;
     this.logger = deps.logger;
+    this.sessionSearch = deps.sessionSearch;
+    this.pilotHome = deps.pilotHome;
     this.reportChannelStatus = deps.reportChannelStatus;
     this.startGeneration++;
     this.loopAbort = new AbortController();
@@ -484,6 +489,8 @@ export class WeixinChannel implements ChannelAdapter {
         bindProject: (projectKey) => { this.mapper.bindProject(fromUser, projectKey); this.onStateChange?.(this.mapper.snapshot()); },
         getProject: () => this.mapper.getProject(fromUser),
         resetSession: () => { this.mapper.resolve({ chatId: fromUser, text: "/new" }); this.onStateChange?.(this.mapper.snapshot()); },
+        sessionSearch: this.sessionSearch,
+        pilotHome: this.pilotHome,
         logger: this.logger as any,
       });
       if (handled) return;

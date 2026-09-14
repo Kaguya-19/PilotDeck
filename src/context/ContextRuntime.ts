@@ -1,4 +1,3 @@
-import type { CanonicalMessage } from "../model/index.js";
 import type {
   ContextBoundary,
   ContextCaptureTurnInput,
@@ -10,8 +9,7 @@ import type {
   ContextToolResultResult,
   ModelContext,
 } from "./protocol/types.js";
-import type { AutoCompactResult } from "./DefaultContextRuntime.js";
-import type { TokenBudgetSnapshot } from "./budget/TokenBudgetManager.js";
+import type { AutoCompactResult, CompactionAutoCompactInput } from "./compaction/CompactionPort.js";
 
 export type AgentContextPrepareInput = ContextPrepareInput;
 export type AgentPreparedContext = ModelContext;
@@ -30,6 +28,8 @@ export type AgentContextCaptureTurnInput = ContextCaptureTurnInput;
 
 export type AgentContextRuntime = {
   prepareForModel(input: AgentContextPrepareInput): Promise<AgentPreparedContext>;
+  /** Optional lifecycle hook for a session-owned Context provider. */
+  dispose?(): void | Promise<void>;
   /**
    * Optional. Real implementations (e.g. `DefaultContextRuntime`) provide
    * this; minimal runtimes (`NullContextRuntime`) leave it undefined and the
@@ -58,15 +58,5 @@ export type AgentContextRuntime = {
    * re-evaluate compaction against the routed model's (potentially smaller)
    * context window after a routing decision.
    */
-  tryAutoCompact?(input: {
-    sessionId?: string;
-    turnId?: string;
-    messages: CanonicalMessage[];
-    abortSignal?: AbortSignal;
-    maxContextTokens?: number;
-    reservedOutputTokens?: number;
-    /** Legacy compatibility flag; summary failures never fabricate a checkpoint. */
-    allowFallbackOnFailure?: boolean;
-    budgetEvaluator?: (messages: CanonicalMessage[]) => Promise<TokenBudgetSnapshot>;
-  }): Promise<AutoCompactResult>;
+  tryAutoCompact?(input: CompactionAutoCompactInput): Promise<AutoCompactResult>;
 };

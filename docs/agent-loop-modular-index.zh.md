@@ -23,7 +23,7 @@ PilotDeck；宿主产品的 session、turn、permission、tool、checkpoint、SO
 4. [Module Communication SOP](pilotdeck-module-communication-sop.zh.md)
 
    规范身份字段、operation/attempt 状态、终态、取消、deadline、重试、恢复、profile
-   和 transport-independent adapter 约定。当前文档版本为 v0.3，协议版本为 v2.0。
+   和 transport-independent adapter 约定。当前文档版本为 v0.7，协议版本为 v2.0。
 
 5. [Module Protocol v2 Schema](pilotdeck-module-protocol-v2.schema.json)
 
@@ -31,22 +31,32 @@ PilotDeck；宿主产品的 session、turn、permission、tool、checkpoint、SO
 
 6. [AgentLoop Modular Framework TRD](trd/03-agent-loop-modular.zh.md)
 
-   说明 `ModelInvokerPort`、`ToolPort`、`AgentContextRuntime`、sidecar factory、
-   context module 和 capability module 的实现边界。
+   说明 `ModelInvokerPort`、`ToolPort`、`AgentContextRuntime`、session projection、scope lifecycle、
+   sidecar factory、context module 和 capability module 的实现边界。
 
-7. [StaffDeck AgentLoop Integration](https://github.com/Kaguya-19/StaffDeck/tree/codex/pilotdeck-agent-loop/docs/pilotdeck-agent-loop-integration.md)
+7. [PilotDeck DSH 风格模块化 Roadmap](trd/04-dsh-modularization-roadmap.zh.md)
+
+   对照 DSH 的 capability seam、scope、session event/projection、owned lifecycle 和
+   profile/bundle 组合模型，列出 PilotDeck 当前成熟度、未模块化主体及分阶段迁移门槛。
+
+8. [DSH 与 PilotDeck 当前执行 Roadmap](trd/05-dsh-pilotdeck-current-roadmap.zh.md)
+
+   基于 DSH `0.1.2-alpha.2` 发布实现与当前 PilotDeck 组合链的复核结论，明确当前模块成熟度、
+   不可迁移的 state owner，以及从 stdio sidecar provider 开始的实际交付顺序。
+
+9. [StaffDeck AgentLoop Integration](https://github.com/Kaguya-19/StaffDeck/tree/codex/pilotdeck-agent-loop/docs/pilotdeck-agent-loop-integration.md)
 
    StaffDeck 的具体 glue、TaskFrame/Harness mapping、checkpoint 投影、权限聚合和
    result_unknown 处理只在 StaffDeck 仓库维护，不成为 PilotDeck core contract。
 
-8. [PilotDeck Native / Sidecar 对拍 SOP](pilotdeck-agent-loop-parity-sop.zh.md)
+10. [PilotDeck Native / Sidecar 对拍 SOP](pilotdeck-agent-loop-parity-sop.zh.md)
 
    PilotDeck 原生与 sidecar 的比较范围、adapter 契约、scenario 矩阵、canonical trace、
    normalization、退出码和 gateway 验收门槛。
 
    实际运行记录见 [PilotDeck AgentLoop 对拍结果](pilotdeck-agent-loop-parity-results.zh.md)。
 
-9. [AgentLoop parity README](https://github.com/Kaguya-19/StaffDeck/tree/codex/pilotdeck-agent-loop/tools/agent-loop-parity/README.md)
+11. [AgentLoop parity README](https://github.com/Kaguya-19/StaffDeck/tree/codex/pilotdeck-agent-loop/tools/agent-loop-parity/README.md)
 
    跨宿主对拍 harness、mock provider/tool、canonical trace 和 StaffDeck 真实部署验证方法；
    PilotDeck-only 工具则位于本仓库的 `tools/agent-loop-parity/`。
@@ -60,6 +70,7 @@ PilotDeck；宿主产品的 session、turn、permission、tool、checkpoint、SO
         +-- capability      -> 宿主 ToolRuntime/PermissionRuntime
         +-- model           -> 宿主 Model provider
         +-- checkpoint      -> 宿主持久化和恢复逻辑
+        +-- event           -> 宿主 AgentEventEmitter（仅 live projection）
         |
         +-- PilotDeck AgentLoop
               +-- canonical messages
@@ -72,11 +83,30 @@ AgentLoop 不识别 StaffDeck 的 TaskRequirement、HarnessAction、TaskFrame �
 宿主将自己的业务状态投影为通用 payload；sidecar 只消费 canonical messages、tool
 descriptors、permission context、seed state 和 execution identity。
 
+### 当前 application composition 边界
+
+- AgentLoop 通过冻结的 `AgentTurnContextPort` 和 `LifecycleDispatchPort` 消费 context/lifecycle；完整 runtime
+  仍由 session scope 持有和释放。
+- Session durable backend 由 `ProjectSessionPersistenceProvider` 定义；application 在启动时组合
+  `ProjectSessionDataPlane`，再把 catalog、fork、replacement、search 分别交给对应 consumer。旧
+  `ProjectSessionStorageProvider` optional capability bag 仅作兼容入口。
+- Plugin generation 仍由 `PluginRegistry` 唯一管理。session composition 获取
+  `PluginSessionContributionSnapshot`，Gateway command catalog 获取 `PluginCommandCatalogSnapshot`；两个 lease
+  都绑定获取时 generation，retired plugin 等全部旧 lease 释放后才 dispose。
+- `PluginContributionSnapshot` 与原 acquisition API 暂时保留为 deprecated adapter；生产 session/context/command
+  路径不再依赖完整 aggregate。
+
+Workflow、Agent Terminal、Goal round driver、SQLite query 与跨平台 sandbox 是独立功能扩展，不属于本轮
+边界收窄；本轮不迁移任何 Plan/Todo、Cron、Always-On、Goal、Session 或 Gateway 状态 owner。
+
 ## 跨语言和 transport 约定
 
 - Module Protocol 使用 JSON/NDJSON wire format，字段和终态由 v2 Schema 定义，语言实现
   不受 TypeScript 限制。
-- AgentLoop 核心只依赖 ports；stdio sidecar 是当前提供的跨进程实现，不是协议唯一 transport。
+- AgentLoop 核心只依赖 ports；sidecar server、host stdio provider 和 loopback TCP reconnect provider 已作为
+  capability-only external loop factory 纳入应用组合，不是协议唯一 transport。stdio 仍是一 turn 一 child process，
+  TCP 才广告 `resume`/`ack` 并在同一 sidecar instance 上恢复 stream。`status` 是同连接 live snapshot；
+  `result_unknown` 的 durable reconciliation 仍由 session-owned ledger 决定，见[当前执行 Roadmap](trd/05-dsh-pilotdeck-current-roadmap.zh.md) 的 R1/R2。
 - 其他语言或通道可以实现自己的 adapter，但必须保持 `hello`、`capabilities`、`execute`
   以及适用的 `cancel`、`status`、`resume`、`ack` profile 语义。
 - 宿主必须拥有 session/turn/run/operation 最终状态；模块不得创建第二套公共状态。
@@ -100,13 +130,22 @@ normalization 规则隐藏 semantic diff。
 
 ## 当前验收状态
 
-- PilotDeck native vs sidecar：`core-regression` 10/10、`core-resilience` 20/20，当前
-  对拍为零 semantic diff。
-- `auto_compact` 仍是显式 known gap：host context overflow 与 sidecar 完成路径不同。
+- PilotDeck native vs sidecar 与真实 Gateway surface：default-sidecar 和 Gateway 的 `core-resilience` 均为 20/20 当前复核通过，
+  且无 semantic diff、oracle failure 或 `BLOCKED`。P0.2 的 read-file permission input、cancel terminal ordering、mixed-permission
+  oracle 和 write-snapshot projection 已闭合；Gateway 适配层同样在 terminal 前 drain 已受理的 module call。命令与 trace 证据见
+  [DSH 风格模块化 Roadmap](trd/04-dsh-modularization-roadmap.zh.md)。
+- `auto_compact` 已纳入 context host-module method；sidecar 只有在 capabilities 广告 `try_auto_compact` 时才启用该 consumer，未广告时保留原有 fallback。
+- `plan_todo` 已作为可选 capability host-module method 闭合；Session projection 是唯一 durable truth，sidecar 只持有按 active session/turn 校验后的 cache，不能演变为 generic workflow registry。
+- `lifecycle.dispatch` 已作为可选 host-module method 闭合；host 继续拥有 plugin registry、turn environment 和 teardown，sidecar 仅消费 hook dispatch result。
+- capability host dispatch 会从 active host capability view 重建 audit、interaction、file/plan services、turn environment 和 model routing；read/write seed state 与 full-fork subagent state 继续按 checkpoint/R3 owner 隔离。
+- `event.emit` 已作为可选 host-module method 闭合；sidecar 串行回传 AgentLoop volatile event，并在 final 前 flush 已受理 delivery。它不是 Session truth、operation ledger 或 reconnect state；event failure 不得改写业务 terminal。
+- session read-side 已按 selected storage provider 组合 catalog 与 transcript reader；Web fork 通过 `ProjectSessionForkPort` 把 target durable write、auxiliary artifact transfer 和 publication 留给 provider，Web replace 通过 `ProjectSessionReplacementPort` 把 backup/rewrite/finalize/recovery 留给 provider。未声明 catalog/fork/replacement 的 non-native backend 分别 fail-closed；Gateway 继续拥有 replacement 的 live reservation 和 timeout。
 - StaffDeck workflow 对拍已能真实进入 Harness，但 SOP step/slot/handoff、deadline、
   unknown result 等宿主状态仍有差异，不能作为 PilotDeck core 已完全验收的依据。
-- 完整生产级跨语言 SDK、Schema runtime validator 和断线 resume/status/ack 仍是后续工作，
-  本文不将其表述为已完成能力。
+- `src/workflow/` 已具备 caller-owned Definition/Run/Control、InMemory 与 JSONL EventStore、DAG 执行、只读 live event observer、pause/resume/cancel/deadline/dispose、owner fence 和 unknown recovery；它仍不接管 Plan/Todo、Cron、Always-On、Goal 的 durable owner，也没有 generic registry。
+- `session-title` 已具备 provider/model provenance、user-pinned source、source turn 与 accepted-input sequence 的兼容 metadata 投影；独立 DSH `user/message` seq 事件仍未引入，避免把聚合 `accepted_input` 错当作逐消息 durable event。
+- 完整生产级跨语言 SDK、Schema runtime validator 和具体 Gateway/remote deployment 的断线 E2E 仍是后续工作；
+  loopback TCP provider 已覆盖 AgentSession 的 resume/ack 本地契约，但不等同于上述部署验收。
 
 ## 验证命令
 

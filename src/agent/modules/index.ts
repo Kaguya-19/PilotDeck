@@ -1,8 +1,17 @@
 export {
+  HOST_CAPABILITY_MODULE_METHODS,
+  HOST_CONTEXT_MODULE_METHODS,
+  HOST_EVENT_MODULE_METHODS,
+  HOST_LIFECYCLE_MODULE_METHODS,
+  HOST_MODEL_MODULE_METHODS,
+  HOST_PERMISSION_MODULE_METHODS,
   MODULE_PROTOCOL_VERSION,
-  InProcessModuleAdapter,
-  ModuleOperationHost,
-  validateModuleMessage,
+  readHostCapabilityModuleMethods,
+  readHostContextModuleMethods,
+  readHostEventModuleMethods,
+  readHostLifecycleModuleMethods,
+  readHostModelModuleMethods,
+  readHostPermissionModuleMethods,
   type AgentExecutionContext,
   type ModelExecutionContext,
   type ModelInvokerPort,
@@ -17,6 +26,10 @@ export {
   type ModuleHandshakeRequest,
   type HostCapabilityModuleMethod,
   type HostContextModuleMethod,
+  type HostEventModuleMethod,
+  type HostLifecycleModuleMethod,
+  type HostModelModuleMethod,
+  type HostPermissionModuleMethod,
   type HostModuleCapabilities,
   type ModuleMessage,
   type ModuleMessageBase,
@@ -28,19 +41,112 @@ export {
   type ModuleRetryability,
   type PreparedModelInvocation,
   type ToolPort,
-  type InProcessModuleHandler,
-  type InProcessModuleOptions,
 } from "./protocol.js";
-export { createRouterModelInvokerPort, createToolSchedulerPort } from "./adapters.js";
+export { validateModuleMessage } from "./protocol.js";
 export {
   AgentLoopSidecarServer,
-  createSidecarContextRuntime,
+  createAgentLoopSidecarRuntimeFactory,
+  createStdioAgentLoopSidecarConnectionFactory,
+  createTcpAgentLoopSidecarConnectionFactory,
+  TcpAgentLoopSidecarConnection,
+  AgentLoopSidecarTcpServer,
+  InProcessModuleAdapter,
+  ModuleOperationHost,
   createSidecarPorts,
   moduleOutcomeFromAgentResult,
   type AgentLoopSidecarOptions,
+  type AgentLoopSidecarConnection,
+  type AgentLoopSidecarConnectionFactory,
+  type AgentLoopSidecarConnectionFactoryInput,
+  type AgentLoopSidecarResultUnknownInput,
+  type AgentLoopSidecarResultUnknownReconciler,
+  type AgentLoopSidecarResultUnknownResolution,
+  type AgentLoopSidecarRuntimeFactoryOptions,
+  type StdioAgentLoopSidecarConnectionFactoryOptions,
+  type TcpAgentLoopSidecarConnectionFactoryOptions,
+  type TcpAgentLoopSidecarAddress,
+  type TcpAgentLoopSidecarListenOptions,
+  type InProcessModuleHandler,
+  type InProcessModuleOptions,
   type SidecarExecution,
   type SidecarExecutionFactory,
   type SidecarModuleCall,
   type SidecarModuleBinding,
   type SidecarModuleCallClient,
+  SessionAgentLoopOperationLedger,
+  type SessionAgentLoopOperationLedgerOptions,
+  SidecarStreamReplayStore,
+  type SidecarStreamReplayAck,
+  type SidecarStreamReplayResume,
+  type SidecarStreamReplayStoreOptions,
+  type AgentLoopOperationAccepted,
+  type AgentLoopOperationIdentity,
+  type AgentLoopOperationKnownTerminal,
+  type AgentLoopOperationLedger,
+  type AgentLoopOperationResolution,
+  type AgentLoopOperationUnknownTerminal,
+} from "./transport/index.js";
+export { createRouterModelInvokerPort, createToolSchedulerPort } from "./adapters.js";
+export {
+  createHostCapabilityToolPort,
+  createDurableToolPort,
+  createHostPlanTodoPort,
+  createPlanTodoAwareToolPort,
+  type HostCapabilityModuleClient,
+  type HostCapabilityToolPortOptions,
+  type HostPlanTodoModuleClient,
+  type HostPlanTodoPort,
+  type HostPlanTodoPortOptions,
+} from "./capability/index.js";
+export {
+  createHostContextRuntime,
+  type HostContextModuleBinding,
+  type HostContextModuleClient,
+} from "./context/index.js";
+export {
+  createHostLifecycleRuntime,
+  type HostLifecycleModuleBinding,
+  type HostLifecycleModuleClient,
+} from "./lifecycle/index.js";
+export {
+  createHostAgentEventBridge,
+  type HostAgentEventBridge,
+  type HostEventModuleBinding,
+  type HostEventModuleClient,
+} from "./events/index.js";
+export {
+  createDurableModelInvokerPort,
+  createHostModelInvokerPort,
+  type HostModelInvokerPortOptions,
+  type HostModelModuleClient,
+  type RouterModelInvokerAdapterOptions,
+} from "./llm/index.js";
+export {
+  createHostPermissionDecisionPort,
+  createDurablePermissionAuditRecorder,
+  HostPermissionModeState,
+  type DurablePermissionAuditOptions,
+  type HostPermissionDecisionPortOptions,
+  type HostPermissionModuleBinding,
+  type HostPermissionModuleClient,
+} from "./permission/index.js";
+export {
+  createDurableElicitationChannel,
+  createDeterministicElicitationAnswerer,
+  type DurableElicitationChannelOptions,
+} from "./interaction/index.js";
+export {
+  interactionTimeoutOutcome,
+  normalizeInteractionTimeout,
+  type InteractionDeadline,
+  type InteractionOutcome,
+  type InteractionRequestKind,
+} from "../../interaction/index.js";
+export {
+  parseAgentLoopSeedStateProjection,
+  type AgentLoopSeedStateReadProjection,
+  type AgentLoopSeedStateWriteProjection,
+} from "./checkpoint/index.js";
+export {
+  createSidecarContextRuntime,
 } from "./sidecar.js";

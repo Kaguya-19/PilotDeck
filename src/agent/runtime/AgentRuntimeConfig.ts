@@ -1,4 +1,5 @@
 import type { CanonicalThinkingConfig, CanonicalToolChoice, MultimodalConstraints } from "../../model/index.js";
+import type { RuntimeContextSurface } from "../../context/RuntimeContextSurface.js";
 import type { PermissionContext, PermissionMode } from "../../permission/index.js";
 import type { AgentRunMode } from "../protocol/input.js";
 
@@ -9,6 +10,12 @@ export type AgentRuntimeConfig = {
   modelMultimodal?: MultimodalConstraints;
   cwd: string;
   systemPrompt?: string;
+  /**
+   * Profile-selected projection for dynamic runtime context. The native
+   * compatibility default keeps it in the system prompt; `user_message`
+   * makes the context an explicit durable user-role surface.
+   */
+  runtimeContextSurface?: RuntimeContextSurface;
   maxOutputTokens?: number;
   temperature?: number;
   thinking?: CanonicalThinkingConfig;

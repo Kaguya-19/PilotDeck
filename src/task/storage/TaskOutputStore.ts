@@ -17,7 +17,7 @@
  *     polling offset.
  */
 
-import { promises as fs } from "node:fs";
+import { closeSync, openSync, promises as fs, readFileSync, readSync, statSync } from "node:fs";
 import path from "node:path";
 import type { PilotDeckTaskOutputSlice } from "../protocol/types.js";
 
@@ -31,6 +31,10 @@ export type TaskOutputStoreOptions = {
    * later (off the ring-buffer fast path).
    */
   diskSpillDir?: string;
+  /** Recover the retained output window from an already-flushed spill file. */
+  restore?: {
+    expectedTotalBytes: number;
+  };
 };
 
 const DEFAULT_MEMORY_BYTES = 1_000_000;
@@ -44,6 +48,9 @@ export class TaskOutputStore {
   private readonly maxMemoryBytes: number;
   private readonly diskSpillPath: string | null;
   private spillReady = false;
+  private spillTail: Promise<void> = Promise.resolve();
+  private closed = false;
+  private closePromise?: Promise<void>;
 
   constructor(options: TaskOutputStoreOptions) {
     this.options = options;
@@ -51,10 +58,12 @@ export class TaskOutputStore {
     this.diskSpillPath = options.diskSpillDir
       ? path.join(options.diskSpillDir, `${options.taskId}.log`)
       : null;
+    if (options.restore) this.restoreFromSpill(options.restore.expectedTotalBytes);
   }
 
   /** Append a stdout/stderr chunk. */
   append(chunk: Buffer | string): void {
+    if (this.closed) return;
     const buf = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
     if (buf.length === 0) return;
     this.totalSeenBytes += buf.length;
@@ -66,9 +75,17 @@ export class TaskOutputStore {
     this.chunks.push(buf);
     this.memBytes += buf.length;
     while (this.memBytes > this.maxMemoryBytes && this.chunks.length > 0) {
-      const oldest = this.chunks.shift()!;
-      this.memBytes -= oldest.length;
-      this.droppedBytes += oldest.length;
+      const overflow = this.memBytes - this.maxMemoryBytes;
+      const oldest = this.chunks[0]!;
+      if (oldest.length <= overflow) {
+        this.chunks.shift();
+        this.memBytes -= oldest.length;
+        this.droppedBytes += oldest.length;
+      } else {
+        this.chunks[0] = oldest.subarray(overflow);
+        this.memBytes -= overflow;
+        this.droppedBytes += overflow;
+      }
     }
   }
 
@@ -79,18 +96,57 @@ export class TaskOutputStore {
    */
   readSlice(offset: number, maxBytes?: number): PilotDeckTaskOutputSlice {
     const head = this.totalSeenBytes;
-    let cursor = Math.max(offset, this.droppedBytes);
+    let cursor = Number.isFinite(offset) ? Math.max(0, Math.floor(offset)) : 0;
     const cap = maxBytes ?? Infinity;
-    const truncated = offset < this.droppedBytes;
+    let remaining = Number.isFinite(cap) ? Math.max(0, Math.floor(cap)) : this.maxMemoryBytes;
+    let truncated = false;
+    const slices: Buffer[] = [];
 
-    if (cursor >= head) {
-      return { content: "", nextOffset: head, totalBytes: head, truncated };
+    if (cursor < this.droppedBytes && this.diskSpillPath && remaining > 0) {
+      const disk = this.readDiskSlice(cursor, remaining);
+      if (disk) {
+        slices.push(disk.content);
+        cursor = disk.nextOffset;
+        remaining -= disk.content.length;
+      }
     }
 
-    const wanted = Math.min(head - cursor, cap);
+    if (remaining <= 0) {
+      return {
+        content: Buffer.concat(slices).toString("utf8"),
+        nextOffset: cursor,
+        totalBytes: head,
+        truncated,
+      };
+    }
+
+    if (cursor < this.droppedBytes) {
+      // The in-memory ring no longer has this range and the disk spill has
+      // not flushed it yet (or is unavailable), so report an explicit gap.
+      truncated = true;
+      cursor = this.droppedBytes;
+    }
+
+    if (cursor >= head) {
+      return {
+        content: Buffer.concat(slices).toString("utf8"),
+        nextOffset: Math.min(cursor, head),
+        totalBytes: head,
+        truncated,
+      };
+    }
+
+    const wanted = Math.min(head - cursor, remaining);
+    if (wanted <= 0) {
+      return {
+        content: Buffer.concat(slices).toString("utf8"),
+        nextOffset: cursor,
+        totalBytes: head,
+        truncated,
+      };
+    }
     let toSkip = cursor - this.droppedBytes;
     let collected = 0;
-    const slices: Buffer[] = [];
     for (const buf of this.chunks) {
       if (collected >= wanted) break;
       if (toSkip >= buf.length) {
@@ -117,45 +173,107 @@ export class TaskOutputStore {
     return this.totalSeenBytes;
   }
 
-  /** Clear in-memory buffer (the disk spill, if any, remains intact). */
-  close(): void {
-    this.chunks = [];
-    this.memBytes = 0;
+  /** Wait until accepted spill writes are durable without discarding readable output. */
+  flush(): Promise<void> {
+    return this.spillTail;
+  }
+
+  hasDurableOutput(): boolean {
+    return this.diskSpillPath !== null;
+  }
+
+  /** Flush accepted spill writes before releasing the in-memory buffer. */
+  close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
+    this.closed = true;
+    this.closePromise = this.flush().then(() => {
+      this.chunks = [];
+      this.memBytes = 0;
+    });
+    return this.closePromise;
   }
 
   // ---------------------------------------------------------------------
 
-  private spillQueue: Buffer[] = [];
-  private spillFlushing = false;
-
   private queueSpill(chunk: Buffer): void {
-    this.spillQueue.push(chunk);
-    if (!this.spillFlushing) {
-      this.spillFlushing = true;
-      void this.flushSpill();
+    this.spillTail = this.spillTail.then(() => this.writeSpill(chunk));
+  }
+
+  private async writeSpill(chunk: Buffer): Promise<void> {
+    if (!this.diskSpillPath) return;
+    try {
+      if (!this.spillReady) {
+        await fs.mkdir(path.dirname(this.diskSpillPath), { recursive: true });
+        this.spillReady = true;
+      }
+      await fs.appendFile(this.diskSpillPath, chunk);
+    } catch {
+      // Disk spill is best-effort; never crash the runtime over a write
+      // error. Subsequent appends retry through the same ordered chain.
+      this.spillReady = false;
     }
   }
 
-  private async flushSpill(): Promise<void> {
-    if (!this.diskSpillPath) {
-      this.spillFlushing = false;
-      return;
+  private restoreFromSpill(expectedTotalBytes: number): void {
+    if (!Number.isSafeInteger(expectedTotalBytes) || expectedTotalBytes < 0) {
+      throw new TypeError("Task output restore totalBytes must be a non-negative safe integer.");
     }
-    while (this.spillQueue.length > 0) {
-      const next = this.spillQueue.shift()!;
-      try {
-        if (!this.spillReady) {
-          await fs.mkdir(path.dirname(this.diskSpillPath), { recursive: true });
-          this.spillReady = true;
-        }
-        await fs.appendFile(this.diskSpillPath, next);
-      } catch {
-        // Disk spill is best-effort; never crash the runtime over a write
-        // error. Subsequent appends will retry the mkdir.
-        this.spillReady = false;
-        break;
+    if (!this.diskSpillPath) {
+      throw new Error("Task output cannot be restored without durable spill storage.");
+    }
+    let output: Buffer;
+    try {
+      output = readFileSync(this.diskSpillPath);
+    } catch (error) {
+      if (expectedTotalBytes === 0 && isMissingFile(error)) {
+        output = Buffer.alloc(0);
+      } else {
+        throw new Error(`Could not restore task output from ${this.diskSpillPath}.`, { cause: error });
       }
     }
-    this.spillFlushing = false;
+    if (output.length !== expectedTotalBytes) {
+      throw new Error(
+        `Task output at ${this.diskSpillPath} has ${output.length} bytes; expected ${expectedTotalBytes}.`,
+      );
+    }
+    this.totalSeenBytes = output.length;
+    const retainedStart = Math.max(0, output.length - this.maxMemoryBytes);
+    const retained = output.subarray(retainedStart);
+    if (retained.length > 0) this.chunks = [retained];
+    this.memBytes = retained.length;
+    this.droppedBytes = retainedStart;
+    this.spillReady = true;
   }
+
+  private readDiskSlice(offset: number, maxBytes: number): { content: Buffer; nextOffset: number } | undefined {
+    if (!this.diskSpillPath || maxBytes <= 0) return undefined;
+    let size: number;
+    try {
+      size = statSync(this.diskSpillPath).size;
+    } catch {
+      return undefined;
+    }
+    const readable = Math.min(size, this.totalSeenBytes) - offset;
+    if (readable <= 0) return undefined;
+    const wanted = Math.min(readable, maxBytes);
+    let handle: number | undefined;
+    try {
+      handle = openSync(this.diskSpillPath, "r");
+      const target = Buffer.allocUnsafe(wanted);
+      const read = readSync(handle, target, 0, wanted, offset);
+      if (read === 0) return undefined;
+      return { content: target.subarray(0, read), nextOffset: offset + read };
+    } catch {
+      return undefined;
+    } finally {
+      if (handle !== undefined) closeSync(handle);
+    }
+  }
+}
+
+function isMissingFile(error: unknown): boolean {
+  return typeof error === "object"
+    && error !== null
+    && "code" in error
+    && error.code === "ENOENT";
 }

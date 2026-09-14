@@ -1,5 +1,5 @@
 import type { CanonicalModelError } from "../../model/index.js";
-import type { RouterFallbackConfig, RouterModelRef } from "../config/schema.js";
+import type { RouterConfig, RouterFallbackConfig, RouterModelRef } from "../config/schema.js";
 import type { RouterScenarioType } from "../protocol/decision.js";
 import { LITELLM_ROUTER_MAX_FALLBACKS } from "../config/schema.js";
 
@@ -7,6 +7,37 @@ export type FallbackPlan = {
   /** Provider/model pairs to try in order, after the initial decision. */
   attempts: RouterModelRef[];
 };
+
+/** DSH-style Definition for fallback planning and error admission. */
+export type RouterFallbackPolicy = {
+  plan(scenarioType: RouterScenarioType | "explicit"): FallbackPlan;
+  candidates(scenarioType: RouterScenarioType): readonly RouterModelRef[];
+  isEligible(error: CanonicalModelError): boolean;
+  dispose?(): void | Promise<void>;
+};
+
+/** Native provider preserving the existing config-driven fallback semantics. */
+export function createNativeRouterFallbackPolicy(config: RouterConfig): RouterFallbackPolicy {
+  const fallback = config.fallback;
+  return {
+    plan: (scenarioType) => planFallback(fallback, scenarioType),
+    candidates(scenarioType) {
+      const candidates: RouterModelRef[] = [];
+      const add = (refs: RouterModelRef[] | undefined): void => {
+        for (const ref of refs ?? []) {
+          const id = ref.id || `${ref.provider}/${ref.model}`;
+          if (!candidates.some((candidate) => candidate.provider === ref.provider && candidate.model === ref.model)) {
+            candidates.push({ ...ref, id });
+          }
+        }
+      };
+      add((fallback as Record<string, RouterModelRef[] | undefined> | undefined)?.[scenarioType]);
+      add(fallback?.default);
+      return candidates;
+    },
+    isEligible: isFallbackEligible,
+  };
+}
 
 export function planFallback(
   fallback: RouterFallbackConfig | undefined,

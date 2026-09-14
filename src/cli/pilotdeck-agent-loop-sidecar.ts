@@ -2,7 +2,11 @@
 import { isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { AgentLoopSidecarServer, type SidecarExecutionFactory } from "../agent/modules/sidecar.js";
+import {
+  AgentLoopSidecarServer,
+  AgentLoopSidecarTcpServer,
+  type SidecarExecutionFactory,
+} from "../agent/modules/index.js";
 
 const factoryPath = process.env.PILOTDECK_AGENT_LOOP_FACTORY;
 let factory: SidecarExecutionFactory | undefined;
@@ -19,4 +23,24 @@ if (!factory) {
   throw new Error("Sidecar factory module must export default or createSidecarExecution.");
 }
 
-await new AgentLoopSidecarServer(factory).serve();
+const sidecar = new AgentLoopSidecarServer(factory);
+const tcpPort = optionalPort(process.env.PILOTDECK_AGENT_LOOP_TCP_PORT);
+if (tcpPort === undefined) {
+  await sidecar.serve();
+} else {
+  const server = new AgentLoopSidecarTcpServer(sidecar);
+  await server.listen({
+    host: process.env.PILOTDECK_AGENT_LOOP_TCP_HOST?.trim() || "127.0.0.1",
+    port: tcpPort,
+  });
+  await new Promise<void>(() => undefined);
+}
+
+function optionalPort(value: string | undefined): number | undefined {
+  if (value === undefined || value.trim() === "") return undefined;
+  const port = Number(value);
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+    throw new Error("PILOTDECK_AGENT_LOOP_TCP_PORT must be an integer between 1 and 65535.");
+  }
+  return port;
+}

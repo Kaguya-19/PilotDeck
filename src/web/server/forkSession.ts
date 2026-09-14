@@ -7,16 +7,15 @@
  */
 
 import { randomUUID } from "node:crypto";
-import type { Dirent } from "node:fs";
-import { chmod, cp, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { platform } from "node:process";
 import type { CanonicalContentBlock, CanonicalMessage } from "../../model/index.js";
-import { getPilotProjectChatDir } from "../../pilot/index.js";
-import { readTranscript } from "../../session/transcript/TranscriptReader.js";
+import { parseAgentRunMode } from "../../agent/protocol/input.js";
 import {
-  sanitizeSessionIdForPath,
-} from "../../session/storage/ProjectSessionStorage.js";
+  createProjectSessionForkPort,
+  readAgentProjectSessionPersistence,
+  type ProjectSessionForkPort,
+  type ProjectSessionStorageProvider,
+} from "../../session/index.js";
 import type {
   AgentAcceptedInputTranscriptEntry,
   AgentSessionMetadataTranscriptEntry,
@@ -27,6 +26,10 @@ import type { WebAgentRunMode, WebGatewayMode, WebForkSessionInput, WebForkSessi
 export type ForkWebSessionOptions = {
   projectRoot: string;
   pilotHome: string;
+  /** Application-selected durable backend used for source reads and fork writes. */
+  storageProvider?: ProjectSessionStorageProvider;
+  /** Explicit application/test override for the selected durable fork transaction. */
+  sessionForkPort?: ProjectSessionForkPort;
   now?: () => Date;
 };
 
@@ -58,8 +61,7 @@ function getForkMode(entry: AgentAcceptedInputTranscriptEntry): WebGatewayMode |
 }
 
 function getForkRunMode(entry: AgentAcceptedInputTranscriptEntry): WebAgentRunMode | undefined {
-  const value = entry.metadata?.runMode;
-  return value === "agent" || value === "plan" || value === "ask" ? value : undefined;
+  return parseAgentRunMode(entry.metadata?.runMode);
 }
 
 function buildForkTitle(
@@ -165,49 +167,6 @@ function shouldPreserveSourceEntry(entry: AgentTranscriptEntry, forkPoint: ForkP
   );
 }
 
-function retargetAuxiliaryPath(
-  path: string,
-  sourceSessionDir: string,
-  targetSessionDir: string,
-): string {
-  const absolutePath = resolve(path);
-  const relativePath = relative(sourceSessionDir, absolutePath);
-  if (
-    relativePath === "" ||
-    relativePath.startsWith("..") ||
-    isAbsolute(relativePath)
-  ) {
-    return path;
-  }
-  return resolve(targetSessionDir, relativePath);
-}
-
-function retargetRelativeSessionPath(
-  path: string,
-  sourceSafeId: string,
-  targetSafeId: string,
-): string {
-  const parts = path.split(/[\\/]/);
-  if (parts[0] !== sourceSafeId) {
-    return path;
-  }
-  return [targetSafeId, ...parts.slice(1)].join("/");
-}
-
-function retargetContentBlock(
-  block: CanonicalContentBlock,
-  sourceSessionDir: string,
-  targetSessionDir: string,
-): CanonicalContentBlock {
-  if (block.type === "tool_result_reference" || block.type === "media_reference") {
-    return {
-      ...block,
-      path: retargetAuxiliaryPath(block.path, sourceSessionDir, targetSessionDir),
-    };
-  }
-  return block;
-}
-
 function markMessageAsForkCarryover(
   message: CanonicalMessage,
   sourceSessionId: string,
@@ -223,40 +182,6 @@ function markMessageAsForkCarryover(
       },
     },
   };
-}
-
-function retargetTranscriptEntryAuxiliaryPaths(
-  entry: AgentTranscriptEntry,
-  sourceSessionDir: string,
-  targetSessionDir: string,
-): AgentTranscriptEntry {
-  if (entry.type === "accepted_input") {
-    return {
-      ...entry,
-      messages: entry.messages.map((message) => ({
-        ...message,
-        content: message.content.map((block) =>
-          retargetContentBlock(block, sourceSessionDir, targetSessionDir),
-        ),
-      })),
-    };
-  }
-  if (
-    entry.type === "assistant_message" ||
-    entry.type === "tool_result_message" ||
-    entry.type === "durable_message"
-  ) {
-    return {
-      ...entry,
-      message: {
-        ...entry.message,
-        content: entry.message.content.map((block) =>
-          retargetContentBlock(block, sourceSessionDir, targetSessionDir),
-        ),
-      },
-    };
-  }
-  return entry;
 }
 
 function markTranscriptEntryAsForkCarryover(
@@ -284,157 +209,29 @@ function markTranscriptEntryAsForkCarryover(
   return entry;
 }
 
-function retargetAcceptedInputEntry(
-  entry: AgentAcceptedInputTranscriptEntry,
-  sessionId: string,
-  sourceSessionDir: string,
-  targetSessionDir: string,
-): AgentAcceptedInputTranscriptEntry {
-  const retargeted = retargetTranscriptEntryAuxiliaryPaths(
-    entry,
-    sourceSessionDir,
-    targetSessionDir,
-  );
-  if (retargeted.type !== "accepted_input") {
-    return entry;
-  }
-  return {
-    ...retargeted,
-    sessionId,
-  };
-}
-
 function retargetEntriesToSession(
   entries: AgentTranscriptEntry[],
   options: {
     sessionId: string;
-    sourceSafeId: string;
-    targetSafeId: string;
-    sourceSessionDir: string;
-    targetSessionDir: string;
   },
 ): AgentTranscriptEntry[] {
   return entries.map((entry) => {
     if (entry.type === "accepted_input") {
-      const retargeted = retargetAcceptedInputEntry(
-        entry,
-        options.sessionId,
-        options.sourceSessionDir,
-        options.targetSessionDir,
-      );
-      return markTranscriptEntryAsForkCarryover(retargeted, entry.sessionId);
+      return markTranscriptEntryAsForkCarryover({ ...entry, sessionId: options.sessionId }, entry.sessionId);
     }
     if (
       entry.type === "assistant_message" ||
       entry.type === "tool_result_message" ||
       entry.type === "durable_message"
     ) {
-      const retargeted = {
-        ...retargetTranscriptEntryAuxiliaryPaths(
-          entry,
-          options.sourceSessionDir,
-          options.targetSessionDir,
-        ),
-        sessionId: options.sessionId,
-      };
+      const retargeted = { ...entry, sessionId: options.sessionId };
       return markTranscriptEntryAsForkCarryover(retargeted, entry.sessionId);
-    }
-    if (entry.type === "subagent_started") {
-      return {
-        ...entry,
-        sessionId: options.sessionId,
-        transcriptRelativePath: retargetRelativeSessionPath(
-          entry.transcriptRelativePath,
-          options.sourceSafeId,
-          options.targetSafeId,
-        ),
-      };
     }
     return {
       ...entry,
       sessionId: options.sessionId,
     };
   });
-}
-
-function isNotFoundError(error: unknown): boolean {
-  return Boolean(
-    error &&
-      typeof error === "object" &&
-      "code" in error &&
-      (error as { code?: unknown }).code === "ENOENT",
-  );
-}
-
-async function pathExists(path: string): Promise<boolean> {
-  try {
-    await stat(path);
-    return true;
-  } catch (error) {
-    if (isNotFoundError(error)) {
-      return false;
-    }
-    throw error;
-  }
-}
-
-async function retargetCopiedSubagentTranscripts(
-  targetSubagentsDir: string,
-  sourceSessionDir: string,
-  targetSessionDir: string,
-): Promise<void> {
-  let entries: Dirent<string>[];
-  try {
-    entries = await readdir(targetSubagentsDir, { withFileTypes: true });
-  } catch (error) {
-    if (isNotFoundError(error)) {
-      return;
-    }
-    throw error;
-  }
-
-  for (const entry of entries) {
-    const path = join(targetSubagentsDir, entry.name);
-    if (entry.isDirectory()) {
-      await retargetCopiedSubagentTranscripts(path, sourceSessionDir, targetSessionDir);
-      continue;
-    }
-    if (!entry.isFile() || !entry.name.endsWith(".jsonl")) {
-      continue;
-    }
-    const content = await readFile(path, "utf8");
-    const rewritten = content
-      .split(/\r?\n/)
-      .map((line) => {
-        if (!line.trim()) {
-          return line;
-        }
-        try {
-          const parsed = JSON.parse(line) as AgentTranscriptEntry;
-          return JSON.stringify(
-            retargetTranscriptEntryAuxiliaryPaths(parsed, sourceSessionDir, targetSessionDir),
-          );
-        } catch {
-          return line;
-        }
-      })
-      .join("\n");
-    await writeFile(path, rewritten, "utf8");
-  }
-}
-
-async function copySessionAuxDirs(sourceSessionDir: string, targetSessionDir: string): Promise<void> {
-  for (const subdir of ["tool-results", "file-history", "subagents"] as const) {
-    const source = join(sourceSessionDir, subdir);
-    const target = join(targetSessionDir, subdir);
-    if (!(await pathExists(source))) {
-      continue;
-    }
-    await cp(source, target, { recursive: true, force: true });
-    if (subdir === "subagents") {
-      await retargetCopiedSubagentTranscripts(target, sourceSessionDir, targetSessionDir);
-    }
-  }
 }
 
 export class ForkSessionError extends Error {
@@ -452,12 +249,12 @@ export async function forkWebSession(
   options: ForkWebSessionOptions,
 ): Promise<WebForkSessionResult> {
   const effectiveProjectRoot = input.projectKey ?? options.projectRoot;
-  const chatDir = getPilotProjectChatDir(effectiveProjectRoot, options.pilotHome);
-  const sourceSafeId = sanitizeSessionIdForPath(input.sessionKey);
-  const sourceTranscriptPath = resolve(chatDir, `${sourceSafeId}.jsonl`);
-  const sourceSessionDir = resolve(chatDir, sourceSafeId);
-
-  const { entries } = await readTranscript(sourceTranscriptPath);
+  const { entries } = await readAgentProjectSessionPersistence({
+    projectRoot: effectiveProjectRoot,
+    pilotHome: options.pilotHome,
+    sessionId: input.sessionKey,
+    ...(options.storageProvider ? { storageProvider: options.storageProvider } : {}),
+  });
   if (entries.length === 0) {
     throw new ForkSessionError("fork_empty_transcript", "Cannot fork an empty session transcript.");
   }
@@ -478,22 +275,9 @@ export async function forkWebSession(
   const carriedMessageCount = countCarriedUserAssistantMessages(preservedSourceEntries);
 
   const newSessionKey = newWebSessionKey();
-  const newSafeId = sanitizeSessionIdForPath(newSessionKey);
-  const newTranscriptPath = resolve(chatDir, `${newSafeId}.jsonl`);
-  const newSessionDir = resolve(chatDir, newSafeId);
   const preserved = retargetEntriesToSession(preservedSourceEntries, {
     sessionId: newSessionKey,
-    sourceSafeId,
-    targetSafeId: newSafeId,
-    sourceSessionDir,
-    targetSessionDir: newSessionDir,
   });
-
-  await mkdir(chatDir, { recursive: true, mode: 0o700 });
-  await mkdir(newSessionDir, { recursive: true, mode: 0o700 });
-  await copySessionAuxDirs(sourceSessionDir, newSessionDir);
-
-  const preservedLines = preserved.map((entry) => `${JSON.stringify(entry)}\n`).join("");
   const lastPreserved = preserved[preserved.length - 1];
   const lastEntryId = lastPreserved?.entryId ?? null;
   const maxSequence = preserved.reduce((max, entry) => Math.max(max, entry.sequence), 0);
@@ -527,9 +311,16 @@ export async function forkWebSession(
     },
   };
 
-  const body = preservedLines + `${JSON.stringify(metadataEntry)}\n`;
-  await writeFile(newTranscriptPath, body, { encoding: "utf8", mode: 0o600 });
-  await chmod(dirname(newTranscriptPath), 0o700);
+  const sessionForkPort = options.sessionForkPort ?? createProjectSessionForkPort({
+    ...(options.storageProvider ? { storageProvider: options.storageProvider } : {}),
+  });
+  await sessionForkPort.fork({
+    projectRoot: effectiveProjectRoot,
+    pilotHome: options.pilotHome,
+    sourceSessionId: input.sessionKey,
+    targetSessionId: newSessionKey,
+    entries: [...preserved, metadataEntry],
+  });
 
   return {
     newSessionKey,

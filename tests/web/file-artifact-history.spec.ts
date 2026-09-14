@@ -4,8 +4,11 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
+import { createNodeSessionCatalog } from "../../src/session/catalog/NodeSessionCatalog.js";
 import { createAgentProjectSessionStorage } from "../../src/session/storage/ProjectSessionStorage.js";
 import { readWebSessionMessages } from "../../src/web/server/readSessionMessages.js";
+
+const sessionCatalog = createNodeSessionCatalog();
 
 test("history replay restores structured agent file artifacts", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "pilotdeck-artifact-history-project-"));
@@ -44,7 +47,7 @@ test("history replay restores structured agent file artifacts", async () => {
       createdAt: "2026-07-21T10:00:00.000Z",
     }]);
 
-    const replay = await readWebSessionMessages({ sessionKey }, { projectRoot, pilotHome });
+    const replay = await readWebSessionMessages({ sessionKey }, { projectRoot, pilotHome, sessionCatalog });
     const message = replay.messages.find((item) => item.kind === "file_artifacts");
     const assistantMessage = replay.messages.find((item) => item.kind === "text" && item.role === "assistant");
 
@@ -93,7 +96,7 @@ test("history replay hides stale workspace-diff artifacts from turns with no too
       createdAt: "2026-08-02T10:00:00.000Z",
     }]);
 
-    const replay = await readWebSessionMessages({ sessionKey }, { projectRoot, pilotHome });
+    const replay = await readWebSessionMessages({ sessionKey }, { projectRoot, pilotHome, sessionCatalog });
 
     assert.equal(replay.messages.some((item) => item.kind === "file_artifacts"), false);
   } finally {
@@ -127,7 +130,7 @@ test("history replay hides Agent file artifacts in general conversations", async
 
     const replay = await readWebSessionMessages(
       { sessionKey, projectKey: pilotHome },
-      { projectRoot: pilotHome, pilotHome },
+      { projectRoot: pilotHome, pilotHome, sessionCatalog },
     );
 
     assert.equal(replay.messages.some((item) => item.kind === "file_artifacts"), false);

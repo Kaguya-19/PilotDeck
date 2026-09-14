@@ -4,6 +4,7 @@ import test from "node:test";
 import type { AgentSession } from "../../src/agent/index.js";
 import type { CanonicalMessage } from "../../src/model/index.js";
 import { InProcessGateway } from "../../src/gateway/client/InProcessGateway.js";
+import type { GatewayAttachmentTurnComposerPort } from "../../src/gateway/dialog/GatewayAttachmentTurnComposerPort.js";
 import { SessionRouter } from "../../src/gateway/SessionRouter.js";
 
 test("gateway turns guidance into a canonical user message for the active run", async () => {
@@ -35,7 +36,20 @@ test("gateway turns guidance into a canonical user message for the active run", 
   await router.getOrCreate({ sessionKey: "session-1", channelKey: "web" });
   assert.equal(router.beginTurn("session-1", "run-1"), true);
 
-  const gateway = new InProcessGateway(router);
+  const composerCalls: Array<{ message: string; projectRoot?: string }> = [];
+  const attachmentTurnComposer: GatewayAttachmentTurnComposerPort = {
+    async prepare(input) {
+      composerCalls.push({ message: input.message, projectRoot: input.projectRoot });
+      return {
+        agentInput: {
+          type: "blocks",
+          content: [{ type: "text", text: "prepared steer input" }],
+        },
+        allowedReadFiles: ["/approved/attachment.txt"],
+      };
+    },
+  };
+  const gateway = new InProcessGateway(router, { attachmentTurnComposer });
   const result = await gateway.steerTurn({
     sessionKey: "session-1",
     runId: "run-1",
@@ -52,7 +66,12 @@ test("gateway turns guidance into a canonical user message for the active run", 
     purpose: "mid_turn_steer",
     queueItemId: "queue-1",
   });
-  assert.deepEqual(received?.message.content, [{ type: "text", text: "Use HTML instead" }]);
+  assert.deepEqual(received?.message.content, [{ type: "text", text: "prepared steer input" }]);
+  assert.deepEqual(received?.allowedReadFiles, ["/approved/attachment.txt"]);
+  assert.deepEqual(composerCalls, [{
+    message: "Use HTML instead",
+    projectRoot: "/tmp/project",
+  }]);
 
   assert.deepEqual(await gateway.steerTurn({
     sessionKey: "session-1",

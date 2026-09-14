@@ -74,6 +74,25 @@ test("allows a disabled token saver without child model settings", () => {
   assert.deepEqual(result.config?.tokenSaver, { enabled: false });
 });
 
+test("parses transient retry policy values", () => {
+  const result = parseRouterConfig({
+    transientRetry: {
+      enabled: false,
+      maxAttempts: 0,
+      baseDelayMs: 0,
+      maxDelayMs: 0,
+    },
+  }, modelConfig);
+
+  assert.equal(result.diagnostics.filter((item) => item.severity === "fatal").length, 0);
+  assert.deepEqual(result.config?.transientRetry, {
+    enabled: false,
+    maxAttempts: 0,
+    baseDelayMs: 0,
+    maxDelayMs: 0,
+  });
+});
+
 test("skips auto-orchestrate tier validation when token saver is disabled", () => {
   const result = parseRouterConfig({
     tokenSaver: { enabled: false },

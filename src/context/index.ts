@@ -10,13 +10,29 @@ export {
   type AgentPreparedContext,
 } from "./ContextRuntime.js";
 export { NullContextRuntime } from "./NullContextRuntime.js";
-export { DefaultContextRuntime, type AutoCompactResult, type CompactionTier, type DefaultContextRuntimeOptions } from "./DefaultContextRuntime.js";
+export {
+  DEFAULT_RUNTIME_CONTEXT_SURFACE,
+  LEGACY_RUNTIME_CONTEXT_SURFACE,
+  RUNTIME_CONTEXT_SURFACES,
+  isRuntimeContextSurface,
+  resolveRuntimeContextSurface,
+  type RuntimeContextSurface,
+} from "./RuntimeContextSurface.js";
+export {
+  DefaultContextRuntime,
+  type AutoCompactResult,
+  type CompactionTier,
+  type DefaultContextRuntimeOptions,
+} from "./DefaultContextRuntime.js";
 export type {
   ContextBoundary,
   ContextDiagnostic,
+  ContextInstructionSnapshotLayer,
+  ContextMaterialization,
   ContextPrepareInput,
   ContextRecoveryDecision,
   ContextRecoveryInput,
+  ContextRuntimeSnapshotSection,
   ContextRuntime,
   ContextSupplementalToolResultMessage,
   ContextToolResultInput,
@@ -29,6 +45,27 @@ export {
   type PromptAssemblerResult,
   type PromptAssemblerSections,
 } from "./prompt/PromptAssembler.js";
+export {
+  PromptContributionRegistry,
+  createToolRegistryPromptSchemaSource,
+  renderPromptContributionSections,
+  renderPromptRuntimeContextSections,
+  type AssembledPromptRuntimeContext,
+  type AssembledPromptSection,
+  type PromptContributionContext,
+  type PromptContributionRegistration,
+  type PromptContributionRegistrationKind,
+  type PromptContributionRegistryOptions,
+  type PromptContributionRegistryState,
+  type PromptContributionSnapshot,
+  type PromptContributionSnapshotOptions,
+  type PromptRuntimeContextContribution,
+  type PromptSectionContribution,
+  type PromptTextProvider,
+  type PromptToolSchemaSource,
+  type PromptVariableProvider,
+} from "./prompt/PromptContributionRegistry.js";
+export { registerExtensionPromptContributions } from "./prompt/registerExtensionPromptContributions.js";
 export {
   MessageProjector,
   type MessageProjectorInput,
@@ -46,7 +83,13 @@ export {
   type ToolResultReplacementRecord,
 } from "./budget/ToolResultBudget.js";
 export {
+  createNodeToolResultSpillPort,
+  type ToolResultSpillPort,
+} from "./budget/ToolResultSpillPort.js";
+export {
   InputProcessor,
+  MAX_PLUGIN_COMMAND_ARGUMENT_CHARS,
+  MAX_PLUGIN_COMMAND_BODY_CHARS,
   type ContextInputBlock,
   type ContextInputResult,
   type InputProcessorOptions,
@@ -57,6 +100,13 @@ export {
   type AttachmentResolverOptions,
   type ResolvedAttachment,
 } from "./attachments/AttachmentResolver.js";
+export { PromptCacheCoordinator } from "./cache/PromptCacheCoordinator.js";
+export type { PromptCacheCoordinatorPort } from "./cache/PromptCacheCoordinatorPort.js";
+export {
+  createNodeAttachmentPort,
+  type AttachmentPort,
+  type AttachmentMetadata,
+} from "./attachments/AttachmentPort.js";
 export {
   IMAGE_MAX_TOKEN_SIZE,
   TokenBudgetManager,
@@ -88,6 +138,28 @@ export {
   type CompactionResult,
   type CompactionTrigger,
 } from "./compaction/CompactionEngine.js";
+export {
+  type AutoCompactResult as CompactionAutoCompactResult,
+  type CompactionAutoCompactInput,
+  type CompactionBudgetProjection,
+  type CompactionBudgetPort,
+  type CompactionMicroPort,
+  type CompactionPolicyPort,
+  type CompactionPort,
+  type CompactionRecoveryPort,
+  type CompactionSnipPort,
+  type CompactionSummaryPort,
+} from "./compaction/CompactionPort.js";
+export { projectCompactionBudget } from "./compaction/CompactionPort.js";
+export {
+  createNativeCompactionPort,
+  type NativeCompactionPortOptions,
+} from "./compaction/NativeCompactionPort.js";
+export {
+  createCompactionOrchestrator,
+  withCompactionOrchestrator,
+  type CompactionOrchestratorOptions,
+} from "./compaction/CompactionOrchestrator.js";
 export {
   AutoCompactionPolicy,
   type AutoCompactionDecision,
@@ -139,6 +211,7 @@ export {
 export {
   NullExtensionResolver,
   type ContributedCommand,
+  type ContributedPrompt,
   type ContributedSkill,
   type ExtensionResolver,
   type McpServerInstruction,
@@ -147,6 +220,7 @@ export {
   PluginRuntimeExtensionResolver,
   type PluginRuntimeLike,
 } from "./extension/PluginRuntimeExtensionResolver.js";
+export type { ContributedTool } from "./extension/ExtensionResolver.js";
 export {
   MemoryAttachmentBuilder,
   type MemoryAttachmentBuilderResult,
@@ -177,3 +251,8 @@ export {
   type InstructionLayer,
   type InstructionScope,
 } from "./instructions/InstructionDiscovery.js";
+export {
+  createNodeInstructionStoragePort,
+  type InstructionStorageDirectoryEntry,
+  type InstructionStoragePort,
+} from "./instructions/InstructionStoragePort.js";

@@ -30,6 +30,7 @@ export function createAlwaysOnWorkspaceTool(
       "Prepare an isolated workspace for the current Always-On plan execution. " +
       "Use `auto` to let the runtime pick the best strategy, or specify `git-worktree` / `snapshot-copy` explicitly.",
     kind: "session",
+    requiredRuntimeCapabilities: ["always_on_run_context"],
     inputSchema: {
       type: "object",
       required: ["strategy"],

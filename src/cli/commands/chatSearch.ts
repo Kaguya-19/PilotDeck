@@ -2,24 +2,22 @@ import { resolvePilotHome } from "../../pilot/index.js";
 import {
   formatChatHistorySearchResults,
 } from "../../session/search/formatChatHistorySearch.js";
-import {
-  parseChatSearchArgs,
-  searchChatHistory,
-  type SearchChatHistoryResult,
-} from "../../session/search/searchChatHistory.js";
+import { parseChatSearchArgs } from "../../session/search/ChatSearchArgs.js";
+import type { SessionSearchPort, SessionSearchResult } from "../../session/search/SessionSearchPort.js";
 
 export type RunChatSearchOptions = {
+  sessionSearch: SessionSearchPort;
   pilotHome?: string;
   projectRoot?: string;
   arg: string;
   locale?: "zh" | "en";
 };
 
-export async function runChatSearch(options: RunChatSearchOptions): Promise<SearchChatHistoryResult> {
+export async function runChatSearch(options: RunChatSearchOptions): Promise<SessionSearchResult> {
   const parsed = parseChatSearchArgs(options.arg);
   const pilotHome = options.pilotHome ?? resolvePilotHome(process.env);
 
-  return searchChatHistory({
+  return options.sessionSearch.search({
     pilotHome,
     projectRoot: parsed.allProjects ? undefined : options.projectRoot,
     query: parsed.query,
@@ -32,7 +30,7 @@ export async function runChatSearch(options: RunChatSearchOptions): Promise<Sear
 }
 
 export async function runChatSearchFormatted(options: RunChatSearchOptions): Promise<{
-  result: SearchChatHistoryResult;
+  result: SessionSearchResult;
   text: string;
 }> {
   const result = await runChatSearch(options);
@@ -56,7 +54,7 @@ function readNumberFlag(argv: string[], flag: string): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
-export async function runChatSearchCli(argv: string[]): Promise<void> {
+export async function runChatSearchCli(argv: string[], sessionSearch: SessionSearchPort): Promise<void> {
   const subcommand = argv[0];
   if (subcommand !== "search") {
     console.error(
@@ -95,7 +93,7 @@ export async function runChatSearchCli(argv: string[]): Promise<void> {
   }
 
   const pilotHome = readStringFlag(argv, "--pilot-home") ?? resolvePilotHome(process.env);
-  const result = await searchChatHistory({
+  const result = await sessionSearch.search({
     pilotHome,
     projectRoot: allProjects ? undefined : projectRoot,
     query,

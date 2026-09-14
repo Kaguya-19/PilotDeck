@@ -5,6 +5,7 @@ import { join, relative } from "node:path";
 import { tmpdir } from "node:os";
 
 import { createSendAttachmentTool } from "../../../src/tool/builtin/sendAttachment.js";
+import type { AttachmentDeliveryPort } from "../../../src/tool/execution-world/AttachmentDeliveryPort.js";
 import type { PilotDeckToolRuntimeContext } from "../../../src/tool/protocol/types.js";
 
 function context(cwd: string, workDir = join(cwd, ".pilotdeck", "work", "session", "turn")): PilotDeckToolRuntimeContext {
@@ -118,4 +119,28 @@ test("send_attachment still sends reviewed files published to the workspace", as
   } finally {
     await rm(projectRoot, { recursive: true, force: true });
   }
+});
+
+test("send_attachment consumes an injected attachment-delivery provider after path policy", async () => {
+  const calls: string[] = [];
+  const delivery: AttachmentDeliveryPort = {
+    async realpath(path) {
+      calls.push(`realpath:${path}`);
+      return path;
+    },
+    async stat(path) {
+      calls.push(`stat:${path}`);
+      return { size: 42, kind: "file" };
+    },
+  };
+  const tool = createSendAttachmentTool({ delivery });
+  const result = await tool.execute({ file_path: "deliverable.pdf" }, context("/project"));
+
+  assert.equal(result.data?.bytes, 42);
+  assert.deepEqual(calls, [
+    "realpath:/project/deliverable.pdf",
+    "realpath:/project/.pilotdeck/work",
+    "realpath:/project/.pilotdeck/work/session/turn",
+    "stat:/project/deliverable.pdf",
+  ]);
 });

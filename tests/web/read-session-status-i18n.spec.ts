@@ -4,8 +4,11 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
+import { createNodeSessionCatalog } from "../../src/session/catalog/NodeSessionCatalog.js";
 import { createAgentProjectSessionStorage } from "../../src/session/storage/ProjectSessionStorage.js";
 import { readWebSessionMessages } from "../../src/web/server/readSessionMessages.js";
+
+const sessionCatalog = createNodeSessionCatalog();
 
 test("history replay preserves agent status i18n metadata and user hint", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "pilotdeck-status-i18n-project-"));
@@ -35,7 +38,7 @@ test("history replay preserves agent status i18n metadata and user hint", async 
       },
     });
 
-    const replay = await readWebSessionMessages({ sessionKey }, { projectRoot, pilotHome });
+    const replay = await readWebSessionMessages({ sessionKey }, { projectRoot, pilotHome, sessionCatalog });
     const message = replay.messages.find((item) => item.kind === "error");
 
     assert.ok(message, "expected replayed error status message");
@@ -99,7 +102,7 @@ test("history token usage restores latest non-empty turn past latest empty turn 
 
     const replay = await readWebSessionMessages(
       { sessionKey },
-      { projectRoot, pilotHome, maxContextTokens: 1000 },
+      { projectRoot, pilotHome, sessionCatalog, maxContextTokens: 1000 },
     );
 
     assert.equal(replay.tokenUsage?.used, 35);
@@ -152,7 +155,7 @@ test("history token usage prefers persisted context budget snapshot", async () =
 
     const replay = await readWebSessionMessages(
       { sessionKey },
-      { projectRoot, pilotHome, maxContextTokens: 1000 },
+      { projectRoot, pilotHome, sessionCatalog, maxContextTokens: 1000 },
     );
 
     assert.equal(replay.tokenUsage?.used, 60);
@@ -206,7 +209,7 @@ test("history token usage reflects the latest compact boundary after context bud
 
     const replay = await readWebSessionMessages(
       { sessionKey },
-      { projectRoot, pilotHome, maxContextTokens: 100000, maxOutputTokens: 10000 },
+      { projectRoot, pilotHome, sessionCatalog, maxContextTokens: 100000, maxOutputTokens: 10000 },
     );
 
     assert.equal(replay.tokenUsage?.used, 12000);

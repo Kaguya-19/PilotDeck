@@ -1,7 +1,6 @@
 import type {
   CanonicalMessage,
   CanonicalModelRequest,
-  ModelRuntime,
 } from "../../model/index.js";
 import { ModelProviderError, ModelRequestError } from "../../model/index.js";
 import type { TelemetryClient } from "../../telemetry/index.js";
@@ -31,7 +30,7 @@ export type TokenSaverFailure = {
 export type ClassifyAndRouteInput = {
   config: RouterTokenSaverConfig;
   messages: CanonicalMessage[];
-  judgeRuntime: ModelRuntime;
+  judgeRuntime: Pick<import("../../model/index.js").ModelRuntime, "complete">;
   abortSignal?: AbortSignal;
   /** Tier from the previous turn; passed to the judge for context-aware classification. */
   previousTier?: string;

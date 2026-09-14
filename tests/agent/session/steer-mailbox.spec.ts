@@ -15,32 +15,32 @@ function steer(itemId: string, text = itemId): AgentSteerMessage {
   };
 }
 
-test("steer mailbox accepts only the active turn and deduplicates retries", () => {
+test("steer mailbox accepts only the active turn and deduplicates retries", async () => {
   const mailbox = new SteerMailbox();
-  assert.deepEqual(mailbox.enqueue("turn-1", steer("item-1")), {
+  assert.deepEqual(await mailbox.enqueue("turn-1", steer("item-1")), {
     accepted: false,
     reason: "no_active_turn",
   });
 
   mailbox.start("turn-1");
-  assert.deepEqual(mailbox.enqueue("turn-2", steer("item-1")), {
+  assert.deepEqual(await mailbox.enqueue("turn-2", steer("item-1")), {
     accepted: false,
     reason: "turn_mismatch",
   });
-  assert.deepEqual(mailbox.enqueue("turn-1", steer("item-1", "adjust direction")), {
+  assert.deepEqual(await mailbox.enqueue("turn-1", steer("item-1", "adjust direction")), {
     accepted: true,
   });
-  assert.deepEqual(mailbox.enqueue("turn-1", steer("item-1", "duplicate retry")), {
+  assert.deepEqual(await mailbox.enqueue("turn-1", steer("item-1", "duplicate retry")), {
     accepted: true,
   });
   assert.deepEqual(mailbox.drain("turn-1").map((entry) => entry.itemId), ["item-1"]);
   assert.deepEqual(mailbox.drain("turn-1"), []);
 });
 
-test("drainOrClose removes the terminal race without dropping accepted guidance", () => {
+test("drainOrClose removes the terminal race without dropping accepted guidance", async () => {
   const mailbox = new SteerMailbox();
   mailbox.start("turn-1");
-  mailbox.enqueue("turn-1", steer("item-1"));
+  await mailbox.enqueue("turn-1", steer("item-1"));
 
   const firstBoundary = mailbox.drainOrClose("turn-1");
   assert.equal(firstBoundary.closed, false);
@@ -48,61 +48,121 @@ test("drainOrClose removes the terminal race without dropping accepted guidance"
 
   const terminalBoundary = mailbox.drainOrClose("turn-1");
   assert.deepEqual(terminalBoundary, { messages: [], closed: true });
-  assert.deepEqual(mailbox.enqueue("turn-1", steer("item-2")), {
+  assert.deepEqual(await mailbox.enqueue("turn-1", steer("item-2")), {
     accepted: false,
     reason: "turn_closing",
   });
 });
 
-test("finish returns unconsumed guidance so callers can leave it queued", () => {
+test("finish returns unconsumed guidance so callers can leave it queued", async () => {
   const mailbox = new SteerMailbox();
   mailbox.start("turn-1");
-  mailbox.enqueue("turn-1", steer("item-1"));
+  await mailbox.enqueue("turn-1", steer("item-1"));
 
   assert.deepEqual(mailbox.finish("turn-1").map((entry) => entry.itemId), ["item-1"]);
-  assert.deepEqual(mailbox.enqueue("turn-1", steer("item-2")), {
+  assert.deepEqual(await mailbox.enqueue("turn-1", steer("item-2")), {
     accepted: false,
     reason: "no_active_turn",
   });
 });
 
-test("close returns pending guidance while rejecting late submissions as turn_closing", () => {
+test("close returns pending guidance while rejecting late submissions as turn_closing", async () => {
   const mailbox = new SteerMailbox();
   mailbox.start("turn-1");
-  mailbox.enqueue("turn-1", steer("item-1"));
+  await mailbox.enqueue("turn-1", steer("item-1"));
 
-  assert.deepEqual(mailbox.close("turn-1").map((entry) => entry.itemId), ["item-1"]);
-  assert.deepEqual(mailbox.enqueue("turn-1", steer("item-2")), {
+  assert.deepEqual((await mailbox.close("turn-1")).map((entry) => entry.itemId), ["item-1"]);
+  assert.deepEqual(await mailbox.enqueue("turn-1", steer("item-2")), {
     accepted: false,
     reason: "turn_closing",
   });
   assert.deepEqual(mailbox.finish("turn-1"), []);
 });
 
-test("pending guidance can be cancelled before a model boundary", () => {
+test("pending guidance can be cancelled before a model boundary", async () => {
   const mailbox = new SteerMailbox();
   mailbox.start("turn-1");
-  mailbox.enqueue("turn-1", steer("item-1"));
+  await mailbox.enqueue("turn-1", steer("item-1"));
 
-  assert.deepEqual(mailbox.cancel("turn-1", "item-1"), { cancelled: true });
-  assert.deepEqual(mailbox.cancel("turn-1", "item-1"), { cancelled: true });
+  assert.deepEqual(await mailbox.cancel("turn-1", "item-1"), { cancelled: true });
+  assert.deepEqual(await mailbox.cancel("turn-1", "item-1"), { cancelled: true });
   assert.deepEqual(mailbox.drain("turn-1"), []);
 });
 
-test("cancel tombstones win a race with enqueue, but drained guidance is too late", () => {
+test("cancel tombstones win a race with enqueue, but drained guidance is too late", async () => {
   const mailbox = new SteerMailbox();
   mailbox.start("turn-1");
 
-  assert.deepEqual(mailbox.cancel("turn-1", "item-before-enqueue"), { cancelled: true });
-  assert.deepEqual(mailbox.enqueue("turn-1", steer("item-before-enqueue")), {
+  assert.deepEqual(await mailbox.cancel("turn-1", "item-before-enqueue"), { cancelled: true });
+  assert.deepEqual(await mailbox.enqueue("turn-1", steer("item-before-enqueue")), {
     accepted: false,
     reason: "cancelled",
   });
 
-  mailbox.enqueue("turn-1", steer("item-drained"));
+  await mailbox.enqueue("turn-1", steer("item-drained"));
   assert.deepEqual(mailbox.drain("turn-1").map((entry) => entry.itemId), ["item-drained"]);
-  assert.deepEqual(mailbox.cancel("turn-1", "item-drained"), {
+  assert.deepEqual(await mailbox.cancel("turn-1", "item-drained"), {
     cancelled: false,
     reason: "too_late",
   });
+});
+
+test("mailbox records insert, claim, cancel, and discard before mutating state", async () => {
+  const mutations: string[] = [];
+  const mailbox = new SteerMailbox({
+    recordMutation: async (_turnId, mutation) => {
+      mutations.push(`${mutation.mutation}:${mutation.itemId}`);
+    },
+  });
+  mailbox.start("turn-1");
+
+  await mailbox.enqueue("turn-1", steer("claimed"));
+  assert.deepEqual(mailbox.drain("turn-1").map((entry) => entry.itemId), ["claimed"]);
+  await mailbox.claim("turn-1", "claimed");
+  mailbox.ack("turn-1", "claimed");
+
+  await mailbox.enqueue("turn-1", steer("cancelled"));
+  await mailbox.cancel("turn-1", "cancelled");
+  await mailbox.enqueue("turn-1", steer("discarded"));
+  assert.deepEqual((await mailbox.close("turn-1")).map((entry) => entry.itemId), ["discarded"]);
+
+  assert.deepEqual(mutations, [
+    "insert:claimed",
+    "claim:claimed",
+    "insert:cancelled",
+    "cancel:cancelled",
+    "insert:discarded",
+    "discard:discarded",
+  ]);
+});
+
+test("enqueue finishing after terminal close is durably discarded and rejected", async () => {
+  let releaseInsert: (() => void) | undefined;
+  const insertStarted = new Promise<void>((resolve) => {
+    releaseInsert = resolve;
+  });
+  let allowInsert: (() => void) | undefined;
+  const insertBlocked = new Promise<void>((resolve) => {
+    allowInsert = resolve;
+  });
+  const mutations: string[] = [];
+  const mailbox = new SteerMailbox({
+    recordMutation: async (_turnId, mutation) => {
+      mutations.push(mutation.mutation);
+      if (mutation.mutation === "insert") {
+        releaseInsert?.();
+        await insertBlocked;
+      }
+    },
+  });
+  mailbox.start("turn-1");
+
+  const pending = mailbox.enqueue("turn-1", steer("late"));
+  await insertStarted;
+  const closing = mailbox.close("turn-1");
+  allowInsert?.();
+
+  assert.deepEqual(await pending, { accepted: false, reason: "turn_closing" });
+  assert.deepEqual(await closing, []);
+  assert.deepEqual(mutations, ["insert", "discard"]);
 });

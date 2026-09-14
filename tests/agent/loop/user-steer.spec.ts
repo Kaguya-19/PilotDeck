@@ -69,7 +69,7 @@ test("guidance at the terminal boundary becomes a user message and starts anothe
   let terminalBoundaryCount = 0;
   const durable: CanonicalMessage[] = [];
   const eventTypes: string[] = [];
-  const loop = new AgentLoop(config, dependencies);
+  const loop = AgentLoop.fromDependencies(config, dependencies);
 
   const iterator = loop.run({
     sessionId: "session-1",
@@ -134,7 +134,7 @@ test("terminal guidance does not bypass the configured max turn budget", async (
     }),
     observeUsage: () => undefined,
   };
-  const loop = new AgentLoop({
+  const loop = AgentLoop.fromDependencies({
     provider: "openai",
     model: "test-model",
     cwd: "/workspace/project",
@@ -178,7 +178,7 @@ test("terminal guidance does not bypass the configured max turn budget", async (
 });
 
 test("failed steer persistence does not apply its message or file permissions", async () => {
-  const loop = new AgentLoop({
+  const loop = AgentLoop.fromDependencies({
     provider: "openai",
     model: "test-model",
     cwd: "/workspace/project",

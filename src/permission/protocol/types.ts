@@ -1,4 +1,14 @@
-export type PermissionMode = "default" | "plan" | "bypassPermissions";
+/** Permission policies accepted by runtime and transport consumers. */
+export const PERMISSION_MODES = ["default", "plan", "bypassPermissions"] as const;
+
+export type PermissionMode = (typeof PERMISSION_MODES)[number];
+
+/** Compatibility fallback used when a caller does not explicitly choose a policy. */
+export const DEFAULT_PERMISSION_MODE: PermissionMode = "default";
+
+export function isPermissionMode(value: unknown): value is PermissionMode {
+  return typeof value === "string" && PERMISSION_MODES.some((mode) => mode === value);
+}
 
 export type PermissionRuleBehavior = "allow" | "deny" | "ask";
 
@@ -92,7 +102,7 @@ export function createDefaultPermissionContext(options: {
   rules?: Partial<PermissionRuleSet>;
 }): PermissionContext {
   return {
-    mode: options.mode ?? "default",
+    mode: options.mode ?? DEFAULT_PERMISSION_MODE,
     canPrompt: options.canPrompt ?? false,
     bypassAvailable: options.bypassAvailable ?? false,
     cwd: options.cwd,

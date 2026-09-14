@@ -10,8 +10,9 @@ import type {
   PermissionResult,
   PermissionRule,
 } from "../protocol/types.js";
+import type { PermissionDecisionPort } from "../PermissionDecisionPort.js";
 
-export class PermissionRuntime {
+export class PermissionRuntime implements PermissionDecisionPort {
   async decide(
     tool: PilotDeckToolDefinition,
     input: unknown,

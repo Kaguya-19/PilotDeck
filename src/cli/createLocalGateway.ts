@@ -1,106 +1,105 @@
 import { randomUUID } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync as mkdirSyncFs, renameSync } from "node:fs";
-import { dirname, resolve, join as joinPath } from "node:path";
+import { resolve, join as joinPath } from "node:path";
 import { tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
-import type { EdgeClawMemoryService } from "edgeclaw-memory-core";
 import type { SessionConfigOverrides } from "../always-on/runtime/SessionConfigOverrides.js";
+import type { AlwaysOnControlPort } from "../always-on/protocol/AlwaysOnControlPort.js";
 import {
-  createAgentEventBuffer,
-  createAgentSessionWithStorage,
-  type AgentLoopRunner,
   type AgentRuntimeConfig,
   type AgentRuntimeDependencies,
+  type AgentLoopRuntimeFactory,
   type AgentLoopSeedState,
-  type AgentSession,
-  type CreateAgentSessionOptions,
+  type AgentLoopRunner,
+  type AgentLoopSidecarTransportObserver,
 } from "../agent/index.js";
-import { resolveRoutedModelMaxContextTokens } from "../agent/runtime/modelContextWindow.js";
 import {
-  AutoCompactionPolicy,
-  CompactionEngine,
-  ContextOverflowRecovery,
-  DefaultContextRuntime,
-  DEFAULT_PROTECTED_TOOL_RESULT_NAMES,
-  InstructionDiscovery,
-  MicroCompactionEngine,
-  PluginRuntimeExtensionResolver,
-  SnipEngine,
-  TokenAccountingRuntime,
-  TokenBudgetManager,
-  ToolResultBudget,
-  createEdgeClawMemoryProviderFromConfig,
+  createNodeAttachmentPort,
+  type CompactionPort,
+  type PromptCacheCoordinatorPort,
+  type AttachmentPort,
 } from "../context/index.js";
-import { FileHistoryStore } from "../session/filesystem/FileHistoryStore.js";
-import type { AgentSubagentTranscriptHooks } from "../agent/runtime/AgentRuntimeDependencies.js";
-import { createPlanTodoStateManager } from "../agent/runtime/PlanTodoState.js";
-import { HookRuntime, PluginRuntime } from "../extension/index.js";
-import { LifecycleRuntime } from "../lifecycle/index.js";
+import type { PilotDeckLoadedPlugin } from "../extension/index.js";
 import {
-  GatewayElicitationChannel,
   InProcessGateway,
-  type InProcessGatewayOptions,
   SessionRouter,
+  GatewayAgentEventProjector,
+  GatewayAgentEventTelemetryObserver,
+  GatewayToolResultArtifactStore,
+  GatewayManualCompactionCoordinator,
+  GatewayTurnReplayStore,
+  GatewayTurnTelemetryContextResolver,
   isGatewayMemoryDiagnosticsEnabled,
   logGatewayMemoryDiagnostic,
   summarizeCanonicalMessages,
   type Gateway,
   type GatewayCronController,
-  type GatewayProjectStorageOptions,
-  type GatewaySessionContext,
-  type ListSessionsInput,
-  type ListSessionsResult,
+  type GatewayToolResultArtifactStorePort,
 } from "../gateway/index.js";
+import type { UploadLifecyclePort } from "../gateway/dialog/UploadLifecyclePort.js";
 import {
-  GATEWAY_PERMISSION_CALLBACK_NAME,
-  createGatewayPermissionHook,
-} from "../gateway/permission/createGatewayPermissionHook.js";
-import {
-  McpRuntime,
-  createMcpToolDefinitionsFromRuntime,
-  loadMcpServerConfig,
-  parsePluginMcpServers,
+  type McpRuntimeFactory,
 } from "../mcp/index.js";
-import { createModelRuntime, type ModelRuntime } from "../model/index.js";
-import { createDefaultPermissionContext, type PermissionRule } from "../permission/index.js";
-import { loadPilotConfig, resolvePilotHome, type PilotProxyConfig } from "../pilot/index.js";
-import { createPilotConfigStoreSync, type PilotConfigStore } from "../pilot/config/PilotConfigStore.js";
-import type { PilotAgentModelSelection, PilotConfigSnapshot } from "../pilot/config/types.js";
-import { DEFAULT_JUDGE_TIMEOUT_MS, DEFAULT_ALLOWED_TOOLS, DEFAULT_TRIGGER_TIERS, type RouterConfig } from "../router/config/schema.js";
-import { createAgentProjectSessionStorage, listProjectSessions, readTranscript, replayTranscriptEntries, resumeAgentSession } from "../session/index.js";
-import { sanitizeSessionIdForPath } from "../session/storage/ProjectSessionStorage.js";
-import { createSessionTitleGenerator } from "../session/title/SessionTitleGenerator.js";
-import { readWebSessionMessages, readSubagentWebMessages } from "../web/server/readSessionMessages.js";
-import { forkWebSession } from "../web/server/forkSession.js";
 import {
-  finalizeLastWebSessionTurnReplacement,
-  recoverPendingLastTurnReplacements,
-  replaceLastWebSessionTurn,
-} from "../web/server/replaceLastTurn.js";
-import { describeWebProject, listWebProjects } from "../web/server/listProjects.js";
-import { BackgroundTaskRuntime, type BackgroundTaskCompletionEvent } from "../task/runtime/BackgroundTaskRuntime.js";
-import { createBuiltinRegistry, createPlanFileManager, filterAvailableTools } from "../tool/index.js";
-import type {
-  PilotDeckElicitationChannel,
-  PilotDeckToolDefinition,
-  PilotDeckUnavailableToolDiagnostic,
-  ToolRegistry,
+  NativeSessionModelSelectionPolicy,
+  NativeSessionModelSelectionPort,
+  type ModelRuntime,
+  type ModelInvocationProvider,
+} from "../model/index.js";
+import {
+  type InteractionProfileName,
+} from "../interaction/index.js";
+import type { RouterSessionStateProvider } from "../router/index.js";
+import type { RouterSessionCustomRouterPort } from "../router/index.js";
+import type { RouterProviderHealthPort } from "../router/index.js";
+import type { LspServicePort } from "../lsp/index.js";
+import { type PilotProxyConfig } from "../pilot/index.js";
+import { createPilotConfigStoreSync, type PilotConfigStore } from "../pilot/config/PilotConfigStore.js";
+import type { PilotConfigSnapshot } from "../pilot/config/types.js";
+import {
+  createProjectSessionDataPlane,
+  ProjectSessionWriteCoordinator,
+  type ProjectSessionDataPlane,
+  type ProjectSessionForkPort,
+  type ProjectSessionPersistenceProvider,
+  type ProjectSessionReplacementPort,
+  type ProjectSessionStorageProvider,
+  type SessionCatalogPort,
+  type SessionSearchPort,
+  type SessionTitlePort,
+} from "../session/index.js";
+import {
+  type ExecutionWorldBundle,
+  type SandboxMode,
 } from "../tool/index.js";
-import { createRouterRuntime, type RouterRuntime } from "../router/index.js";
-import { SessionRouterStore } from "../router/session/SessionRouterStore.js";
-import type { RouterEventBus, RouterEvent } from "../router/protocol/events.js";
-import type { EdgeClawMemoryProvider } from "../context/index.js";
-import { loadBuiltinPlugins } from "../extension/plugins/builtin/loadBuiltinPlugins.js";
+import type {
+  PilotDeckToolDefinition,
+} from "../tool/index.js";
 import { SkillManager, migrateLegacyBundledSkillCopies } from "../extension/skills/index.js";
-import { getPilotDeckInstallCommand, patchProjectScopedMcpSpec } from "../mcp/runtime/projectMcpSpec.js";
+import { getPilotDeckInstallCommand } from "../mcp/runtime/projectMcpSpec.js";
 import { ExtensionWatchManager, type ExtensionWatchEvent } from "./ExtensionWatchManager.js";
-import { createTelemetryCollector, type TelemetryClient } from "../telemetry/index.js";
-import { UploadStore } from "../gateway/dialog/UploadStore.js";
-import { DialogGatewayError } from "../gateway/dialog/errors.js";
-import { listModelCatalog, validateExplicitModelSelection, validateModelSelection } from "../gateway/dialog/modelCatalog.js";
-import { createDialogProjectRegistry } from "../gateway/dialog/projectRegistry.js";
-import type { SessionModelSelection } from "../gateway/protocol/types.js";
-import { listCommands } from "../gateway/dialog/commands.js";
+import {
+  type TelemetryClient,
+  type TelemetryObserverRegistry,
+} from "../telemetry/index.js";
+import { LocalGatewayBootResources } from "./LocalGatewayBootResources.js";
+import { readPositiveIntegerEnv, resolveLocalGatewayBootConfig } from "./LocalGatewayBootConfig.js";
+import {
+  createAgentLoopDeploymentFactory,
+  resolveAgentLoopDeploymentProfile,
+} from "./AgentLoopDeploymentProfile.js";
+import { GatewaySessionModelBundle } from "./GatewaySessionModelBundle.js";
+import { GatewaySessionHistoryBundle } from "./GatewaySessionHistoryBundle.js";
+import { GatewayDialogBundle } from "./GatewayDialogBundle.js";
+import type { ProjectContextStorageBundleOptions } from "./ProjectContextStorageBundle.js";
+import type { ProjectMemoryProviderFactory } from "./ProjectMemoryBundle.js";
+import { GatewayCommandCatalogBundle } from "./GatewayCommandCatalogBundle.js";
+import { GatewayRuntimeRefreshBundle } from "./GatewayRuntimeRefreshBundle.js";
+import { GatewayTelemetryBundle } from "./GatewayTelemetryBundle.js";
+import { ProjectMemoryMaintenanceController } from "./ProjectMemoryMaintenanceController.js";
+import { ProjectRuntimeRegistry } from "./ProjectRuntimeRegistry.js";
+import {
+  GatewaySubagentRuntimeBundle,
+  type GatewaySubagentContinuations,
+} from "./GatewaySubagentRuntimeBundle.js";
 
 export type CreateLocalGatewayOptions = {
   projectRoot?: string;
@@ -109,6 +108,16 @@ export type CreateLocalGatewayOptions = {
   builtinSkillsRoot?: string;
   env?: Record<string, string | undefined>;
   permissionMode?: AgentRuntimeConfig["permissionMode"];
+  /** Maximum time an interactive permission request may wait for a host answer. */
+  permissionTimeoutMs?: number;
+  /** Maximum time an interactive question may wait for a host answer. */
+  elicitationTimeoutMs?: number;
+  /**
+   * Explicit provider profile for approval and user-question interaction.
+   * Takes precedence over the project config; `autoElicitation` remains a
+   * compatibility alias for `headless` when this option is omitted.
+   */
+  interactionProfile?: InteractionProfileName;
   /** Tools merged into every per-project ToolRegistry. */
   extraTools?: PilotDeckToolDefinition[];
   /** Per-sessionKey config overrides (cwd / permissionMode). */
@@ -127,12 +136,78 @@ export type CreateLocalGatewayOptions = {
    * end-to-end against a deterministic transport. NOT part of the public API.
    */
   __testModelFactory?: (snapshot: PilotConfigSnapshot) => ModelRuntime;
+  /** Application-selected model invocation providers for each project generation. */
+  modelInvocationProviderFactory?: (snapshot: PilotConfigSnapshot) => readonly ModelInvocationProvider[];
+  /** Application-selected project execution-world provider. */
+  executionWorldBundleFactory?: (input: {
+    projectRoot: string;
+    now: () => Date;
+    sandboxMode: SandboxMode;
+  }) => ExecutionWorldBundle;
+  /** Application-selected MCP runtime provider factory. */
+  mcpRuntimeFactory?: McpRuntimeFactory;
+  /** Application-selected context I/O providers for each project generation. */
+  contextStorage?: ProjectContextStorageBundleOptions;
+  /** Application-selected project memory provider for each project generation. */
+  memoryProviderFactory?: ProjectMemoryProviderFactory;
+  /** Application-selected compaction provider for each project generation. */
+  compactionProviderFactory?: (input: {
+    projectRoot: string;
+    snapshot: PilotConfigSnapshot;
+    now: () => Date;
+  }) => CompactionPort | undefined;
+  /** Application-selected prompt-cache generation provider for each project generation. */
+  promptCacheCoordinatorFactory?: (input: {
+    projectRoot: string;
+    snapshot: PilotConfigSnapshot;
+    now: () => Date;
+  }) => PromptCacheCoordinatorPort | undefined;
+  /** Application-selected session-title provider for each project generation. */
+  sessionTitleProviderFactory?: (input: {
+    projectRoot: string;
+    snapshot: PilotConfigSnapshot;
+    modelRuntime: ModelRuntime;
+    now: () => Date;
+  }) => SessionTitlePort | undefined;
+  /** Application-selected project-generation LSP capability provider. */
+  lspServiceFactory?: (input: { projectRoot: string; now: () => Date }) => LspServicePort;
+  /** Application-owned volatile routing state retained across generation reloads. */
+  routerSessionState?: RouterSessionStateProvider;
+  /** Application-selected per-generation session custom-router provider. */
+  routerSessionCustomRouterFactory?: () => RouterSessionCustomRouterPort;
+  /** Application-selected per-generation Router provider-health policy. */
+  routerProviderHealthFactory?: (input: { now: () => number }) => RouterProviderHealthPort;
+  /** Application-selected frozen builtin plugin contribution set. */
+  builtinPlugins?: PilotDeckLoadedPlugin[];
+  /** @deprecated Use `modelInvocationProviderFactory`. */
+  __testModelInvocationProviderFactory?: (snapshot: PilotConfigSnapshot) => readonly ModelInvocationProvider[];
+  /** @deprecated Use `executionWorldBundleFactory`. */
+  __testExecutionWorldBundleFactory?: (input: {
+    projectRoot: string;
+    now: () => Date;
+    sandboxMode: SandboxMode;
+  }) => ExecutionWorldBundle;
+  /** @deprecated Use `mcpRuntimeFactory`. */
+  __testMcpRuntimeFactory?: McpRuntimeFactory;
+  /** @deprecated Use `contextStorage`. */
+  __testContextStorage?: ProjectContextStorageBundleOptions;
+  /** @deprecated Use `builtinPlugins`. */
+  __testBuiltinPlugins?: PilotDeckLoadedPlugin[];
+  /**
+   * Application-selected external AgentLoop runtime. It receives the
+   * capability-only contract required by a sidecar or other provider.
+   */
+  agentLoopFactory?: AgentLoopRuntimeFactory;
+  /** Optional live observer for the selected stdio/TCP AgentLoop deployment. */
+  agentLoopTransportObserver?: AgentLoopSidecarTransportObserver;
   /** @internal Test hook for exercising the complete Gateway with an external AgentLoop transport. */
   __testAgentLoopFactory?: (input: {
     config: AgentRuntimeConfig;
     dependencies: AgentRuntimeDependencies;
     seedState?: AgentLoopSeedState;
   }) => AgentLoopRunner;
+  /** @internal Test hook for asserting rollback after both filesystem watchers are active. */
+  __testFailAfterBootstrapWatchers?: () => void;
   /**
    * Fallback project root used as the agent cwd when no explicit
    * `projectKey` is provided (e.g. IM channels without a bound project).
@@ -141,28 +216,58 @@ export type CreateLocalGatewayOptions = {
    * of the gateway process's cwd.
    */
   fallbackProjectRoot?: string;
-  /**
-   * When true, `ask_user_question` tool calls are answered automatically
-   * (first option selected) instead of waiting for a human. Intended for
-   * benchmark / headless runs where no interactive user is present.
-   */
+  /** @deprecated Use `interactionProfile: "headless"`. */
   autoElicitation?: boolean;
   telemetry?: TelemetryClient;
+  /**
+   * Read-only durable-session query provider. The local Gateway selects the
+   * JSONL provider when omitted; callers may supply a compatible catalog.
+   */
+  sessionCatalog?: SessionCatalogPort;
+  sessionForkPort?: ProjectSessionForkPort;
+  sessionReplacementPort?: ProjectSessionReplacementPort;
+  sessionSearch?: SessionSearchPort;
+  /** Application-owned session data plane, resolved once before consumer composition. */
+  sessionDataPlane?: ProjectSessionDataPlane;
+  /** Application-selected backend for project-session events and projection caches. */
+  persistenceProvider?: ProjectSessionPersistenceProvider;
+  /** @deprecated Use persistenceProvider and independent session ports. */
+  storageProvider?: ProjectSessionStorageProvider;
+  /**
+   * Application-selected attachment I/O provider for Gateway turn composition.
+   * The provider only reads declared attachment paths; AttachmentResolver keeps
+   * MIME, size, and model-visible projection policy.
+   */
+  attachmentPort?: AttachmentPort;
+  /**
+   * Application-selected upload lifecycle provider for browser artifacts.
+   * The provider owns upload admission, retention, cleanup, and attachment
+   * leases; Gateway only consumes the resolved lease projection.
+   */
+  uploadLifecycle?: UploadLifecyclePort;
+  /**
+   * Application-selected advisory store for large Gateway tool-result previews.
+   * It participates only in live event projection and never replaces the
+   * Session transcript or turn terminal owner.
+   */
+  toolResultArtifactStore?: GatewayToolResultArtifactStorePort;
 };
 
 export type SubsystemUpdate = {
   extraTools: PilotDeckToolDefinition[];
   sessionOverrides?: SessionConfigOverrides;
   cron?: GatewayCronController;
-  alwaysOnApply?: InProcessGatewayOptions["alwaysOnApply"];
-  alwaysOnRerunPlan?: InProcessGatewayOptions["alwaysOnRerunPlan"];
+  alwaysOnControl?: AlwaysOnControlPort;
 };
 
 export type CreateLocalGatewayResult = {
   gateway: Gateway;
   configStore: PilotConfigStore;
   registry: ProjectRuntimeRegistry;
-  dispose: () => void;
+  /** Application-owned registration point for live, non-durable telemetry observers. */
+  telemetryObservers: TelemetryObserverRegistry;
+  sessionDataPlane: ProjectSessionDataPlane;
+  dispose: () => void | Promise<void>;
   bindServer: (server: { broadcastNotification(name: string, payload?: unknown): void }) => void;
   /**
    * Returns true when at least one interactive (non-background) turn is
@@ -179,11 +284,31 @@ export type CreateLocalGatewayResult = {
 };
 
 export function createLocalGateway(options: CreateLocalGatewayOptions = {}): CreateLocalGatewayResult {
-  const baseEnv = options.env ?? process.env;
-  const projectRoot = resolve(options.projectRoot ?? process.cwd());
-  const pilotHome = options.pilotHome ?? resolvePilotHome(baseEnv);
+  const bootConfig = resolveLocalGatewayBootConfig(options);
+  const {
+    env,
+    projectRoot,
+    pilotHome,
+    builtinSkillsRoot,
+    fallbackProjectRoot,
+    permissionMode,
+    permissionTimeoutMs,
+    elicitationTimeoutMs,
+  } = bootConfig;
+  const agentLoopFactory = options.agentLoopFactory ?? createAgentLoopDeploymentFactory(
+    resolveAgentLoopDeploymentProfile({ env, cwd: projectRoot }),
+    { transportObserver: options.agentLoopTransportObserver },
+  );
+  const sessionDataPlane = options.sessionDataPlane ?? createProjectSessionDataPlane({
+    ...(options.persistenceProvider ? { persistenceProvider: options.persistenceProvider } : {}),
+    ...(options.storageProvider ? { storageProvider: options.storageProvider } : {}),
+    ...(options.sessionCatalog ? { catalog: options.sessionCatalog } : {}),
+    ...(options.sessionForkPort ? { fork: options.sessionForkPort } : {}),
+    ...(options.sessionReplacementPort ? { replacement: options.sessionReplacementPort } : {}),
+    ...(options.sessionSearch ? { search: options.sessionSearch } : {}),
+  });
   const replacementTransactionOwner = { instanceId: randomUUID(), pid: process.pid };
-  const replacementRecovery = recoverPendingLastTurnReplacements(pilotHome);
+  const replacementRecovery = sessionDataPlane.replacement.recover({ pilotHome });
   if (replacementRecovery.committed > 0 || replacementRecovery.rolledBack > 0) {
     // eslint-disable-next-line no-console
     console.log(
@@ -195,11 +320,9 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
     // Keep the backup/journal in place so a later startup can retry safely.
     // eslint-disable-next-line no-console
     console.warn(
-      `[pilotdeck] Could not recover replacement transaction for ${failure.transcriptPath}: ${failure.message}`,
+      `[pilotdeck] Could not recover replacement transaction for ${failure.scope}: ${failure.message}`,
     );
   }
-  const env = options.pilotHome ? { ...baseEnv, PILOT_HOME: pilotHome } : baseEnv;
-  const builtinSkillsRoot = resolveBuiltinSkillsRoot(options.builtinSkillsRoot, env);
   const legacySkillMigration = migrateLegacyBundledSkillCopies({ pilotHome, builtinSkillsRoot });
   if (legacySkillMigration.migrated.length > 0) {
     // eslint-disable-next-line no-console
@@ -214,8 +337,28 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
     console.warn(`[pilotdeck] Could not migrate legacy skill '${failure.slug}': ${failure.message}`);
   }
   const now = () => new Date();
-  const telemetry = options.telemetry ?? createTelemetryCollector({ env, pilotHome });
-  const ownsTelemetry = !options.telemetry;
+  const sessionCatalog = sessionDataPlane.catalog;
+  const telemetryBundle = new GatewayTelemetryBundle({
+    env,
+    pilotHome,
+    telemetry: options.telemetry,
+  });
+  const telemetryObservers = telemetryBundle.observers;
+  const telemetry = telemetryBundle.client;
+  const bootResources = new LocalGatewayBootResources({
+    warn: (message, error) => console.warn(message, error),
+  });
+  bootResources.ownTelemetry(telemetryBundle);
+  try {
+  const attachmentPort = options.attachmentPort ?? createNodeAttachmentPort();
+  const subagentRuntime = new GatewaySubagentRuntimeBundle({
+    onCleanupError: (error) => {
+      console.warn("[pilotdeck] failed to clean up continuable subagent resources:", error);
+    },
+  });
+  bootResources.ownSubagentRuntime(subagentRuntime);
+  const liveAgents = subagentRuntime.agents;
+  const continuations: GatewaySubagentContinuations = subagentRuntime.continuations;
   let registry!: ProjectRuntimeRegistry;
   let router: SessionRouter | undefined;
   const extensionWatchManager = new ExtensionWatchManager({
@@ -232,23 +375,45 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
       );
     },
   });
-  const fallbackProjectRoot = options.fallbackProjectRoot ?? projectRoot;
   registry = new ProjectRuntimeRegistry({
     fallbackProjectRoot,
     pilotHome,
     builtinSkillsRoot,
     env,
-    permissionMode: options.permissionMode ?? "default",
+    permissionMode,
+    permissionTimeoutMs,
+    elicitationTimeoutMs,
     now,
     extraTools: options.extraTools,
     sessionOverrides: options.sessionOverrides,
     additionalWorkingDirectories: options.additionalWorkingDirectories,
     modelFactory: options.__testModelFactory,
-    agentLoopFactory: options.__testAgentLoopFactory,
+    modelInvocationProviderFactory:
+      options.modelInvocationProviderFactory ?? options.__testModelInvocationProviderFactory,
+    executionWorldBundleFactory: options.executionWorldBundleFactory ?? options.__testExecutionWorldBundleFactory,
+    mcpRuntimeFactory: options.mcpRuntimeFactory ?? options.__testMcpRuntimeFactory,
+    contextStorage: options.contextStorage ?? options.__testContextStorage,
+    memoryProviderFactory: options.memoryProviderFactory,
+    compactionProviderFactory: options.compactionProviderFactory,
+    promptCacheCoordinatorFactory: options.promptCacheCoordinatorFactory,
+    sessionTitleProviderFactory: options.sessionTitleProviderFactory,
+    lspServiceFactory: options.lspServiceFactory,
+    routerSessionState: options.routerSessionState,
+    routerSessionCustomRouterFactory: options.routerSessionCustomRouterFactory,
+    routerProviderHealthFactory: options.routerProviderHealthFactory,
+    builtinPlugins: options.builtinPlugins ?? options.__testBuiltinPlugins,
+    agentLoopFactory,
+    testAgentLoopFactory: options.__testAgentLoopFactory,
+    interactionProfile: options.interactionProfile,
     autoElicitation: options.autoElicitation,
     telemetry,
+    sessionCatalog,
+    storageProvider: sessionDataPlane.persistence,
+    continuations,
+    buildBrowserUseArgs,
     onProjectActivated: (activeProjectRoot) => extensionWatchManager.watchProject(activeProjectRoot),
   });
+  bootResources.ownRegistry(registry);
   const defaultRuntime = registry.resolve();
   const memoryDiagnosticsEnabled = isGatewayMemoryDiagnosticsEnabled(
     env,
@@ -257,43 +422,28 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
 
   const configStore = createPilotConfigStoreSync({ projectRoot, env });
   const stopConfigWatching = configStore.startWatching();
+  bootResources.ownConfigWatcher(stopConfigWatching);
   const stopExtensionWatching = extensionWatchManager.start();
-
-  let boundServer: { broadcastNotification(name: string, payload?: unknown): void } | undefined;
-  const configChangeLifecycle = new LifecycleRuntime(new HookRuntime({}));
-
-  configStore.subscribe((event) => {
-    const { changeClasses, changedPaths } = event;
-    if (changeClasses.length === 0) {
-      return;
-    }
-    if (changeClasses.every((c) => c === "restart-required")) {
-      // eslint-disable-next-line no-console
-      console.warn("[pilotdeck] Config change requires process restart:", changedPaths.join(", "));
-      return;
-    }
-    // eslint-disable-next-line no-console
-    console.log("[pilotdeck] Config reloaded, invalidating runtimes:", changedPaths.join(", "));
-    registry.invalidate();
-    if (memoryDiagnosticsEnabled) {
-      logGatewayMemoryDiagnostic({
-        event: "runtime_invalidated",
-        sessionCount: router?.cachedSessionCount(),
-        projectKey: projectRoot,
-        reason: "config_changed",
-      });
-    }
-    router?.markAllDirty("config_changed");
-    configChangeLifecycle.dispatch({
-      event: "ConfigChange",
-      baseInput: { sessionId: "", transcriptPath: "", cwd: projectRoot },
-      payload: { changedPaths, changeClasses },
-      matchQuery: "ConfigChange",
-    }).catch(() => {});
-    boundServer?.broadcastNotification("config_changed", { changedPaths, changeClasses });
+  bootResources.ownExtensionWatcher(stopExtensionWatching);
+  const runtimeRefresh = new GatewayRuntimeRefreshBundle({
+    configStore,
+    registry,
+    memoryMaintenance: new ProjectMemoryMaintenanceController({
+      resolveRuntime: (projectKey) => registry.resolve(projectKey),
+      telemetry,
+    }),
+    getRouter: () => router,
+    projectRoot,
+    memoryDiagnosticsEnabled,
+    logMemoryDiagnostic: (input) => logGatewayMemoryDiagnostic(input as Parameters<typeof logGatewayMemoryDiagnostic>[0]),
+    summarizeMessages: (messages) => summarizeCanonicalMessages(messages as import("../model/index.js").CanonicalMessage[]),
   });
+  runtimeRefresh.attach();
+  bootResources.ownRuntimeRefresh(runtimeRefresh);
+  options.__testFailAfterBootstrapWatchers?.();
 
   router = new SessionRouter({
+    agents: liveAgents,
     createSession: (ctx) => registry.createSession(ctx),
     recreateSession: (ctx, session) => registry.recreateSession(ctx, session),
     listSessions: (input) => registry.listSessions(input),
@@ -302,7 +452,6 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
     idleSweepIntervalMs:
       Math.max(0, defaultRuntime.snapshot.config.gateway?.idleSweepIntervalSeconds ?? 60) * 1_000,
     now,
-    onSessionEvict: (sessionKey) => registry.evictSessionMcp(sessionKey),
     onSessionIdleEvict: memoryDiagnosticsEnabled
       ? (_sessionKey, snapshot) => {
           logGatewayMemoryDiagnostic({
@@ -316,246 +465,111 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
           });
         }
       : undefined,
+    onSessionEvict: (sessionKey) => registry.permissionModePort().clear(sessionKey),
   });
+  bootResources.ownRouter(router);
   const skillManager = new SkillManager({ pilotHome, builtinSkillsRoot });
-  const dialogProjects = createDialogProjectRegistry({
+  const dialog = new GatewayDialogBundle({
     pilotHome,
-    listProjects: async () => (await listWebProjects({ pilotHome })).projects,
+    sessionCatalog,
+    attachmentPort,
+    uploadLifecycle: options.uploadLifecycle,
   });
-  const uploadStore = new UploadStore({
-    listProjects: dialogProjects.listProjectKeys,
-    resolveProject: dialogProjects.resolveProjectKey,
+  const sessionWriteCoordinator = new ProjectSessionWriteCoordinator();
+  const sessionModels = new GatewaySessionModelBundle({
+    fallbackProjectKey: fallbackProjectRoot,
+    resolveProjectKey: dialog.projects.resolveProjectKey,
+    router: router!,
+    selectionPort: new NativeSessionModelSelectionPort({
+      pilotHome,
+      now,
+      storageProvider: sessionDataPlane.persistence,
+      writeCoordinator: sessionWriteCoordinator,
+    }),
+    policy: new NativeSessionModelSelectionPolicy(env),
   });
-  const readSavedModel = async (projectKey: string, sessionKey: string): Promise<SessionModelSelection | undefined> => {
-    if (!sessionKey?.trim()) throw new DialogGatewayError("INVALID_SESSION_KEY", "sessionKey is required.");
-    const storage = createAgentProjectSessionStorage({ projectRoot: projectKey, pilotHome, sessionId: sessionKey, now });
-    const replay = replayTranscriptEntries((await readTranscript(storage.transcriptPath)).entries);
-    return replay.metadata.modelSelection ?? undefined;
-  };
-  const modelResult = async (projectKey: string, sessionKey: string, saved?: SessionModelSelection) => {
-    const snapshot = loadPilotConfig({ projectRoot: projectKey, env }).config;
-    const explicit = saved?.mode === "model" ? saved : undefined;
-    return {
-      projectKey,
-      sessionKey,
-      ...(saved ? { saved } : {}),
-      effective: explicit ? {
-        provider: explicit.provider,
-        model: explicit.model,
-        source: "session" as const,
-        reasoning: explicit.reasoning,
-        temperature: explicit.temperature,
-        speed: explicit.speed,
-      } : {
-        provider: snapshot.agent.model.provider,
-        model: snapshot.agent.model.model,
-        source: snapshot.router?.enabled ? "router" as const : "default" as const,
-      },
-    };
-  };
+  const sessionHistory = new GatewaySessionHistoryBundle({
+    fallbackProjectRoot,
+    pilotHome,
+    sessionCatalog,
+    now,
+    maxContextTokens: defaultRuntime.snapshot.config.agent.maxContextTokens,
+    maxOutputTokens: defaultRuntime.snapshot.config.agent.maxOutputTokens,
+    transactionOwner: replacementTransactionOwner,
+    storageProvider: sessionDataPlane.persistence,
+    sessionForkPort: sessionDataPlane.fork,
+    sessionReplacementPort: sessionDataPlane.replacement,
+    writeCoordinator: sessionWriteCoordinator,
+  });
+  const commandCatalog = new GatewayCommandCatalogBundle({
+    pilotHome,
+    resolveProjectKey: dialog.projects.resolveProjectKey,
+    resolveRuntime: (projectKey) => registry.resolve(projectKey),
+  });
+  const toolResultArtifacts = options.toolResultArtifactStore ?? new GatewayToolResultArtifactStore({
+    rootDir: resolve(tmpdir(), "pilotdeck-tool-output", process.pid.toString()),
+  });
+  const agentEventProjector = new GatewayAgentEventProjector({ toolResultArtifacts });
+  const agentEventTelemetryObserver = new GatewayAgentEventTelemetryObserver({ telemetry });
+  const turnReplayStore = new GatewayTurnReplayStore();
+  const turnTelemetryContextResolver = new GatewayTurnTelemetryContextResolver();
+  const manualCompactionCoordinator = new GatewayManualCompactionCoordinator({ router });
   const gateway = new InProcessGateway(router, {
     funasrInstallCommand: getPilotDeckInstallCommand(),
+    attachmentTurnComposer: dialog.attachmentTurnComposer,
     now,
     serverInfo: { mode: "in_process", projectKey: projectRoot },
     telemetry,
-    toolResultsDir: resolve(tmpdir(), "pilotdeck-tool-output", process.pid.toString()),
+    permissionGrants: registry.permissionGrantPort(),
+    permissionModes: registry.permissionModePort(),
+    toolResultArtifacts,
+    agentEventProjector,
+    agentEventTelemetryObserver,
+    turnReplayStore,
+    turnTelemetryContextResolver,
+    manualCompactionCoordinator,
     cron: options.cron,
     skillManager,
-    async commandsList(input) {
-      const projectKey = await dialogProjects.resolveProjectKey(input.projectKey);
-      return listCommands({ ...input, projectKey }, pilotHome);
-    },
-    async modelCatalogList(input) {
-      const projectKey = await dialogProjects.resolveProjectKey(input.projectKey);
-      return listModelCatalog({ ...input, projectKey }, env);
-    },
-    async sessionModelGet(input) {
-      const projectKey = await dialogProjects.resolveProjectKey(input.projectKey);
-      return modelResult(projectKey, input.sessionKey, await readSavedModel(projectKey, input.sessionKey));
-    },
-    async sessionModelSet(input) {
-      const projectKey = await dialogProjects.resolveProjectKey(input.projectKey);
-      if (router.hasActiveTurn(input.sessionKey)) throw new DialogGatewayError("SESSION_BUSY", "Cannot change the model during an active turn.");
-      if (!input.selection || typeof input.selection !== "object") throw new DialogGatewayError("INVALID_MODEL_OVERRIDE", "selection is required.");
-      validateModelSelection(projectKey, input.selection, env);
-      const storage = createAgentProjectSessionStorage({ projectRoot: projectKey, pilotHome, sessionId: input.sessionKey, now });
-      await storage.transcript.recordSessionMetadata(input.sessionKey, "model-selection", {
-        modelSelection: input.selection,
-        updatedAt: now().toISOString(),
-      });
-      await router.close(input.sessionKey);
-      return modelResult(projectKey, input.sessionKey, input.selection);
-    },
-    async sessionModelClear(input) {
-      const projectKey = await dialogProjects.resolveProjectKey(input.projectKey);
-      if (!input.sessionKey?.trim()) throw new DialogGatewayError("INVALID_SESSION_KEY", "sessionKey is required.");
-      if (router.hasActiveTurn(input.sessionKey)) throw new DialogGatewayError("SESSION_BUSY", "Cannot clear the model during an active turn.");
-      const storage = createAgentProjectSessionStorage({ projectRoot: projectKey, pilotHome, sessionId: input.sessionKey, now });
-      await storage.transcript.recordSessionMetadata(input.sessionKey, "model-selection-clear", {
-        modelSelection: null,
-        updatedAt: now().toISOString(),
-      });
-      await router.close(input.sessionKey);
-    },
-    async resolveTurnModelSelection(input) {
-      const projectKey = await dialogProjects.resolveProjectKey(input.projectKey ?? fallbackProjectRoot);
-      if (input.modelOverride) {
-        validateExplicitModelSelection(projectKey, input.modelOverride, env);
-        return { selection: input.modelOverride, source: "turn" as const };
-      }
-      const saved = await readSavedModel(projectKey, input.sessionKey);
-      if (saved?.mode === "model") {
-        validateExplicitModelSelection(projectKey, saved, env);
-        return { selection: saved, source: "session" as const };
-      }
-      const config = loadPilotConfig({ projectRoot: projectKey, env }).config;
-      return { source: config.router?.enabled ? "router" as const : "default" as const };
-    },
-    async resolveUploadedAttachments(input) {
-      const resolved = await Promise.all(input.uploads.map(async (upload) => ({
-        uploadId: upload.uploadId,
-        attachments: await uploadStore.verifyAttachment(upload.uploadId, input.projectKey, upload.attachmentIds),
-      })));
-      return resolved.flatMap(({ uploadId, attachments }) => attachments.map((attachment) => ({
-          type: attachment.mimeType?.startsWith("image/") ? "image" as const : "file" as const,
-          name: attachment.name,
-          path: attachment.path,
-          mimeType: attachment.mimeType,
-          bytes: attachment.bytes,
-          metadata: {
-            uploadId,
-            attachmentId: attachment.attachmentId,
-            relativePath: attachment.relativePath,
-            sha256: attachment.sha256,
-          },
-        })));
-    },
+    commandsList: (input) => commandCatalog.commandsList(input),
+    modelCatalogList: (input) => sessionModels.modelCatalogList(input),
+    sessionModelGet: (input) => sessionModels.sessionModelGet(input),
+    sessionModelSet: (input) => sessionModels.sessionModelSet(input),
+    sessionModelClear: (input) => sessionModels.sessionModelClear(input),
+    resolveTurnModelSelection: (input) => sessionModels.resolveTurnModelSelection(input),
+    resolveUploadedAttachments: (input) => dialog.uploadedAttachments.resolve(input),
     setSessionCwd: (sessionKey, cwd) => registry.setSessionCwd(sessionKey, cwd),
-    readSessionMessages: (input) =>
-      readWebSessionMessages(input, {
-        projectRoot: input.projectKey ? input.projectKey : fallbackProjectRoot,
-        pilotHome,
-        maxContextTokens: defaultRuntime.snapshot.config.agent.maxContextTokens,
-        maxOutputTokens: defaultRuntime.snapshot.config.agent.maxOutputTokens,
-        now,
-      }),
-    readSubagentMessages: (input) =>
-      readSubagentWebMessages(input, {
-        projectRoot: input.projectKey ? input.projectKey : fallbackProjectRoot,
-        pilotHome,
-        now,
-      }),
-    forkSession: (input) =>
-      forkWebSession(input, {
-        projectRoot: input.projectKey ? input.projectKey : fallbackProjectRoot,
-        pilotHome,
-        now,
-      }),
-    replaceLastTurn: (input) =>
-      replaceLastWebSessionTurn(input, {
-        projectRoot: input.projectKey ? input.projectKey : fallbackProjectRoot,
-        pilotHome,
-        now,
-        transactionOwner: replacementTransactionOwner,
-      }),
-    finalizeLastTurnReplacement: (input) =>
-      finalizeLastWebSessionTurnReplacement(input, {
-        projectRoot: input.projectKey ? input.projectKey : fallbackProjectRoot,
-        pilotHome,
-        now,
-      }),
-    async recordAgentStatusMessage(input) {
-      const storage = createAgentProjectSessionStorage({
-        projectRoot: input.projectKey ? input.projectKey : fallbackProjectRoot,
-        pilotHome,
-        sessionId: input.sessionKey,
-        now,
-      });
-      await storage.transcript.recordAgentStatusMessage(input.sessionKey, input.turnId, input.status);
-      return { recorded: true };
-    },
-    listProjects: () =>
-      listWebProjects({ pilotHome }),
-    describeProject: (input) =>
-      describeWebProject(input.projectKey, { pilotHome }),
-    async reloadConfig() {
-      let changedPaths: string[] = [];
-      const unsubscribe = configStore.subscribe((event) => {
-        changedPaths = event.changedPaths;
-      });
-      try {
-        await configStore.reload("rpc");
-      } finally {
-        unsubscribe();
-      }
-      return { reloaded: true, changedPaths };
-    },
-    async reloadExtensions(input) {
-      const changedPaths = input?.changedPaths ?? [];
-      if (input?.projectKey) {
-        // eslint-disable-next-line no-console
-        console.log(
-          `[pilotdeck] Extensions reload requested for project ${input.projectKey}:`,
-          changedPaths.join(", ") || "(manual)",
-        );
-        registry.invalidate(input.projectKey);
-        router?.markProjectDirty(input.projectKey, "extension_changed");
-      } else {
-        // eslint-disable-next-line no-console
-        console.log("[pilotdeck] Extensions reload requested for all runtimes:", changedPaths.join(", ") || "(manual)");
-        registry.invalidate();
-        router?.markAllDirty("extension_changed");
-      }
-      boundServer?.broadcastNotification("config_changed", {
-        changedPaths,
-        changeClasses: ["extension-changed"],
-      });
-      return { reloaded: true, changedPaths };
-    },
+    readSessionMessages: (input) => sessionHistory.readSessionMessages(input),
+    readSubagentMessages: (input) => sessionHistory.readSubagentMessages(input),
+    forkSession: (input) => sessionHistory.forkSession(input),
+    replaceLastTurn: (input) => sessionHistory.replaceLastTurn(input),
+    finalizeLastTurnReplacement: (input) => sessionHistory.finalizeLastTurnReplacement(input),
+    recordAgentStatusMessage: (input) => sessionHistory.recordAgentStatusMessage(input),
+    listProjects: dialog.listProjects,
+    describeProject: dialog.describeProject,
+    reloadConfig: () => runtimeRefresh.reloadConfig(),
+    reloadExtensions: (input) => runtimeRefresh.reloadExtensions(input),
     // Defensive: re-check the on-disk config at the start of every
     // turn so an apiKey/url edit applied between two messages takes
     // effect on the next one, even if the fs watcher missed it.
     // Singleton-deduped inside PilotConfigStore.reload — concurrent
     // turns share a single in-flight read, and unchanged config is a
     // no-op (no invalidation, no session recreation).
-    async refreshConfigBeforeTurn() {
-      await configStore.reload("turn-start");
-    },
-    afterTurnCompleted: ({ sessionKey, projectKey, runId }) => {
-      if (memoryDiagnosticsEnabled) {
-        const snapshot = router?.snapshotSession(sessionKey);
-        logGatewayMemoryDiagnostic({
-          event: "turn_completed",
-          sessionCount: router?.cachedSessionCount(),
-          session: {
-            sessionKey,
-            projectKey,
-            runId,
-            ...(snapshot ? summarizeCanonicalMessages(snapshot.messages) : {}),
-          },
-        });
-      }
-      registry.scheduleMemoryMaintenance(projectKey ?? projectRoot);
-    },
+    refreshConfigBeforeTurn: () => runtimeRefresh.refreshConfigBeforeTurn(),
+    afterTurnCompleted: (input) => runtimeRefresh.afterTurnCompleted(input),
   });
   // Hand the gateway back to the registry so per-session creation can
   // build a `GatewayElicitationChannel` against this gateway's bus +
   // emit-sink (B1).
   registry.setGateway(gateway);
+  const lifecycle = bootResources.commit({ gateway });
   return {
     gateway,
     configStore,
     registry,
-    dispose: () => {
-      registry.invalidate();
-      router?.shutdown();
-      stopConfigWatching();
-      stopExtensionWatching();
-      if (ownsTelemetry) {
-        void telemetry.shutdown();
-      }
-    },
-    bindServer: (server) => { boundServer = server; },
+    sessionDataPlane,
+    telemetryObservers,
+    dispose: () => lifecycle.dispose(),
+    bindServer: (server) => runtimeRefresh.bindServer(server),
     isProjectBusy: (projectKey: string) => router!.hasActiveUserTurn(projectKey),
     updateSubsystems: (update: SubsystemUpdate) => {
       registry.updateSubsystems({
@@ -563,997 +577,19 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
         sessionOverrides: update.sessionOverrides,
       });
       gateway.setCronController(update.cron);
-      gateway.setAlwaysOnApply(update.alwaysOnApply);
-      gateway.setAlwaysOnRerunPlan(update.alwaysOnRerunPlan);
+      gateway.setAlwaysOnControl(update.alwaysOnControl);
     },
   };
+  } catch (error) {
+    void bootResources.rollback().catch((rollbackError) => {
+      console.warn("[pilotdeck] failed to roll back local Gateway bootstrap:", rollbackError);
+    });
+    throw error;
+  }
 }
-
-function resolveBuiltinSkillsRoot(
-  configuredRoot: string | undefined,
-  env: Record<string, string | undefined>,
-): string {
-  const explicit = configuredRoot ?? env.PILOTDECK_BUNDLED_SKILLS_DIR;
-  if (explicit) return resolve(explicit);
-
-  const moduleDir = dirname(fileURLToPath(import.meta.url));
-  const candidates = [
-    joinPath(moduleDir, "..", "..", "skills"),
-    joinPath(moduleDir, "..", "..", "..", "skills"),
-    joinPath(process.cwd(), "skills"),
-  ];
-  return resolve(candidates.find((candidate) => existsSync(candidate)) ?? candidates[2]);
-}
-
-type ProjectRuntimeRegistryOptions = {
-  fallbackProjectRoot: string;
-  pilotHome: string;
-  builtinSkillsRoot?: string;
-  env: Record<string, string | undefined>;
-  permissionMode: AgentRuntimeConfig["permissionMode"];
-  now: () => Date;
-  extraTools?: PilotDeckToolDefinition[];
-  sessionOverrides?: SessionConfigOverrides;
-  additionalWorkingDirectories?: string[];
-  /** @internal Test hook from `CreateLocalGatewayOptions.__testModelFactory`. */
-  modelFactory?: (snapshot: PilotConfigSnapshot) => ModelRuntime;
-  /** @internal Test hook from `CreateLocalGatewayOptions.__testAgentLoopFactory`. */
-  agentLoopFactory?: CreateAgentSessionOptions["__agentLoopFactory"];
-  autoElicitation?: boolean;
-  telemetry: TelemetryClient;
-  onProjectActivated?: (projectRoot: string) => void;
-};
-
-type ProjectRuntime = {
-  projectRoot: string;
-  snapshot: ReturnType<typeof loadPilotConfig>;
-  model: ModelRuntime;
-  tokenAccounting: TokenAccountingRuntime;
-  router: RouterRuntime;
-  pluginRuntime: PluginRuntime;
-  tools: ToolRegistry;
-  unavailableTools?: PilotDeckUnavailableToolDiagnostic[];
-  projectStorage: GatewayProjectStorageOptions;
-  /** Per-project background task runtime (shared across sessions). C5. */
-  backgroundTasks: BackgroundTaskRuntime;
-  /** Memory provider, undefined when memory is disabled in PilotConfig. */
-  memory?: EdgeClawMemoryProvider;
-  /** Backing memory service for maintenance / introspection. */
-  memoryService?: EdgeClawMemoryService;
-  /** Coalesced project-level memory maintenance loop. */
-  memoryMaintenanceInFlight?: Promise<void>;
-  memoryMaintenanceRequested?: boolean;
-  /**
-   * Lazily-started MCP runtime (C1). Built on first session creation by
-   * `ensureMcpReady()` because plugin refresh + connect is async.
-   * Only contains non-`perSession` servers (shared across sessions).
-   */
-  mcpRuntime?: McpRuntime;
-  /** Tracks the in-flight `ensureMcpReady` promise so concurrent sessions share it. */
-  mcpReady?: Promise<void>;
-  /**
-   * Server specs marked `perSession: true`. These are NOT started at the
-   * project level — each agent session creates its own `McpRuntime` from
-   * these specs so that e.g. browser-use gets an isolated process per
-   * session.  Populated during `ensureMcpReady()`.
-   */
-  perSessionServerSpecs?: import("../mcp/protocol/types.js").PilotDeckMcpServerSpec[];
-};
 
 const DEFAULT_BROWSER_ACTION_TIMEOUT_MS = 30_000;
 const DEFAULT_BROWSER_NAVIGATION_TIMEOUT_MS = 90_000;
-
-class ProjectRuntimeRegistry {
-  private readonly runtimes = new Map<string, ProjectRuntime>();
-  private gateway?: InProcessGateway;
-  /**
-   * Per-session live permission rules used when no `sessionOverrides`
-   * entry exists. Same array reference is handed to:
-   *   - `createDefaultPermissionContext({ rules })` so `PermissionRuntime.decide`
-   *     sees current allow/deny entries.
-   *   - `createGatewayPermissionHook({ permissionRules })` so the hook can
-   *     push session-scoped allow rules on `remember=true` and have the
-   *     very next `decide()` call inside this turn see them.
-   * Without this fallback, remote-gateway clients (Web UI talking to
-   * `pilotdeck server`) wouldn't be able to round-trip permission
-   * prompts because they can't reach into the server's `sessionOverrides`
-   * map from outside the process.
-   */
-  private readonly fallbackRuleSets = new Map<
-    string,
-    { allow: PermissionRule[]; deny: PermissionRule[]; ask: PermissionRule[] }
-  >();
-
-  /**
-   * Per-session MCP runtimes for `perSession: true` servers (e.g.
-   * browser-use).  Each entry owns one or more child processes and a temp
-   * directory.  Cleaned up by `evictSessionMcp()` when the SessionRouter
-   * evicts the session (idle sweep, explicit close, or dirty-recreate).
-   */
-  private readonly sessionMcpRuntimes = new Map<string, McpRuntime>();
-
-  private _extraTools: PilotDeckToolDefinition[];
-  private _sessionOverrides: SessionConfigOverrides | undefined;
-  private readonly sharedSessionStore = new SessionRouterStore({
-    now: () => this.options.now().getTime(),
-  });
-
-  constructor(private readonly options: ProjectRuntimeRegistryOptions) {
-    this._extraTools = options.extraTools ? [...options.extraTools] : [];
-    this._sessionOverrides = options.sessionOverrides;
-  }
-
-  /**
-   * Stop and discard the per-session MCP runtime for `sessionKey`.
-   * Called by the `SessionRouter.onSessionEvict` callback.
-   */
-  evictSessionMcp(sessionKey: string): void {
-    const mcp = this.sessionMcpRuntimes.get(sessionKey);
-    if (mcp) {
-      this.sessionMcpRuntimes.delete(sessionKey);
-      mcp.stop().catch(() => {});
-    }
-  }
-
-  setGateway(gateway: InProcessGateway): void {
-    this.gateway = gateway;
-  }
-
-  private emitBackgroundTaskCompletion(event: BackgroundTaskCompletionEvent): void {
-    if (!event.sessionId || !this.gateway) {
-      return;
-    }
-    const outputPreview = event.outputPreview.trimEnd();
-    this.gateway.emitForSession(event.sessionId, {
-      type: "agent_status",
-      event: "background_task_completed",
-      detail: {
-        taskId: event.taskId,
-        status: event.status,
-        exitCode: event.exitCode ?? null,
-        totalBytes: event.totalBytes,
-        startedAt: event.startedAt,
-        endedAt: event.endedAt,
-        ...(outputPreview ? { outputPreview } : {}),
-      },
-    });
-  }
-
-  private buildRouterEventBus(): RouterEventBus {
-    const pilotHome = this.options.pilotHome;
-    const routerDir = joinPath(pilotHome, "router");
-    try { mkdirSyncFs(routerDir, { recursive: true }); } catch { /* exists */ }
-    const eventsPath = joinPath(routerDir, "events.jsonl");
-    try {
-      const oldPath = joinPath(pilotHome, "router-events.jsonl");
-      if (!existsSync(eventsPath) && existsSync(oldPath)) {
-        renameSync(oldPath, eventsPath);
-      }
-    } catch { /* best-effort migration */ }
-    const self = this;
-    return {
-      emit(event: RouterEvent) {
-        try {
-          appendFileSync(eventsPath, JSON.stringify(event) + "\n");
-        } catch { /* best-effort, never crash the agent loop */ }
-        if (event.type === "pilotdeck_router_retry_progress") {
-          try {
-            self.gateway?.broadcastRetryProgress(event);
-          } catch { /* best-effort */ }
-        }
-      },
-    };
-  }
-
-  /**
-   * Resolve the live permission-rule set for a session. Prefers any
-   * explicit `sessionOverrides` entry (used by `always-on` to inject a
-   * pre-populated allow list); otherwise lazily mints a per-session
-   * fallback so the gateway permission hook always has a live array to
-   * push `remember=true` grants into.
-   */
-  private getLiveRuleSet(sessionKey: string): {
-    allow: PermissionRule[];
-    deny: PermissionRule[];
-    ask: PermissionRule[];
-  } {
-    const explicit = this._sessionOverrides?.get(sessionKey)?.permissionRules;
-    if (explicit) {
-      return {
-        allow: explicit.allow ?? [],
-        deny: explicit.deny ?? [],
-        ask: explicit.ask ?? [],
-      };
-    }
-    let auto = this.fallbackRuleSets.get(sessionKey);
-    if (!auto) {
-      auto = { allow: [], deny: [], ask: [] };
-      this.fallbackRuleSets.set(sessionKey, auto);
-    }
-    return auto;
-  }
-
-  /**
-   * Drop cached runtimes so the next `resolve()` call rebuilds from
-   * a fresh `loadPilotConfig()` snapshot. Gracefully shuts down any
-   * active MCP connections (both shared and per-session) before
-   * discarding the entry.
-   */
-  invalidate(projectRoot?: string): void {
-    for (const [, mcp] of this.sessionMcpRuntimes) {
-      mcp.stop().catch(() => {});
-    }
-    this.sessionMcpRuntimes.clear();
-
-    if (projectRoot) {
-      const runtime = this.runtimes.get(projectRoot);
-      if (runtime?.mcpRuntime) {
-        runtime.mcpRuntime.stop().catch(() => {});
-      }
-      runtime?.memoryService?.close();
-      runtime?.router?.shutdown().catch(() => {});
-      this.runtimes.delete(projectRoot);
-    } else {
-      for (const [, runtime] of this.runtimes) {
-        if (runtime.mcpRuntime) {
-          runtime.mcpRuntime.stop().catch(() => {});
-        }
-        runtime.memoryService?.close();
-        runtime.router?.shutdown().catch(() => {});
-      }
-      this.runtimes.clear();
-    }
-  }
-
-  /**
-   * Replace subsystem-owned tools and session overrides (Always-On / Cron).
-   * Called after the subsystem lifecycle is torn down and rebuilt so that
-   * future session creations pick up the new tool definitions and override
-   * map. Also invalidates cached runtimes.
-   */
-  updateSubsystems(config: {
-    extraTools: PilotDeckToolDefinition[];
-    sessionOverrides?: SessionConfigOverrides;
-  }): void {
-    this._extraTools = config.extraTools;
-    this._sessionOverrides = config.sessionOverrides;
-    this.invalidate();
-  }
-
-  /**
-   * Set the working directory override for a specific session.
-   * Used by the Web UI execution path to point an agent session at
-   * an isolated workspace (git-worktree / snapshot-copy) without
-   * going through DiscoveryFire.
-   */
-  setSessionCwd(sessionKey: string, cwd: string): void {
-    if (!this._sessionOverrides) return;
-    const existing = this._sessionOverrides.get(sessionKey);
-    this._sessionOverrides.set(sessionKey, { ...existing, cwd });
-  }
-
-  resolve(projectKey?: string): ProjectRuntime {
-    const projectRoot = resolve(projectKey ?? this.options.fallbackProjectRoot);
-    this.options.onProjectActivated?.(projectRoot);
-    const cached = this.runtimes.get(projectRoot);
-    if (cached) {
-      return cached;
-    }
-
-    const snapshot = loadPilotConfig({ projectRoot, env: this.options.env });
-    const model = this.options.modelFactory
-      ? this.options.modelFactory(snapshot)
-      : createModelRuntime(snapshot.config.model);
-    const tokenAccounting = new TokenAccountingRuntime({
-      modelConfig: snapshot.config.model,
-    });
-    const pluginRuntime = new PluginRuntime({
-      projectRoot,
-      pilotHome: this.options.pilotHome,
-      builtinSkillsRoot: this.options.builtinSkillsRoot,
-      builtinPlugins: loadBuiltinPlugins(),
-      builtinPluginsEnabled: snapshot.config.extension.builtinPluginsEnabled,
-    });
-    const routerConfig = ensureRouterConfig(snapshot.config.router, snapshot.config.agent.model);
-    const router = createRouterRuntime(routerConfig, {
-      modelRuntime: model,
-      now: this.options.now,
-      customRouterRegistry: pluginRuntime,
-      loadSkillPrompt: (extensionId) => pluginRuntime.loadSkillPrompt(extensionId),
-      events: this.buildRouterEventBus(),
-      telemetry: this.options.telemetry,
-    });
-    const backgroundTasks = new BackgroundTaskRuntime({
-      now: this.options.now,
-      onCompletion: (event) => this.emitBackgroundTaskCompletion(event),
-    });
-    const webSearchConfig = snapshot.config.tools?.webSearch;
-    const tools = createBuiltinRegistry({
-      backgroundTasks: { runtime: backgroundTasks },
-      readSkill: {
-        loader: (name) => pluginRuntime.loadSkillPrompt(name),
-        lister: () => pluginRuntime.getAllSkills(),
-      },
-      // Pass the YAML-configured web-search provider through to the built-in
-      // `web_search` tool. When absent, the tool may infer GLM/Tavily from
-      // provider-specific environment variables.
-      ...(webSearchConfig?.enabled === false
-        ? { webSearch: false as const }
-        : webSearchConfig
-          ? {
-              webSearch: {
-                ...(webSearchConfig.provider ? { provider: webSearchConfig.provider } : {}),
-                ...(webSearchConfig.apiKey ? { apiKey: webSearchConfig.apiKey } : {}),
-                ...(webSearchConfig.endpoint ? { endpoint: webSearchConfig.endpoint } : {}),
-                ...(webSearchConfig.customProvider ? { customProvider: webSearchConfig.customProvider } : {}),
-              },
-            }
-          : {}),
-    });
-    for (const tool of this._extraTools) {
-      tools.register(tool);
-    }
-
-    const memory = createEdgeClawMemoryProviderFromConfig({
-      config: snapshot.config.memory,
-      modelConfig: snapshot.config.model,
-      agentModel: snapshot.config.agent.model.id,
-      projectRoot,
-      now: this.options.now,
-      telemetry: this.options.telemetry,
-    });
-
-    const runtime: ProjectRuntime = {
-      projectRoot,
-      snapshot,
-      model,
-      tokenAccounting,
-      router,
-      pluginRuntime,
-      tools,
-      backgroundTasks,
-      memory: memory?.provider,
-      memoryService: memory?.service,
-      projectStorage: {
-        projectRoot,
-        pilotHome: this.options.pilotHome,
-      },
-    };
-    this.runtimes.set(projectRoot, runtime);
-    return runtime;
-  }
-
-  scheduleMemoryMaintenance(projectKey?: string): void {
-    const runtime = this.resolve(projectKey);
-    const service = runtime.memoryService;
-    if (!service) return;
-    runtime.memoryMaintenanceRequested = true;
-    if (runtime.memoryMaintenanceInFlight) return;
-    runtime.memoryMaintenanceInFlight = (async () => {
-      while (runtime.memoryMaintenanceRequested) {
-        runtime.memoryMaintenanceRequested = false;
-        try {
-          await service.runDueScheduledMaintenance("scheduled");
-          this.options.telemetry.trackFeatureLoopStage({
-            module: "memory",
-            ownerModule: "memory",
-            executionKind: "memory",
-            phase: "maintenance",
-            loopStage: "module_event",
-            outcome: "success",
-            metadata: {
-              phase: "maintenance_completed",
-            },
-          });
-        } catch (error) {
-          this.options.telemetry.trackError(error, {
-            module: "memory",
-            ownerModule: "memory",
-            executionKind: "memory",
-            phase: "maintenance",
-            loopStage: "loop_end",
-            errorCategory: "loop_error",
-            code: error instanceof Error ? error.name : "UnknownError",
-          });
-          // eslint-disable-next-line no-console
-          console.warn(
-            `[pilotdeck] memory maintenance failed for project ${runtime.projectRoot}:`,
-            error instanceof Error ? error.message : String(error),
-          );
-        }
-      }
-    })().finally(() => {
-      runtime.memoryMaintenanceInFlight = undefined;
-      if (runtime.memoryMaintenanceRequested) {
-        this.scheduleMemoryMaintenance(projectKey);
-      }
-    });
-  }
-
-  /**
-   * Lazily start the MCP runtime for this project. Idempotent — concurrent
-   * callers share a single in-flight promise. Errors are swallowed (logged
-   * to stderr) so a misbehaving MCP server can't take the gateway down.
-   */
-  private ensureMcpReady(runtime: ProjectRuntime): Promise<void> {
-    if (runtime.mcpReady) return runtime.mcpReady;
-    runtime.mcpReady = (async () => {
-      try {
-        const configServers = loadMcpServerConfig(runtime.projectRoot, this.options.pilotHome);
-        for (const diagnostic of configServers.diagnostics) {
-          // eslint-disable-next-line no-console
-          console.warn(`[pilotdeck] Ignoring invalid MCP config ${diagnostic.path}: ${diagnostic.message}`);
-        }
-        const rawServers = {
-          ...runtime.pluginRuntime.mcpServers(),
-          ...configServers.servers,
-        };
-        const { servers: parsedServers } = parsePluginMcpServers(rawServers);
-        const servers = parsedServers.map((server) => patchProjectScopedMcpSpec(
-          server,
-          runtime.projectRoot,
-          this.options.pilotHome,
-        ));
-        if (servers.length === 0) return;
-
-        const sharedServers = servers.filter((s) => s.transport !== "stdio" || !s.perSession);
-        const perSessionServers = servers.filter((s) => s.transport === "stdio" && s.perSession);
-
-        runtime.perSessionServerSpecs = perSessionServers.length > 0 ? perSessionServers : undefined;
-
-        if (sharedServers.length > 0) {
-          const mcp = new McpRuntime(sharedServers);
-          runtime.mcpRuntime = mcp;
-          const statuses = await mcp.start();
-          for (const status of statuses) {
-            if (status.status === "error") {
-              // eslint-disable-next-line no-console
-              console.warn(
-                `[pilotdeck] ${status.serverId === "funasr" ? "ASR unavailable" : "MCP server unavailable"} ` +
-                `(server=${status.serverId}): ${status.error ?? "unknown error"}`,
-              );
-            }
-          }
-          const defs = await createMcpToolDefinitionsFromRuntime(mcp);
-          for (const def of defs) {
-            if (!runtime.tools.has(def.name)) runtime.tools.register(def);
-          }
-        }
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.warn(
-          `[pilotdeck] MCP runtime startup partial-failed for project ${runtime.projectRoot}:`,
-          (err as Error).message,
-        );
-      }
-    })();
-    return runtime.mcpReady;
-  }
-
-  async createSession(context: GatewaySessionContext) {
-    const prepared = await this.prepareSessionRuntime(context);
-    const resumed = await resumeAgentSession({
-      sessionId: context.sessionKey,
-      config: this.createAgentConfig(prepared.runtime, context.sessionKey),
-      dependencies: prepared.baseDependencies,
-      projectStorage: prepared.runtime.projectStorage,
-      extendDependencies: prepared.extendDependencies,
-      sessionTitleGenerator: prepared.sessionTitleGenerator,
-      collectFileArtifacts: this.shouldCollectFileArtifacts(prepared.runtime),
-      __agentLoopFactory: this.options.agentLoopFactory,
-    });
-    return resumed.session;
-  }
-
-  async recreateSession(context: GatewaySessionContext, previousSession: AgentSession) {
-    const prepared = await this.prepareSessionRuntime(context);
-    const previous = previousSession.snapshotForRuntimeReload();
-    const storage = createAgentProjectSessionStorage({
-      ...prepared.runtime.projectStorage,
-      sessionId: context.sessionKey,
-      now: prepared.baseDependencies.now,
-    });
-    if (previous.transcriptWriterState) {
-      storage.transcript.restoreState(
-        previous.transcriptWriterState.sequence,
-        previous.transcriptWriterState.lastEntryId,
-      );
-    }
-    const extensionDependencies = prepared.extendDependencies(storage);
-    const { session } = createAgentSessionWithStorage({
-      sessionId: context.sessionKey,
-      config: this.createAgentConfig(prepared.runtime, context.sessionKey),
-      dependencies: mergeSessionDependencies(prepared.baseDependencies, extensionDependencies),
-      storage,
-      transcript: storage.transcript,
-      initialState: previous.state,
-      seedState: previous.fileState,
-      initialMetadata: previous.metadata,
-      sessionTitleGenerator: prepared.sessionTitleGenerator,
-      collectFileArtifacts: this.shouldCollectFileArtifacts(prepared.runtime),
-      __agentLoopFactory: this.options.agentLoopFactory,
-    });
-    return session;
-  }
-
-  private shouldCollectFileArtifacts(runtime: ProjectRuntime): boolean {
-    return resolve(runtime.projectRoot) !== resolve(this.options.pilotHome);
-  }
-
-  private async prepareSessionRuntime(context: GatewaySessionContext) {
-    const runtime = this.resolve(context.projectKey);
-    await runtime.pluginRuntime.refresh();
-    await this.ensureMcpReady(runtime);
-    const contributions = runtime.pluginRuntime.snapshotContributions();
-
-    // -- per-session MCP runtime (e.g. browser-use) --------------------
-    let sessionTools: ToolRegistry = runtime.tools;
-    const perSpecs = runtime.perSessionServerSpecs;
-    const maxInstances = runtime.snapshot.config.gateway?.maxPerSessionMcpInstances ?? 5;
-    if (perSpecs && perSpecs.length > 0 && this.sessionMcpRuntimes.size < maxInstances) {
-      this.evictSessionMcp(context.sessionKey);
-      const patchedPerSpecs = perSpecs.map((spec) => {
-        if (spec.transport === "stdio" && spec.id === "browser-use") {
-          const outDir = joinPath(
-            runtime.projectRoot,
-            ".pilotdeck",
-            "browser_screenshots",
-            sanitizeSessionIdForPath(context.sessionKey),
-          );
-          mkdirSyncFs(outDir, { recursive: true });
-          return {
-            ...spec,
-            cwd: outDir,
-            args: buildBrowserUseArgs(spec.args ?? [], outDir, this.options.env, runtime.snapshot.config.proxy),
-          };
-        }
-        return spec;
-      });
-      const sessionMcp = new McpRuntime(patchedPerSpecs);
-      this.sessionMcpRuntimes.set(context.sessionKey, sessionMcp);
-      try {
-        const statuses = await sessionMcp.start();
-        for (const status of statuses) {
-          if (status.status === "error") {
-            // eslint-disable-next-line no-console
-            console.warn(
-              `[pilotdeck] ${status.serverId === "funasr" ? "ASR unavailable" : "Per-session MCP unavailable"} ` +
-              `(server=${status.serverId}, session=${context.sessionKey}): ${status.error ?? "unknown error"}`,
-            );
-          }
-        }
-        const defs = await createMcpToolDefinitionsFromRuntime(sessionMcp);
-        if (defs.length > 0) {
-          sessionTools = runtime.tools.clone();
-          for (const def of defs) {
-            if (sessionTools.has(def.name)) {
-              sessionTools.replace(def);
-            } else {
-              sessionTools.register(def);
-            }
-          }
-        }
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.warn(
-          `[pilotdeck] Per-session MCP startup failed for ${context.sessionKey}:`,
-          (err as Error).message,
-        );
-      }
-    } else if (perSpecs && perSpecs.length > 0) {
-      // eslint-disable-next-line no-console
-      console.warn(
-        `[pilotdeck] Per-session MCP limit reached (${maxInstances}). ` +
-        `Session ${context.sessionKey} will not start: ${perSpecs.map((spec) => spec.id).join(", ")}.`,
-      );
-    }
-
-    // -- excludeTools filtering (unattended sessions) -------------------
-    const override = this._sessionOverrides?.get(context.sessionKey);
-    if (override?.excludeTools && override.excludeTools.length > 0) {
-      if (sessionTools === runtime.tools) {
-        sessionTools = runtime.tools.clone();
-      }
-      for (const name of override.excludeTools) {
-        sessionTools.unregister(name);
-      }
-    }
-
-    // -- Strip always_on_* tools from non-Always-On sessions -------------
-    // These tools require an AlwaysOnRunContext to execute; surfacing them
-    // in regular user sessions just pollutes the model's tool list.
-    const isAlwaysOnSession = context.sessionKey.startsWith("always-on/");
-    if (!isAlwaysOnSession) {
-      const alwaysOnNames = this._extraTools
-        .filter((t) => t.name.startsWith("always_on_"))
-        .map((t) => t.name);
-      if (alwaysOnNames.length > 0) {
-        if (sessionTools === runtime.tools) {
-          sessionTools = runtime.tools.clone();
-        }
-        for (const name of alwaysOnNames) {
-          sessionTools.unregister(name);
-        }
-      }
-    }
-
-    const availability = await filterAvailableTools(sessionTools, {
-      cwd: runtime.projectRoot,
-      env: this.options.env,
-    });
-    sessionTools = availability.registry;
-    runtime.unavailableTools = availability.unavailable;
-
-    // Inject the gateway's interactive permission hook so the agent's
-    // PermissionRequest lifecycle is round-tripped through whichever
-    // client is streaming this session (Web UI, TUI, etc.) instead of
-    // returning `permission_required` errors. The hook mutates the
-    // session's live `permissionRules.allow` array on `remember=true`,
-    // so a subsequent tool call inside the same turn bypasses the ask
-    // path without waiting for the next turn.
-    //
-    // We register unconditionally whenever a gateway is wired up. If no
-    // client is actively streaming, `gw.emitForSession()` returns false
-    // and the hook auto-denies — better than silently hanging.
-    const gw = this.gateway;
-    const liveRuleSet = this.getLiveRuleSet(context.sessionKey);
-    const hookSettings: typeof contributions.hooks = gw
-      ? {
-          ...contributions.hooks,
-          PermissionRequest: [
-            ...(contributions.hooks.PermissionRequest ?? []),
-            {
-              hooks: [
-                { type: "callback", name: GATEWAY_PERMISSION_CALLBACK_NAME },
-              ],
-            },
-          ],
-        }
-      : contributions.hooks;
-    const hookRuntime = new HookRuntime(hookSettings);
-    if (gw) {
-      hookRuntime.getCallbackExecutor().register(
-        GATEWAY_PERMISSION_CALLBACK_NAME,
-        createGatewayPermissionHook({
-          sessionKey: context.sessionKey,
-          bus: gw.getPermissionBus(),
-          emit: (event) => gw.emitForSession(context.sessionKey, event),
-          permissionRules: liveRuleSet.allow,
-        }),
-      );
-    }
-    const lifecycle = new LifecycleRuntime(hookRuntime);
-    const extension = new PluginRuntimeExtensionResolver(runtime.pluginRuntime);
-    const projectRoot = runtime.projectRoot;
-    const memoryResolver = runtime.memory;
-    const now = this.options.now;
-    const eventBuf = createAgentEventBuffer();
-
-    const baseDependencies: CreateAgentSessionOptions["dependencies"] = {
-      router: runtime.router,
-      tools: { registry: sessionTools },
-      lifecycle,
-      now: this.options.now,
-      eventEmitter: eventBuf.emitter,
-      drainEvents: eventBuf.drain,
-      tokenAccounting: runtime.tokenAccounting,
-      getModelMaxContextTokens: (provider, model) => resolveRoutedModelMaxContextTokens({
-        modelRuntime: runtime.model,
-        agentModel: runtime.snapshot.config.agent.model,
-        agentMaxContextTokens: runtime.snapshot.config.agent.maxContextTokens,
-        provider,
-        model,
-      }),
-      getModelMaxOutputTokens: (provider, model) => {
-        try {
-          return runtime.model.getCapabilities(provider, model).maxOutputTokens;
-        } catch {
-          return undefined;
-        }
-      },
-      getModelTokenLimits: (provider, model) => {
-        try {
-          const caps = runtime.model.getCapabilities(provider, model);
-          return { maxContextTokens: caps.maxContextTokens, maxOutputTokens: caps.maxOutputTokens };
-        } catch {
-          return undefined;
-        }
-      },
-      getModelProtocol: (provider) => runtime.model.getProviderProtocol(provider),
-      getModelSupportsPromptCache: (provider, model) => {
-        try {
-          return runtime.model.getCapabilities(provider, model).supportsPromptCache;
-        } catch {
-          return undefined;
-        }
-      },
-    };
-    const sessionTitleGenerator = createSessionTitleGenerator({
-      modelRuntime: runtime.model,
-      agentModel: runtime.snapshot.config.agent.model,
-    });
-    const extendDependencies = (storage: ReturnType<typeof createAgentProjectSessionStorage>) => {
-      const toolResultBudget = new ToolResultBudget({ toolResultsDir: storage.toolResultsDir });
-      const tokenBudget = new TokenBudgetManager();
-      const compactionEngine = new CompactionEngine({
-        model: {
-          stream: (request, signal) =>
-            runtime.router.stream(request, {
-              sessionId: context.sessionKey,
-              turnId: "compact",
-              projectPath: context.projectKey,
-              abortSignal: signal,
-              isMainAgent: false,
-            }),
-        },
-        tokenBudget,
-        tokenAccounting: runtime.tokenAccounting,
-        lifecycle: {
-          async dispatch(input) {
-            await lifecycle.dispatch({
-              event: input.event,
-              baseInput: {
-                sessionId: context.sessionKey,
-                transcriptPath: "",
-                cwd: projectRoot,
-                permissionMode: "default",
-              },
-              payload: input.payload,
-              matchQuery: input.event,
-            });
-          },
-        },
-        provider: runtime.snapshot.config.agent.model.provider,
-        model_: runtime.snapshot.config.agent.model.model,
-        protectedToolNames: DEFAULT_PROTECTED_TOOL_RESULT_NAMES,
-        now,
-        eventEmitter: eventBuf.emitter,
-      });
-      const autoCompactionPolicy = new AutoCompactionPolicy({ tokenBudget });
-      const microCompaction = new MicroCompactionEngine({
-        protectedToolNames: DEFAULT_PROTECTED_TOOL_RESULT_NAMES,
-      });
-      const snipEngine = new SnipEngine({
-        protectedToolNames: DEFAULT_PROTECTED_TOOL_RESULT_NAMES,
-      });
-      const overflowRecovery = new ContextOverflowRecovery();
-      const caps = runtime.model.getCapabilities(
-        runtime.snapshot.config.agent.model.provider,
-        runtime.snapshot.config.agent.model.model,
-      );
-      const instructionDiscovery = new InstructionDiscovery(
-        projectRoot,
-        projectRoot,
-        this.options.pilotHome,
-      );
-      const contextRuntime = new DefaultContextRuntime({
-        extension,
-        projectRoot,
-        memoryResolver,
-        memoryRetrievalTimeoutMs: runtime.snapshot.config.memory?.retrievalTimeoutMs,
-        instructionDiscovery,
-        toolResultBudget,
-        tokenBudget,
-        compactionEngine,
-        autoCompactionPolicy,
-        microCompaction,
-        snipEngine,
-        overflowRecovery,
-        maxContextTokens: runtime.snapshot.config.agent.maxContextTokens ?? caps.maxContextTokens,
-        now,
-      });
-      const fileHistory = new FileHistoryStore({
-        backupDir: storage.fileHistoryDir,
-        now: this.options.now,
-      });
-      const gw = this.gateway;
-      const elicitation = this.options.autoElicitation
-        ? createAutoElicitationChannel()
-        : gw
-          ? new GatewayElicitationChannel({
-              sessionKey: context.sessionKey,
-              bus: gw.getElicitationBus(),
-              emit: (event) => gw.emitForSession(context.sessionKey, event),
-              dispatchHook: (hookEvent, payload) => {
-                lifecycle.dispatch({
-                  event: hookEvent as import("../extension/hooks/protocol/events.js").PilotDeckHookEvent,
-                  baseInput: { sessionId: context.sessionKey, transcriptPath: "", cwd: projectRoot },
-                  payload,
-                  matchQuery: hookEvent,
-                }).catch(() => {});
-              },
-              emitAgentEvent: (_type, payload) => {
-                eventBuf.emitter({
-                  type: "elicitation_requested",
-                  sessionId: context.sessionKey,
-                  turnId: "",
-                  requestId: payload.requestId,
-                  toolName: payload.toolName,
-                });
-              },
-            })
-          : undefined;
-      const subagentTranscript: AgentSubagentTranscriptHooks = {
-        recordSubagentStarted: (args) =>
-          storage.transcript.recordSubagentStarted(args.sessionId, args.turnId, {
-            subagentId: args.subagentId,
-            subagentType: args.subagentType,
-            prompt: args.prompt,
-            transcriptRelativePath: args.transcriptRelativePath,
-            subagentSessionId: args.subagentSessionId,
-          }),
-        recordSubagentCompleted: (args) =>
-          storage.transcript.recordSubagentCompleted(args.sessionId, args.turnId, {
-            subagentId: args.subagentId,
-            subagentType: args.subagentType,
-            summary: args.summary,
-            usage: args.usage,
-            turns: args.turns,
-            durationMs: args.durationMs,
-            errored: args.errored,
-          }),
-        subagentTranscriptResolver: (subagentId) => {
-          const handle = storage.transcript.forSubagent(subagentId, this.options.now);
-          return {
-            recordAcceptedInput: (sessionId, turnId, messages) =>
-              handle.writer.recordAcceptedInput(sessionId, turnId, messages),
-            recordDurableMessage: (sessionId, turnId, message) =>
-              handle.writer.recordDurableMessage(sessionId, turnId, message),
-            transcriptRelativePath: storage.transcript.relativeSubagentPath(subagentId),
-          };
-        },
-      };
-      const planFileManager = createPlanFileManager({ projectRoot });
-      const planTodoManager = createPlanTodoStateManager();
-      return {
-        context: contextRuntime,
-        fileHistory,
-        subagentTranscript,
-        elicitation,
-        planFileManager,
-        planTodoManager,
-      };
-    };
-    return {
-      runtime,
-      baseDependencies,
-      sessionTitleGenerator,
-      extendDependencies,
-    };
-  }
-
-  async listSessions(input: ListSessionsInput): Promise<ListSessionsResult> {
-    const runtime = this.resolve(input.projectKey);
-    const offset = input.cursor ? Number.parseInt(input.cursor, 10) : 0;
-    const safeOffset = Number.isFinite(offset) ? offset : 0;
-    const sessions = await listProjectSessions({
-      ...runtime.projectStorage,
-      limit: input.limit,
-      offset: safeOffset,
-    });
-    const nextOffset = safeOffset + sessions.length;
-    return {
-      sessions,
-      nextCursor: input.limit && sessions.length === input.limit ? String(nextOffset) : undefined,
-    };
-  }
-
-  private createAgentConfig(
-    runtime: ProjectRuntime,
-    sessionKey: string,
-  ): CreateAgentSessionOptions["config"] {
-    const agent = runtime.snapshot.config.agent;
-    const override = this._sessionOverrides?.get(sessionKey);
-    const permissionMode = override?.permissionMode ?? this.options.permissionMode;
-    const cwd = override?.cwd ?? runtime.projectRoot;
-    // Hand `PermissionContext` the same live rule-set reference the
-    // gateway permission hook owns (see `getLiveRuleSet`). With this
-    // shared reference, an "allow + remember" decision pushed by the
-    // hook is visible to `PermissionRuntime.decide` on the very next
-    // tool call inside the same turn — no roundtrip back to the client
-    // needed, even when the client lives in a different process.
-    const liveRuleSet = this.getLiveRuleSet(sessionKey);
-    let modelMultimodal: import("../model/index.js").MultimodalConstraints | undefined;
-    try {
-      modelMultimodal = runtime.model.getMultimodal(agent.model.provider, agent.model.model);
-    } catch {
-      // Model or provider not found — fall back to text-only.
-    }
-    let maxContextTokens: number | undefined;
-    let maxOutputTokens: number | undefined;
-    try {
-      const caps = runtime.model.getCapabilities(agent.model.provider, agent.model.model);
-      maxContextTokens = agent.maxContextTokens ?? caps.maxContextTokens;
-      maxOutputTokens = caps.maxOutputTokens;
-    } catch {
-      maxContextTokens = agent.maxContextTokens;
-    }
-    maxOutputTokens = readPositiveIntegerEnv(this.options.env.PILOTDECK_MAX_OUTPUT_TOKENS)
-      ?? agent.maxOutputTokens
-      ?? maxOutputTokens;
-    const subagentModel = agent.subagents?.default;
-    let subagentRuntimeModel: CreateAgentSessionOptions["config"]["subagentModel"];
-    if (subagentModel) {
-      let subagentModelMultimodal: import("../model/index.js").MultimodalConstraints | undefined;
-      try {
-        subagentModelMultimodal = runtime.model.getMultimodal(
-          subagentModel.provider,
-          subagentModel.model,
-        );
-      } catch {
-        // Model or provider not found — keep the override but fall back to inherited caps.
-      }
-      let subagentMaxContextTokens: number | undefined;
-      let subagentMaxOutputTokens: number | undefined;
-      try {
-        const caps = runtime.model.getCapabilities(subagentModel.provider, subagentModel.model);
-        subagentMaxContextTokens = caps.maxContextTokens;
-        subagentMaxOutputTokens = caps.maxOutputTokens;
-      } catch {
-        // Keep the override even if capability lookup fails.
-      }
-      subagentRuntimeModel = {
-        provider: subagentModel.provider,
-        model: subagentModel.model,
-        ...(subagentModelMultimodal ? { modelMultimodal: subagentModelMultimodal } : {}),
-        ...(subagentMaxContextTokens !== undefined ? { maxContextTokens: subagentMaxContextTokens } : {}),
-        ...(subagentMaxOutputTokens !== undefined
-          ? {
-              maxOutputTokens: readPositiveIntegerEnv(this.options.env.PILOTDECK_MAX_OUTPUT_TOKENS)
-                ?? subagentMaxOutputTokens,
-            }
-          : {}),
-      };
-    }
-    return {
-      provider: agent.model.provider,
-      model: agent.model.model,
-      modelMultimodal,
-      cwd,
-      permissionMode,
-      jsonSelfCorrect: true,
-      ...(subagentRuntimeModel ? { subagentModel: subagentRuntimeModel } : {}),
-      subagentTimeoutMs: agent.subagents?.timeoutMs,
-      maxContextTokens,
-      maxOutputTokens,
-      thinking: agent.thinking,
-      permissionContext: createDefaultPermissionContext({
-        cwd,
-        mode: permissionMode,
-        canPrompt: override?.canPrompt ?? true,
-        bypassAvailable: override?.bypassAvailable ?? true,
-        additionalWorkingDirectories: this.options.additionalWorkingDirectories,
-        rules: {
-          allow: liveRuleSet.allow,
-          deny: liveRuleSet.deny,
-          ask: liveRuleSet.ask,
-        },
-      }),
-    };
-  }
-}
-
-function mergeSessionDependencies(
-  base: CreateAgentSessionOptions["dependencies"],
-  extension: Partial<
-    Pick<
-      AgentRuntimeDependencies,
-      "context" | "fileHistory" | "subagentTranscript" | "elicitation" | "eventEmitter" | "drainEvents" | "planFileManager" | "planTodoManager"
-    >
-  >,
-): CreateAgentSessionOptions["dependencies"] {
-  return {
-    ...base,
-    ...(extension.context ? { context: extension.context } : {}),
-    ...(extension.fileHistory ? { fileHistory: extension.fileHistory } : {}),
-    ...(extension.subagentTranscript ? { subagentTranscript: extension.subagentTranscript } : {}),
-    ...(extension.elicitation ? { elicitation: extension.elicitation } : {}),
-    ...(extension.eventEmitter ? { eventEmitter: extension.eventEmitter } : {}),
-    ...(extension.drainEvents ? { drainEvents: extension.drainEvents } : {}),
-    ...(extension.planFileManager ? { planFileManager: extension.planFileManager } : {}),
-    ...(extension.planTodoManager ? { planTodoManager: extension.planTodoManager } : {}),
-  };
-}
 
 function handleExtensionWatchEvent(
   event: ExtensionWatchEvent,
@@ -1579,90 +615,6 @@ function handleExtensionWatchEvent(
 
 function describeExtensionScope(scope: ExtensionWatchEvent["scope"]): string {
   return scope.kind === "global" ? "global extensions" : `project extensions (${scope.projectRoot})`;
-}
-
-function createAutoElicitationChannel(): PilotDeckElicitationChannel {
-  return {
-    async askUser(request) {
-      const answers: Record<string, string | string[]> = {};
-      for (const q of request.questions) {
-        if (q.options.length > 0) {
-          answers[q.question] = q.multiSelect
-            ? [q.options[0].label]
-            : q.options[0].label;
-        } else {
-          answers[q.question] = "yes";
-        }
-      }
-      return { type: "answered", answers };
-    },
-  };
-}
-
-function ensureRouterConfig(
-  router: RouterConfig | undefined,
-  defaultSelection: PilotAgentModelSelection,
-): RouterConfig {
-  const defaultRef = { id: defaultSelection.id, provider: defaultSelection.provider, model: defaultSelection.model };
-  if (router?.enabled === false) {
-    return { enabled: false };
-  }
-  if (router) {
-    // Scenarios is optional at the parse boundary (see schema.ts) — the UI
-    // can persist a partial `router:` block, e.g. user toggled `enabled`
-    // and seeded `tokenSaver.*` without ever opening the Scenarios editor.
-    // Fill `scenarios.default` from `agent.model` so RouterRuntime always
-    // sees a valid map.
-    return {
-      enabled: true,
-      ...router,
-      scenarios: router.scenarios ?? { default: defaultRef },
-      fallback: router.fallback ?? { default: [defaultRef] },
-      tokenSaver: router.tokenSaver ?? buildDefaultTokenSaver(defaultRef),
-      autoOrchestrate: router.autoOrchestrate ?? buildDefaultAutoOrchestrate(),
-      stats: { enabled: true, baselineModel: defaultRef, ...(router.stats ?? {}) },
-    };
-  }
-  return {
-    enabled: true,
-    scenarios: { default: defaultRef },
-    fallback: { default: [defaultRef] },
-    zeroUsageRetry: { enabled: true, maxAttempts: 2 },
-    tokenSaver: buildDefaultTokenSaver(defaultRef),
-    autoOrchestrate: buildDefaultAutoOrchestrate(),
-    stats: { enabled: true, baselineModel: defaultRef },
-  };
-}
-
-function buildDefaultTokenSaver(defaultRef: { id: string; provider: string; model: string }) {
-  return {
-    enabled: true,
-    judge: defaultRef,
-    defaultTier: "medium",
-    judgeTimeoutMs: DEFAULT_JUDGE_TIMEOUT_MS,
-    tiers: {
-      simple: { model: defaultRef },
-      medium: { model: defaultRef },
-      complex: { model: defaultRef },
-      reasoning: { model: defaultRef },
-    },
-  };
-}
-
-function buildDefaultAutoOrchestrate() {
-  return {
-    enabled: true,
-    triggerTiers: [...DEFAULT_TRIGGER_TIERS],
-    slimSystemPrompt: true,
-    allowedTools: [...DEFAULT_ALLOWED_TOOLS],
-  };
-}
-
-function readPositiveIntegerEnv(value: string | undefined): number | undefined {
-  if (value === undefined) return undefined;
-  const parsed = Number.parseInt(value.trim(), 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) return undefined;
-  return Math.floor(parsed);
 }
 
 export function buildBrowserUseArgs(

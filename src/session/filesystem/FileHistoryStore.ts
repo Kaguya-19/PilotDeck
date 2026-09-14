@@ -48,17 +48,9 @@ import type {
   FileHistorySnapshot,
   FileHistoryState,
 } from "./types.js";
+import type { FileHistorySnapshotRecord } from "../transcript/TranscriptEntry.js";
 
-export type FileHistorySnapshotRecordedEntry = {
-  messageId: string;
-  trackedFileBackups: Record<
-    string,
-    Pick<FileHistoryBackup, "backupFileName" | "version" | "mode"> & {
-      backupTime: string;
-    }
-  >;
-  timestamp: string;
-};
+export type FileHistorySnapshotRecordedEntry = FileHistorySnapshotRecord;
 
 export type FileHistoryStoreOptions = {
   /** Absolute path under which `<sha16>@v<version>` files live. */
@@ -70,7 +62,10 @@ export type FileHistoryStoreOptions = {
   /** Optional `now()` for deterministic tests. */
   now?: () => Date;
   /** Optional sink for `file_snapshot_recorded` transcript entries (F12). */
-  onSnapshotRecorded?: (entry: FileHistorySnapshotRecordedEntry, kind: "create" | "update") => void;
+  onSnapshotRecorded?: (
+    entry: FileHistorySnapshotRecordedEntry,
+    kind: "create" | "update",
+  ) => void | Promise<void>;
   /** Optional warning sink for oversize / missing backups. */
   warn?: (message: string) => void;
 };
@@ -146,7 +141,7 @@ export class FileHistoryStore {
       snapshot.trackedFileBackups[absPath] = result.backup;
       this.cacheMtime(absPath);
 
-      this.recordTranscript(snapshot, "update");
+      await this.recordTranscript(snapshot, "update");
     });
   }
 
@@ -209,7 +204,7 @@ export class FileHistoryStore {
         this.state.snapshots.push(snapshot);
       }
 
-      this.recordTranscript(snapshot, existing ? "update" : "create");
+      await this.recordTranscript(snapshot, existing ? "update" : "create");
       await this.evictIfNeeded();
     });
   }
@@ -363,7 +358,7 @@ export class FileHistoryStore {
     }
   }
 
-  private recordTranscript(snapshot: FileHistorySnapshot, kind: "create" | "update"): void {
+  private async recordTranscript(snapshot: FileHistorySnapshot, kind: "create" | "update"): Promise<void> {
     if (!this.options.onSnapshotRecorded) return;
     const entry: FileHistorySnapshotRecordedEntry = {
       messageId: snapshot.messageId,
@@ -380,7 +375,7 @@ export class FileHistoryStore {
       ),
       timestamp: snapshot.timestamp.toISOString(),
     };
-    this.options.onSnapshotRecorded(entry, kind);
+    await this.options.onSnapshotRecorded(entry, kind);
   }
 
   /** F13 — drop the oldest snapshots when over `maxSnapshots`. */

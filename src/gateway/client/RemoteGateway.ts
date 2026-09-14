@@ -1,11 +1,15 @@
 import type {
   AlwaysOnApplyInput,
   AlwaysOnApplyResult,
+  AlwaysOnAbortInput,
+  AlwaysOnAbortResult,
   AlwaysOnRerunPlanInput,
   AlwaysOnRerunPlanResult,
   Gateway,
   GatewayElicitationResponseInput,
   GatewayEvent,
+  GatewayReconnectInteractionInput,
+  GatewayReconnectInteractionResult,
   GatewayPermissionDecisionInput,
   GatewayServerInfo,
   GatewaySubmitTurnInput,
@@ -81,6 +85,14 @@ import { parseReloadConfigResult } from "../protocol/reloadConfigResult.js";
 export class RemoteGateway implements Gateway {
   constructor(private readonly client: GatewayWsClient) {}
 
+  /**
+   * The server-issued binding for this transport connection. Application
+   * consumers retain it only to prove ownership during a later reconnect.
+   */
+  get interactionBinding(): import("../../interaction/index.js").InteractionConnectionBinding | undefined {
+    return this.client.interactionBinding;
+  }
+
   onNotification(handler: GatewayWsNotificationHandler): void {
     this.client.onNotification(handler);
   }
@@ -151,6 +163,10 @@ export class RemoteGateway implements Gateway {
 
   async getActiveTurnSnapshot(input: import("../protocol/types.js").GatewayActiveTurnSnapshotInput): Promise<import("../protocol/types.js").GatewayActiveTurnSnapshot> {
     return (await this.client.request("active_turn_snapshot", input)) as import("../protocol/types.js").GatewayActiveTurnSnapshot;
+  }
+
+  async reconnectInteraction(input: Omit<GatewayReconnectInteractionInput, "nextBinding">): Promise<GatewayReconnectInteractionResult> {
+    return (await this.client.request("reconnect_interaction", input)) as GatewayReconnectInteractionResult;
   }
 
   async cronCreate(input: CronCreateInput): Promise<CronCreateResult> {
@@ -268,6 +284,10 @@ export class RemoteGateway implements Gateway {
 
   async alwaysOnApply(input: AlwaysOnApplyInput): Promise<AlwaysOnApplyResult> {
     return (await this.client.request("always_on_apply", input)) as AlwaysOnApplyResult;
+  }
+
+  async alwaysOnAbort(input: AlwaysOnAbortInput): Promise<AlwaysOnAbortResult> {
+    return (await this.client.request("always_on_abort", input)) as AlwaysOnAbortResult;
   }
 
   async alwaysOnRerunPlan(input: AlwaysOnRerunPlanInput): Promise<AlwaysOnRerunPlanResult> {

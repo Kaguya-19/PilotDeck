@@ -12,8 +12,9 @@
  */
 
 import type { Gateway } from "../../../gateway/index.js";
-import { resolvePilotHome } from "../../../pilot/index.js";
-import { runChatSearchFormatted } from "../../../cli/commands/chatSearch.js";
+import { parseChatSearchArgs } from "../../../session/search/ChatSearchArgs.js";
+import { formatChatHistorySearchResults } from "../../../session/search/formatChatHistorySearch.js";
+import type { SessionSearchPort } from "../../../session/search/SessionSearchPort.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -31,6 +32,8 @@ export type CommandExecContext = {
   getProject?: () => string | undefined;
   /** Reset the active session for this chat (equivalent to /new). */
   resetSession?: () => void;
+  sessionSearch?: SessionSearchPort;
+  pilotHome?: string;
   logger?: {
     info?(msg: string): void;
     warn?(msg: string): void;
@@ -262,13 +265,25 @@ const commands: ChannelCommand[] = [
         return;
       }
 
-      const { text } = await runChatSearchFormatted({
-        arg: parsed,
-        projectRoot,
-        pilotHome: resolvePilotHome(process.env),
-        locale: "zh",
+      if (!ctx.sessionSearch || !ctx.pilotHome) {
+        await ctx.reply("聊天记录搜索当前不可用。");
+        return;
+      }
+      const searchArgs = parseChatSearchArgs(parsed);
+      const result = await ctx.sessionSearch.search({
+        pilotHome: ctx.pilotHome,
+        projectRoot: searchArgs.allProjects ? undefined : projectRoot,
+        query: searchArgs.query,
+        limit: searchArgs.limit,
+        regex: searchArgs.regex,
+        caseSensitive: searchArgs.caseSensitive,
+        role: searchArgs.role,
+        sessionId: searchArgs.sessionId,
       });
-      await ctx.reply(text);
+      await ctx.reply(formatChatHistorySearchResults(result, {
+        locale: "zh",
+        includeProject: searchArgs.allProjects || !projectRoot,
+      }));
     },
   },
 

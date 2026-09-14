@@ -125,14 +125,21 @@ export function useShellConnection({
 
         const socket = new WebSocket(wsUrl);
         wsRef.current = socket;
+        const isCurrentSocket = () => wsRef.current === socket;
 
         socket.onopen = () => {
+          if (!isCurrentSocket()) {
+            return;
+          }
           setIsConnected(true);
           setIsConnecting(false);
           connectingRef.current = false;
           setAuthUrl('');
 
           window.setTimeout(() => {
+            if (!isCurrentSocket() || socket.readyState !== WebSocket.OPEN) {
+              return;
+            }
             const currentTerminal = terminalRef.current;
             const currentFitAddon = fitAddonRef.current;
             const currentProject = selectedProjectRef.current;
@@ -157,11 +164,18 @@ export function useShellConnection({
         };
 
         socket.onmessage = (event) => {
+          if (!isCurrentSocket()) {
+            return;
+          }
           const rawPayload = typeof event.data === 'string' ? event.data : String(event.data ?? '');
           handleSocketMessage(rawPayload);
         };
 
         socket.onclose = () => {
+          if (!isCurrentSocket()) {
+            return;
+          }
+          wsRef.current = null;
           setIsConnected(false);
           setIsConnecting(false);
           connectingRef.current = false;
@@ -169,6 +183,9 @@ export function useShellConnection({
         };
 
         socket.onerror = () => {
+          if (!isCurrentSocket()) {
+            return;
+          }
           setIsConnected(false);
           setIsConnecting(false);
           connectingRef.current = false;

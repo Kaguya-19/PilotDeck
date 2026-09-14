@@ -61,7 +61,12 @@ class MockHandler(BaseHTTPRequestHandler):
                 with self.server.state_lock:
                     counts = dict(self.server.side_effects.get(run_key, {}))
                     attempts = dict(self.server.attempts.get(run_key, {}))
-                self._json(200, {"runKey": run_key, "sideEffects": counts, "attempts": attempts})
+                self._json(200, {
+                    "runKey": run_key,
+                    "sideEffects": counts,
+                    "attempts": attempts,
+                    "subagentModelRequests": int(attempts.get("subagent_model", 0)),
+                })
             else:
                 self._json(404, {"error": {"code": "NOT_FOUND", "message": "Unknown mock endpoint."}})
         except (TypeError, ValueError, json.JSONDecodeError) as exc:  # pragma: no cover - protocol boundary
@@ -70,9 +75,12 @@ class MockHandler(BaseHTTPRequestHandler):
     def _model(self, request: dict[str, Any]) -> None:
         scenario = str(request.get("scenarioId") or "")
         run_key = str(request.get("runKey") or "default")
+        is_subagent = request.get("isSubagent") is True
         with self.server.state_lock:
             attempts = self.server.attempts.setdefault(run_key, {})
             attempts["model"] = int(attempts.get("model", 0)) + 1
+            if is_subagent:
+                attempts["subagent_model"] = int(attempts.get("subagent_model", 0)) + 1
             attempt = attempts["model"]
         faults = request.get("faults") if isinstance(request.get("faults"), dict) else {}
         model_fault = next(
@@ -108,6 +116,68 @@ class MockHandler(BaseHTTPRequestHandler):
         )
         if not scenario:
             self._production_model(messages, q, has_tool_result)
+            return
+        if scenario in {
+            "sidecar_continuable_followup_live",
+            "sidecar_continuable_followup_cold",
+            "sidecar_parent_close_after_admission",
+        }:
+            tool_calls = _tool_call_names(messages)
+            if is_subagent:
+                child_delay_ms = int(delays.get("subagentModelMs") or 0)
+                if child_delay_ms > 0:
+                    time.sleep(child_delay_ms / 1000)
+                self._json(200, _completion(f"MOCK_SUBAGENT_REPORT::{q}"))
+                return
+            if not has_tool_result:
+                self._json(200, _tool_completion([("subagent", {
+                    "description": "Inspect the delegated work",
+                    "prompt": "Return one deterministic subagent report.",
+                    "subagent_type": "general-purpose",
+                })]))
+                return
+            if scenario == "sidecar_parent_close_after_admission":
+                parent_delay_ms = int(delays.get("parentAfterAdmissionModelMs") or 0)
+                if parent_delay_ms > 0:
+                    time.sleep(parent_delay_ms / 1000)
+                self._json(200, _completion(f"MOCK_PARENT_AFTER_ADMISSION::{q}"))
+                return
+            if "send_message" not in tool_calls:
+                followup_delay_ms = int(delays.get("parentFollowupModelMs") or 0)
+                if followup_delay_ms > 0:
+                    time.sleep(followup_delay_ms / 1000)
+                child_session_id = _subagent_id_from_messages(messages)
+                if not child_session_id:
+                    self._json(500, {"error": {"code": "MISSING_SUBAGENT_ID", "message": "Subagent admission result did not expose a child id."}})
+                    return
+                self._json(200, _tool_completion([("send_message", {
+                    "subagent_id": child_session_id,
+                    "message": "Add one deterministic follow-up.",
+                })]))
+                return
+            self._json(200, _completion(f"MOCK_AFTER_SUBAGENT_FOLLOWUP::{q}"))
+            return
+        if scenario in {
+            "sidecar_one_shot_subagent_success",
+            "sidecar_one_shot_subagent_failure",
+            "sidecar_one_shot_parent_abort_after_admission",
+            "sidecar_one_shot_parent_close_after_admission",
+        }:
+            if is_subagent:
+                child_delay_ms = int(delays.get("subagentModelMs") or 0)
+                if child_delay_ms > 0:
+                    time.sleep(child_delay_ms / 1000)
+                self._json(200, _completion(f"MOCK_ONE_SHOT_REPORT::{q}"))
+                return
+            if not has_tool_result:
+                self._json(200, _tool_completion([("agent", {
+                    "description": "Inspect one bounded task",
+                    "prompt": "Return one deterministic one-shot subagent report.",
+                    "subagent_type": "general-purpose",
+                })]))
+                return
+            suffix = "FAILURE" if scenario == "sidecar_one_shot_subagent_failure" else "SUCCESS"
+            self._json(200, _completion(f"MOCK_AFTER_ONE_SHOT_{suffix}::{q}"))
             return
         if scenario == "pure_text" or scenario in {"image", "checkpoint_resume", "multimodal_image_and_text", "stale_event", "write_snapshot_resume", "duplicate_execute", "sop_scheduled_task", "sop_handoff_resume"}:
             content = f"MOCK_ANSWER[{scenario}]::{q}"
@@ -338,6 +408,29 @@ def _is_tool_result(item: Any) -> bool:
         isinstance(block, dict) and block.get("type") == "tool_result"
         for block in content
     )
+
+
+def _tool_call_names(messages: list[Any]) -> set[str]:
+    names: set[str] = set()
+    for item in _walk(messages):
+        if isinstance(item, dict) and item.get("type") == "tool_call":
+            name = item.get("name")
+            if isinstance(name, str):
+                names.add(name)
+    return names
+
+
+def _subagent_id_from_messages(messages: list[Any]) -> str | None:
+    for item in _walk(messages):
+        if isinstance(item, dict):
+            value = item.get("subagentId") or item.get("subagent_id")
+            if isinstance(value, str) and value:
+                return value
+        if isinstance(item, str):
+            match = re.search(r"for subagent ([^\s.]+)", item)
+            if match:
+                return match.group(1)
+    return None
 def _completion(content: str) -> dict[str, Any]:
     return {"id": "mock-response", "object": "chat.completion", "choices": [{"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}
 

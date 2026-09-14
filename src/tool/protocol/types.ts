@@ -15,6 +15,8 @@ import type { AgentRunMode } from "../../agent/protocol/input.js";
 import type { PilotDeckToolAuditRecorder } from "../audit/ToolAuditRecorder.js";
 import type { PilotDeckElicitationChannel } from "../elicitation/PilotDeckElicitationChannel.js";
 import type { PilotDeckToolInputSchema, PilotDeckToolValidationResult } from "./schema.js";
+import type { LspServicePort } from "../../lsp/index.js";
+import type { GoalSessionPort } from "../../goal/protocol/types.js";
 
 /**
  * File-history sink used by `edit_file` / `write_file` to backup files
@@ -65,6 +67,10 @@ export type PilotDeckSubagentForkApi = {
     turns: number;
     durationMs: number;
     parsed?: Record<string, string>;
+    /** Host-owned child identity, when the provider created a durable child session. */
+    subagentSessionId?: string;
+    /** Host-owned relative sidechain transcript location, when durable transcript storage is configured. */
+    transcriptRelativePath?: string;
   }>;
 };
 
@@ -77,6 +83,12 @@ export type PilotDeckToolKind =
   | "agent"
   | "structured_output"
   | "custom";
+
+export type PilotDeckToolRuntimeCapability =
+  | "always_on_run_context"
+  | "plan_workflow"
+  | "subagent_fork"
+  | "user_interaction";
 
 export type PilotDeckToolResultContent =
   | { type: "text"; text: string }
@@ -220,12 +232,24 @@ export type PilotDeckPlanTodoStateSnapshot = {
   todoDiagnostics: PilotDeckTodoDiagnostics;
 };
 
+export type PilotDeckPlanTodoMutationOptions = {
+  /** The active turn that owns this durable session mutation. */
+  turnId: string;
+};
+
 export type PilotDeckPlanTodoStateHandle = {
   getSnapshot(): PilotDeckPlanTodoStateSnapshot;
-  markPlanApproved(plan: string): void;
-  recordTodoWrite(markdown: string, todos: PilotDeckTodoItem[], options?: { reason?: string }): PilotDeckTodoItem[];
-  writeTodos(todos: PilotDeckTodoUpdate[], options?: { markdown?: string; merge?: boolean; reason?: string }): PilotDeckTodoItem[];
-  markToolProgressChanged(toolName: string): void;
+  markPlanApproved(plan: string, options: PilotDeckPlanTodoMutationOptions): Promise<void>;
+  recordTodoWrite(
+    markdown: string,
+    todos: PilotDeckTodoItem[],
+    options: PilotDeckPlanTodoMutationOptions & { reason?: string },
+  ): Promise<PilotDeckTodoItem[]>;
+  writeTodos(
+    todos: PilotDeckTodoUpdate[],
+    options: PilotDeckPlanTodoMutationOptions & { markdown?: string; merge?: boolean; reason?: string },
+  ): Promise<PilotDeckTodoItem[]>;
+  markToolProgressChanged(toolName: string, options: PilotDeckPlanTodoMutationOptions): Promise<void>;
   buildPromptAddendum(): string | undefined;
   blockingMessageFor(toolName: string, isReadOnly: boolean): string | undefined;
 };
@@ -378,6 +402,10 @@ export type PilotDeckToolRuntimeContext = {
    * such as LSP bridges or editor diff views.
    */
   fileUpdateNotifier?: PilotDeckFileUpdateNotifier;
+  /** Optional project-scoped LSP capability consumed by the `lsp` tool. */
+  lsp?: LspServicePort;
+  /** Optional session-scoped durable goal capability consumed by goal tools. */
+  goal?: GoalSessionPort;
 };
 
 export type PilotDeckToolDefinition<Input = unknown, Output = unknown> = {
@@ -386,6 +414,8 @@ export type PilotDeckToolDefinition<Input = unknown, Output = unknown> = {
   title?: string;
   description: string;
   kind: PilotDeckToolKind;
+  /** Runtime services that must be present before this tool can enter a scoped registry view. */
+  requiredRuntimeCapabilities?: readonly PilotDeckToolRuntimeCapability[];
   inputSchema: PilotDeckToolInputSchema;
   outputSchema?: Record<string, unknown>;
   maxResultBytes?: number;

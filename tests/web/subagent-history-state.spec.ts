@@ -4,10 +4,12 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
+import { createNodeSessionCatalog } from "../../src/session/catalog/NodeSessionCatalog.js";
 import { createAgentProjectSessionStorage } from "../../src/session/storage/ProjectSessionStorage.js";
 import { readWebSessionMessages } from "../../src/web/server/readSessionMessages.js";
 
 const createdAt = "2026-08-10T00:00:00.000Z";
+const sessionCatalog = createNodeSessionCatalog();
 
 test("history keeps a completed sibling complete when its parent turn is aborted", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "pilotdeck-subagent-history-project-"));
@@ -85,7 +87,7 @@ test("history keeps a completed sibling complete when its parent turn is aborted
       completedAt: createdAt,
     });
 
-    const replay = await readWebSessionMessages({ sessionKey }, { projectRoot, pilotHome });
+    const replay = await readWebSessionMessages({ sessionKey }, { projectRoot, pilotHome, sessionCatalog });
     const completedTool = replay.messages.find(
       (message) => message.kind === "tool_use" && message.toolCallId === "agent-call-completed",
     );
@@ -160,7 +162,7 @@ test("history does not duplicate a persisted subagent tool result", async () => 
       }],
     });
 
-    const replay = await readWebSessionMessages({ sessionKey }, { projectRoot, pilotHome });
+    const replay = await readWebSessionMessages({ sessionKey }, { projectRoot, pilotHome, sessionCatalog });
     const results = replay.messages.filter(
       (message) => message.kind === "tool_result" && message.toolCallId === toolCallId,
     );

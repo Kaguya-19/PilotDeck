@@ -1,9 +1,9 @@
-import { stat } from "node:fs/promises";
 import type { PilotDeckToolDefinition } from "../protocol/types.js";
 import { PilotDeckToolRuntimeError } from "../protocol/errors.js";
 import { resolvePilotDeckWorkspacePath } from "./filesystem/pathSafety.js";
 import { checkFilesystemWritePermission } from "./filesystem/writePermissions.js";
-import { writeTextFile } from "./filesystem/writeTextFile.js";
+import { createNodeFsPort } from "../execution-world/NodeFsPort.js";
+import type { FsPort } from "../execution-world/FsPort.js";
 import {
   buildStructuredPatch,
   buildUnifiedDiff,
@@ -34,7 +34,12 @@ export type WriteFileOutput = {
   };
 };
 
-export function createWriteFileTool(): PilotDeckToolDefinition<WriteFileInput, WriteFileOutput> {
+export type CreateWriteFileToolOptions = {
+  fs?: FsPort;
+};
+
+export function createWriteFileTool(options: CreateWriteFileToolOptions = {}): PilotDeckToolDefinition<WriteFileInput, WriteFileOutput> {
+  const fs = options.fs ?? createNodeFsPort();
   return {
     name: "write_file",
     aliases: ["Write"],
@@ -125,7 +130,7 @@ export function createWriteFileTool(): PilotDeckToolDefinition<WriteFileInput, W
       }
 
       try {
-        await validateWriteSnapshotFresh(context, resolved.absolutePath);
+        await validateWriteSnapshotFresh(context, resolved.absolutePath, fs);
       } catch (error) {
         const normalized = error instanceof PilotDeckToolRuntimeError ? error.message : String(error);
         if (normalized === "File has not been read yet. Read it first before writing to it."
@@ -153,7 +158,7 @@ export function createWriteFileTool(): PilotDeckToolDefinition<WriteFileInput, W
         throw new PilotDeckToolRuntimeError(resolved.error.code, resolved.error.message, resolved.error.details);
       }
 
-      const freshness = await ensureWriteSnapshotFresh(context, resolved.absolutePath);
+      const freshness = await ensureWriteSnapshotFresh(context, resolved.absolutePath, fs);
       if (context.fileHistory) {
         await context.fileHistory.trackEdit(
           resolved.absolutePath,
@@ -161,12 +166,14 @@ export function createWriteFileTool(): PilotDeckToolDefinition<WriteFileInput, W
         );
       }
 
-      const action = await writeTextFile(resolved.absolutePath, input.content, { allowOverwrite: true });
-      const fileStat = await stat(resolved.absolutePath);
+      const write = await fs.writeText(resolved.absolutePath, input.content, {
+        allowOverwrite: true,
+        workspaceRoot: resolved.root,
+      });
       invalidateReadFileState(context, resolved.absolutePath);
-      recordWriteSnapshot(context, resolved.absolutePath, input.content, Math.floor(fileStat.mtimeMs));
+      recordWriteSnapshot(context, resolved.absolutePath, input.content, write.mtimeMs);
 
-      const type = action === "created" ? "create" : "update";
+      const type = write.action === "created" ? "create" : "update";
       const structuredPatch = buildStructuredPatch(freshness.previousContent, input.content);
       const gitDiffText = buildUnifiedDiff(resolved.relativePath, freshness.previousContent, input.content);
       const data: WriteFileOutput = {
@@ -199,7 +206,7 @@ export function createWriteFileTool(): PilotDeckToolDefinition<WriteFileInput, W
         data,
         metadata: {
           bytesWritten: Buffer.byteLength(input.content, "utf8"),
-          mtimeMs: Math.floor(fileStat.mtimeMs),
+          mtimeMs: write.mtimeMs,
         },
       };
     },

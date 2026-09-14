@@ -84,6 +84,7 @@ export function createAskUserQuestionTool(): PilotDeckToolDefinition<
     aliases: ["AskUserQuestion"],
     description: ASK_USER_QUESTION_DESCRIPTION,
     kind: "session",
+    requiredRuntimeCapabilities: ["user_interaction"],
     shouldDefer: true,
     maxResultBytes: 100_000,
     inputSchema: {

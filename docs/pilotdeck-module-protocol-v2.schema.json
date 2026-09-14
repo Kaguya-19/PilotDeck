@@ -25,6 +25,18 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "model": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["methods"],
+          "properties": {
+            "methods": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "enum": ["prepare", "stream"] }
+            }
+          }
+        },
         "context": {
           "type": "object",
           "additionalProperties": false,
@@ -34,7 +46,7 @@
               "type": "array",
               "uniqueItems": true,
               "items": {
-                "enum": ["prepare_for_model", "apply_tool_results", "recover_from_model_error", "capture_turn"]
+                "enum": ["prepare_for_model", "apply_tool_results", "recover_from_model_error", "capture_turn", "try_auto_compact"]
               }
             }
           }
@@ -47,7 +59,43 @@
             "methods": {
               "type": "array",
               "uniqueItems": true,
-              "items": { "enum": ["execute", "execute_batch"] }
+              "items": { "enum": ["execute", "execute_batch", "plan_todo"] }
+            }
+          }
+        },
+        "permission": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["methods"],
+          "properties": {
+            "methods": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "enum": ["decide"] }
+            }
+          }
+        },
+        "lifecycle": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["methods"],
+          "properties": {
+            "methods": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "enum": ["dispatch"] }
+            }
+          }
+        },
+        "event": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["methods"],
+          "properties": {
+            "methods": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "enum": ["emit"] }
             }
           }
         }
@@ -106,7 +154,8 @@
         "runId": { "$ref": "#/$defs/id" },
         "operationId": { "$ref": "#/$defs/id" },
         "requestId": { "$ref": "#/$defs/id" },
-        "module": { "enum": ["model", "capability", "permission", "checkpoint", "context"] },
+        "idempotencyKey": { "$ref": "#/$defs/id" },
+        "module": { "enum": ["model", "capability", "permission", "checkpoint", "context", "lifecycle", "event"] },
         "payload": { "$ref": "#/$defs/payload" }
       }
     },
@@ -147,7 +196,7 @@
             "method": { "const": "resume" },
             "streamId": { "$ref": "#/$defs/id" },
             "previousBinding": { "$ref": "#/$defs/binding" },
-            "lastAppliedSequence": { "type": "integer", "minimum": 0 }
+            "lastAppliedSequence": { "type": "integer", "minimum": -1 }
           }
         },
         {
@@ -222,6 +271,7 @@
         "toolCallId": { "$ref": "#/$defs/id" },
         "final": { "type": "boolean" },
         "outcome": { "$ref": "#/$defs/outcome" },
+        "code": { "$ref": "#/$defs/id" },
         "error": { "$ref": "#/$defs/payload" },
         "payload": { "$ref": "#/$defs/payload" }
       },

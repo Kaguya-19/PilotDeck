@@ -1,8 +1,38 @@
 export { createModelRuntime, type ModelRuntime } from "./ModelRuntime.js";
+export {
+  createNativeRetryPolicy,
+  type NativeRetryPolicyOptions,
+  type RetryPolicy,
+  type RetryPolicyDecision,
+  type RetryPolicyInput,
+  type RetryPolicyKind,
+} from "./policy/index.js";
 export { normalizeProviderBaseUrl } from "./normalizeProviderBaseUrl.js";
+export {
+  NativeSessionModelSelectionPolicy,
+} from "./session/NativeSessionModelSelectionPolicy.js";
+export {
+  NativeSessionModelSelectionPort,
+  type NativeSessionModelSelectionPortOptions,
+  type SessionModelSelectionStorage,
+} from "./session/NativeSessionModelSelectionPort.js";
+export type {
+  SessionModelSelectionPolicy,
+  SessionModelSelectionPort,
+  SessionModelSelectionScope,
+} from "./session/SessionModelSelectionPort.js";
 export { parseModelConfig, type ParseModelConfigOptions } from "./config/parseModelConfig.js";
 export { resolveApiKey, type CredentialEnv } from "./config/resolveCredentials.js";
 export { ModelProviderRegistry, type ModelProviderAdapter } from "./providers/registry.js";
+export {
+  createModelRuntimeFromProviderRegistry,
+  createNativeModelInvocationProvider,
+  ModelInvocationProviderRegistry,
+  type ModelInvocationProvider,
+  type ModelInvocationProviderLease,
+  type ModelInvocationProviderRegistration,
+  type ModelInvocationProviderReplacement,
+} from "./providers/ModelInvocationProviderRegistry.js";
 export { buildModelRequest, type ProviderRequestBody } from "./request/buildModelRequest.js";
 export {
   materializeMediaReferences,
@@ -101,7 +131,13 @@ export {
   flattenToolResultContentText,
   toolResultContentBlockToText,
 } from "./protocol/toolResultContent.js";
-export { cloneContentBlock, cloneMessage, cloneMessages, messageContent } from "./protocol/clone.js";
+export {
+  cloneContentBlock,
+  cloneMessage,
+  cloneMessages,
+  messageContent,
+  snapshotCanonicalModelRequest,
+} from "./protocol/clone.js";
 export {
   ANTHROPIC_STRUCTURED_OUTPUT_TOOL_NAME,
   buildAnthropicRequest,

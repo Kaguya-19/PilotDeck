@@ -123,7 +123,7 @@ test("agent loop respects agent maxContextTokens before and after routing", asyn
     },
   };
 
-  const loop = new AgentLoop(config, dependencies);
+  const loop = AgentLoop.fromDependencies(config, dependencies);
 
   const events: Array<{ type: string }> = [];
   for await (const event of loop.run({
@@ -197,7 +197,7 @@ test("main agent loop ignores matching subagent baseline caps", async () => {
     observeUsage: () => undefined,
   };
 
-  const loop = new AgentLoop({
+  const loop = AgentLoop.fromDependencies({
     provider: "openai",
     model: "same-model",
     cwd: "/workspace/project",
@@ -304,7 +304,7 @@ test("subagent loop applies baseline caps after router keeps the baseline model"
     observeUsage: () => undefined,
   };
 
-  const loop = new AgentLoop({
+  const loop = AgentLoop.fromDependencies({
     provider: "child",
     model: "baseline",
     cwd: "/workspace/project",
@@ -407,7 +407,7 @@ test("subagent loop uses routed model caps when router picks a smaller model tha
     observeUsage: () => undefined,
   };
 
-  const loop = new AgentLoop({
+  const loop = AgentLoop.fromDependencies({
     provider: "child",
     model: "large-baseline",
     cwd: "/workspace/project",
@@ -514,7 +514,7 @@ test("subagent loop does not precompress to a smaller baseline when router picks
     observeUsage: () => undefined,
   };
 
-  const loop = new AgentLoop({
+  const loop = AgentLoop.fromDependencies({
     provider: "child",
     model: "small-baseline",
     cwd: "/workspace/project",
@@ -679,7 +679,7 @@ test("agent loop does not reserve catalog max output for compaction unless reque
     },
   };
 
-  const loop = new AgentLoop(config, dependencies);
+  const loop = AgentLoop.fromDependencies(config, dependencies);
 
   for await (const _event of loop.run({
     sessionId: "session-no-catalog-reserve",
@@ -828,7 +828,7 @@ test("agent loop records a compact boundary when auto compaction fires", async (
     },
   };
 
-  const loop = new AgentLoop(config, dependencies);
+  const loop = AgentLoop.fromDependencies(config, dependencies);
 
   const events: Array<{ type: string }> = [];
   for await (const event of loop.run({
@@ -964,7 +964,7 @@ test("agent loop persists a full compaction after recovering from a context erro
     observeUsage: () => undefined,
   };
 
-  const loop = new AgentLoop({
+  const loop = AgentLoop.fromDependencies({
     provider: "openai",
     model: "model-a",
     cwd: "/workspace/project",
@@ -1038,7 +1038,7 @@ test("agent loop does not calibrate a primary route from fallback usage", async 
     },
     stream: async function* (): AsyncIterable<CanonicalModelEvent> {},
   };
-  const loop = new AgentLoop({
+  const loop = AgentLoop.fromDependencies({
     provider: "primary",
     model: "model-a",
     cwd: "/workspace/project",
@@ -1100,7 +1100,7 @@ test("agent loop skips calibration when a same-route request was transformed", a
     materializeRequest: (_decision, request) => request,
     observeUsage: () => undefined,
   };
-  const loop = new AgentLoop({
+  const loop = AgentLoop.fromDependencies({
     provider: "openai",
     model: "model-a",
     cwd: "/workspace/project",

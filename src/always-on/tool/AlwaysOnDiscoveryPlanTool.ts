@@ -42,6 +42,7 @@ export function createAlwaysOnDiscoveryPlanTool(
     description:
       "Save the single discovery plan for this Always-On fire. Returns plan_quota_exhausted if called more than once per fire. Plan content must follow the PilotDeck Always-On plan markdown contract.",
     kind: "session",
+    requiredRuntimeCapabilities: ["always_on_run_context"],
     inputSchema: {
       type: "object",
       required: ["title", "summary", "rationale", "dedupeKey", "content"],

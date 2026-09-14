@@ -3,6 +3,7 @@ import type {
   CanonicalMessage,
   CanonicalToolCallBlock,
   CanonicalToolResultBlock,
+  CanonicalModelRequest,
 } from "./canonical.js";
 
 export function messageContent(message: Pick<CanonicalMessage, "content">): CanonicalContentBlock[] {
@@ -48,4 +49,29 @@ export function cloneMessage(message: CanonicalMessage): CanonicalMessage {
 
 export function cloneMessages(messages: CanonicalMessage[]): CanonicalMessage[] {
   return messages.map(cloneMessage);
+}
+
+/**
+ * Capture the canonical model request at the provider admission boundary.
+ *
+ * A prepared request is the retry snapshot for one model request series.  It
+ * must not observe later prompt/tool-registry mutations, and a host/remote
+ * adapter must be able to send it again without asking the context provider to
+ * assemble a second request.  Canonical requests are protocol values, so a
+ * structured clone gives provider adapters an isolated copy; the recursive
+ * freeze makes accidental in-process mutation fail fast as well.
+ */
+export function snapshotCanonicalModelRequest(request: CanonicalModelRequest): CanonicalModelRequest {
+  return deepFreeze(structuredClone(request));
+}
+
+function deepFreeze<Value>(value: Value, seen = new WeakSet<object>()): Value {
+  if (value === null || typeof value !== "object") return value;
+  const objectValue = value as object;
+  if (seen.has(objectValue)) return value;
+  seen.add(objectValue);
+  for (const child of Object.values(value as Record<string, unknown>)) {
+    deepFreeze(child, seen);
+  }
+  return Object.freeze(value);
 }

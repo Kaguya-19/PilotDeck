@@ -137,7 +137,7 @@ function createLoop(
     }),
   };
 
-  return new AgentLoop(config, {
+  return AgentLoop.fromDependencies(config, {
     router,
     tools: {
       registry: new ToolRegistry(),

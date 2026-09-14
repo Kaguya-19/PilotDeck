@@ -5,10 +5,6 @@ import { join } from "node:path";
 import test, { afterEach } from "node:test";
 
 import type { AgentRuntimeConfig } from "../../../src/agent/runtime/AgentRuntimeConfig.js";
-import {
-  AgentLoop,
-  type AgentLoopInput,
-} from "../../../src/agent/loop/AgentLoop.js";
 import type { AgentEvent } from "../../../src/agent/protocol/events.js";
 import type {
   AgentRouterRuntime,
@@ -18,10 +14,22 @@ import {
   SubAgentSession,
   type SubAgentSessionOptions,
 } from "../../../src/agent/sub/SubAgentSession.js";
+import { createNativeOneShotSubagentPort } from "../../../src/agent/sub/OneShotSubagentPort.js";
+import type {
+  ResolvedSubagentRunRequest,
+  SubagentProvider,
+} from "../../../src/agent/sub/SubagentProvider.js";
 import {
   SUBAGENT_DEFINITIONS,
   type SubagentDefinition,
 } from "../../../src/agent/sub/builtinSubagentTypes.js";
+import {
+  snapshotSubagentDescriptor,
+} from "../../../src/agent/sub/SubagentDescriptor.js";
+import {
+  recordSubagentAcceptedInputWithDescriptor,
+  SUBAGENT_DESCRIPTOR_METADATA_KEY,
+} from "../../../src/agent/sub/SubagentDescriptorPersistence.js";
 import {
   PermissionRuntime,
   createDefaultPermissionContext,
@@ -32,11 +40,13 @@ import { createExecuteCodeTool } from "../../../src/tool/builtin/executeCode.js"
 import { ToolRuntime } from "../../../src/tool/execution/ToolRuntime.js";
 import {
   ToolRegistry,
+  createAgentTool,
+  createSubagentContinuationTool,
   type PilotDeckSubagentForkApi,
   type PilotDeckToolDefinition,
   type PilotDeckToolRuntimeContext,
 } from "../../../src/tool/index.js";
-import type { CanonicalMessage } from "../../../src/model/index.js";
+import { InMemoryTranscriptWriter } from "../../../src/session/transcript/InMemoryTranscriptWriter.js";
 import { loadPilotConfig } from "../../../src/pilot/index.js";
 import { PilotConfigError } from "../../../src/pilot/config/types.js";
 
@@ -59,13 +69,10 @@ afterEach(() => {
 type TestableSubAgentSession = {
   buildScopedRegistry(): ToolRegistry;
   buildConfig(): AgentRuntimeConfig;
-};
-
-type TestableAgentLoop = {
-  buildSubagentForkApi(
-    input: AgentLoopInput,
-    messages: CanonicalMessage[],
-  ): PilotDeckSubagentForkApi;
+  createScopedRuntime(): {
+    dependencies: AgentRuntimeDependencies;
+    dispose(): Promise<void>;
+  };
 };
 
 function createNoopTool(
@@ -153,12 +160,15 @@ function parentConfig(): AgentRuntimeConfig {
   };
 }
 
-function createSubagentForkHarness(router: AgentRouterRuntime): {
+function createSubagentForkHarness(
+  router: AgentRouterRuntime,
+  config = parentConfig(),
+): {
   events: AgentEvent[];
   fork: PilotDeckSubagentForkApi;
 } {
   const events: AgentEvent[] = [];
-  const loop = new AgentLoop(parentConfig(), {
+  const dependencies: AgentRuntimeDependencies = {
     router,
     tools: {
       registry: new ToolRegistry(),
@@ -167,23 +177,26 @@ function createSubagentForkHarness(router: AgentRouterRuntime): {
     eventEmitter: (event) => {
       events.push(event);
     },
-  }) as unknown as TestableAgentLoop;
-  const fork = loop.buildSubagentForkApi({
+  };
+  const fork = createNativeOneShotSubagentPort({
+    config,
+    dependencies,
+  }).createForkApi({
     sessionId: "parent-session",
     turnId: "parent-turn",
-    messages: [],
-  }, []);
+  });
   return { events, fork };
 }
 
 function sessionFor(
   definition: SubagentDefinition,
   registry: ToolRegistry,
+  config = parentConfig(),
 ): TestableSubAgentSession {
   const options: SubAgentSessionOptions = {
     definition,
     directive: "Inspect the workspace.",
-    parentConfig: parentConfig(),
+    parentConfig: config,
     parentDependencies: {
       router: {} as AgentRuntimeDependencies["router"],
       tools: {
@@ -198,6 +211,169 @@ function sessionFor(
   };
   return new SubAgentSession(options) as unknown as TestableSubAgentSession;
 }
+
+test("subagent depth capability exposes delegation only to an eligible general-purpose child", () => {
+  const registry = new ToolRegistry();
+  registry.register(createAgentTool());
+  registry.register(createSubagentContinuationTool({
+    start: async () => ({ childSessionId: "nested", itemId: "item", turnId: "turn" }),
+    followup: async () => ({ childSessionId: "nested", itemId: "item", turnId: "turn" }),
+  }));
+
+  const defaultDepth = sessionFor(SUBAGENT_DEFINITIONS["general-purpose"], registry);
+  assert.equal(defaultDepth.buildScopedRegistry().has("agent"), false);
+  assert.equal(defaultDepth.buildScopedRegistry().has("subagent"), false);
+
+  const nestedDepth = sessionFor(SUBAGENT_DEFINITIONS["general-purpose"], registry, {
+    ...parentConfig(),
+    maxSubagentDepth: 2,
+  });
+  assert.equal(nestedDepth.buildScopedRegistry().has("agent"), true);
+  assert.equal(nestedDepth.buildScopedRegistry().has("subagent"), true);
+
+  const readOnlyNestedDepth = sessionFor(SUBAGENT_DEFINITIONS.explore, registry, {
+    ...parentConfig(),
+    maxSubagentDepth: 2,
+  });
+  assert.equal(readOnlyNestedDepth.buildScopedRegistry().has("agent"), false);
+  assert.equal(readOnlyNestedDepth.buildScopedRegistry().has("subagent"), false);
+});
+
+test("SubAgentSession delegates to the named subagent provider", async () => {
+  const definition = SUBAGENT_DEFINITIONS.explore;
+  let received: ResolvedSubagentRunRequest | undefined;
+  const provider: SubagentProvider = {
+    name: "test-provider",
+    capabilities: { continuation: false, depthLimit: true, toolFilter: true },
+    run: async (request) => {
+      received = request;
+      return {
+        subagentId: request.subagentId,
+        definitionId: request.definition.id,
+        markdown: FINAL_REPORT,
+        usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+        turns: 1,
+        durationMs: 3,
+      };
+    },
+  };
+  const options: SubAgentSessionOptions = {
+    definition,
+    directive: "Inspect the workspace.",
+    parentConfig: parentConfig(),
+    parentDependencies: {
+      router: {} as AgentRuntimeDependencies["router"],
+      tools: {
+        registry: new ToolRegistry(),
+        scheduler: {} as AgentRuntimeDependencies["tools"]["scheduler"],
+      },
+      subagentProvider: provider,
+    },
+    parentSessionId: "parent-session",
+    parentTurnId: "parent-turn",
+    subagentSessionId: "child-session",
+    subagentId: "child-agent",
+  };
+
+  const report = await new SubAgentSession(options).run();
+
+  assert.equal(received?.directive, options.directive);
+  assert.equal(received?.parentSessionId, options.parentSessionId);
+  assert.equal(received?.subagentId, options.subagentId);
+  assert.deepEqual(received?.descriptor, {
+    version: 1,
+    mode: "one-shot",
+    provider: "test-provider",
+    definitionId: "explore",
+  });
+  assert.equal(report.markdown, FINAL_REPORT);
+});
+
+test("native subagent hands its resolved descriptor to sidechain persistence before running", async () => {
+  let acceptedMetadata: Record<string, unknown> | undefined;
+  const session = new SubAgentSession({
+    definition: SUBAGENT_DEFINITIONS.explore,
+    directive: "Inspect the workspace.",
+    parentConfig: parentConfig(),
+    parentDependencies: {
+      router: createRouter(),
+      tools: { registry: new ToolRegistry(), scheduler: {} as never },
+    },
+    parentSessionId: "parent-session",
+    parentTurnId: "parent-turn",
+    subagentSessionId: "child-session",
+    subagentId: "child-agent",
+    sidechainTranscript: {
+      recordAcceptedInput: async (_sessionId, _turnId, _messages, metadata) => {
+        acceptedMetadata = metadata;
+      },
+      recordDurableMessage: async () => undefined,
+    },
+  });
+  const descriptor = snapshotSubagentDescriptor({
+    mode: "one-shot",
+    provider: "selected-provider",
+    definitionId: "explore",
+  });
+
+  await session.runNative(descriptor);
+
+  assert.deepEqual(acceptedMetadata?.[SUBAGENT_DESCRIPTOR_METADATA_KEY], descriptor);
+});
+
+test("native one-shot subagent completes its durable child turn without releasing caller-owned sidechain storage", async () => {
+  const transcript = new InMemoryTranscriptWriter();
+  let sidechainDisposals = 0;
+  const session = new SubAgentSession({
+    definition: SUBAGENT_DEFINITIONS.explore,
+    directive: "Inspect the workspace.",
+    parentConfig: parentConfig(),
+    parentDependencies: {
+      router: createRouter(),
+      tools: { registry: new ToolRegistry(), scheduler: {} as never },
+    },
+    parentSessionId: "parent-session",
+    parentTurnId: "parent-turn",
+    subagentSessionId: "child-session",
+    subagentId: "child-agent",
+    sidechainTranscript: {
+      recordSessionEvent: transcript.recordSessionEvent.bind(transcript),
+      recordAcceptedInput: (sessionId, turnId, messages, metadata) =>
+        recordSubagentAcceptedInputWithDescriptor(transcript, sessionId, turnId, messages, metadata),
+      recordDurableMessage: transcript.recordDurableMessage.bind(transcript),
+      recordTurnResult: transcript.recordTurnResult.bind(transcript),
+      dispose: async () => {
+        sidechainDisposals += 1;
+      },
+    },
+  });
+  const descriptor = snapshotSubagentDescriptor({
+    mode: "one-shot",
+    provider: "pilotdeck-native",
+    definitionId: "explore",
+  });
+
+  await session.runNative(descriptor);
+
+  assert.deepEqual(
+    transcript.entries.map((entry) => entry.type),
+    [
+      "turn_started",
+      "subagent_descriptor",
+      "accepted_input",
+      "step_started",
+      "model_request",
+      "model_stream_event",
+      "model_stream_event",
+      "durable_message",
+      "step_completed",
+      "turn_result",
+    ],
+  );
+  assert.equal(transcript.entries.every((entry) => entry.sessionId === "child-session"), true);
+  assert.equal(transcript.entries.every((entry) => entry.turnId === "child-agent-t0"), true);
+  assert.equal(sidechainDisposals, 0);
+});
 
 function runtimeContext(config: AgentRuntimeConfig): PilotDeckToolRuntimeContext {
   return {
@@ -252,6 +428,47 @@ test("agent.subagents.default inherit keeps subagent model unset", () => {
 
   assert.equal(snapshot.config.agent.subagents?.default, undefined);
   assert.equal(snapshot.diagnostics.some((diagnostic) => diagnostic.path === "agent.subagents.default"), false);
+});
+
+test("agent.subagents.maxDepth is parsed as the opt-in nested delegation cap", () => {
+  const snapshot = loadInlinePilotConfig(`
+schemaVersion: 1
+agent:
+  model: main/main-model
+  subagents:
+    maxDepth: 2
+model:
+  providers:
+    main:
+      protocol: openai
+      url: https://example.invalid/v1
+      apiKey: test
+      models:
+        main-model: {}
+`);
+
+  assert.equal(snapshot.config.agent.subagents?.maxDepth, 2);
+  assert.equal(snapshot.diagnostics.some((diagnostic) => diagnostic.path === "agent.subagents.maxDepth"), false);
+});
+
+test("agent.subagents.maxDepth accepts zero to disable delegation", () => {
+  const snapshot = loadInlinePilotConfig(`
+schemaVersion: 1
+agent:
+  model: main/main-model
+  subagents:
+    maxDepth: 0
+model:
+  providers:
+    main:
+      protocol: openai
+      url: https://example.invalid/v1
+      apiKey: test
+      models:
+        main-model: {}
+`);
+
+  assert.equal(snapshot.config.agent.subagents?.maxDepth, 0);
 });
 
 test("agent.subagents.params is reported as unsupported instead of being silently discarded", () => {
@@ -485,6 +702,41 @@ test("explore registry ignores an unallowed dynamic execute_code tool without pr
   assert.equal(session.buildConfig().runMode, "ask");
 });
 
+test("subagent child scope inherits parent services and disposes independently", async () => {
+  const registry = new ToolRegistry();
+  const router = createRouter();
+  const permission = new PermissionRuntime();
+  const context = {} as NonNullable<AgentRuntimeDependencies["context"]>;
+  const session = new SubAgentSession({
+    definition: SUBAGENT_DEFINITIONS["general-purpose"],
+    directive: "Inspect the provided files.",
+    parentConfig: parentConfig(),
+    parentDependencies: {
+      router,
+      permission,
+      context,
+      tools: { registry, scheduler: {} as never },
+    },
+    parentSessionId: "parent-session",
+    parentTurnId: "parent-turn",
+    subagentSessionId: "subagent-session",
+    subagentId: "subagent-scoped",
+  }) as unknown as TestableSubAgentSession;
+
+  const scoped = session.createScopedRuntime();
+  assert.equal(scoped.dependencies.router, router);
+  assert.equal(scoped.dependencies.permission, permission);
+  assert.equal(scoped.dependencies.context, context);
+  assert.notEqual(scoped.dependencies.tools.registry, registry);
+  assert.equal(scoped.dependencies.scope?.state, "active");
+
+  registry.register(createNoopTool("late_parent_tool", () => true));
+  assert.equal(scoped.dependencies.tools.registry.has("late_parent_tool"), true);
+
+  await scoped.dispose();
+  assert.equal(scoped.dependencies.scope?.state, "disposed");
+});
+
 test("subagent config uses configured default model without copying caps to top-level overrides", () => {
   const registry = new ToolRegistry();
   const session = new SubAgentSession({
@@ -582,8 +834,7 @@ test("configured subagent default remains a router baseline, not a router overri
       yield { type: "text_delta", text: FINAL_REPORT };
     },
   } as AgentRouterRuntime;
-  const events: AgentEvent[] = [];
-  const loop = new AgentLoop({
+  const { events, fork } = createSubagentForkHarness(router, {
     ...parentConfig(),
     provider: "main",
     model: "main-model",
@@ -591,21 +842,7 @@ test("configured subagent default remains a router baseline, not a router overri
       provider: "child",
       model: "child-model",
     },
-  }, {
-    router,
-    tools: {
-      registry: new ToolRegistry(),
-      scheduler: {} as never,
-    },
-    eventEmitter: (event) => {
-      events.push(event);
-    },
-  }) as unknown as TestableAgentLoop;
-  const fork = loop.buildSubagentForkApi({
-    sessionId: "parent-session",
-    turnId: "parent-turn",
-    messages: [],
-  }, []);
+  });
 
   await fork.fork({
     definitionId: "explore",

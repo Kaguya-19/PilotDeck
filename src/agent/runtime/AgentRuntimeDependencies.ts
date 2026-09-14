@@ -8,14 +8,25 @@ import type {
   ToolRegistry,
 } from "../../tool/index.js";
 import type { PlanFileManager } from "../../tool/builtin/planFile.js";
-import type { PlanTodoStateManager } from "./PlanTodoState.js";
+import type { PlanTodoPort } from "../../plan-todo/runtime/PlanTodoPort.js";
 import type { LifecycleRuntime } from "../../lifecycle/index.js";
 import type { AgentContextRuntime } from "../../context/ContextRuntime.js";
 import type { TokenAccountingRuntime } from "../../context/index.js";
+import type { PromptContributionRegistry } from "../../context/prompt/PromptContributionRegistry.js";
 import type { RouterRuntime } from "../../router/index.js";
 import type { AgentEvent, AgentEventEmitter } from "../protocol/events.js";
 import type { ModelProtocol } from "../../model/index.js";
+import type { PermissionDecisionPort } from "../../permission/index.js";
 import type { ModelInvokerPort, ToolPort } from "../modules/protocol.js";
+import type { AgentRuntimeScope } from "../scope/AgentRuntimeScope.js";
+import type { SubagentProvider } from "../sub/SubagentProvider.js";
+import type { SubagentProviderRegistry } from "../sub/SubagentProviderRegistry.js";
+import type { OneShotSubagentPort } from "../sub/OneShotSubagentPort.js";
+import type { InteractionDeadlinePolicy, InteractionPolicy, InteractionReconnectPort } from "../../interaction/index.js";
+import type { AgentTurnResult } from "../protocol/result.js";
+import type { SessionEventDraft } from "../../session/events/SessionEventStore.js";
+import type { AgentLoopOperationLedger } from "../modules/transport/operationLedger.js";
+import type { GoalPort } from "../../goal/protocol/types.js";
 
 export type AgentRuntimePorts = {
   model?: ModelInvokerPort;
@@ -43,9 +54,10 @@ export type AgentRouterRuntime = Pick<RouterRuntime, "stream" | "decide" | "exec
  *     **parent** transcript (truncated directive preview).
  *   - `recordSubagentCompleted` writes a `subagent_completed` reference into
  *     the **parent** transcript (truncated summary + usage / duration).
- *   - `subagentTranscriptResolver(subagentId)` returns a sidechain writer
- *     that captures the subagent's turn-by-turn entries into a separate
- *     `<subagentId>.jsonl` file.
+ *   - `subagentTranscriptResolver(subagentId, sessionId)` returns a sidechain
+ *     writer that captures the subagent's turn-by-turn entries in the
+ *     application-selected child storage. Native JSONL retains the compatible
+ *     `<subagentId>.jsonl` artifact layout.
  *
  * All hooks are optional — when missing, the agent loop falls back to the
  * legacy "no sidechain" behavior (subagent runs, but no persistence).
@@ -77,27 +89,52 @@ export type AgentSubagentTranscriptHooks = {
     durationMs: number;
     errored?: boolean;
   }): Promise<void>;
-  subagentTranscriptResolver?(subagentId: string): {
+  subagentTranscriptResolver?(subagentId: string, sessionId?: string): {
+    recordSessionEvent?(
+      sessionId: string,
+      turnId: string,
+      event: SessionEventDraft,
+    ): void | Promise<void>;
     recordAcceptedInput(
       sessionId: string,
       turnId: string,
       messages: CanonicalMessage[],
       metadata?: Record<string, unknown>,
-    ): Promise<void>;
-    recordDurableMessage(sessionId: string, turnId: string, message: CanonicalMessage): Promise<void>;
+    ): void | Promise<void>;
+    recordDurableMessage(sessionId: string, turnId: string, message: CanonicalMessage): void | Promise<void>;
+    recordTurnResult?(sessionId: string, turnId: string, result: AgentTurnResult): void | Promise<void>;
     transcriptRelativePath: string;
+    /** Releases an independently composed child storage; calls are idempotent. */
+    dispose?(): void | Promise<void>;
   };
 };
 
 export type AgentRuntimeDependencies = {
   router: AgentRouterRuntime;
+  /** Current agent scope. Child agents inherit scoped services from this owner. */
+  scope?: AgentRuntimeScope;
   /** Optional modular ports. Legacy router/tools are adapted when omitted. */
   ports?: AgentRuntimePorts;
+  /** Optional permission provider used by host-composed ToolRuntime instances. */
+  permission?: PermissionDecisionPort;
+  /** Session/agent-scoped admission policy for approval and questions. */
+  interactionPolicy?: InteractionPolicy;
+  /** Session/agent-scoped deadline selection for approval and questions. */
+  interactionDeadlinePolicy?: InteractionDeadlinePolicy;
+  /** Session/agent-scoped pending interaction reconnect owner. */
+  interactionReconnect?: InteractionReconnectPort;
   tools: {
     scheduler: PilotDeckToolScheduler;
     registry: ToolRegistry;
   };
   context?: AgentContextRuntime;
+  /** Whether the current Agent scope owns and disposes the Context provider. */
+  ownedContext?: boolean;
+  /** Session-scoped prompt registry and its explicit lifecycle ownership. */
+  promptContributions?: {
+    registry: PromptContributionRegistry;
+    owned?: boolean;
+  };
   tokenAccounting?: TokenAccountingRuntime;
   /**
    * Look up a model's context-window size by provider/model id. Used after
@@ -121,14 +158,25 @@ export type AgentRuntimeDependencies = {
   uuid?: () => string;
   auditRecorder?: PilotDeckToolAuditRecorder;
   lifecycle?: LifecycleRuntime;
+  /** Whether this Agent scope owns lifecycle/hook teardown. */
+  ownedLifecycle?: boolean;
   /** C3 sidechain transcript hooks (optional). */
   subagentTranscript?: AgentSubagentTranscriptHooks;
+  /** Named delegation provider; native in-process provider is used when omitted. */
+  subagentProvider?: SubagentProvider;
+  subagentProviders?: SubagentProviderRegistry;
+  /** Composition-bound one-shot delegation consumer for the `agent` tool. */
+  oneShotSubagentPort?: OneShotSubagentPort;
+  /** Whether the current session scope owns provider teardown. */
+  ownedSubagentProvider?: boolean;
   /**
    * Elicitation channel — wired into the per-tool `PilotDeckToolRuntimeContext`
    * so `ask_user_question` (B1) can drive the gateway. When omitted, the
    * tool returns a `mcp_unavailable` error instead of crashing.
    */
   elicitation?: PilotDeckElicitationChannel;
+  /** Whether the current session scope owns and disposes the elicitation channel. */
+  ownedElicitation?: boolean;
   /**
    * File-history sink — wired into the per-tool runtime context so
    * `edit_file` / `write_file` (C4) snapshot the file before mutation.
@@ -148,7 +196,15 @@ export type AgentRuntimeDependencies = {
    */
   planFileManager?: PlanFileManager;
   /** Session-scoped state tracking required `todo_write` calls after plan approval. */
-  planTodoManager?: PlanTodoStateManager;
+  planTodoManager?: PlanTodoPort;
+  /** Session-scoped durable goal provider. */
+  goalManager?: GoalPort;
+  /**
+   * Host-owned durable status ledger for a sidecar execution. The AgentLoop
+   * never reads it; an external transport factory may use it to reconcile a
+   * result_unknown attempt without inventing an outcome.
+   */
+  sidecarOperationLedger?: AgentLoopOperationLedger;
   eventEmitter?: AgentEventEmitter;
   drainEvents?: () => AgentEvent[];
 };

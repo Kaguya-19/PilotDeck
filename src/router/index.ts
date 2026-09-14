@@ -4,6 +4,47 @@ export {
   type RouterRuntime,
   type RouterRuntimeDeps,
 } from "./RouterRuntime.js";
+export {
+  createNativeRouterRetryPolicy,
+  type NativeRouterRetryPolicyOptions,
+  type RouterRetryDecision,
+  type RouterRetryDecisionInput,
+  type RouterRetryPolicy,
+} from "./policy/RouterRetryPolicy.js";
+export {
+  clampMaxOutputTokensToModelCap,
+  createNativeRouterRequestMaterializer,
+  type RouterRequestMaterializer,
+} from "./policy/RouterRequestMaterializer.js";
+export {
+  createNativeRouterCachePolicy,
+  type RouterCachePolicy,
+  type RouterCachePolicyInput,
+  type RouterCachePolicyResult,
+} from "./policy/RouterCachePolicy.js";
+export {
+  createRegistryRouterModelInvocationPort,
+  createNativeRouterModelInvocationPort,
+  type RouterJudgeInvocationPort,
+  type RouterModelInvocationPort,
+} from "./provider/RouterModelInvocationPort.js";
+export {
+  createNativeRouterOrchestrationPolicy,
+  type RouterOrchestrationPolicy,
+  type RouterOrchestrationPolicyInput,
+  type RouterOrchestrationPolicyResult,
+} from "./policy/RouterOrchestrationPolicy.js";
+export {
+  createNativeRouterUsageObserver,
+  type NativeRouterUsageObserverOptions,
+  type RouterStatsPort,
+  type RouterUsageObservation,
+  type RouterUsageObserver,
+} from "./usage/RouterUsageObserver.js";
+export {
+  createNativeRouterTokenMeter,
+  type RouterTokenMeter,
+} from "./token/RouterTokenMeter.js";
 export type {
   RouterDecision,
   RouterDecisionInput,
@@ -38,11 +79,25 @@ export {
   type SubagentDetection,
 } from "./scenario/subagentDetector.js";
 export { SessionRouterStore } from "./session/SessionRouterStore.js";
+export {
+  createNativeRouterSessionStateProvider,
+  type RouterSessionStatePort,
+  type RouterSessionStateProvider,
+} from "./session/RouterSessionStatePort.js";
+export {
+  RouterSessionCustomRouterRegistry,
+  createNativeRouterSessionCustomRouterPort,
+  type RouterSessionCustomRouterPort,
+  type RouterSessionCustomRouterRegistration,
+  type RouterSessionCustomRouterState,
+} from "./session/RouterSessionCustomRouterPort.js";
 export { SessionUsageCache } from "./session/sessionUsageCache.js";
 export {
+  createNativeRouterFallbackPolicy,
   isFallbackEligible,
   planFallback,
   type FallbackPlan,
+  type RouterFallbackPolicy,
 } from "./fallback/runFallbackChain.js";
 export {
   createZeroUsageState,
@@ -77,3 +132,9 @@ export {
   ProviderHealthTracker,
   type ProviderHealthState,
 } from "./health/ProviderHealthTracker.js";
+export {
+  createNativeRouterProviderHealthPort,
+  type NativeRouterProviderHealthPortOptions,
+  type RouterProviderHealthInput,
+  type RouterProviderHealthPort,
+} from "./health/RouterProviderHealthPort.js";

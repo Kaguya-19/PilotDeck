@@ -3,8 +3,6 @@ import { DEFAULT_IGNORE_GLOBS, DEFAULT_MAX_PLANS_PER_CYCLE, type AlwaysOnConfig 
 import { AlwaysOnError } from "../protocol/errors.js";
 import type { GateBlockReason } from "../protocol/types.js";
 import type { AlwaysOnPaths } from "../storage/AlwaysOnPaths.js";
-import { DiscoveryStateStore } from "../storage/DiscoveryStateStore.js";
-import { WorkCycleStore } from "../storage/WorkCycleStore.js";
 import type { ChannelLeaseRegistry } from "./ChannelLeaseRegistry.js";
 import {
   acquireDiscoveryLock,
@@ -13,6 +11,10 @@ import {
 } from "./DiscoveryFire.js";
 import { evaluateAlwaysOnDiscoveryGates } from "./DiscoveryGates.js";
 import { SignalWatcher } from "./SignalWatcher.js";
+import type {
+  DiscoveryStateStorePort,
+  WorkCycleStorePort,
+} from "./AlwaysOnProjectStorageProvider.js";
 
 export type DiscoverySchedulerLogger = {
   info: (message: string, data?: Record<string, unknown>) => void;
@@ -23,8 +25,8 @@ export type DiscoverySchedulerDependencies = {
   config: AlwaysOnConfig;
   projectKey: string;
   paths: AlwaysOnPaths;
-  stateStore: DiscoveryStateStore;
-  cycleStore: WorkCycleStore;
+  stateStore: DiscoveryStateStorePort;
+  cycleStore: WorkCycleStorePort;
   leases: ChannelLeaseRegistry;
   fire: DiscoveryFire;
   uuid: () => string;

@@ -1,5 +1,5 @@
-import { readFile } from "node:fs/promises";
 import { PilotDeckToolRuntimeError } from "../../protocol/errors.js";
+import type { FsPort } from "../../execution-world/FsPort.js";
 
 type NotebookCell = {
   cell_type?: string;
@@ -23,13 +23,19 @@ export type NotebookReadResult = {
   cellCount: number;
 };
 
-export async function readNotebook(filePath: string): Promise<NotebookReadResult> {
-  const raw = await readFile(filePath, "utf8").catch((error: unknown) => {
+export async function readNotebook(filePath: string, fs?: Pick<FsPort, "readFile">): Promise<NotebookReadResult> {
+  const raw = await (fs
+    ? fs.readFile(filePath, { encoding: "utf8" })
+    : import("node:fs/promises").then(({ readFile }) => readFile(filePath, "utf8"))).catch((error: unknown) => {
     if (isNodeError(error) && error.code === "ENOENT") {
       throw new PilotDeckToolRuntimeError("file_not_found", `File ${filePath} does not exist.`);
     }
     throw error;
   });
+
+  if (typeof raw !== "string") {
+    throw new PilotDeckToolRuntimeError("invalid_tool_input", `Notebook ${filePath} is not text.`);
+  }
 
   let notebook: NotebookFile;
   try {

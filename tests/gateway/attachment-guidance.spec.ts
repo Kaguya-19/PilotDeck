@@ -5,7 +5,10 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import type { AgentInput, AgentSession, AgentSubmitOptions } from "../../src/agent/index.js";
+import { AttachmentResolver } from "../../src/context/attachments/AttachmentResolver.js";
+import type { AttachmentPort } from "../../src/context/attachments/AttachmentPort.js";
 import { InProcessGateway } from "../../src/gateway/client/InProcessGateway.js";
+import type { GatewayAttachmentTurnComposerPort } from "../../src/gateway/dialog/GatewayAttachmentTurnComposerPort.js";
 import { SessionRouter } from "../../src/gateway/SessionRouter.js";
 
 test("registered plain-text attachments with non-whitelisted names are described as read_file inspectable", async () => {
@@ -114,7 +117,92 @@ test("registered audio attachments advertise FunASR paths instead of read_file c
   }
 });
 
-function createGateway(onInput: (input: AgentInput) => void): InProcessGateway {
+test("gateway uses its composed AttachmentResolver for model-visible attachment content", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pilotdeck-attachment-provider-"));
+  try {
+    const filePath = join(root, "notes.txt");
+    await writeFile(filePath, "native content", "utf8");
+    const calls: string[] = [];
+    const attachmentPort: AttachmentPort = {
+      async stat(path) {
+        calls.push(`stat:${path}`);
+        return { size: 16 };
+      },
+      async readText(path) {
+        calls.push(`text:${path}`);
+        return "provider content";
+      },
+      async readBytes() {
+        throw new Error("not used");
+      },
+    };
+    let capturedInput: AgentInput | undefined;
+    const gateway = createGateway(
+      (input) => {
+        capturedInput = input;
+      },
+      new AttachmentResolver({ attachmentPort }),
+    );
+
+    for await (const _event of gateway.submitTurn({
+      sessionKey: "session-1",
+      channelKey: "feishu",
+      message: "inspect attachment",
+      attachments: [{
+        type: "file",
+        path: filePath,
+        name: "notes.txt",
+        metadata: { channelKey: "feishu" },
+      }],
+    })) {
+      // Drain the stream so the fake session runs to completion.
+    }
+
+    assert.match(inputText(capturedInput), /provider content/);
+    assert.deepEqual(calls, [`stat:${filePath}`, `text:${filePath}`]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("gateway submit consumes the composed attachment turn input", async () => {
+  let capturedInput: AgentInput | undefined;
+  const composerCalls: string[] = [];
+  const attachmentTurnComposer: GatewayAttachmentTurnComposerPort = {
+    async prepare(input) {
+      composerCalls.push(`${input.message}:${input.projectRoot ?? ""}`);
+      return {
+        agentInput: { type: "text", text: "prepared submit input" },
+        allowedReadFiles: ["/approved/submit.txt"],
+      };
+    },
+  };
+  const gateway = createGateway(
+    (input) => {
+      capturedInput = input;
+    },
+    undefined,
+    attachmentTurnComposer,
+  );
+
+  for await (const _event of gateway.submitTurn({
+    sessionKey: "session-1",
+    channelKey: "web",
+    projectKey: "/project",
+    message: "original submit input",
+  })) {
+    // Drain the stream so the fake session receives the accepted input.
+  }
+
+  assert.deepEqual(capturedInput, { type: "text", text: "prepared submit input" });
+  assert.deepEqual(composerCalls, ["original submit input:/project"]);
+});
+
+function createGateway(
+  onInput: (input: AgentInput) => void,
+  attachmentResolver?: AttachmentResolver,
+  attachmentTurnComposer?: GatewayAttachmentTurnComposerPort,
+): InProcessGateway {
   const router = new SessionRouter({
     idleSweepIntervalMs: 0,
     createSession: () => createFakeSession(onInput),
@@ -122,6 +210,8 @@ function createGateway(onInput: (input: AgentInput) => void): InProcessGateway {
   return new InProcessGateway(router, {
     uuid: () => "run-1",
     now: () => new Date("2026-07-20T00:00:00.000Z"),
+    attachmentResolver,
+    attachmentTurnComposer,
   });
 }
 

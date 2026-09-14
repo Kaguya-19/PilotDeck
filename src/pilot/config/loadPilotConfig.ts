@@ -26,6 +26,20 @@ import {
   type PilotRawConfig,
   type PilotTelemetryConfig,
 } from "./types.js";
+import {
+  DEFAULT_RUNTIME_CONTEXT_SURFACE,
+  isRuntimeContextSurface,
+} from "../../context/RuntimeContextSurface.js";
+import {
+  DEFAULT_INTERACTION_PROFILE_NAME,
+  isInteractionProfileName,
+} from "../../interaction/InteractionProfile.js";
+import {
+  DEFAULT_SANDBOX_MODE,
+  SANDBOX_MODES,
+  isSandboxMode,
+  resolveSandboxMode,
+} from "../../tool/execution-world/SandboxPort.js";
 
 const SUPPORTED_SCHEMA_VERSION = 1;
 const ENV_CONFIG_OVERRIDES = [
@@ -346,6 +360,9 @@ function parseAgent(
   }
 
   const model = parseAgentModelSelection(rawAgent.model, "agent.model", modelConfig, diagnostics);
+  const sandboxMode = parseSandboxMode(rawAgent.sandboxMode, diagnostics);
+  const runtimeContextSurface = parseRuntimeContextSurface(rawAgent.runtimeContextSurface, diagnostics);
+  const interactionProfile = parseInteractionProfile(rawAgent.interactionProfile, diagnostics);
   const subagents = parseAgentSubagents(rawAgent.subagents, modelConfig, diagnostics);
   const maxContextTokens = readOptionalPositiveInteger(rawAgent.maxContextTokens, "agent.maxContextTokens");
   const maxOutputTokens = readOptionalPositiveInteger(rawAgent.maxOutputTokens, "agent.maxOutputTokens");
@@ -364,11 +381,62 @@ function parseAgent(
 
   return {
     model,
+    sandboxMode,
+    ...(runtimeContextSurface ? { runtimeContextSurface } : {}),
+    ...(interactionProfile ? { interactionProfile } : {}),
     ...(maxContextTokens !== undefined ? { maxContextTokens } : {}),
     ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
     ...(thinking ? { thinking } : {}),
     ...(subagents ? { subagents } : {}),
   };
+}
+
+function parseSandboxMode(
+  value: unknown,
+  diagnostics: PilotConfigDiagnostic[],
+): NonNullable<PilotAgentConfig["sandboxMode"]> {
+  if (value === undefined || value === null) return DEFAULT_SANDBOX_MODE;
+  if (isSandboxMode(value)) return value;
+  diagnostics.push({
+    code: "CONFIG_AGENT_SANDBOX_MODE_INVALID",
+    severity: "warning",
+    message: `agent.sandboxMode must be ${SANDBOX_MODES.join(", ")}; using ${DEFAULT_SANDBOX_MODE}.`,
+    path: "agent.sandboxMode",
+    recoverable: true,
+  });
+  return resolveSandboxMode(value);
+}
+
+function parseInteractionProfile(
+  value: unknown,
+  diagnostics: PilotConfigDiagnostic[],
+): PilotAgentConfig["interactionProfile"] {
+  if (value === undefined || value === null) return DEFAULT_INTERACTION_PROFILE_NAME;
+  if (isInteractionProfileName(value)) return value;
+  diagnostics.push({
+    code: "CONFIG_AGENT_INTERACTION_PROFILE_INVALID",
+    severity: "warning",
+    message: "agent.interactionProfile must be interactive, headless, or disabled; using the interactive profile default.",
+    path: "agent.interactionProfile",
+    recoverable: true,
+  });
+  return DEFAULT_INTERACTION_PROFILE_NAME;
+}
+
+function parseRuntimeContextSurface(
+  value: unknown,
+  diagnostics: PilotConfigDiagnostic[],
+): PilotAgentConfig["runtimeContextSurface"] {
+  if (value === undefined || value === null) return DEFAULT_RUNTIME_CONTEXT_SURFACE;
+  if (isRuntimeContextSurface(value)) return value;
+  diagnostics.push({
+    code: "CONFIG_AGENT_RUNTIME_CONTEXT_SURFACE_INVALID",
+    severity: "warning",
+    message: "agent.runtimeContextSurface must be system_prompt or user_message; using the user_message profile default.",
+    path: "agent.runtimeContextSurface",
+    recoverable: true,
+  });
+  return DEFAULT_RUNTIME_CONTEXT_SURFACE;
 }
 
 function parseAgentThinking(value: unknown): PilotAgentConfig["thinking"] | undefined {
@@ -404,7 +472,7 @@ function parseAgentSubagents(
         path: "agent.subagents.params",
         recoverable: true,
       });
-    } else if (key !== "timeoutMs" && key !== "default" && key !== "params") {
+    } else if (key !== "timeoutMs" && key !== "maxDepth" && key !== "default" && key !== "params") {
       diagnostics.push({
         code: "CONFIG_AGENT_UNKNOWN_FIELD",
         severity: "warning",
@@ -429,6 +497,7 @@ function parseAgentSubagents(
   return {
     ...(defaultModel ? { default: defaultModel } : {}),
     timeoutMs: readOptionalPositiveInteger(value.timeoutMs, "agent.subagents.timeoutMs"),
+    maxDepth: readOptionalNonNegativeInteger(value.maxDepth, "agent.subagents.maxDepth"),
   };
 }
 
@@ -690,6 +759,16 @@ function readOptionalPositiveInteger(value: unknown, path: string): number | und
   }
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
     throw new PilotConfigError("CONFIG_INVALID_VALUE", `${path} must be a positive integer.`);
+  }
+  return Math.floor(value);
+}
+
+function readOptionalNonNegativeInteger(value: unknown, path: string): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    throw new PilotConfigError("CONFIG_INVALID_VALUE", `${path} must be a non-negative integer.`);
   }
   return Math.floor(value);
 }

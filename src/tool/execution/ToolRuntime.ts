@@ -1,5 +1,5 @@
 import { isAbsolute, relative, resolve } from "node:path";
-import { PermissionRuntime } from "../../permission/index.js";
+import type { PermissionDecisionPort } from "../../permission/index.js";
 import type { LifecycleRuntime, PilotDeckHookEffect } from "../../lifecycle/index.js";
 import { toolError } from "../protocol/errors.js";
 import type { PilotDeckToolErrorCode } from "../protocol/errors.js";
@@ -16,7 +16,12 @@ import {
   type PilotDeckToolResult,
   type PilotDeckToolSuccessResult,
 } from "../protocol/result.js";
-import type { PilotDeckToolCall, PilotDeckToolRuntimeContext } from "../protocol/types.js";
+import type {
+  PilotDeckFileUpdateNotification,
+  PilotDeckFileUpdateNotifier,
+  PilotDeckToolCall,
+  PilotDeckToolRuntimeContext,
+} from "../protocol/types.js";
 import type { ToolRegistry } from "../registry/ToolRegistry.js";
 import { validateToolInput } from "./validateToolInput.js";
 import { formatValidationError } from "./formatValidationError.js";
@@ -27,9 +32,11 @@ import { buildToolErrorRecovery } from "./errorRecovery.js";
 import { repairToolName } from "./repairToolName.js";
 
 export class ToolRuntime {
+  private readonly fileChangedNotifiers = new WeakSet<PilotDeckFileUpdateNotifier>();
+
   constructor(
     private readonly registry: ToolRegistry,
-    private readonly permissionRuntime: PermissionRuntime,
+    private readonly permissionRuntime: PermissionDecisionPort,
     private readonly lifecycle?: LifecycleRuntime,
     private readonly eventEmitter?: AgentEventEmitter,
   ) {}
@@ -229,29 +236,65 @@ ${formatValidationError(tool.name, updatedValidation.issues, {
       );
     }
 
-    let decision = await this.permissionRuntime.decide(tool, executeInput, context, call.id);
-    if (decision.type === "ask") {
-      const permissionHookResult = await this.dispatchLifecycle("PermissionRequest", tool.name, call.id, executeInput, context, {
-        permissionSuggestions: decision.request.options,
-      });
-      this.eventEmitter?.({ type: "permission_requested", sessionId: context.sessionId, turnId: context.turnId, toolCallId: call.id, toolName: tool.name });
-      const permissionRequestResult = findEffect(permissionHookResult.effects, "permission_request_result");
-      if (permissionRequestResult?.result.behavior === "allow") {
-        decision = {
-          type: "allow",
-          reason: { type: "runtime", message: `PermissionRequest hook allowed ${tool.name}.` },
-          updatedInput: permissionRequestResult.result.updatedInput,
-        };
-      } else if (permissionRequestResult?.result.behavior === "deny") {
-        decision = {
-          type: "deny",
-          reason: { type: "runtime", message: permissionRequestResult.result.message ?? `PermissionRequest hook denied ${tool.name}.` },
-          message: permissionRequestResult.result.message ?? `PermissionRequest hook denied ${tool.name}.`,
-        };
+    const permissionOperationId = call.id;
+    await context.auditRecorder?.recordPermissionStarted?.({
+      type: "permission_started",
+      operationId: permissionOperationId,
+      sessionId: context.sessionId,
+      turnId: context.turnId,
+      toolCallId: call.id,
+      toolName: tool.name,
+      mode: context.permissionContext.mode,
+      createdAt: now(context).toISOString(),
+    });
+
+    let decision: Awaited<ReturnType<PermissionDecisionPort["decide"]>>;
+    try {
+      decision = await this.permissionRuntime.decide(tool, executeInput, context, call.id);
+      if (decision.type === "ask") {
+        const permissionHookResult = await this.dispatchLifecycle("PermissionRequest", tool.name, call.id, executeInput, context, {
+          permissionSuggestions: decision.request.options,
+        });
+        this.eventEmitter?.({ type: "permission_requested", sessionId: context.sessionId, turnId: context.turnId, toolCallId: call.id, toolName: tool.name });
+        const permissionRequestResult = findEffect(permissionHookResult.effects, "permission_request_result");
+        if (permissionRequestResult?.result.behavior === "allow") {
+          decision = {
+            type: "allow",
+            reason: { type: "runtime", message: `PermissionRequest hook allowed ${tool.name}.` },
+            updatedInput: permissionRequestResult.result.updatedInput,
+          };
+        } else if (permissionRequestResult?.result.behavior === "deny") {
+          decision = {
+            type: "deny",
+            reason: { type: "runtime", message: permissionRequestResult.result.message ?? `PermissionRequest hook denied ${tool.name}.` },
+            message: permissionRequestResult.result.message ?? `PermissionRequest hook denied ${tool.name}.`,
+          };
+        }
       }
+    } catch (error) {
+      try {
+        await context.auditRecorder?.recordPermissionFailed?.({
+          type: "permission_failed",
+          operationId: permissionOperationId,
+          sessionId: context.sessionId,
+          turnId: context.turnId,
+          toolCallId: call.id,
+          toolName: tool.name,
+          mode: context.permissionContext.mode,
+          error: error instanceof Error ? error.message : String(error),
+          createdAt: now(context).toISOString(),
+        });
+      } catch (auditError) {
+        throw new AggregateError(
+          [error, auditError],
+          `Permission decision failed and its audit could not be recorded for ${tool.name}.`,
+        );
+      }
+      throw error;
     }
     await context.auditRecorder?.recordPermission({
       type: "permission",
+      operationId: permissionOperationId,
       sessionId: context.sessionId,
       turnId: context.turnId,
       toolCallId: call.id,
@@ -307,6 +350,10 @@ ${formatValidationError(tool.name, updatedValidation.issues, {
             }),
         }
       : baseContext;
+    const fileUpdateNotifier = this.createFileUpdateNotifier(executeContext);
+    if (fileUpdateNotifier) {
+      executeContext.fileUpdateNotifier = fileUpdateNotifier;
+    }
     try {
       const output = await tool.execute(executeInput, executeContext);
       const maxResultBytes = tool.maxResultBytes ?? context.maxResultBytes;
@@ -339,7 +386,7 @@ ${formatValidationError(tool.name, updatedValidation.issues, {
         completedAt,
       };
       if (!tool.isReadOnly(executeInput) && tool.name !== "todo_write") {
-        context.planTodo?.markToolProgressChanged(tool.name);
+        await context.planTodo?.markToolProgressChanged(tool.name, { turnId: context.turnId });
       }
       await this.recordToolAudit(result, context, startedAtDate);
       return result;
@@ -380,27 +427,7 @@ ${formatValidationError(tool.name, updatedValidation.issues, {
     context: PilotDeckToolRuntimeContext,
     details?: Record<string, unknown>,
   ): PilotDeckToolErrorResult {
-    const completedAt = now(context).toISOString();
-    const recovery = buildToolErrorRecovery({
-      code,
-      toolName,
-      message,
-      cwd: context.cwd,
-      permissionMode: context.permissionMode,
-      details,
-    });
-    return {
-      type: "error",
-      toolCallId,
-      toolName,
-      error: toolError(code, message, details),
-      content: [{ type: "text", text: formatToolErrorContent(recovery.message, details) }],
-      metadata: {
-        recovery: recovery.advice,
-      },
-      startedAt,
-      completedAt,
-    };
+    return createToolErrorResult({ toolCallId, toolName, code, message, startedAt, context, details });
   }
 
   private async recordToolAudit(
@@ -455,6 +482,133 @@ ${formatValidationError(tool.name, updatedValidation.issues, {
       nonBlockingErrors: [],
     };
   }
+
+  /**
+   * File updates are post-commit observations. They reuse the existing
+   * integration notifier rather than inferring a path from a tool name or
+   * input, and cannot change an already-committed tool result.
+   */
+  private createFileUpdateNotifier(
+    context: PilotDeckToolRuntimeContext,
+  ): PilotDeckFileUpdateNotifier | undefined {
+    if (!this.lifecycle) {
+      return context.fileUpdateNotifier;
+    }
+    if (context.fileUpdateNotifier && this.fileChangedNotifiers.has(context.fileUpdateNotifier)) {
+      return context.fileUpdateNotifier;
+    }
+
+    const upstream = context.fileUpdateNotifier;
+    const notifier: PilotDeckFileUpdateNotifier = {
+      didChange: async (update) => {
+        await upstream?.didChange?.(update);
+      },
+      didSave: async (update) => {
+        await upstream?.didSave?.(update);
+        await this.dispatchFileChanged(update, context);
+      },
+    };
+    this.fileChangedNotifiers.add(notifier);
+    return notifier;
+  }
+
+  private async dispatchFileChanged(
+    update: PilotDeckFileUpdateNotification,
+    context: PilotDeckToolRuntimeContext,
+  ): Promise<void> {
+    if (!this.lifecycle) return;
+
+    const changeKind = update.previousContent === null ? "create" : "update";
+    try {
+      const result = await this.lifecycle.dispatch({
+        event: "FileChanged",
+        baseInput: {
+          sessionId: context.sessionId,
+          transcriptPath: "",
+          cwd: context.cwd,
+          permissionMode: context.permissionMode,
+        },
+        matchQuery: update.absolutePath,
+        payload: {
+          absolutePath: update.absolutePath,
+          relativePath: update.relativePath,
+          changeKind,
+        },
+        signal: context.abortSignal,
+        env: context.env,
+      });
+      const block = findEffect(result.effects, "block");
+      if (block) {
+        this.reportFileChangedObservation(context, "file_changed_hook_blocked", block.reason, update, changeKind);
+      }
+      for (const error of [...result.blockingErrors, ...result.nonBlockingErrors]) {
+        this.reportFileChangedObservation(context, "file_changed_hook_error", error.message, update, changeKind, error.hookName);
+      }
+    } catch (error) {
+      this.reportFileChangedObservation(
+        context,
+        "file_changed_hook_error",
+        error instanceof Error ? error.message : String(error),
+        update,
+        changeKind,
+      );
+    }
+  }
+
+  private reportFileChangedObservation(
+    context: PilotDeckToolRuntimeContext,
+    code: "file_changed_hook_blocked" | "file_changed_hook_error",
+    message: string,
+    update: PilotDeckFileUpdateNotification,
+    changeKind: "create" | "update",
+    hookName?: string,
+  ): void {
+    this.eventEmitter?.({
+      type: "warning",
+      sessionId: context.sessionId,
+      turnId: context.turnId,
+      code,
+      message,
+      metadata: {
+        absolutePath: update.absolutePath,
+        relativePath: update.relativePath,
+        changeKind,
+        ...(hookName ? { hookName } : {}),
+      },
+    });
+  }
+}
+
+/** Build the canonical model-visible error projection for every tool port. */
+export function createToolErrorResult(input: {
+  toolCallId: string;
+  toolName: string;
+  code: PilotDeckToolErrorCode;
+  message: string;
+  startedAt: string;
+  context: PilotDeckToolRuntimeContext;
+  details?: Record<string, unknown>;
+}): PilotDeckToolErrorResult {
+  const recovery = buildToolErrorRecovery({
+    code: input.code,
+    toolName: input.toolName,
+    message: input.message,
+    cwd: input.context.cwd,
+    permissionMode: input.context.permissionMode,
+    details: input.details,
+  });
+  return {
+    type: "error",
+    toolCallId: input.toolCallId,
+    toolName: input.toolName,
+    error: toolError(input.code, input.message, input.details),
+    content: [{ type: "text", text: formatToolErrorContent(recovery.message, input.details) }],
+    metadata: {
+      recovery: recovery.advice,
+    },
+    startedAt: input.startedAt,
+    completedAt: now(input.context).toISOString(),
+  };
 }
 
 function formatToolErrorContent(

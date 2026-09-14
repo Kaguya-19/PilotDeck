@@ -1,8 +1,8 @@
-import type { Gateway, GatewayEvent } from "../../gateway/index.js";
 import type { CronResultDeliveryHandler, CronRunRecord, CronRunOutcome, CronTask } from "../protocol/types.js";
-import type { CronTaskStore } from "../storage/CronTaskStore.js";
 import { resolveCronTimezone } from "../CronTimezone.js";
 import { computeNextRunAt } from "./CronSchedule.js";
+import type { CronAgentGatewayPort, GatewayEvent } from "./CronAgentGatewayPort.js";
+import type { CronTaskStorePort } from "./CronProjectStorageProvider.js";
 
 export type CronActiveRun = {
   runId: string;
@@ -25,8 +25,8 @@ export type CronPhaseEventCallback = (event: {
 export type CronTurnEventHandler = (sessionKey: string, channelKey: string, event: GatewayEvent) => void;
 
 export type CronFireDependencies = {
-  gateway: Gateway;
-  store: CronTaskStore;
+  gateway: CronAgentGatewayPort;
+  store: CronTaskStorePort;
   now: () => Date;
   registerActiveRun: (run: CronActiveRun) => void;
   unregisterActiveRun: (runId: string) => CronActiveRun | undefined;

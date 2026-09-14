@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import type { PilotDeckElicitationAnswer, PilotDeckElicitationRequest } from "../elicitation/PilotDeckElicitationChannel.js";
 import { PilotDeckToolRuntimeError } from "../protocol/errors.js";
 import type { PilotDeckToolDefinition } from "../protocol/types.js";
@@ -141,6 +140,7 @@ export function createEnterPlanModeTool(): PilotDeckToolDefinition<Record<string
     aliases: ["EnterPlanMode"],
     description: ENTER_PLAN_MODE_DESCRIPTION,
     kind: "session",
+    requiredRuntimeCapabilities: ["plan_workflow"],
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -170,6 +170,7 @@ export function createExitPlanModeTool(): PilotDeckToolDefinition<ExitPlanModeIn
     aliases: ["ExitPlanMode"],
     description: EXIT_PLAN_MODE_DESCRIPTION,
     kind: "session",
+    requiredRuntimeCapabilities: ["plan_workflow", "user_interaction"],
     inputSchema: {
       type: "object",
       required: ["plan_file_path"],
@@ -198,17 +199,22 @@ export function createExitPlanModeTool(): PilotDeckToolDefinition<ExitPlanModeIn
           "exit_plan_mode requires a connected user interaction channel.",
         );
       }
-      const resolvedPlanFilePath = context?.planDirectory?.resolve(input.plan_file_path);
+      const planDirectory = context?.planDirectory;
+      if (!planDirectory) {
+        throw new PilotDeckToolRuntimeError(
+          "invalid_tool_input",
+          "plan_file_path must point to a markdown file under the current project's .pilotdeck/plans directory.",
+        );
+      }
+      const resolvedPlanFilePath = planDirectory?.resolve(input.plan_file_path);
       if (!resolvedPlanFilePath) {
         throw new PilotDeckToolRuntimeError(
           "invalid_tool_input",
           "plan_file_path must point to a markdown file under the current project's .pilotdeck/plans directory.",
         );
       }
-      let plan: string;
-      try {
-        plan = readFileSync(resolvedPlanFilePath, "utf8").trim();
-      } catch {
+      const plan = planDirectory.read(input.plan_file_path)?.trim();
+      if (plan === undefined) {
         throw new PilotDeckToolRuntimeError(
           "invalid_tool_input",
           `Plan file does not exist or could not be read: ${resolvedPlanFilePath}`,
@@ -262,7 +268,7 @@ export function createExitPlanModeTool(): PilotDeckToolDefinition<ExitPlanModeIn
       }
 
       if (action === EXIT_PLAN_MODE_EXECUTE) {
-        context.planTodo?.markPlanApproved(plan);
+        await context.planTodo?.markPlanApproved(plan, { turnId: context.turnId });
         const titleMatch = plan.match(/^#\s+(.+)$/m);
         const planTitle = titleMatch?.[1];
         const summaryLines = plan.split("\n").filter((l) => l.trim() && !l.startsWith("#"));

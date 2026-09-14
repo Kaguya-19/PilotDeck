@@ -29,10 +29,34 @@ export {
 export { PromptHookExecutor, type PromptHookEvaluator } from "./hooks/execution/PromptHookExecutor.js";
 export { HttpHookExecutor, type HttpHookFetch } from "./hooks/execution/HttpHookExecutor.js";
 export { AgentHookExecutor, type AgentHookRunner } from "./hooks/execution/AgentHookExecutor.js";
-export { CallbackHookExecutor, type CallbackHookHandler } from "./hooks/execution/CallbackHookExecutor.js";
-export { HookRuntime, type HookRuntimeRunInput, type HookRuntimeRunResult } from "./hooks/execution/HookRuntime.js";
-export { AsyncHookRegistry, type AsyncHookResponse, type PendingAsyncHook } from "./hooks/execution/AsyncHookRegistry.js";
-export { HookExecutionEventBus, type PilotDeckHookExecutionEvent } from "./hooks/events/HookExecutionEventBus.js";
+export {
+  CallbackHookExecutor,
+  type CallbackHookExecutorState,
+  type CallbackHookHandler,
+  type CallbackHookRegistration,
+} from "./hooks/execution/CallbackHookExecutor.js";
+export {
+  HookRuntime,
+  type HookRuntimeRunInput,
+  type HookRuntimeRunResult,
+  type HookRuntimeState,
+} from "./hooks/execution/HookRuntime.js";
+export {
+  AsyncHookRegistry,
+  type AsyncHookRegistryState,
+  type AsyncHookRegistration,
+  type AsyncHookCompletion,
+  type AsyncHookResponse,
+  type PendingAsyncHookDescriptor,
+  type PendingAsyncHook,
+} from "./hooks/execution/AsyncHookRegistry.js";
+export {
+  HookExecutionEventBus,
+  type HookExecutionEventBusOptions,
+  type HookExecutionEventSubscription,
+  type PilotDeckHookExecutionEvent,
+  type PilotDeckHookExecutionEventHandler,
+} from "./hooks/events/HookExecutionEventBus.js";
 
 export type { PilotDeckPluginManifest } from "./plugins/protocol/manifest.js";
 export type { PilotDeckMarketplaceReference } from "./plugins/protocol/manifest.js";
@@ -51,6 +75,16 @@ export {
   PluginRuntime,
   type PluginRuntimeOptions,
   type PluginRefreshResult,
+  type PluginRefreshFailure,
+  type PluginContributionSnapshot,
+  type PluginContributionLease,
+  type PluginSessionContributionSnapshot,
+  type PluginSessionContributionLease,
+  type PluginCommandCatalogSnapshot,
+  type PluginCommandCatalogLease,
+  type PluginPromptContribution,
+  type PluginToolContribution,
+  type PluginRouterContribution,
   type PilotDeckMcpInstructionEntry,
   type PilotDeckMcpServerStaticSpec,
 } from "./plugins/runtime/PluginRuntime.js";
@@ -58,7 +92,12 @@ export {
   MAX_MCP_INSTRUCTION_LENGTH,
   truncateMcpInstructionString,
 } from "./plugins/runtime/truncateMcpString.js";
-export { PluginRegistry } from "./plugins/runtime/PluginRegistry.js";
+export {
+  PluginRegistry,
+  type PluginRegistryLease,
+  type PluginRegistryReplacement,
+  type PluginRegistryState,
+} from "./plugins/runtime/PluginRegistry.js";
 export { defaultPluginReloadPolicy, type PluginReloadPolicy } from "./plugins/runtime/PluginReloadPolicy.js";
 
 export type { CommandContribution } from "./contributions/CommandContribution.js";

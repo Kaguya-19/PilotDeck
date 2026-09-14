@@ -2,8 +2,9 @@
  * Built-in subagent presets, mirroring legacy `src/tools/AgentTool/built-in/*Agent.ts`.
  *
  * Four presets:
- *   - `general-purpose` — broad parent-tool access except nested `agent`
- *                         dispatch; project instructions retained, full read/write.
+ *   - `general-purpose` — broad parent-tool access; nested delegation is
+ *                         available only when the configured depth cap permits
+ *                         it. Project instructions retained, full read/write.
  *   - `explore`         — read-only file inspection (read / grep / glob / bash);
  *                         omits project instructions & gitStatus from system context.
  *   - `plan`            — read-only planning (read / grep / glob, no bash);
@@ -77,7 +78,7 @@ export const SUBAGENT_DEFINITIONS: Record<SubagentDefinitionId, SubagentDefiniti
   "general-purpose": {
     id: "general-purpose",
     description:
-      "General-purpose subagent for complex research/synthesis tasks. Has broad parent-tool access except nested subagent launch.",
+      "General-purpose subagent for complex research/synthesis tasks. Has broad parent-tool access; nested delegation follows the configured depth cap.",
     allowedTools: ["*"],
     omitProjectInstructions: false,
     omitGitStatus: false,

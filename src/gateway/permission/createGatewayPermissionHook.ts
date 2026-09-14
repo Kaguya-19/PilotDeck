@@ -3,7 +3,17 @@ import type { CallbackHookHandler } from "../../extension/hooks/execution/Callba
 import type { PilotDeckHookSyncOutput } from "../../extension/hooks/protocol/output.js";
 import type { PermissionRule } from "../../permission/protocol/types.js";
 import type { GatewayEvent } from "../protocol/types.js";
-import type { GatewayPermissionBus, GatewayPermissionDecision } from "./GatewayPermissionBus.js";
+import type {
+  GatewayPermissionBus,
+  GatewayPermissionDecision,
+  GatewayPermissionRegistration,
+} from "./GatewayPermissionBus.js";
+import { normalizeInteractionTimeout, interactionTimeoutOutcome, toInteractionReplayValue } from "../../interaction/index.js";
+import type {
+  InteractionDeadlinePolicy,
+  InteractionPolicy,
+  InteractionPolicyMode,
+} from "../../interaction/index.js";
 
 export const GATEWAY_PERMISSION_CALLBACK_NAME = "pilotdeck.gateway.permission";
 
@@ -29,6 +39,18 @@ export type CreateGatewayPermissionHookOptions = {
   permissionRules: PermissionRule[];
   /** Inject a deterministic UUID for tests. */
   uuid?: () => string;
+  /**
+   * Maximum time to wait for a host decision. A timeout is converted to a
+   * deterministic deny so a missing UI can never leave the tool hanging or
+   * accidentally execute a side effect.
+  */
+  timeoutMs?: number;
+  /** Profile-selected deadline provider. Takes precedence over `timeoutMs`. */
+  deadlinePolicy?: InteractionDeadlinePolicy;
+  /** Optional profile policy; omitted keeps the legacy interactive behavior. */
+  policy?: InteractionPolicy;
+  policyMode?: InteractionPolicyMode;
+  canPrompt?: boolean;
 };
 
 /**
@@ -72,46 +94,78 @@ export function createGatewayPermissionHook(
         ? hookInput.input
         : {};
     const requestId = options.uuid ? options.uuid() : randomUUID();
-
-    const delivered = options.emit({
-      type: "permission_request",
-      requestId,
-      toolName,
-      payload,
+    const deny = (message: string): PilotDeckHookSyncOutput => ({
+      type: "sync",
+      specific: {
+        hookEventName: "PermissionRequest",
+        decision: { behavior: "deny", message },
+      },
     });
 
-    if (!delivered) {
-      return {
-        type: "sync",
-        specific: {
-          hookEventName: "PermissionRequest",
-          decision: {
-            behavior: "deny",
-            message: "Permission prompt could not be delivered to the Web UI.",
-          },
-        },
-      } satisfies PilotDeckHookSyncOutput;
+    const policyDecision = options.policy?.decide({
+      kind: "permission",
+      mode: options.policyMode ?? "interactive",
+      hasAnswerer: true,
+      canPrompt: options.canPrompt,
+    });
+    if (policyDecision && policyDecision.outcome !== "ask") {
+      return deny(policyDecision.reason);
     }
 
     let onAbort: (() => void) | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let registration: GatewayPermissionRegistration | undefined;
     const decision = await new Promise<GatewayPermissionDecision>((resolve, reject) => {
-      options.bus.register(options.sessionKey, {
+      registration = options.bus.register(options.sessionKey, {
         requestId,
         toolCallId,
         toolName,
         resolve,
         reject,
+      }, {
+        payload: toInteractionReplayValue({ toolName, toolCallId, payload }),
       });
+      const settle = (value: GatewayPermissionDecision): void => {
+        const pending = options.bus.consume(options.sessionKey, requestId);
+        if (pending) pending.resolve(value);
+      };
       if (signal) {
         if (signal.aborted) {
-          reject(new Error("Hook aborted before permission decision."));
+          settle({ requestId, decision: "deny", reason: "Permission prompt cancelled." });
           return;
         }
-        onAbort = () => reject(new Error("Hook aborted before permission decision."));
+        onAbort = () => settle({ requestId, decision: "deny", reason: "Permission prompt cancelled." });
         signal.addEventListener("abort", onAbort, { once: true });
+      }
+      const timeoutMs = options.deadlinePolicy
+        ? normalizeInteractionTimeout(options.deadlinePolicy.resolve({ kind: "permission" }))
+        : normalizeInteractionTimeout(options.timeoutMs);
+      if (timeoutMs !== undefined) {
+        timer = setTimeout(() => {
+          settle({ requestId, decision: "deny", reason: "Permission prompt timed out.", outcome: interactionTimeoutOutcome() });
+        }, timeoutMs);
+      }
+      try {
+        const delivered = options.emit({
+          type: "permission_request",
+          requestId,
+          toolName,
+          payload,
+        });
+        if (!delivered) {
+          settle({ requestId, decision: "deny", reason: "Permission prompt could not be delivered to the Web UI." });
+        }
+      } catch (error) {
+        settle({
+          requestId,
+          decision: "deny",
+          reason: `Permission prompt delivery failed: ${error instanceof Error ? error.message : String(error)}`,
+        });
       }
     }).finally(() => {
       if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+      if (timer !== undefined) clearTimeout(timer);
+      registration?.dispose();
     });
 
     if (decision.decision === "allow" && decision.remember) {
@@ -136,16 +190,15 @@ export function createGatewayPermissionHook(
       }
     }
 
-    return {
-      type: "sync",
-      specific: {
-        hookEventName: "PermissionRequest",
-        decision:
-          decision.decision === "allow"
-            ? { behavior: "allow" }
-            : { behavior: "deny", message: decision.reason },
-      },
-    } satisfies PilotDeckHookSyncOutput;
+    return decision.decision === "allow"
+      ? {
+          type: "sync",
+          specific: {
+            hookEventName: "PermissionRequest",
+            decision: { behavior: "allow" },
+          },
+        } satisfies PilotDeckHookSyncOutput
+      : deny(decision.reason ?? "Permission prompt denied.");
   };
 }
 

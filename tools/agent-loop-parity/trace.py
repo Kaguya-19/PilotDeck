@@ -9,25 +9,171 @@ from typing import Any
 
 _VOLATILE_KEYS = {
     "timestamp", "startedAt", "completedAt", "createdAt", "updatedAt",
+    "durationMs",
     "messageId", "requestId", "streamId", "runId", "operationId", "idempotencyKey",
     "connectionGeneration", "moduleInstanceId", "processId", "pid",
 }
 _NULL_OPTIONAL_KEYS = {"code", "structuredResult"}
 _VOLATILE_ID = re.compile(r"^(?:[a-z_-]+-)?(?:[0-9a-f]{8,}|[0-9]{6,})$")
+_UUID_LIKE_ID = re.compile(
+    r"^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+_SUBAGENT_SESSION_REFERENCE = re.compile(
+    r"^.+::sub::(?P<subagent_id>[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})$",
+    re.IGNORECASE,
+)
+_SUBAGENT_TRANSCRIPT_REFERENCE = re.compile(
+    r"^(?:.+/)?subagents/(?P<subagent_id>[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})\.jsonl$",
+    re.IGNORECASE,
+)
+_GENERATED_REFERENCE_KINDS = {
+    "subagentId": "subagent-id",
+    "subagent_id": "subagent-id",
+    "itemId": "item-id",
+    "turnId": "turn-id",
+}
+_ACCEPTED_SUBAGENT_NOTICE = re.compile(
+    r"\baccepted message "
+    r"(?P<message_id>[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}) "
+    r"for subagent "
+    r"(?P<subagent_id>[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})\b",
+    re.IGNORECASE,
+)
+_TOOL_LIFECYCLE_PHASE = {
+    "tool.call": 0,
+    "tool.start": 1,
+    "tool.finish": 2,
+    "tool.result": 3,
+}
 
 
-def canonicalize(value: Any, *, key: str | None = None) -> Any:
+def _generated_id_placeholder(
+    value: str,
+    kind: str,
+    generated_ids: dict[tuple[str, str], str],
+) -> str:
+    key = (kind, value)
+    placeholder = generated_ids.get(key)
+    if placeholder is not None:
+        return placeholder
+    index = 1 + sum(existing_kind == kind for existing_kind, _ in generated_ids)
+    placeholder = f"<{kind}-{index}>"
+    generated_ids[key] = placeholder
+    return placeholder
+
+
+def _canonicalize_subagent_notice(
+    value: str,
+    generated_ids: dict[tuple[str, str], str],
+) -> str:
+    def replace(match: re.Match[str]) -> str:
+        message_id = _generated_id_placeholder(
+            match.group("message_id"), "message-id", generated_ids,
+        )
+        subagent_id = _generated_id_placeholder(
+            match.group("subagent_id"), "subagent-id", generated_ids,
+        )
+        return f"accepted message {message_id} for subagent {subagent_id}"
+
+    return _ACCEPTED_SUBAGENT_NOTICE.sub(replace, value)
+
+
+def _canonicalize_arguments(
+    value: str,
+    generated_ids: dict[tuple[str, str], str],
+) -> str:
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return value
+    normalized = canonicalize(parsed, generated_ids=generated_ids)
+    if normalized == parsed:
+        return value
+    return json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _canonicalize_subagent_reference(
+    value: str,
+    key: str | None,
+    generated_ids: dict[tuple[str, str], str],
+) -> str:
+    if key == "subagentSessionId":
+        match = _SUBAGENT_SESSION_REFERENCE.match(value)
+        if match:
+            subagent_id = _generated_id_placeholder(
+                match.group("subagent_id"), "subagent-id", generated_ids,
+            )
+            return f"<subagent-session:{subagent_id}>"
+    if key == "transcriptRelativePath":
+        match = _SUBAGENT_TRANSCRIPT_REFERENCE.match(value)
+        if match:
+            subagent_id = _generated_id_placeholder(
+                match.group("subagent_id"), "subagent-id", generated_ids,
+            )
+            return f"<subagent-transcript:{subagent_id}>"
+    return value
+
+
+def _canonicalize_duration_json_text(
+    value: str,
+    generated_ids: dict[tuple[str, str], str],
+) -> str:
+    """Drop framework timing from a complete JSON value or final JSON line only.
+
+    One-shot subagent reports are presented to the parent model as a human
+    summary followed by JSON. The duration is process scheduling noise, but
+    the rest of that JSON remains model-visible and semantic. Do not parse or
+    rewrite arbitrary prose: only a complete JSON value or the final line is
+    eligible.
+    """
+    if not any(marker in value for marker in ('"durationMs"', '"subagentSessionId"', '"transcriptRelativePath"')):
+        return value
+    candidates = [(0, value)]
+    final_line_start = value.rfind("\n{")
+    if final_line_start >= 0:
+        candidates.append((final_line_start + 1, value[final_line_start + 1:]))
+    for start, candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(parsed, (dict, list)):
+            continue
+        normalized = canonicalize(parsed, generated_ids=generated_ids)
+        if normalized == parsed:
+            return value
+        encoded = json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return value[:start] + encoded
+    return value
+
+
+def canonicalize(
+    value: Any,
+    *,
+    key: str | None = None,
+    generated_ids: dict[tuple[str, str], str] | None = None,
+) -> Any:
+    generated_ids = {} if generated_ids is None else generated_ids
     if isinstance(value, dict):
         derived_image_bytes = value.get("type") == "image" and value.get("source") == "base64"
         return {
-            k: canonicalize(v, key=k)
+            k: canonicalize(v, key=k, generated_ids=generated_ids)
             for k, v in sorted(value.items())
             if k not in _VOLATILE_KEYS
             and not (k in _NULL_OPTIONAL_KEYS and v is None)
             and not (derived_image_bytes and k == "bytes")
         }
     if isinstance(value, list):
-        return [canonicalize(item) for item in value]
+        return [canonicalize(item, key=key, generated_ids=generated_ids) for item in value]
+    if isinstance(value, str) and key in _GENERATED_REFERENCE_KINDS and _UUID_LIKE_ID.match(value):
+        return _generated_id_placeholder(value, _GENERATED_REFERENCE_KINDS[key], generated_ids)
+    if isinstance(value, str) and key == "arguments":
+        return _canonicalize_arguments(value, generated_ids)
+    if isinstance(value, str):
+        value = _canonicalize_subagent_reference(value, key, generated_ids)
+        value = _canonicalize_subagent_notice(value, generated_ids)
+        value = _canonicalize_duration_json_text(value, generated_ids)
     if isinstance(value, str) and key == "handoff_id" and value:
         return "<generated-id>"
     if isinstance(value, str) and key in {"id", "callId", "toolCallId"} and _VOLATILE_ID.match(value):
@@ -37,6 +183,7 @@ def canonicalize(value: Any, *, key: str | None = None) -> Any:
 
 def load_trace(path: Path) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
+    generated_ids: dict[tuple[str, str], str] = {}
     for line_no, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         if not raw.strip():
             continue
@@ -47,7 +194,7 @@ def load_trace(path: Path) -> list[dict[str, Any]]:
         missing = sorted(required - value.keys())
         if missing:
             raise ValueError(f"{path}:{line_no}: trace record missing {', '.join(missing)}")
-        records.append(canonicalize(value))
+        records.append(canonicalize(value, generated_ids=generated_ids))
     return records
 
 
@@ -64,14 +211,17 @@ _SEMANTIC_EVENT_FIELDS = {
     "model.request": {"modelView", "messages", "systemPrompt", "tools", "metadata", "attempt"},
     "model.response": {"modelView", "message", "content", "tool_calls", "stopReason", "usage", "errors", "structuredResult", "attempt"},
     "model.error": {"code", "message", "retryable", "attempt"},
-    "tool.call": {"name", "toolName", "arguments", "toolCallId", "context", "order", "sideEffectCount", "attempt"},
-    "tool.start": {"name", "toolName", "toolCallId", "order", "attempt"},
-    "tool.finish": {"name", "toolName", "toolCallId", "order", "success", "error", "sideEffectCount", "attempt"},
-    "tool.result": {"result", "data", "error", "toolName", "toolCallId", "success", "sideEffectCount", "attempt"},
+    "tool.call": {"name", "toolName", "arguments", "toolCallId", "context", "order", "sideEffectCount", "attempt", "concurrencySafe"},
+    "tool.start": {"name", "toolName", "toolCallId", "order", "attempt", "concurrencySafe"},
+    "tool.finish": {"name", "toolName", "toolCallId", "order", "success", "error", "sideEffectCount", "attempt", "concurrencySafe"},
+    "tool.result": {"result", "data", "error", "toolName", "toolCallId", "success", "sideEffectCount", "attempt", "concurrencySafe"},
     "permission.request": {"toolName", "toolCallId", "mode", "canPrompt"},
     "permission.answer": {"toolName", "toolCallId", "allowed", "code"},
     "permission.decision": {"toolName", "toolCallId", "allowed", "code", "retryable"},
-    "sidecar.lifecycle": {"state", "stage", "code", "attempt"},
+    "sidecar.lifecycle": {
+        "state", "stage", "code", "attempt", "parentClosed", "parentAborted",
+        "subagentModelRequests", "terminalCount",
+    },
     "fault.injected": {"target", "action", "stage", "attempt"},
     "side_effect.state": {"counts", "sideEffectCount"},
     "compact.boundary": {"compactionId", "reason", "messages", "metadata"},
@@ -83,7 +233,10 @@ _SEMANTIC_EVENT_FIELDS = {
 }
 
 
-def _semantic_record(record: dict[str, Any]) -> dict[str, Any]:
+def _semantic_record(
+    record: dict[str, Any],
+    generated_ids: dict[tuple[str, str], str],
+) -> dict[str, Any]:
     kind = str(record.get("kind") or "")
     fields = _SEMANTIC_EVENT_FIELDS.get(kind)
     if fields is None:
@@ -99,11 +252,83 @@ def _semantic_record(record: dict[str, Any]) -> dict[str, Any]:
     for key in ("logicalSequence", "phase"):
         if key in record:
             projected[key] = record[key]
-    return canonicalize(projected)
+    return canonicalize(projected, generated_ids=generated_ids)
+
+
+def _tool_lifecycle_name(record: dict[str, Any]) -> str | None:
+    for key in ("name", "toolName"):
+        value = record.get(key)
+        if isinstance(value, str):
+            return value
+    result = record.get("result")
+    if isinstance(result, dict) and isinstance(result.get("toolName"), str):
+        return result["toolName"]
+    return None
+
+
+def _tool_lifecycle_identity(record: dict[str, Any]) -> str | None:
+    value = record.get("toolCallId")
+    if isinstance(value, str) and value:
+        return value
+    result = record.get("result")
+    if isinstance(result, dict):
+        value = result.get("toolCallId")
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _canonicalize_parallel_tool_lifecycle(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Canonicalize only explicitly concurrency-safe tool lifecycle interleavings.
+
+    The scheduler promises stable result order, but concurrent tool start/finish
+    observations have no total order. We preserve strict ordering for every
+    other event, including non-concurrent and repeated tool calls.
+    """
+    result = list(records)
+    index = 0
+    while index < len(result):
+        if result[index].get("kind") not in _TOOL_LIFECYCLE_PHASE:
+            index += 1
+            continue
+        end = index
+        while end < len(result) and result[end].get("kind") in _TOOL_LIFECYCLE_PHASE:
+            end += 1
+        group = result[index:end]
+        call_ids = [
+            _tool_lifecycle_identity(record)
+            for record in group
+            if record.get("kind") == "tool.call"
+        ]
+        identities = [_tool_lifecycle_identity(record) for record in group]
+        if (
+            len(call_ids) > 1
+            and None not in call_ids
+            and len(set(call_ids)) == len(call_ids)
+            and all(record.get("concurrencySafe") is True for record in group)
+            and all(record.get("sideEffectCount", 0) == 0 for record in group)
+            and all(identity in call_ids for identity in identities)
+        ):
+            order = {identity: offset for offset, identity in enumerate(call_ids)}
+            result[index:end] = [
+                record
+                for _, record in sorted(
+                    enumerate(group),
+                    key=lambda item: (
+                        order[_tool_lifecycle_identity(item[1])],
+                        _TOOL_LIFECYCLE_PHASE[item[1]["kind"]],
+                        item[0],
+                    ),
+                )
+            ]
+        index = end
+    return result
 
 
 def project_semantic_trace(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [_semantic_record(record) for record in records]
+    generated_ids: dict[tuple[str, str], str] = {}
+    projected = [_semantic_record(record, generated_ids) for record in records]
+    return _canonicalize_parallel_tool_lifecycle(projected)
 
 
 def project_format_trace(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -198,6 +423,27 @@ def _record_value(records: list[dict[str, Any]], key: str) -> Any:
         "forcedSopVersion": taskframe.get("forcedSopVersion") or session.get("forcedSopVersion"),
         "output": terminal.get("output"),
         "modelAttempts": sum(record.get("kind") == "model.request" for record in records),
+        "parentClosed": any(
+            record.get("kind") == "sidecar.lifecycle"
+            and record.get("state") == "parent_closed"
+            and record.get("parentClosed") is True
+            for record in records
+        ),
+        "parentAborted": any(
+            record.get("kind") == "sidecar.lifecycle"
+            and record.get("state") == "parent_abort_acknowledged"
+            and record.get("parentAborted") is True
+            for record in records
+        ),
+        "terminalCount": next(
+            (
+                record.get("terminalCount")
+                for record in reversed(records)
+                if record.get("kind") == "sidecar.lifecycle"
+                and isinstance(record.get("terminalCount"), int)
+            ),
+            None,
+        ),
         "pendingTasks": session.get("pendingTasks"),
     }
     if key == "toolCalls":

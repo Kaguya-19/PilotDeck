@@ -1,0 +1,61 @@
+import type { CanonicalMessage } from "../../../model/index.js";
+import type { AgentLoopSeedState } from "../../loop/AgentLoop.js";
+import type { AgentTurnResult } from "../../protocol/result.js";
+import type { ModuleBinding, ModuleOutcome } from "../protocol.js";
+
+/**
+ * Host-owned identity for one sidecar execute attempt. It deliberately does
+ * not expose a Session, Gateway, Router, or transport implementation.
+ */
+export type AgentLoopOperationIdentity = Readonly<{
+  runId: string;
+  operationId: string;
+  requestId: string;
+  sessionId: string;
+  turnId: string;
+  binding: ModuleBinding;
+  idempotencyKey?: string;
+}>;
+
+export type AgentLoopOperationAccepted = AgentLoopOperationIdentity & Readonly<{
+  streamId: string;
+}>;
+
+export type AgentLoopOperationKnownTerminal = AgentLoopOperationIdentity & Readonly<{
+  streamId?: string;
+  lastAppliedSequence: number;
+  outcome: Exclude<ModuleOutcome, "result_unknown">;
+  result: AgentTurnResult;
+  messages: CanonicalMessage[];
+  seedState?: AgentLoopSeedState;
+  code?: string;
+  error?: unknown;
+}>;
+
+export type AgentLoopOperationUnknownTerminal = AgentLoopOperationAccepted & Readonly<{
+  lastAppliedSequence: number;
+  code?: string;
+  error?: unknown;
+}>;
+
+export type AgentLoopOperationResolution = Readonly<{
+  outcome: Exclude<ModuleOutcome, "result_unknown">;
+  result: AgentTurnResult;
+  messages: CanonicalMessage[];
+  seedState?: AgentLoopSeedState;
+}>;
+
+/**
+ * A host operation-status port. The sidecar only reports immutable protocol
+ * facts; this owner decides whether a previously committed result is safe to
+ * return after a result_unknown terminal.
+ */
+export type AgentLoopOperationLedger = {
+  start(input: AgentLoopOperationIdentity): void | Promise<void>;
+  accept(input: AgentLoopOperationAccepted): void | Promise<void>;
+  terminal(input: AgentLoopOperationKnownTerminal): void | Promise<void>;
+  resultUnknown(input: AgentLoopOperationUnknownTerminal): void | Promise<void>;
+  reconcile(
+    input: AgentLoopOperationUnknownTerminal,
+  ): AgentLoopOperationResolution | undefined | Promise<AgentLoopOperationResolution | undefined>;
+};

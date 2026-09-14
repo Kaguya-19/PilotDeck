@@ -1,11 +1,41 @@
 import type { CanonicalMessage } from "../../model/index.js";
 import { HookRuntime } from "../../extension/hooks/execution/HookRuntime.js";
+import type { AsyncHookCompletion } from "../../extension/hooks/execution/AsyncHookRegistry.js";
+import type {
+  HookExecutionEventSubscription,
+  PilotDeckHookExecutionEventHandler,
+} from "../../extension/hooks/events/HookExecutionEventBus.js";
 import { createHookInput } from "../../extension/hooks/protocol/input.js";
 import type { LifecycleDispatchInput, LifecycleDispatchResult } from "../protocol/payloads.js";
 import { emptyLifecycleDispatchResult } from "../protocol/payloads.js";
 
 export class LifecycleRuntime {
   constructor(private readonly hooks = new HookRuntime()) {}
+
+  dispose(): Promise<void> {
+    return this.hooks.dispose();
+  }
+
+  /** Subscribe to volatile execution transitions without exposing HookRuntime itself. */
+  subscribeHookExecutionEvents(handler: PilotDeckHookExecutionEventHandler): HookExecutionEventSubscription {
+    return this.hooks.subscribeExecutionEvents(handler);
+  }
+
+  completeAsyncHook(id: string, completion: AsyncHookCompletion = {}): boolean {
+    return this.hooks.completeAsyncHook(id, completion);
+  }
+
+  cancelAsyncHook(id: string): boolean {
+    return this.hooks.cancelAsyncHook(id);
+  }
+
+  collectAsyncHookResponses() {
+    return this.hooks.collectAsyncResponses();
+  }
+
+  removeDeliveredAsyncHookResponses(): void {
+    this.hooks.removeDeliveredAsyncResponses();
+  }
 
   async dispatch(input: LifecycleDispatchInput): Promise<LifecycleDispatchResult> {
     const hookInput = createHookInput(input.event, input.baseInput, input.payload);
@@ -24,6 +54,7 @@ export class LifecycleRuntime {
       events: hookResult.events,
       blockingErrors: hookResult.blockingErrors,
       nonBlockingErrors: hookResult.nonBlockingErrors,
+      pendingAsyncHooks: hookResult.pendingAsyncHooks,
     };
   }
 }

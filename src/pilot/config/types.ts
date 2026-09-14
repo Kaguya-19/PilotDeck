@@ -1,5 +1,8 @@
 import type { AlwaysOnConfig } from "../../always-on/config/parseAlwaysOnConfig.js";
+import type { RuntimeContextSurface } from "../../context/RuntimeContextSurface.js";
 import type { CronConfig } from "../../cron/config/parseCronConfig.js";
+import type { InteractionProfileName } from "../../interaction/InteractionProfile.js";
+import type { SandboxMode } from "../../tool/execution-world/SandboxPort.js";
 import type { ModelConfig } from "../../model/protocol/canonical.js";
 import type { RouterConfig } from "../../router/config/schema.js";
 
@@ -63,6 +66,12 @@ export type PilotAgentModelSelection = {
 
 export type PilotAgentConfig = {
   model: PilotAgentModelSelection;
+  /** File-effect profile for model-authored local processes (`execute_code`, `bash`, and `task_*`). */
+  sandboxMode?: SandboxMode;
+  /** Dynamic runtime-context projection selected by the agent profile. */
+  runtimeContextSurface?: RuntimeContextSurface;
+  /** Selects the question/approval providers composed for new agent sessions. */
+  interactionProfile?: InteractionProfileName;
   /**
    * Override the model catalog's context window size (tokens). When set,
    * auto-compaction thresholds (80% warn / 95% block) are computed against
@@ -76,6 +85,8 @@ export type PilotAgentConfig = {
   subagents?: {
     default?: PilotAgentModelSelection;
     timeoutMs?: number;
+    /** Maximum nested delegation depth. Defaults to one child level. */
+    maxDepth?: number;
   };
 };
 

@@ -18,6 +18,8 @@ export type PromptAssemblerInput = {
   customSystemPrompt?: string;
   /** Optional appended fragment (always last). */
   appendSystemPrompt?: string;
+  /** Keep user context out of the system prompt when a durable user-role surface owns it. */
+  includeUserContextInSystemPrompt?: boolean;
   /** Optional override for the user-context "now" line. */
   now?: () => Date;
 };
@@ -63,7 +65,9 @@ export class PromptAssembler {
       parts.push(...sections.defaultSystemPrompt);
     }
 
-    parts.push(...sections.userContext);
+    if (input.includeUserContextInSystemPrompt !== false) {
+      parts.push(...sections.userContext);
+    }
 
     if (!useCustom) {
       parts.push(...sections.systemContext);

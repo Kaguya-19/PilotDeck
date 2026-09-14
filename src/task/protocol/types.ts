@@ -8,7 +8,9 @@ export type PilotDeckBackgroundTaskStatus =
   | "running"
   | "completed"
   | "failed"
-  | "cancelled";
+  | "cancelled"
+  /** Restored after process loss; no live child handle or terminal result is known. */
+  | "unknown";
 
 export type PilotDeckBackgroundTaskKind = "bash" | "monitor";
 

@@ -1,6 +1,7 @@
 import { open, readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { getPilotProjectChatDir } from "../../pilot/index.js";
+import type { SessionCatalogListInput, SessionInfo } from "../catalog/SessionCatalogPort.js";
 import { mergeMetadata } from "../metadata/SessionMetadataStore.js";
 import { readSessionLite, SESSION_LITE_READ_BYTES, type SessionLiteFile } from "./SessionLiteReader.js";
 import type { SessionMetadataValue } from "../transcript/TranscriptEntry.js";
@@ -13,28 +14,10 @@ function isInternalSession(sessionId: string): boolean {
   return ALWAYS_ON_AUXILIARY_PATTERN.test(sessionId);
 }
 
-export type SessionInfo = {
-  sessionId: string;
-  summary: string;
-  lastModified: number;
-  fileSize?: number;
-  customTitle?: string;
-  aiTitle?: string;
-  firstPrompt?: string;
-  cwd?: string;
-  tag?: string;
-  createdAt?: number;
-  parentSessionId?: string;
-  forkedFromTurnId?: string;
-};
-
-export type ListProjectSessionsOptions = {
-  projectRoot: string;
-  pilotHome: string;
-  limit?: number;
-  offset?: number;
-  includeInternal?: boolean;
-};
+/** @deprecated Use SessionCatalogPort at application consumer boundaries. */
+export type ListProjectSessionsOptions = SessionCatalogListInput;
+/** @deprecated Import SessionInfo from the catalog definition. */
+export type { SessionInfo } from "../catalog/SessionCatalogPort.js";
 
 export async function listProjectSessions(options: ListProjectSessionsOptions): Promise<SessionInfo[]> {
   const chatDir = getPilotProjectChatDir(options.projectRoot, options.pilotHome);

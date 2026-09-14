@@ -10,11 +10,26 @@ export {
   createCronManager,
   type CreateCronManagerOptions,
 } from "./runtime/CronManager.js";
+export type { CronControlPort } from "./runtime/CronControlPort.js";
+export type { CronAgentGatewayPort } from "./runtime/CronAgentGatewayPort.js";
+export {
+  createCronToolDefinitions,
+  createCronRunNowTool,
+  createCronUpdateTool,
+} from "./tool/index.js";
 export type { CronPhaseEventCallback } from "./runtime/CronFire.js";
 export { computeNextCronRunAt, computeNextRunAt } from "./runtime/CronSchedule.js";
 export { isValidCronTimezone, resolveCronTimezone } from "./CronTimezone.js";
 export { resolveCronPaths, cronRunEventsPath, type CronPaths } from "./storage/CronPaths.js";
 export { CronTaskStore } from "./storage/CronTaskStore.js";
+export {
+  createNativeCronProjectStorageProvider,
+  type CronProjectStorage,
+  type CronProjectStorageLogger,
+  type CronProjectStorageProvider,
+  type CronProjectStorageProviderInput,
+  type CronTaskStorePort,
+} from "./runtime/CronProjectStorageProvider.js";
 export type {
   CronCreateInput,
   CronCreateResult,

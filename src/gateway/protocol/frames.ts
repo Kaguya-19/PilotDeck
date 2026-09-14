@@ -15,6 +15,7 @@ export type WsHelloOk = {
   protocolVersion: string;
   serverVersion: string;
   serverInfo: GatewayServerInfo;
+  interactionBinding?: import("../../interaction/index.js").InteractionConnectionBinding;
 };
 
 export type WsGatewayMethod =
@@ -35,6 +36,7 @@ export type WsGatewayMethod =
   | "session_model_set"
   | "session_model_clear"
   | "active_turn_snapshot"
+  | "reconnect_interaction"
   | "cron_create"
   | "cron_list"
   | "cron_update"
@@ -63,6 +65,7 @@ export type WsGatewayMethod =
   | "skill_validate"
   | "skill_scan"
   | "always_on_apply"
+  | "always_on_abort"
   | "always_on_rerun_plan";
 
 export type WsRequestFrame = {

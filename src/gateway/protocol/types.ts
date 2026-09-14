@@ -15,6 +15,15 @@ import type {
   CronUpdateInput,
   CronUpdateResult,
 } from "../../cron/protocol/types.js";
+import type { CronControlPort } from "../../cron/runtime/CronControlPort.js";
+import type {
+  AlwaysOnApplyInput,
+  AlwaysOnApplyResult,
+  AlwaysOnAbortInput,
+  AlwaysOnAbortResult,
+  AlwaysOnRerunPlanInput,
+  AlwaysOnRerunPlanResult,
+} from "../../always-on/protocol/AlwaysOnControlPort.js";
 import type { CanonicalMessage, CanonicalUsage } from "../../model/index.js";
 import type { TelemetryExecutionKind, TelemetryModule } from "../../telemetry/index.js";
 import type { SessionInfo as ProjectSessionInfo } from "../../session/index.js";
@@ -54,6 +63,7 @@ import type {
   SkillsListInput,
   SkillsListResult,
 } from "../../extension/skills/types.js";
+import type { InteractionConnectionBinding, InteractionReconnectResult } from "../../interaction/index.js";
 
 export type GatewayChannelKey =
   | "cli" | "tui" | "feishu" | "weixin" | "qq" | "web" | "test"
@@ -127,6 +137,27 @@ export type GatewaySubmitTurnInput = {
    * so they are visible to the model but hidden from the Web UI.
    */
   syntheticMessages?: Array<{ text: string; purpose?: string }>;
+  /** @internal server-side binding used to scope reconnectable interaction requests. */
+  interactionBinding?: InteractionConnectionBinding;
+};
+
+export type GatewayReconnectInteractionInput = {
+  sessionKey: string;
+  previousBinding?: InteractionConnectionBinding;
+  /** Filled by the WS adapter; direct callers may provide it explicitly. */
+  nextBinding?: InteractionConnectionBinding;
+};
+
+export type GatewayReconnectInteractionResult = InteractionReconnectResult;
+
+export type GatewayDisconnectInteractionInput = {
+  sessionKey: string;
+  binding: InteractionConnectionBinding;
+};
+
+export type GatewayDisconnectInteractionResult = {
+  disconnected: boolean;
+  preserveTurn: boolean;
 };
 
 export type GatewaySteerTurnInput = {
@@ -292,17 +323,22 @@ export type GatewayActiveTurnSnapshot = {
   sessionKey: string;
   runId?: string;
   /**
-   * Volatile replay events for the currently active turn. Durable transcript
-   * history remains the source of truth after the turn completes.
+   * Volatile replay events for an active turn, or for the short terminal
+   * grace window immediately after it completes. Durable transcript history
+   * remains the source of truth after that window expires.
    */
   events: GatewayEvent[];
   truncated?: boolean;
+  /** The snapshot is a short-lived terminal replay rather than an active turn. */
+  terminal?: boolean;
 };
 
 export type GatewayElicitationResponseInput = {
   sessionKey: string;
   requestId: string;
   answer: PilotDeckElicitationAnswer;
+  /** @internal server-side connection binding for stale-response rejection. */
+  interactionBinding?: InteractionConnectionBinding;
 };
 
 /**
@@ -323,6 +359,8 @@ export type GatewayPermissionDecisionInput = {
   remember?: boolean;
   /** Optional free-form reason; surfaced in audit/transcript. */
   reason?: string;
+  /** @internal server-side connection binding for stale-response rejection. */
+  interactionBinding?: InteractionConnectionBinding;
 };
 
 export type GatewaySessionPermissionGrantInput = {
@@ -507,14 +545,8 @@ export type UploadedAttachmentRef = {
   attachmentIds?: string[];
 };
 
-export type GatewayCronController = {
-  createTask(input: CronCreateInput): Promise<CronCreateResult>;
-  listTasks(input: CronListInput): Promise<CronListResult>;
-  updateTask(input: CronUpdateInput): Promise<CronUpdateResult>;
-  deleteTask(input: CronDeleteInput): Promise<CronDeleteResult>;
-  stopTask(input: CronStopInput): Promise<CronStopResult>;
-  runTaskNow(input: CronRunNowInput): Promise<CronRunNowResult>;
-};
+/** Gateway consumes the same provider-neutral schedule-control contract as tools. */
+export type GatewayCronController = CronControlPort;
 
 export type ReloadConfigResult = {
   reloaded: boolean;
@@ -539,26 +571,13 @@ export type ReloadExtensionsResult = {
   reason?: "unsupported" | "unchanged";
 };
 
-export type AlwaysOnApplyInput = {
-  projectKey: string;
-  workCycleId: string;
-  projectName: string;
-};
-
-export type AlwaysOnApplyResult = {
-  sessionKey: string;
-  error?: { code: string; message: string };
-};
-
-export type AlwaysOnRerunPlanInput = {
-  projectKey: string;
-  planId: string;
-  projectName: string;
-};
-
-export type AlwaysOnRerunPlanResult = {
-  runId: string;
-  error?: { code: string; message: string };
+export type {
+  AlwaysOnApplyInput,
+  AlwaysOnApplyResult,
+  AlwaysOnAbortInput,
+  AlwaysOnAbortResult,
+  AlwaysOnRerunPlanInput,
+  AlwaysOnRerunPlanResult,
 };
 
 export interface Gateway {
@@ -579,6 +598,10 @@ export interface Gateway {
   sessionModelSet?(input: SessionModelSetInput): Promise<SessionModelResult>;
   sessionModelClear?(input: SessionModelInput): Promise<void>;
   getActiveTurnSnapshot?(input: GatewayActiveTurnSnapshotInput): Promise<GatewayActiveTurnSnapshot>;
+  reconnectInteraction?(input: GatewayReconnectInteractionInput): Promise<GatewayReconnectInteractionResult> | GatewayReconnectInteractionResult;
+  disconnectInteraction?(input: GatewayDisconnectInteractionInput): Promise<GatewayDisconnectInteractionResult> | GatewayDisconnectInteractionResult;
+  /** Release Gateway-owned interaction state after all host connections stop. */
+  dispose?(reason?: string): void | Promise<void>;
   cronCreate(input: CronCreateInput): Promise<CronCreateResult>;
   cronList(input: CronListInput): Promise<CronListResult>;
   cronUpdate(input: CronUpdateInput): Promise<CronUpdateResult>;
@@ -674,6 +697,12 @@ export interface Gateway {
    * `always-on:turn-event` notifications.
    */
   alwaysOnApply?(input: AlwaysOnApplyInput): Promise<AlwaysOnApplyResult>;
+  /**
+   * Abort an active Always-On phase by its notification-provided session key.
+   * The Always-On provider validates project ownership before delegating to
+   * Gateway's ordinary turn abort path.
+   */
+  alwaysOnAbort?(input: AlwaysOnAbortInput): Promise<AlwaysOnAbortResult>;
   /**
    * Re-execute an existing Always-On plan through DiscoveryFire phases 2-4
    * (workspace, execution, report). Used by the UI retry button.

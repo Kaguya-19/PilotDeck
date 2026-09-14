@@ -1,9 +1,17 @@
-import type { Gateway, GatewayEvent } from "../protocol/types.js";
+import { randomUUID } from "node:crypto";
+import type { Gateway, GatewayEvent, GatewaySubmitTurnInput } from "../protocol/types.js";
 import type { WsHelloFrame, WsRequestFrame } from "../protocol/frames.js";
 import { PILOTDECK_GATEWAY_PROTOCOL_VERSION } from "../protocol/version.js";
 import { TextWebSocketConnection } from "./websocket.js";
 import { SkillManagerError, SkillValidationError } from "../../extension/skills/index.js";
 import { DialogGatewayError } from "../dialog/errors.js";
+
+let connectionGeneration = 0;
+
+function nextConnectionGeneration(): number {
+  connectionGeneration += 1;
+  return connectionGeneration;
+}
 
 export type GatewayWsConnectionOptions = {
   gateway: Gateway;
@@ -14,22 +22,36 @@ export type GatewayWsConnectionOptions = {
 export class GatewayWsConnection {
   private authed = false;
   private readonly inFlightSessions = new Set<string>();
+  /** Sessions whose interaction ownership is bound to this socket. */
+  private readonly interactionSessions = new Set<string>();
+  private readonly interactionBinding = Object.freeze({
+    connectionId: randomUUID(),
+    generation: nextConnectionGeneration(),
+  });
 
   constructor(
     private readonly ws: TextWebSocketConnection,
     private readonly options: GatewayWsConnectionOptions,
   ) {
     ws.onMessage((message) => void this.handleMessage(message));
-    ws.onClose(() => this.abortInFlightTurns());
+    ws.onClose(() => { void this.handleClose(); });
   }
 
-  private abortInFlightTurns(): void {
-    for (const sessionKey of this.inFlightSessions) {
-      this.options.gateway
-        .abortTurn({ sessionKey })
-        .catch(() => undefined);
+  private async handleClose(): Promise<void> {
+    const sessions = new Set([...this.inFlightSessions, ...this.interactionSessions]);
+    for (const sessionKey of sessions) {
+      const disconnected = this.options.gateway.disconnectInteraction
+        ? await this.options.gateway.disconnectInteraction({
+            sessionKey,
+            binding: this.interactionBinding,
+          })
+        : undefined;
+      if (this.inFlightSessions.has(sessionKey) && !disconnected?.preserveTurn) {
+        await this.options.gateway.abortTurn({ sessionKey }).catch(() => undefined);
+      }
     }
     this.inFlightSessions.clear();
+    this.interactionSessions.clear();
   }
 
   sendNotification(name: string, payload?: unknown): void {
@@ -82,6 +104,7 @@ export class GatewayWsConnection {
         protocolVersion: PILOTDECK_GATEWAY_PROTOCOL_VERSION,
         serverVersion: this.options.serverVersion,
         serverInfo: await this.options.gateway.describeServer(),
+        interactionBinding: this.interactionBinding,
       }),
     );
   }
@@ -90,11 +113,18 @@ export class GatewayWsConnection {
     try {
       if (frame.method === "submit_turn") {
         const sessionKey = (frame.params as { sessionKey?: string } | undefined)?.sessionKey;
-        if (sessionKey) this.inFlightSessions.add(sessionKey);
+        if (sessionKey) {
+          this.inFlightSessions.add(sessionKey);
+          this.interactionSessions.add(sessionKey);
+        }
         let seq = 0;
         let lastCompleted: GatewayEvent | undefined;
         try {
-          for await (const event of this.options.gateway.submitTurn(frame.params as never)) {
+          const params = {
+            ...((frame.params ?? {}) as Record<string, unknown>),
+            interactionBinding: this.interactionBinding,
+          } as GatewaySubmitTurnInput;
+          for await (const event of this.options.gateway.submitTurn(params)) {
             if (event.type === "turn_completed") {
               lastCompleted = event;
             }
@@ -227,6 +257,20 @@ export class GatewayWsConnection {
           sessionKey: (frame.params as { sessionKey?: string } | undefined)?.sessionKey ?? "",
           events: [],
         });
+      case "reconnect_interaction":
+        if (this.options.gateway.reconnectInteraction) {
+          const params = (frame.params ?? {}) as {
+            sessionKey?: string;
+            previousBinding?: import("../../interaction/index.js").InteractionConnectionBinding;
+          };
+          if (params.sessionKey) this.interactionSessions.add(params.sessionKey);
+          return Promise.resolve(this.options.gateway.reconnectInteraction({
+            sessionKey: params.sessionKey ?? "",
+            previousBinding: params.previousBinding,
+            nextBinding: this.interactionBinding,
+          }));
+        }
+        return Promise.resolve({ outcome: "stale_binding", requests: [] });
       case "cron_create":
         return this.options.gateway.cronCreate(frame.params as never);
       case "cron_list":
@@ -240,9 +284,15 @@ export class GatewayWsConnection {
       case "cron_run_now":
         return this.options.gateway.cronRunNow(frame.params as never);
       case "elicitation_respond":
-        return this.options.gateway.respondElicitation(frame.params as never);
+        return this.options.gateway.respondElicitation({
+          ...((frame.params ?? {}) as Record<string, unknown>),
+          interactionBinding: this.interactionBinding,
+        } as never);
       case "permission_decide":
-        return this.options.gateway.permissionDecide(frame.params as never);
+        return this.options.gateway.permissionDecide({
+          ...((frame.params ?? {}) as Record<string, unknown>),
+          interactionBinding: this.interactionBinding,
+        } as never);
       case "grant_session_permission":
         return this.options.gateway.grantSessionPermission(frame.params as never);
       case "read_session_messages":
@@ -299,6 +349,11 @@ export class GatewayWsConnection {
           return this.options.gateway.alwaysOnApply(frame.params as never);
         }
         return Promise.resolve({ sessionKey: "", error: { code: "not_configured", message: "Always-On apply not available" } });
+      case "always_on_abort":
+        if (this.options.gateway.alwaysOnAbort) {
+          return this.options.gateway.alwaysOnAbort(frame.params as never);
+        }
+        return Promise.resolve({ aborted: false, sessionKey: "", error: { code: "not_configured", message: "Always-On abort not available" } });
       case "always_on_rerun_plan":
         if (this.options.gateway.alwaysOnRerunPlan) {
           return this.options.gateway.alwaysOnRerunPlan(frame.params as never);

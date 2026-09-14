@@ -21,6 +21,7 @@ import { StreamingCheckpointManager } from "./StreamingCheckpoint.js";
 import { buildLiteLLMContinuationRequest } from "./continuationRequest.js";
 import { requestFingerprint } from "./requestFingerprint.js";
 import { NetworkFetchError, networkFetch } from "../../network/fetch.js";
+import { createNativeRetryPolicy, type RetryPolicy } from "../policy/index.js";
 
 export type ModelTransport = typeof fetch;
 
@@ -30,6 +31,7 @@ export type ModelRuntimeOptions = {
   signal?: AbortSignal;
   streamTimeoutMs?: number;
   onRetryProgress?: (progress: ModelStreamRetryProgress) => void;
+  retryPolicy?: RetryPolicy;
 };
 
 export type ModelStreamRetryProgress = {
@@ -70,8 +72,8 @@ export async function complete(
 ) {
   const nonStreamingRequest = { ...request, stream: false };
   const { provider } = validateModelRequest(nonStreamingRequest, config);
-  const maxRetries = provider.retry?.requestMaxRetries ?? DEFAULT_REQUEST_MAX_RETRIES;
-  const retryBaseDelay = provider.retry?.baseDelayMs ?? LITELLM_INITIAL_RETRY_DELAY_MS;
+  const retryPolicy = options.retryPolicy ?? createNativeRetryPolicy({ defaultMaxRetries: DEFAULT_REQUEST_MAX_RETRIES });
+  const maxRetries = retryPolicy.decide({ provider, kind: "request", attempt: 0 }).maxRetries;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     throwIfAborted(options.signal);
@@ -85,7 +87,7 @@ export async function complete(
         return parseGoogleResponse(raw, provider.id);
       } catch (error) {
         if (attempt < maxRetries && isRetryableRequestError(error)) {
-          const delayMs = retryBaseDelay * (attempt + 1);
+          const { delayMs } = retryPolicy.decide({ provider, kind: "request", attempt });
           console.warn(
             `[PilotDeck] complete() retry: ${(error as Error).message} ` +
             `(attempt ${attempt + 1}/${maxRetries}, delay=${delayMs}ms)`,
@@ -103,7 +105,7 @@ export async function complete(
       response = await sendProviderRequest(provider, body, false, options.fetch ?? fetch, options.signal);
     } catch (error) {
       if (attempt < maxRetries && isRetryableRequestError(error)) {
-        const delayMs = retryBaseDelay * (attempt + 1);
+        const { delayMs } = retryPolicy.decide({ provider, kind: "request", attempt });
         console.warn(
           `[PilotDeck] complete() retry: ${(error as Error).message} ` +
           `(attempt ${attempt + 1}/${maxRetries}, delay=${delayMs}ms)`,
@@ -137,8 +139,8 @@ export async function* streamModel(
 ): AsyncIterable<CanonicalModelEvent> {
   const streamingRequest = { ...request, stream: true };
   const { provider } = validateModelRequest(streamingRequest, config);
-  const maxRetries = provider.retry?.streamMaxRetries ?? DEFAULT_STREAM_MAX_RETRIES;
-  const retryBaseDelay = provider.retry?.baseDelayMs ?? LITELLM_INITIAL_RETRY_DELAY_MS;
+  const retryPolicy = options.retryPolicy ?? createNativeRetryPolicy({ defaultMaxRetries: DEFAULT_STREAM_MAX_RETRIES });
+  const maxRetries = retryPolicy.decide({ provider, kind: "stream", attempt: 0 }).maxRetries;
 
   let currentRequest = streamingRequest;
   const checkpoint = new StreamingCheckpointManager();
@@ -148,7 +150,7 @@ export async function* streamModel(
       request: currentRequest,
       provider,
       maxRetries,
-      retryBaseDelay,
+      retryPolicy,
       checkpoint,
       options,
     });
@@ -179,7 +181,7 @@ export async function* streamModel(
       response = await sendProviderRequest(provider, body, true, options.fetch ?? fetch, options.signal, options);
     } catch (error) {
       if (attempt < maxRetries && isRetryableStreamError(error)) {
-        const delayMs = calculateRetryDelay(provider, attempt);
+        const delayMs = retryPolicy.decide({ provider, kind: "stream", attempt }).delayMs;
         emitModelRetryProgress(options, "network_error", attempt, maxRetries, delayMs, provider, currentRequest.model);
         await delay(delayMs, options.signal);
         continue;
@@ -204,7 +206,7 @@ export async function* streamModel(
         }
       }
       if (error.retryable && attempt < maxRetries) {
-        const delayMs = calculateRetryDelay(provider, attempt, error.retryAfterMs);
+        const delayMs = retryPolicy.decide({ provider, kind: "stream", attempt, retryAfterMs: error.retryAfterMs }).delayMs;
         emitModelRetryProgress(options, retryReasonForError(error.code), attempt, maxRetries, delayMs, provider, currentRequest.model);
         await delay(delayMs, options.signal);
         continue;
@@ -266,7 +268,7 @@ export async function* streamModel(
         checkpoint.canContinueText()
       ) {
         currentRequest = buildLiteLLMContinuationRequest(currentRequest, checkpoint.get().partialText);
-        const delayMs = calculateRetryDelay(provider, attempt, retryAfterMsForError(error));
+        const delayMs = retryPolicy.decide({ provider, kind: "stream", attempt, retryAfterMs: retryAfterMsForError(error) }).delayMs;
         emitModelRetryProgress(options, "continuation", attempt, maxRetries, delayMs, provider, currentRequest.model);
         await delay(delayMs, options.signal);
         continue;
@@ -277,7 +279,7 @@ export async function* streamModel(
         attempt < maxRetries &&
         checkpoint.interruption().phase === "empty"
       ) {
-        const delayMs = calculateRetryDelay(provider, attempt, retryAfterMsForError(error));
+        const delayMs = retryPolicy.decide({ provider, kind: "stream", attempt, retryAfterMs: retryAfterMsForError(error) }).delayMs;
         emitModelRetryProgress(options, retryReasonForThrownError(error), attempt, maxRetries, delayMs, provider, currentRequest.model);
         await delay(delayMs, options.signal);
         continue;
@@ -320,7 +322,7 @@ async function* streamGoogleProviderRequest(params: {
   request: CanonicalModelRequest & { stream: boolean };
   provider: ProviderConfig;
   maxRetries: number;
-  retryBaseDelay: number;
+  retryPolicy: RetryPolicy;
   checkpoint: StreamingCheckpointManager;
   options: ModelRuntimeOptions;
 }): AsyncIterable<CanonicalModelEvent> {
@@ -415,7 +417,7 @@ async function* streamGoogleProviderRequest(params: {
         params.checkpoint.canContinueText()
       ) {
         currentRequest = buildLiteLLMContinuationRequest(currentRequest, params.checkpoint.get().partialText);
-        const delayMs = calculateRetryDelay(params.provider, attempt);
+        const delayMs = params.retryPolicy.decide({ provider: params.provider, kind: "stream", attempt }).delayMs;
         emitModelRetryProgress(params.options, "continuation", attempt, params.maxRetries, delayMs, params.provider, currentRequest.model);
         await delay(delayMs, params.options.signal);
         continue;
@@ -426,7 +428,7 @@ async function* streamGoogleProviderRequest(params: {
         attempt < params.maxRetries &&
         params.checkpoint.interruption().phase === "empty"
       ) {
-        const delayMs = calculateRetryDelay(params.provider, attempt);
+        const delayMs = params.retryPolicy.decide({ provider: params.provider, kind: "stream", attempt }).delayMs;
         emitModelRetryProgress(params.options, "network_error", attempt, params.maxRetries, delayMs, params.provider, currentRequest.model);
         await delay(delayMs, params.options.signal);
         continue;
@@ -564,18 +566,6 @@ function isRetryableStreamError(error: unknown): boolean {
   return false;
 }
 
-function calculateRetryDelay(provider: ProviderConfig, attempt: number, retryAfterMs?: number): number {
-  if (retryAfterMs !== undefined) {
-    const maxDelayMs = provider.retry?.maxDelayMs ?? LITELLM_MAX_RETRY_DELAY_MS;
-    return Math.min(retryAfterMs, maxDelayMs);
-  }
-  const baseDelayMs = provider.retry?.baseDelayMs ?? LITELLM_INITIAL_RETRY_DELAY_MS;
-  const maxDelayMs = provider.retry?.maxDelayMs ?? LITELLM_MAX_RETRY_DELAY_MS;
-  const jitter = provider.retry?.jitter ?? LITELLM_RETRY_JITTER;
-  const deterministicDelay = baseDelayMs * (attempt + 1);
-  const jitterDelay = deterministicDelay * jitter * Math.random();
-  return Math.min(deterministicDelay + jitterDelay, maxDelayMs);
-}
 
 function retryAfterMsForError(error: unknown): number | undefined {
   return error instanceof ModelProviderError ? error.error.retryAfterMs : undefined;

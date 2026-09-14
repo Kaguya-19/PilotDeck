@@ -85,3 +85,59 @@ test("attachment verification returns stable project and expiry errors", async (
     (error: unknown) => (error as { code?: string }).code === "ATTACHMENT_EXPIRED",
   );
 });
+
+test("an artifact lease keeps a Gateway turn readable after an independent UI cleanup", async (t) => {
+  const project = await mkdtemp(join(tmpdir(), "pilotdeck-upload-lease-"));
+  t.after(() => rm(project, { recursive: true, force: true }));
+  let now = new Date("2026-08-11T00:00:00.000Z");
+  const options = {
+    resolveProject: async (projectKey: string) => projectKey,
+    listProjects: async () => [project],
+    now: () => now,
+    retentionMs: 1_000,
+    leaseRetentionMs: 10_000,
+  };
+  const uiStore = new UploadStore(options);
+  const gatewayStore = new UploadStore(options);
+  const created = await uiStore.create(project, [
+    { clientFileId: "one", name: "one.txt", relativePath: "one.txt", size: 5 },
+  ]);
+  const source = await uiStore.writePart(created.uploadId, "one", Readable.from([Buffer.from("hello")]));
+  await uiStore.complete(created.uploadId);
+
+  const lease = await gatewayStore.acquireAttachmentLease(created.uploadId, project);
+  const leasedPath = lease.attachments[0]!.path;
+  assert.notEqual(leasedPath, source.path);
+
+  now = new Date("2026-08-11T00:00:02.000Z");
+  await uiStore.cleanupExpired();
+  await assert.rejects(readFile(source.path), (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT");
+  assert.equal(await readFile(leasedPath, "utf8"), "hello");
+
+  await lease.release();
+  await assert.rejects(readFile(leasedPath), (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT");
+});
+
+test("cleanup reclaims a crash-orphaned artifact lease after its bounded lifetime", async (t) => {
+  const project = await mkdtemp(join(tmpdir(), "pilotdeck-upload-orphaned-lease-"));
+  t.after(() => rm(project, { recursive: true, force: true }));
+  let now = new Date("2026-08-11T00:00:00.000Z");
+  const store = new UploadStore({
+    resolveProject: async (projectKey) => projectKey,
+    listProjects: async () => [project],
+    now: () => now,
+    retentionMs: 1_000,
+    leaseRetentionMs: 1_000,
+  });
+  const created = await store.create(project, [
+    { clientFileId: "one", name: "one.txt", relativePath: "one.txt", size: 5 },
+  ]);
+  await store.writePart(created.uploadId, "one", Readable.from([Buffer.from("hello")]));
+  await store.complete(created.uploadId);
+  const lease = await store.acquireAttachmentLease(created.uploadId, project);
+  const leasedPath = lease.attachments[0]!.path;
+
+  now = new Date("2026-08-11T00:00:02.000Z");
+  await store.cleanupExpired();
+  await assert.rejects(readFile(leasedPath), (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT");
+});

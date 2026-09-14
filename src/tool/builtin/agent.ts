@@ -3,6 +3,7 @@ import type { CanonicalModelRequest, CanonicalUsage } from "../../model/index.js
 import type { PermissionResult } from "../../permission/index.js";
 import { SUBAGENT_DEFINITIONS } from "../../agent/sub/builtinSubagentTypes.js";
 import { PilotDeckToolRuntimeError } from "../protocol/errors.js";
+import { DEFAULT_SUBAGENT_TIMEOUT_MS } from "../protocol/subagentTimeout.js";
 import type {
   PilotDeckSubagentForkApi,
   PilotDeckToolDefinition,
@@ -90,6 +91,8 @@ export type AgentToolOutput = {
   turns?: number;
   durationMs?: number;
   parsed?: Record<string, string>;
+  subagentSessionId?: string;
+  transcriptRelativePath?: string;
 };
 
 export type CreateAgentToolOptions = {
@@ -109,7 +112,6 @@ export type CreateAgentToolOptions = {
 const DEFAULT_MAX_OUTPUT_TOKENS = 65_536;
 const DEFAULT_PROVIDER_FALLBACK = "pilotdeck";
 const DEFAULT_MODEL_FALLBACK = "moonshotai/kimi-k2.6";
-const DEFAULT_SUBAGENT_TIMEOUT_MS = 60 * 60_000;
 const PUBLIC_SUBAGENT_TYPES = ["general-purpose", "explore", "plan"] as const;
 
 export function createAgentTool(
@@ -123,6 +125,7 @@ export function createAgentTool(
     aliases: ["Agent", "Task"],
     description,
     kind: "agent",
+    requiredRuntimeCapabilities: ["subagent_fork"],
     inputSchema: {
       type: "object",
       required: ["description", "prompt"],
@@ -379,6 +382,8 @@ async function runFullFork(args: {
     turns: report.turns,
     durationMs: report.durationMs,
     parsed: report.parsed,
+    ...(report.subagentSessionId ? { subagentSessionId: report.subagentSessionId } : {}),
+    ...(report.transcriptRelativePath ? { transcriptRelativePath: report.transcriptRelativePath } : {}),
   };
   return {
     content: [
@@ -395,6 +400,8 @@ async function runFullFork(args: {
       forkMode: "full",
       turns: report.turns,
       durationMs: report.durationMs,
+      ...(report.subagentSessionId ? { subagentSessionId: report.subagentSessionId } : {}),
+      ...(report.transcriptRelativePath ? { transcriptRelativePath: report.transcriptRelativePath } : {}),
     },
   };
 }

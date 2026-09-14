@@ -9,13 +9,29 @@ import { DialogGatewayError } from "./errors.js";
 const PINNED = ["/skill_install", "/projects", "/switch-project"];
 const WEB_BUILTINS: Array<[string, string]> = [
   ["/clear", "Clear the conversation history"], ["/model", "View the current AI model and available options"],
+  ["/compact", "Compact older conversation history"],
   ["/cost", "Display token usage and cost information"], ["/memory", "Open PILOTDECK.md memory file for editing"],
   ["/config", "Open settings and configuration"], ["/rewind", "Rewind the conversation to a previous state"],
   ["/ao", "List, run, or inspect Always-On jobs"], ["/turnkey", "Run turnkey workflow subcommands"],
   ["/skill_install", "Install a skill"],
 ];
 
-export async function listCommands(input: CommandsListInput, configuredPilotHome?: string): Promise<CommandsListResult> {
+/**
+ * Read-only projection of a frozen extension generation. The Gateway owns
+ * the generation lease while it builds a command-list response.
+ */
+export type ExtensionCommandContribution = {
+  name: string;
+  description?: string;
+  argumentHint?: string;
+  namespace?: string;
+};
+
+export async function listCommands(
+  input: CommandsListInput,
+  configuredPilotHome?: string,
+  extensionCommands: readonly ExtensionCommandContribution[] = [],
+): Promise<CommandsListResult> {
   if (!input.projectKey) throw new DialogGatewayError("PROJECT_NOT_FOUND", "projectKey is required.");
   const query = input.query?.trim().toLocaleLowerCase() ?? "";
   if (query.length > 256) throw new DialogGatewayError("INVALID_QUERY", "query must not exceed 256 characters.");
@@ -35,7 +51,17 @@ export async function listCommands(input: CommandsListInput, configuredPilotHome
     scanMarkdown(join(pilotHome, "commands"), "user", "command"),
     scanSkills(join(pilotHome, "skills"), "user"),
   ]);
-  const all = dedupe([...builtin, ...projectCommands, ...projectSkills, ...userCommands, ...userSkills]);
+  // Disk-owned project/user commands retain their established precedence.
+  // Extension entries fill the same UI catalog from one frozen plugin
+  // generation; they must not create a second command registry.
+  const all = dedupe([
+    ...builtin,
+    ...projectCommands,
+    ...projectSkills,
+    ...userCommands,
+    ...userSkills,
+    ...toExtensionCommands(extensionCommands),
+  ]);
   const matched = all.map((item) => ({ ...item, matches: commandMatches(item, query) }))
     .filter((item) => !query || item.matches.length > 0);
   const pinned = PINNED.map((name) => matched.find((item) => item.name === name)).filter((item): item is CommandListItem & { matches: MatchRange[] } => Boolean(item));
@@ -53,6 +79,24 @@ export async function listCommands(input: CommandsListInput, configuredPilotHome
     custom: page.filter((item) => item.namespace !== "builtin"),
     ...(nextOffset < unpinned.length ? { nextCursor: Buffer.from(JSON.stringify({ offset: nextOffset, signature })).toString("base64url") } : {}),
   };
+}
+
+function toExtensionCommands(
+  contributions: readonly ExtensionCommandContribution[],
+): CommandListItem[] {
+  return contributions.flatMap((contribution) => {
+    const rawName = contribution.name.trim();
+    if (rawName.length === 0) return [];
+    const namespace = contribution.namespace?.trim() || "extension";
+    return [{
+      name: rawName.startsWith("/") ? rawName : `/${rawName}`,
+      ...(contribution.description ? { description: contribution.description } : {}),
+      namespace,
+      type: "command",
+      ...(contribution.argumentHint ? { argumentHint: contribution.argumentHint } : {}),
+      metadata: { type: "command", source: "plugin", namespace },
+    } satisfies CommandListItem];
+  });
 }
 
 async function scanMarkdown(root: string, namespace: string, type: string): Promise<CommandListItem[]> {

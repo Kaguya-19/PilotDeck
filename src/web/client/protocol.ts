@@ -138,6 +138,7 @@ export type WebGatewayMethod =
   | "session_model_set"
   | "session_model_clear"
   | "active_turn_snapshot"
+  | "reconnect_interaction"
   | "cron_create"
   | "cron_list"
   | "cron_update"
@@ -166,6 +167,7 @@ export type WebGatewayMethod =
   | "skill_validate"
   | "skill_scan"
   | "always_on_apply"
+  | "always_on_abort"
   | "always_on_rerun_plan";
 
 export type WebSubmitTurnInput = {
@@ -277,6 +279,7 @@ export type WebHelloOk = {
     sessionCount?: number;
     capabilities?: Array<"project_files_list" | "commands_list" | "model_catalog_list" | "session_model_get" | "session_model_set" | "session_model_clear">;
   };
+  interactionBinding?: { connectionId: string; generation: number };
 };
 
 export type WebRequestFrame = {
@@ -313,6 +316,26 @@ export type WebPermissionDecision = {
   decision: "allow" | "deny";
   remember?: boolean;
   reason?: string;
+  interactionBinding?: { connectionId: string; generation: number };
+};
+
+export type WebReconnectInteractionInput = {
+  sessionKey: string;
+  previousBinding?: { connectionId: string; generation: number };
+};
+
+export type WebReconnectInteractionResult = {
+  outcome: "initial" | "reconnected" | "stale_binding" | "no_pending";
+  binding?: { connectionId: string; generation: number };
+  requests: Array<{
+    ownerId: string;
+    requestId: string;
+    kind: "permission" | "question";
+    toolCallId?: string;
+    toolName?: string;
+    payload?: unknown;
+    binding?: { connectionId: string; generation: number };
+  }>;
 };
 
 export type WebSessionPermissionGrant = {
@@ -410,6 +433,7 @@ export type WebActiveTurnSnapshot = {
   runId?: string;
   events: WebGatewayEvent[];
   truncated?: boolean;
+  terminal?: boolean;
 };
 
 export type WebProjectSummary = {

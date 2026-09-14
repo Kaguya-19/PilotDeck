@@ -2,9 +2,406 @@ import assert from "node:assert/strict";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 
+import { createSidecarExecution } from "../../../src/cli/pilotdeck-agent-loop-default-factory.js";
 import { AgentLoopSidecarServer, type SidecarExecutionFactory } from "../../../src/agent/modules/sidecar.js";
 import type { AgentLoop } from "../../../src/agent/loop/AgentLoop.js";
-import type { PilotDeckToolDefinition } from "../../../src/tool/index.js";
+import type { ModuleCapabilities } from "../../../src/agent/modules/protocol.js";
+
+test("sidecar capabilities do not advertise unsupported stream resume", async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const lines: Record<string, unknown>[] = [];
+  let buffered = "";
+  output.on("data", (chunk: Buffer) => {
+    buffered += chunk.toString("utf8");
+    for (const line of buffered.split("\n").slice(0, -1)) {
+      lines.push(JSON.parse(line) as Record<string, unknown>);
+    }
+    buffered = buffered.slice(buffered.lastIndexOf("\n") + 1);
+  });
+
+  const factory: SidecarExecutionFactory = () => {
+    throw new Error("capabilities handshake must not start an execution");
+  };
+  const serving = new AgentLoopSidecarServer(factory).serve(input, output);
+  input.end(`${JSON.stringify({
+    kind: "request",
+    messageId: "capabilities-1",
+    method: "capabilities",
+    payload: {},
+  })}\n`);
+  await serving;
+
+  const response = lines.find((message) => message.inReplyTo === "capabilities-1");
+  assert.equal(response?.ok, true);
+  const payload = response?.payload as { methods?: Array<Record<string, unknown>> } | undefined;
+  const methods = payload?.methods ?? [];
+  assert.equal(methods.find((method) => method.name === "execute")?.resumeSupport, "none");
+  assert.equal(methods.find((method) => method.name === "resume")?.enabled, false);
+  assert.equal(methods.find((method) => method.name === "ack")?.enabled, false);
+  assert.equal(methods.find((method) => method.name === "status")?.enabled, true);
+});
+
+test("sidecar assigns a distinct default module instance id to each process instance", () => {
+  const ids = sequentialIds();
+  const factory: SidecarExecutionFactory = () => {
+    throw new Error("instance identity test does not execute a turn");
+  };
+  const first = new AgentLoopSidecarServer(factory, { uuid: ids });
+  const second = new AgentLoopSidecarServer(factory, { uuid: ids });
+
+  assert.match(first.moduleInstanceId, /^pilotdeck-agent-loop-instance-/);
+  assert.match(second.moduleInstanceId, /^pilotdeck-agent-loop-instance-/);
+  assert.notEqual(first.moduleInstanceId, second.moduleInstanceId);
+});
+
+test("resumable sidecar rebinds a live stream without replaying an applied event", async () => {
+  const firstInput = new PassThrough();
+  const firstOutput = new PassThrough();
+  const firstLines = collectLines(firstOutput);
+  const secondInput = new PassThrough();
+  const secondOutput = new PassThrough();
+  const secondLines = collectLines(secondOutput);
+  let releaseTerminal!: () => void;
+  const terminalGate = new Promise<void>((resolve) => { releaseTerminal = resolve; });
+  const capabilities: ModuleCapabilities = {
+    capabilitiesVersion: "2.0",
+    methods: [
+      { name: "execute", enabled: true, profiles: ["streaming"], cancel: true, resumeSupport: "streaming" },
+      { name: "cancel", enabled: true },
+      { name: "status", enabled: true },
+      { name: "resume", enabled: true },
+      { name: "ack", enabled: true },
+    ],
+  };
+  const factory: SidecarExecutionFactory = () => ({
+    loop: {
+      async *run() {
+        yield { type: "warning", sessionId: "resume-session", turnId: "resume-turn", code: "FIRST", message: "first" };
+        await terminalGate;
+        return {
+          result: {
+            type: "success",
+            sessionId: "resume-session",
+            turnId: "resume-turn",
+            stopReason: "completed",
+            usage: {},
+            permissionDenials: [],
+            turns: 1,
+            startedAt: "2026-09-10T00:00:00.000Z",
+            completedAt: "2026-09-10T00:00:00.001Z",
+          },
+          messages: [],
+        };
+      },
+    } as unknown as AgentLoop,
+    input: {} as never,
+  });
+  const server = new AgentLoopSidecarServer(factory, { capabilities, uuid: sequentialIds() });
+  const servingFirst = server.serve(firstInput, firstOutput);
+  firstInput.write(`${JSON.stringify({ kind: "request", messageId: "first-hello", method: "hello", payload: {} })}\n`);
+  firstInput.write(`${JSON.stringify({ kind: "request", messageId: "first-capabilities", method: "capabilities", payload: {} })}\n`);
+  firstInput.write(`${JSON.stringify({
+    kind: "request",
+    messageId: "first-execute",
+    method: "execute",
+    runId: "resume-run",
+    operationId: "resume-operation",
+    requestId: "resume-request",
+    payload: {},
+  })}\n`);
+  await waitFor(() => firstLines.some((message) => message.kind === "event" && message.sequence === 0));
+
+  const accepted = firstLines.find((message) => message.inReplyTo === "first-execute");
+  const firstHandshake = firstLines.find((message) => message.inReplyTo === "first-hello");
+  assert.equal(typeof accepted?.streamId, "string");
+  assert.equal(typeof firstHandshake?.moduleInstanceId, "string");
+  assert.equal(typeof firstHandshake?.connectionGeneration, "string");
+  const streamId = String(accepted?.streamId);
+  const firstBinding = {
+    moduleInstanceId: String(firstHandshake?.moduleInstanceId),
+    connectionGeneration: String(firstHandshake?.connectionGeneration),
+  };
+
+  const servingSecond = server.serve(secondInput, secondOutput);
+  secondInput.write(`${JSON.stringify({ kind: "request", messageId: "second-hello", method: "hello", payload: {} })}\n`);
+  secondInput.write(`${JSON.stringify({ kind: "request", messageId: "second-capabilities", method: "capabilities", payload: {} })}\n`);
+  await waitFor(() => secondLines.some((message) => message.inReplyTo === "second-capabilities"));
+  const secondHandshake = secondLines.find((message) => message.inReplyTo === "second-hello");
+  assert.notEqual(secondHandshake?.connectionGeneration, firstHandshake?.connectionGeneration);
+
+  secondInput.write(`${JSON.stringify({
+    kind: "request",
+    messageId: "resume-1",
+    method: "resume",
+    streamId,
+    previousBinding: firstBinding,
+    lastAppliedSequence: 0,
+  })}\n`);
+  await waitFor(() => secondLines.some((message) => message.inReplyTo === "resume-1"));
+  releaseTerminal();
+  await waitFor(() => secondLines.some((message) => message.kind === "event" && message.final === true));
+
+  const resumed = secondLines.find((message) => message.inReplyTo === "resume-1");
+  assert.equal(resumed?.ok, true);
+  assert.equal(resumed?.replayedThroughSequence, 0);
+  assert.deepEqual(
+    secondLines.filter((message) => message.kind === "event").map((message) => message.sequence),
+    [1],
+  );
+
+  secondInput.write(`${JSON.stringify({
+    kind: "request",
+    messageId: "ack-1",
+    method: "ack",
+    streamId,
+    lastAppliedSequence: 1,
+  })}\n`);
+  await waitFor(() => secondLines.some((message) => message.inReplyTo === "ack-1"));
+
+  const thirdInput = new PassThrough();
+  const thirdOutput = new PassThrough();
+  const thirdLines = collectLines(thirdOutput);
+  const servingThird = server.serve(thirdInput, thirdOutput);
+  thirdInput.write(`${JSON.stringify({ kind: "request", messageId: "third-hello", method: "hello", payload: {} })}\n`);
+  await waitFor(() => thirdLines.some((message) => message.inReplyTo === "third-hello"));
+  thirdInput.write(`${JSON.stringify({
+    kind: "request",
+    messageId: "resume-expired",
+    method: "resume",
+    streamId,
+    previousBinding: {
+      moduleInstanceId: String(secondHandshake?.moduleInstanceId),
+      connectionGeneration: String(secondHandshake?.connectionGeneration),
+    },
+    lastAppliedSequence: 0,
+  })}\n`);
+  await waitFor(() => thirdLines.some((message) => message.inReplyTo === "resume-expired"));
+  assert.equal(thirdLines.find((message) => message.inReplyTo === "resume-expired")?.code, "CURSOR_EXPIRED");
+
+  firstInput.end();
+  secondInput.end();
+  thirdInput.end();
+  await Promise.all([servingFirst, servingSecond, servingThird]);
+});
+
+function collectLines(output: PassThrough): Record<string, unknown>[] {
+  const lines: Record<string, unknown>[] = [];
+  let buffered = "";
+  output.on("data", (chunk: Buffer) => {
+    buffered += chunk.toString("utf8");
+    for (const line of buffered.split("\n").slice(0, -1)) {
+      lines.push(JSON.parse(line) as Record<string, unknown>);
+    }
+    buffered = buffered.slice(buffered.lastIndexOf("\n") + 1);
+  });
+  return lines;
+}
+
+function sequentialIds(): () => string {
+  let index = 0;
+  return () => `id-${index++}`;
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("Timed out waiting for sidecar message.");
+    await new Promise<void>((resolve) => setTimeout(resolve, 1));
+  }
+}
+
+test("sidecar resume replays a pending module call and fences a stale host response", async () => {
+  const firstInput = new PassThrough();
+  const firstOutput = new PassThrough();
+  const firstLines = collectLines(firstOutput);
+  const secondInput = new PassThrough();
+  const secondOutput = new PassThrough();
+  const secondLines = collectLines(secondOutput);
+  let settledCalls = 0;
+  const capabilities: ModuleCapabilities = {
+    capabilitiesVersion: "2.0",
+    methods: [
+      { name: "execute", enabled: true, profiles: ["streaming"], resumeSupport: "streaming" },
+      { name: "resume", enabled: true },
+      { name: "ack", enabled: true },
+      { name: "status", enabled: true },
+    ],
+  };
+  const factory: SidecarExecutionFactory = ({ request, callModule }) => ({
+    loop: {
+      async *run() {
+        const response = await callModule({
+          runId: request.runId,
+          operationId: request.operationId,
+          requestId: "pending-module-request",
+          module: "permission",
+          payload: { operation: "decide", toolCallId: "pending-module-tool", tool: { name: "write_file" }, input: {}, context: {} },
+        });
+        assert.equal(response.ok, true);
+        settledCalls += 1;
+        return {
+          result: {
+            type: "success",
+            sessionId: "pending-module-session",
+            turnId: "pending-module-turn",
+            stopReason: "completed",
+            usage: {},
+            permissionDenials: [],
+            turns: 1,
+            startedAt: "2026-09-11T00:00:00.000Z",
+            completedAt: "2026-09-11T00:00:00.001Z",
+          },
+          messages: [],
+        };
+      },
+    } as unknown as AgentLoop,
+    input: {} as never,
+  });
+  const server = new AgentLoopSidecarServer(factory, { capabilities, uuid: sequentialIds() });
+  const servingFirst = server.serve(firstInput, firstOutput);
+  firstInput.write(`${JSON.stringify({ kind: "request", messageId: "pending-hello-a", method: "hello", payload: {} })}\n`);
+  firstInput.write(`${JSON.stringify({
+    kind: "request",
+    messageId: "pending-execute",
+    method: "execute",
+    runId: "pending-module-run",
+    operationId: "pending-module-operation",
+    requestId: "pending-execute-request",
+    payload: {},
+  })}\n`);
+  await waitFor(() => firstLines.some((message) => message.kind === "request" && message.method === "module_call"));
+
+  const accepted = firstLines.find((message) => message.inReplyTo === "pending-execute");
+  const firstHandshake = firstLines.find((message) => message.inReplyTo === "pending-hello-a");
+  const originalCall = firstLines.find((message) => message.kind === "request" && message.method === "module_call");
+  assert.equal(typeof accepted?.streamId, "string");
+  assert.equal(typeof originalCall?.messageId, "string");
+  const streamId = String(accepted?.streamId);
+  const originalMessageId = String(originalCall?.messageId);
+
+  const servingSecond = server.serve(secondInput, secondOutput);
+  secondInput.write(`${JSON.stringify({ kind: "request", messageId: "pending-hello-b", method: "hello", payload: {} })}\n`);
+  await waitFor(() => secondLines.some((message) => message.inReplyTo === "pending-hello-b"));
+  secondInput.write(`${JSON.stringify({
+    kind: "request",
+    messageId: "pending-resume",
+    method: "resume",
+    streamId,
+    previousBinding: {
+      moduleInstanceId: String(firstHandshake?.moduleInstanceId),
+      connectionGeneration: String(firstHandshake?.connectionGeneration),
+    },
+    lastAppliedSequence: -1,
+  })}\n`);
+  await waitFor(() => secondLines.some((message) => message.inReplyTo === "pending-resume"));
+  await waitFor(() => secondLines.some((message) => message.kind === "request" && message.method === "module_call"));
+  const replayed = secondLines.find((message) => message.kind === "request" && message.method === "module_call");
+  assert.equal(replayed?.messageId, originalMessageId);
+
+  // The old connection no longer owns this stream, so its late response must
+  // not resolve the pending call after the replacement binding is installed.
+  firstInput.write(`${JSON.stringify({
+    kind: "response",
+    messageId: "stale-host-response",
+    inReplyTo: originalMessageId,
+    requestId: "pending-module-request",
+    ok: true,
+    payload: { decision: { type: "allow" } },
+  })}\n`);
+  await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  assert.equal(settledCalls, 0);
+
+  secondInput.write(`${JSON.stringify({
+    kind: "response",
+    messageId: "current-host-response",
+    inReplyTo: originalMessageId,
+    requestId: "pending-module-request",
+    ok: true,
+    payload: { decision: { type: "allow" } },
+  })}\n`);
+  await waitFor(() => secondLines.some((message) => message.kind === "event" && message.final === true));
+  assert.equal(settledCalls, 1);
+  assert.equal(secondLines.filter((message) => message.kind === "request" && message.method === "module_call").length, 1);
+
+  firstInput.end();
+  secondInput.end();
+  await Promise.all([servingFirst, servingSecond]);
+});
+
+test("sidecar status returns the live snapshot of an accepted execution", async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const lines: Record<string, unknown>[] = [];
+  let buffered = "";
+  let releaseExecution!: () => void;
+  const executionGate = new Promise<void>((resolve) => { releaseExecution = resolve; });
+  output.on("data", (chunk: Buffer) => {
+    buffered += chunk.toString("utf8");
+    for (const line of buffered.split("\n").slice(0, -1)) {
+      const message = JSON.parse(line) as Record<string, unknown>;
+      lines.push(message);
+      if (message.inReplyTo === "execute-status" && message.ok === true) {
+        input.write(`${JSON.stringify({
+          kind: "request",
+          messageId: "status-1",
+          method: "status",
+          requestId: "request-status",
+        })}\n`);
+      }
+      if (message.inReplyTo === "status-1") {
+        releaseExecution();
+        input.end();
+      }
+    }
+    buffered = buffered.slice(buffered.lastIndexOf("\n") + 1);
+  });
+  const factory: SidecarExecutionFactory = () => ({
+    loop: {
+      async *run() {
+        await executionGate;
+        return {
+          result: {
+            type: "success",
+            sessionId: "session-status",
+            turnId: "turn-status",
+            stopReason: "completed",
+            usage: {},
+            permissionDenials: [],
+            turns: 1,
+            startedAt: "2026-09-10T00:00:00.000Z",
+            completedAt: "2026-09-10T00:00:00.001Z",
+          },
+          messages: [],
+        };
+      },
+    } as unknown as AgentLoop,
+    input: {} as never,
+  });
+  const serving = new AgentLoopSidecarServer(factory).serve(input, output);
+  input.write(`${JSON.stringify({
+    kind: "request",
+    messageId: "execute-status",
+    method: "execute",
+    runId: "run-status",
+    operationId: "operation-status",
+    requestId: "request-status",
+    payload: {},
+  })}\n`);
+  await serving;
+
+  const status = lines.find((message) => message.inReplyTo === "status-1");
+  assert.equal(status?.ok, true);
+  assert.deepEqual(status?.payload, {
+    runId: "run-status",
+    operationId: "operation-status",
+    state: "running",
+    requestIds: ["request-status"],
+    cancelRequested: false,
+    updatedAt: (status?.payload as { updatedAt?: string } | undefined)?.updatedAt,
+  });
+  assert.equal(typeof (status?.payload as { updatedAt?: unknown } | undefined)?.updatedAt, "string");
+});
 
 test("sidecar server round-trips host module calls and emits one terminal event", async () => {
   const input = new PassThrough();
@@ -84,6 +481,253 @@ test("sidecar server round-trips host module calls and emits one terminal event"
   assert.equal(terminal?.outcome, "completed");
 });
 
+test("default sidecar server preserves a host model preparation through AgentLoop request normalization", async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const lines: Record<string, unknown>[] = [];
+  const modelCalls: Array<{ operation?: string; preparationId?: string; request?: unknown }> = [];
+  let buffered = "";
+  output.on("data", (chunk: Buffer) => {
+    buffered += chunk.toString("utf8");
+    for (const line of buffered.split("\n").slice(0, -1)) {
+      const message = JSON.parse(line) as Record<string, unknown>;
+      lines.push(message);
+      if (message.kind === "request" && message.method === "module_call") {
+        const payload = message.payload as Record<string, unknown>;
+        modelCalls.push({
+          operation: payload.operation as string | undefined,
+          preparationId: payload.preparationId as string | undefined,
+          request: structuredClone(payload.request),
+        });
+        if (payload.operation === "prepare") {
+          input.write(`${JSON.stringify({
+            kind: "response",
+            messageId: "host-prepared",
+            inReplyTo: message.messageId,
+            requestId: message.requestId,
+            ok: true,
+            payload: {
+              prepared: {
+                request: payload.request,
+                provider: "host-provider",
+                model: "host-model",
+              },
+            },
+          })}\n`);
+        } else {
+          input.write(`${JSON.stringify({
+            kind: "response",
+            messageId: "host-streamed",
+            inReplyTo: message.messageId,
+            requestId: message.requestId,
+            ok: true,
+            payload: {
+              events: [
+                { type: "text_delta", text: "host done" },
+                { type: "message_end", finishReason: "stop" },
+              ],
+            },
+          })}\n`);
+        }
+      }
+      if (message.kind === "event" && message.final === true) input.end();
+    }
+    buffered = buffered.slice(buffered.lastIndexOf("\n") + 1);
+  });
+
+  const serving = new AgentLoopSidecarServer(createSidecarExecution).serve(input, output);
+  input.write(`${JSON.stringify({
+    kind: "request",
+    messageId: "execute-model-preparation",
+    method: "execute",
+    runId: "run-model-preparation",
+    operationId: "operation-model-preparation",
+    requestId: "request-model-preparation",
+    sessionId: "session-model-preparation",
+    turnId: "turn-model-preparation",
+    payload: {
+      agent: { provider: "provider-a", model: "model-a" },
+      hostModules: { model: { methods: ["prepare", "stream"] } },
+      messages: [{ role: "user", content: "preserve the host preparation" }],
+    },
+  })}\n`);
+  await serving;
+
+  assert.deepEqual(modelCalls.map((call) => call.operation), ["prepare", "stream"]);
+  assert.equal(typeof modelCalls[0]?.preparationId, "string");
+  assert.equal(modelCalls[1]?.preparationId, modelCalls[0]?.preparationId);
+  assert.equal((modelCalls[1]?.request as { provider?: string } | undefined)?.provider, "host-provider");
+  assert.equal((modelCalls[1]?.request as { model?: string } | undefined)?.model, "host-model");
+  assert.deepEqual(
+    (modelCalls[1]?.request as { messages?: unknown } | undefined)?.messages,
+    (modelCalls[0]?.request as { messages?: unknown } | undefined)?.messages,
+  );
+  const terminal = lines.find((message) => message.kind === "event" && message.final === true);
+  assert.equal(terminal?.outcome, "completed");
+});
+
+test("sidecar retry keeps operation identity and clears a recovered module failure", async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const lines: Record<string, unknown>[] = [];
+  const moduleCalls: Record<string, unknown>[] = [];
+  let buffered = "";
+  output.on("data", (chunk: Buffer) => {
+    buffered += chunk.toString("utf8");
+    for (const line of buffered.split("\n").slice(0, -1)) {
+      const message = JSON.parse(line) as Record<string, unknown>;
+      lines.push(message);
+      if (message.kind === "request" && message.method === "module_call") {
+        moduleCalls.push(message);
+        const failed = moduleCalls.length === 1;
+        input.write(`${JSON.stringify({
+          kind: "response",
+          messageId: failed ? "host-response-failed" : "host-response-ok",
+          inReplyTo: message.messageId,
+          requestId: message.requestId,
+          ok: !failed,
+          final: true,
+          outcome: failed ? "result_unknown" : "completed",
+          ...(failed ? { code: "MODEL_TEMPORARY_FAILURE", error: { message: "temporary" } } : { payload: { events: [] } }),
+        })}\n`);
+      }
+    }
+    buffered = buffered.slice(buffered.lastIndexOf("\n") + 1);
+  });
+
+  const factory: SidecarExecutionFactory = ({ callModule }) => ({
+    loop: {
+      async *run() {
+        const first = await callModule({
+          runId: "run-1",
+          operationId: "op-1",
+          requestId: "module-1",
+          module: "model",
+          payload: { request: { messages: [{ role: "user", content: [{ type: "text", text: "stable" }] }] } },
+        });
+        assert.equal(first.ok, false);
+        assert.equal(first.outcome, "result_unknown");
+        const second = await callModule({
+          runId: "run-1",
+          operationId: "op-1",
+          requestId: "module-2",
+          module: "model",
+          payload: { request: { messages: [{ role: "user", content: [{ type: "text", text: "stable" }] }] } },
+        });
+        assert.equal(second.ok, true);
+        return {
+          result: {
+            type: "success",
+            sessionId: "session-1",
+            turnId: "turn-1",
+            stopReason: "completed",
+            usage: {},
+            permissionDenials: [],
+            turns: 1,
+            startedAt: "2026-09-02T00:00:00.000Z",
+            completedAt: "2026-09-02T00:00:00.001Z",
+          },
+          messages: [],
+        };
+      },
+    } as unknown as AgentLoop,
+    input: {} as never,
+  });
+  const serving = new AgentLoopSidecarServer(factory).serve(input, output);
+  input.write(`${JSON.stringify({
+    kind: "request",
+    messageId: "execute-1",
+    method: "execute",
+    runId: "run-1",
+    operationId: "op-1",
+    requestId: "request-1",
+    payload: {},
+  })}\n`);
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  input.end();
+  await serving;
+
+  assert.equal(moduleCalls.length, 2);
+  assert.notEqual(moduleCalls[0]?.requestId, moduleCalls[1]?.requestId);
+  assert.equal(moduleCalls[0]?.runId, moduleCalls[1]?.runId);
+  assert.equal(moduleCalls[0]?.operationId, moduleCalls[1]?.operationId);
+  const terminal = lines.find((message) => message.kind === "event" && message.final === true);
+  assert.equal(terminal?.outcome, "completed");
+  assert.equal("code" in (terminal ?? {}), false);
+  assert.equal("error" in (terminal ?? {}), false);
+});
+
+test("sidecar terminal preserves the AgentLoop error instead of replacing it with a host failure", async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const lines: Record<string, unknown>[] = [];
+  let buffered = "";
+  output.on("data", (chunk: Buffer) => {
+    buffered += chunk.toString("utf8");
+    for (const line of buffered.split("\n").slice(0, -1)) {
+      const message = JSON.parse(line) as Record<string, unknown>;
+      lines.push(message);
+      if (message.kind === "request" && message.method === "module_call") {
+        input.write(`${JSON.stringify({
+          kind: "response",
+          messageId: "host-response-failed",
+          inReplyTo: message.messageId,
+          requestId: message.requestId,
+          ok: false,
+          final: true,
+          outcome: "failed",
+          code: "provider_unavailable",
+          error: { message: "temporary provider failure", retryable: true },
+        })}\n`);
+      }
+    }
+    buffered = buffered.slice(buffered.lastIndexOf("\n") + 1);
+  });
+
+  const factory: SidecarExecutionFactory = ({ callModule }) => ({
+    loop: {
+      async *run() {
+        await callModule({
+          runId: "run-1",
+          operationId: "op-1",
+          requestId: "model-1",
+          module: "model",
+          payload: {},
+        });
+        return {
+          result: {
+            type: "error",
+            sessionId: "session-1",
+            turnId: "turn-1",
+            stopReason: "model_error",
+            usage: {},
+            permissionDenials: [],
+            turns: 0,
+            startedAt: "2026-01-01T00:00:00.000Z",
+            completedAt: "2026-01-01T00:00:00.000Z",
+            errors: [{ code: "agent_model_error", message: "temporary provider failure" }],
+          },
+          messages: [],
+        };
+      },
+    } as unknown as AgentLoop,
+    input: {} as never,
+  });
+  const serving = new AgentLoopSidecarServer(factory).serve(input, output);
+  input.write(`${JSON.stringify({ kind: "request", messageId: "execute-1", method: "execute", runId: "run-1", operationId: "op-1", requestId: "request-1", payload: {} })}\n`);
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  input.end();
+  await serving;
+
+  const terminal = lines.find((message) => message.kind === "event" && message.final === true);
+  assert.equal(terminal?.outcome, "failed");
+  assert.equal(terminal?.code, "agent_model_error");
+  assert.deepEqual(terminal?.error, {
+    code: "agent_model_error",
+    message: "temporary provider failure",
+  });
+});
+
 test("sidecar abort releases a pending module call", async () => {
   const input = new PassThrough();
   const output = new PassThrough();
@@ -123,6 +767,108 @@ test("sidecar abort releases a pending module call", async () => {
   await serving;
   const terminal = lines.find((message) => message.kind === "event" && message.final === true);
   assert.equal(terminal?.outcome, "cancelled");
+});
+
+test("sidecar fences stale cancel and duplicate execute against the active operation identity", async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const lines: Record<string, unknown>[] = [];
+  let buffered = "";
+  let factoryCalls = 0;
+  output.on("data", (chunk: Buffer) => {
+    buffered += chunk.toString("utf8");
+    for (const line of buffered.split("\n").slice(0, -1)) {
+      const message = JSON.parse(line) as Record<string, unknown>;
+      lines.push(message);
+      if (message.inReplyTo === "execute-1" && message.ok === true) {
+        input.write(`${JSON.stringify({
+          kind: "request",
+          messageId: "stale-cancel",
+          method: "cancel",
+          runId: "old-run",
+          operationId: "operation-1",
+          requestId: "request-1",
+          reason: "stale",
+        })}\n`);
+        input.write(`${JSON.stringify({
+          kind: "request",
+          messageId: "duplicate-execute",
+          method: "execute",
+          runId: "run-1",
+          operationId: "operation-1",
+          requestId: "request-2",
+          payload: {},
+        })}\n`);
+      }
+      if (
+        message.inReplyTo === "stale-cancel" || message.inReplyTo === "duplicate-execute"
+      ) {
+        const staleCancel = lines.find((candidate) => candidate.inReplyTo === "stale-cancel");
+        const duplicate = lines.find((candidate) => candidate.inReplyTo === "duplicate-execute");
+        if (staleCancel && duplicate) {
+          input.write(`${JSON.stringify({
+            kind: "request",
+            messageId: "matching-cancel",
+            method: "cancel",
+            runId: "run-1",
+            operationId: "operation-1",
+            requestId: "request-1",
+            reason: "current",
+          })}\n`);
+        }
+      }
+      if (message.inReplyTo === "matching-cancel") input.end();
+    }
+    buffered = buffered.slice(buffered.lastIndexOf("\n") + 1);
+  });
+  const factory: SidecarExecutionFactory = ({ abortSignal }) => ({
+    loop: {
+      async *run() {
+        factoryCalls += 1;
+        await new Promise<void>((resolve) => abortSignal.addEventListener("abort", () => resolve(), { once: true }));
+        return {
+          result: {
+            type: "aborted",
+            sessionId: "session-1",
+            turnId: "turn-1",
+            stopReason: "aborted_streaming",
+            usage: {},
+            permissionDenials: [],
+            turns: 1,
+            startedAt: "2026-09-10T00:00:00.000Z",
+            completedAt: "2026-09-10T00:00:00.001Z",
+          },
+          messages: [],
+        };
+      },
+    } as unknown as AgentLoop,
+    input: {} as never,
+  });
+  const serving = new AgentLoopSidecarServer(factory).serve(input, output);
+  input.write(`${JSON.stringify({
+    kind: "request",
+    messageId: "execute-1",
+    method: "execute",
+    runId: "run-1",
+    operationId: "operation-1",
+    requestId: "request-1",
+    payload: {},
+  })}\n`);
+  await serving;
+
+  assert.equal(factoryCalls, 1);
+  const staleCancel = lines.find((message) => message.inReplyTo === "stale-cancel");
+  assert.equal(staleCancel?.ok, false);
+  assert.equal(staleCancel?.code, "OPERATION_IDENTITY_MISMATCH");
+  const duplicate = lines.find((message) => message.inReplyTo === "duplicate-execute");
+  assert.equal(duplicate?.ok, false);
+  assert.equal(duplicate?.code, "OPERATION_ALREADY_ACTIVE");
+  const matchingCancel = lines.find((message) => message.inReplyTo === "matching-cancel");
+  assert.equal(matchingCancel?.ok, true);
+  assert.deepEqual(matchingCancel?.payload, { operationId: "operation-1", cancelled: true });
+  const terminals = lines.filter((message) => message.kind === "event" && message.final === true);
+  assert.equal(terminals.length, 1);
+  assert.equal(terminals[0]?.outcome, "cancelled");
 });
 
 test("sidecar maps max_turns to a failed protocol outcome with the original result", async () => {
@@ -220,7 +966,43 @@ test("sidecar supplies the canonical max_turns code when the result has no error
   assert.equal(terminal?.code, "agent_max_turns_reached");
 });
 
-test("sidecar aborts a generic execution at its deadline", async () => {
+test("sidecar rejects an execute whose deadline expires before it starts", async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const lines: Record<string, unknown>[] = [];
+  let buffered = "";
+  let factoryCalls = 0;
+  output.on("data", (chunk: Buffer) => {
+    buffered += chunk.toString("utf8");
+    for (const line of buffered.split("\n").slice(0, -1)) lines.push(JSON.parse(line) as Record<string, unknown>);
+    buffered = buffered.slice(buffered.lastIndexOf("\n") + 1);
+  });
+  const factory: SidecarExecutionFactory = () => {
+    factoryCalls += 1;
+    throw new Error("expired execute must not start");
+  };
+  const serving = new AgentLoopSidecarServer(factory).serve(input, output);
+  input.end(`${JSON.stringify({
+    kind: "request",
+    messageId: "expired-execute",
+    method: "execute",
+    runId: "run-1",
+    operationId: "op-1",
+    requestId: "request-1",
+    operationDeadline: "2026-09-01T00:00:00.000Z",
+    payload: {},
+  })}\n`);
+  await serving;
+
+  assert.equal(factoryCalls, 0);
+  const rejection = lines.find((message) => message.inReplyTo === "expired-execute");
+  assert.equal(rejection?.ok, false);
+  assert.equal(rejection?.final, true);
+  assert.equal(rejection?.outcome, "failed");
+  assert.equal(rejection?.code, "DEADLINE_EXCEEDED");
+});
+
+test("sidecar resolves an active deadline as result_unknown for the host operation owner", async () => {
   const input = new PassThrough();
   const output = new PassThrough();
   const lines: Record<string, unknown>[] = [];
@@ -245,101 +1027,7 @@ test("sidecar aborts a generic execution at its deadline", async () => {
   input.end();
   await serving;
   const terminal = lines.find((message) => message.kind === "event" && message.final === true);
-  assert.equal(terminal?.outcome, "failed");
+  assert.equal(terminal?.outcome, "result_unknown");
   assert.equal(terminal?.code, "DEADLINE_EXCEEDED");
-});
-
-test("sidecar tool port runs concurrency-safe calls in parallel and preserves order", async () => {
-  const started: number[] = [];
-  const tools: PilotDeckToolDefinition[] = ["one", "two"].map((name) => ({
-    name,
-    description: name,
-    kind: "custom",
-    inputSchema: { type: "object" },
-    isReadOnly: () => true,
-    isConcurrencySafe: () => true,
-    execute: async () => ({ content: [{ type: "text", text: name }] }),
-  }));
-  const { createSidecarPorts } = await import("../../../src/agent/modules/sidecar.js");
-  const ports = createSidecarPorts(async (request) => {
-    started.push(Date.now());
-    await new Promise((resolve) => setTimeout(resolve, 25));
-    const name = String(request.payload.name);
-    return { kind: "response", messageId: `response-${name}`, inReplyTo: "call", ok: true, payload: { type: "success", toolCallId: String(request.payload.toolCallId), toolName: name, content: [], startedAt: "now", completedAt: "now" } };
-  }, { tools });
-  const results = await ports.tools.executeAll(
-    [{ id: "call-1", name: "one", input: {} }, { id: "call-2", name: "two", input: {} }],
-    { sessionId: "s", turnId: "t", cwd: "/tmp", permissionMode: "default", permissionContext: { mode: "default", rules: { allow: [], deny: [], ask: [] }, cwd: "/tmp", additionalWorkingDirectories: [], canPrompt: false, bypassAvailable: false } },
-    { sessionId: "s", turnId: "t", runId: "run-1" },
-  );
-  assert.equal(results[0]?.toolName, "one");
-  assert.equal(results[1]?.toolName, "two");
-  assert.equal(started.length, 2);
-});
-
-test("sidecar tool port delegates an advertised batch to the host once", async () => {
-  const requests: Array<Record<string, unknown>> = [];
-  const tools: PilotDeckToolDefinition[] = ["one", "two"].map((name) => ({
-    name,
-    description: name,
-    kind: "custom",
-    inputSchema: { type: "object" },
-    isReadOnly: () => true,
-    isConcurrencySafe: () => true,
-    execute: async () => ({ content: [{ type: "text", text: name }] }),
-  }));
-  const { createSidecarPorts } = await import("../../../src/agent/modules/sidecar.js");
-  const ports = createSidecarPorts(async (request) => {
-    requests.push(request as unknown as Record<string, unknown>);
-    const calls = request.payload.calls as Array<Record<string, unknown>>;
-    return {
-      kind: "response",
-      messageId: "response-batch",
-      inReplyTo: "call",
-      ok: true,
-      payload: {
-        results: calls.map((call) => ({
-          type: "success",
-          toolCallId: call.toolCallId,
-          toolName: call.name,
-          content: [],
-          startedAt: "now",
-          completedAt: "now",
-        })),
-      },
-    };
-  }, { tools, capabilityMethods: ["execute_batch"] });
-
-  const results = await ports.tools.executeAll(
-    [{ id: "call-1", name: "one", input: {} }, { id: "call-2", name: "two", input: {} }],
-    { sessionId: "s", turnId: "t", cwd: "/tmp", permissionMode: "default", permissionContext: { mode: "default", rules: { allow: [], deny: [], ask: [] }, cwd: "/tmp", additionalWorkingDirectories: [], canPrompt: false, bypassAvailable: false } },
-    { sessionId: "s", turnId: "t", runId: "run-1" },
-  );
-
-  assert.equal(requests.length, 1);
-  assert.equal(requests[0]?.module, "capability");
-  assert.equal((requests[0]?.payload as Record<string, unknown>).operation, "execute_batch");
-  assert.deepEqual(results.map((result) => result.toolCallId), ["call-1", "call-2"]);
-});
-
-test("sidecar tool port rejects reordered batch results", async () => {
-  const { createSidecarPorts } = await import("../../../src/agent/modules/sidecar.js");
-  const ports = createSidecarPorts(async () => ({
-    kind: "response",
-    messageId: "response-batch",
-    inReplyTo: "call",
-    ok: true,
-    payload: {
-      results: [{ type: "success", toolCallId: "call-2", toolName: "two", content: [], startedAt: "now", completedAt: "now" }],
-    },
-  }), { capabilityMethods: ["execute_batch"] });
-
-  await assert.rejects(
-    () => ports.tools.executeAll(
-      [{ id: "call-1", name: "one", input: {} }],
-      { sessionId: "s", turnId: "t", cwd: "/tmp", permissionMode: "default", permissionContext: { mode: "default", rules: { allow: [], deny: [], ask: [] }, cwd: "/tmp", additionalWorkingDirectories: [], canPrompt: false, bypassAvailable: false } },
-      { sessionId: "s", turnId: "t", runId: "run-1" },
-    ),
-    /does not match tool call call-1/,
-  );
+  assert.deepEqual(terminal?.payload, {});
 });

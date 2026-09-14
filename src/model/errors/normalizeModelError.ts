@@ -53,10 +53,14 @@ export function normalizeModelError(
     code,
     status,
     message,
-    retryable: isRetryable(status, code),
+    retryable: readBoolean(source?.retryable) ?? isRetryable(status, code),
     raw,
     ...hint,
   };
+  const retryAfterMs = readNumber(source?.retryAfterMs);
+  if (retryAfterMs !== undefined && retryAfterMs >= 0) {
+    result.retryAfterMs = retryAfterMs;
+  }
   const tokenLimit = parseTokenLimitError(message);
   if (tokenLimit.maxContextTokens !== undefined) {
     result.maxContextTokens = tokenLimit.maxContextTokens;
@@ -76,9 +80,9 @@ export function normalizeModelError(
   if (code === "image_too_large") {
     result.recoverableViaImageStrip = true;
   }
-  const retryAfterMs = parseRetryAfterFromMessage(rawMessage);
-  if (retryAfterMs !== undefined) {
-    result.retryAfterMs = retryAfterMs;
+  const retryAfterFromMessage = parseRetryAfterFromMessage(rawMessage);
+  if (retryAfterFromMessage !== undefined) {
+    result.retryAfterMs = retryAfterFromMessage;
   }
   return result;
 }
@@ -339,6 +343,14 @@ function sanitizeErrorMessage(raw: string): string {
 
 function readString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function readBoolean(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function readNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

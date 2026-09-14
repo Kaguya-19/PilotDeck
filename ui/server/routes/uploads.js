@@ -4,15 +4,14 @@ import path from 'node:path';
 import { UploadStore } from '../../../src/gateway/dialog/UploadStore.js';
 import { getPilotDeckGateway } from '../pilotdeck-bridge.js';
 
-const router = express.Router();
-
 async function listProjectRoots() {
   const gateway = await getPilotDeckGateway();
   const result = await gateway.listProjects();
   return result.projects.map((project) => project.projectKey);
 }
 
-const store = new UploadStore({
+function createNativeUploadStore() {
+  return new UploadStore({
   async resolveProject(projectKey) {
     const projects = await listProjectRoots();
     const match = projects.find((candidate) => path.resolve(candidate) === path.resolve(projectKey || ''));
@@ -29,102 +28,116 @@ const store = new UploadStore({
   maxFiles: envNumber('PILOTDECK_UPLOAD_MAX_FILES'),
   maxConcurrentPerProject: envNumber('PILOTDECK_UPLOAD_MAX_CONCURRENT'),
   retentionMs: envNumber('PILOTDECK_UPLOAD_RETENTION_MS'),
-});
+  leaseRetentionMs: envNumber('PILOTDECK_UPLOAD_LEASE_RETENTION_MS'),
+  });
+}
+
+const store = createNativeUploadStore();
 
 const cleanupTimer = setInterval(() => void store.cleanupExpired().catch((error) => {
   console.warn('[uploads] cleanup failed:', error);
 }), 15 * 60 * 1000);
 cleanupTimer.unref?.();
 
-const storage = {
-  _handleFile(req, file, callback) {
-    const match = /^files\[([A-Za-z0-9._-]+)\]$/.exec(file.fieldname);
-    if (!match) {
-      const error = new Error(`Invalid multipart field: ${file.fieldname}`);
-      error.code = 'UPLOAD_MANIFEST_MISMATCH';
-      callback(error);
-      return;
-    }
-    store.writePart(req.params.uploadId, match[1], file.stream)
-      .then((attachment) => callback(null, attachment))
-      .catch(callback);
-  },
-  _removeFile(_req, _file, callback) { callback(null); },
-};
-const uploadContent = multer({ storage, limits: { files: 500, fields: 20 } }).any();
-
-router.post('/', async (req, res) => {
-  try {
-    const record = await store.create(
-      req.body?.projectKey,
-      req.body?.files,
-      typeof req.get('Idempotency-Key') === 'string' ? req.get('Idempotency-Key') : undefined,
-    );
-    return res.status(201).json({
-      ...publicRecord(record),
-      contentUrl: `/api/uploads/${record.uploadId}/content`,
-      eventsUrl: `/api/uploads/${record.uploadId}/events`,
-    });
-  } catch (error) {
-    return sendError(res, error, req.id);
-  }
-});
-
-router.post('/:uploadId/content', (req, res) => {
-  uploadContent(req, res, async (error) => {
-    if (error) {
-      try {
-        await store.fail(req.params.uploadId, error.code || 'UPLOAD_STREAM_INTERRUPTED', error.message);
-      } catch {}
-      return sendError(res, error, req.id);
-    }
-    try {
-      return res.json(publicRecord(await store.complete(req.params.uploadId)));
-    } catch (completeError) {
-      return sendError(res, completeError, req.id);
-    }
-  });
-});
-
-router.get('/:uploadId/events', async (req, res) => {
-  let pendingRecord;
-  let ready = false;
-  let unsubscribe = () => {};
-  try {
-    unsubscribe = store.subscribe(req.params.uploadId, (record) => {
-      if (!ready) {
-        pendingRecord = record;
+/**
+ * HTTP consumer for an upload lifecycle provider. The default exported router
+ * composes the local filesystem provider below; route behavior does not depend
+ * on UploadStore internals.
+ */
+export function createUploadRoutes(lifecycle = store) {
+  const router = express.Router();
+  const storage = {
+    _handleFile(req, file, callback) {
+      const match = /^files\[([A-Za-z0-9._-]+)\]$/.exec(file.fieldname);
+      if (!match) {
+        const error = new Error(`Invalid multipart field: ${file.fieldname}`);
+        error.code = 'UPLOAD_MANIFEST_MISMATCH';
+        callback(error);
         return;
       }
-      sendEvent(res, eventName(record), record);
-      if (isTerminal(record.status)) { unsubscribe(); res.end(); }
+      lifecycle.writePart(req.params.uploadId, match[1], file.stream)
+        .then((attachment) => callback(null, attachment))
+        .catch(callback);
+    },
+    _removeFile(_req, _file, callback) { callback(null); },
+  };
+  const uploadContent = multer({ storage, limits: { files: 500, fields: 20 } }).any();
+
+  router.post('/', async (req, res) => {
+    try {
+      const record = await lifecycle.create(
+        req.body?.projectKey,
+        req.body?.files,
+        typeof req.get('Idempotency-Key') === 'string' ? req.get('Idempotency-Key') : undefined,
+      );
+      return res.status(201).json({
+        ...publicRecord(record),
+        contentUrl: `/api/uploads/${record.uploadId}/content`,
+        eventsUrl: `/api/uploads/${record.uploadId}/events`,
+      });
+    } catch (error) {
+      return sendError(res, error, req.id);
+    }
+  });
+
+  router.post('/:uploadId/content', (req, res) => {
+    uploadContent(req, res, async (error) => {
+      if (error) {
+        try {
+          await lifecycle.fail(req.params.uploadId, error.code || 'UPLOAD_STREAM_INTERRUPTED', error.message);
+        } catch {}
+        return sendError(res, error, req.id);
+      }
+      try {
+        return res.json(publicRecord(await lifecycle.complete(req.params.uploadId)));
+      } catch (completeError) {
+        return sendError(res, completeError, req.id);
+      }
     });
-    const snapshot = await store.get(req.params.uploadId);
-    res.status(200);
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache, no-transform');
-    res.setHeader('Connection', 'keep-alive');
-    res.flushHeaders?.();
-    ready = true;
-    const current = pendingRecord ?? snapshot;
-    sendEvent(res, eventName(current), current);
-    if (isTerminal(current.status)) { unsubscribe(); return res.end(); }
-    req.on('close', unsubscribe);
-  } catch (error) {
-    unsubscribe();
-    return sendError(res, error, req.id);
-  }
-});
+  });
 
-router.get('/:uploadId', async (req, res) => {
-  try { return res.json(publicRecord(await store.get(req.params.uploadId))); }
-  catch (error) { return sendError(res, error, req.id); }
-});
+  router.get('/:uploadId/events', async (req, res) => {
+    let pendingRecord;
+    let ready = false;
+    let unsubscribe = () => {};
+    try {
+      unsubscribe = lifecycle.subscribe(req.params.uploadId, (record) => {
+        if (!ready) {
+          pendingRecord = record;
+          return;
+        }
+        sendEvent(res, eventName(record), record);
+        if (isTerminal(record.status)) { unsubscribe(); res.end(); }
+      });
+      const snapshot = await lifecycle.get(req.params.uploadId);
+      res.status(200);
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache, no-transform');
+      res.setHeader('Connection', 'keep-alive');
+      res.flushHeaders?.();
+      ready = true;
+      const current = pendingRecord ?? snapshot;
+      sendEvent(res, eventName(current), current);
+      if (isTerminal(current.status)) { unsubscribe(); return res.end(); }
+      req.on('close', unsubscribe);
+    } catch (error) {
+      unsubscribe();
+      return sendError(res, error, req.id);
+    }
+  });
 
-router.delete('/:uploadId', async (req, res) => {
-  try { await store.cancel(req.params.uploadId); return res.status(204).end(); }
-  catch (error) { return sendError(res, error, req.id); }
-});
+  router.get('/:uploadId', async (req, res) => {
+    try { return res.json(publicRecord(await lifecycle.get(req.params.uploadId))); }
+    catch (error) { return sendError(res, error, req.id); }
+  });
+
+  router.delete('/:uploadId', async (req, res) => {
+    try { await lifecycle.cancel(req.params.uploadId); return res.status(204).end(); }
+    catch (error) { return sendError(res, error, req.id); }
+  });
+
+  return router;
+}
 
 function publicRecord(record) {
   return {
@@ -168,5 +181,6 @@ function sendError(res, error, requestId) {
   } });
 }
 
+const router = createUploadRoutes();
 export { store as uploadStore };
 export default router;

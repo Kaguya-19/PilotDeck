@@ -1,5 +1,10 @@
 import type { ModelConfig } from "../../model/index.js";
 import {
+  LITELLM_DEFAULT_MAX_RETRIES,
+  LITELLM_INITIAL_RETRY_DELAY_MS,
+  LITELLM_MAX_RETRY_DELAY_MS,
+} from "../../model/streaming/streamModel.js";
+import {
   DEFAULT_ALLOWED_TOOLS,
   DEFAULT_BLOCKED_TOOLS,
   DEFAULT_JUDGE_TIMEOUT_MS,
@@ -95,6 +100,7 @@ export function parseRouterConfig(
 
   const fallback = parseFallback(raw.fallback, modelConfig, diagnostics);
   const zeroUsageRetry = parseZeroUsageRetry(raw.zeroUsageRetry, diagnostics);
+  const transientRetry = parseTransientRetry(raw.transientRetry, diagnostics);
   const tokenSaver = parseTokenSaver(raw.tokenSaver, modelConfig, diagnostics);
   const autoOrchestrate = parseAutoOrchestrate(raw.autoOrchestrate, modelConfig, tokenSaver, diagnostics);
   const stats = parseStats(raw.stats, modelConfig, diagnostics);
@@ -106,6 +112,7 @@ export function parseRouterConfig(
       ...(scenarios ? { scenarios } : {}),
       fallback,
       zeroUsageRetry,
+      transientRetry,
       tokenSaver,
       autoOrchestrate,
       stats,
@@ -214,6 +221,65 @@ function parseFallback(
     fallback.maxFallbacks = LITELLM_ROUTER_MAX_FALLBACKS;
   }
   return Object.keys(fallback).length > 0 ? fallback : undefined;
+}
+
+function parseTransientRetry(
+  raw: unknown,
+  diagnostics: RouterConfigDiagnostic[],
+): RouterConfig["transientRetry"] {
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (!isRecord(raw)) {
+    diagnostics.push({
+      code: "ROUTER_TRANSIENT_RETRY_INVALID",
+      severity: "fatal",
+      path: "router.transientRetry",
+      message: "router.transientRetry must be an object.",
+    });
+    return undefined;
+  }
+
+  let enabled = true;
+  if (raw.enabled !== undefined) {
+    if (typeof raw.enabled === "boolean") {
+      enabled = raw.enabled;
+    } else {
+      diagnostics.push({
+        code: "ROUTER_TRANSIENT_RETRY_ENABLED_INVALID",
+        severity: "fatal",
+        path: "router.transientRetry.enabled",
+        message: "enabled must be a boolean.",
+      });
+    }
+  }
+
+  const readNonNegativeNumber = (key: string, fallback: number, integer = false): number => {
+    const value = raw[key];
+    if (value === undefined) {
+      return fallback;
+    }
+    if (
+      typeof value === "number"
+      && Number.isFinite(value)
+      && value >= 0
+      && (!integer || Number.isInteger(value))
+    ) {
+      return value;
+    }
+    diagnostics.push({
+      code: "ROUTER_TRANSIENT_RETRY_VALUE_INVALID",
+      severity: "fatal",
+      path: `router.transientRetry.${key}`,
+      message: `${key} must be a non-negative ${integer ? "integer" : "number"}.`,
+    });
+    return fallback;
+  };
+
+  const maxAttempts = readNonNegativeNumber("maxAttempts", LITELLM_DEFAULT_MAX_RETRIES, true);
+  const baseDelayMs = readNonNegativeNumber("baseDelayMs", LITELLM_INITIAL_RETRY_DELAY_MS);
+  const maxDelayMs = readNonNegativeNumber("maxDelayMs", LITELLM_MAX_RETRY_DELAY_MS);
+  return { enabled, maxAttempts, baseDelayMs, maxDelayMs };
 }
 
 function parseZeroUsageRetry(

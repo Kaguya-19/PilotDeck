@@ -1,7 +1,17 @@
 import type { CanonicalContentBlock } from "../../model/index.js";
 import type { PermissionMode, PermissionRuleSet } from "../../permission/index.js";
 
-export type AgentRunMode = "agent" | "plan" | "ask";
+/** User-visible execution modes accepted at the Agent input boundary. */
+export const AGENT_RUN_MODES = ["agent", "plan", "ask"] as const;
+
+export type AgentRunMode = (typeof AGENT_RUN_MODES)[number];
+
+/** Parse a wire/UI value without choosing a caller-specific fallback. */
+export function parseAgentRunMode(value: unknown): AgentRunMode | undefined {
+  return typeof value === "string" && AGENT_RUN_MODES.some((mode) => mode === value)
+    ? value as AgentRunMode
+    : undefined;
+}
 
 export type AgentModelOverride = {
   provider: string;
@@ -17,6 +27,11 @@ export type AgentInput =
 
 export type AgentSubmitOptions = {
   turnId?: string;
+  /**
+   * Host-owned execution identity. Gateway and external transports use this
+   * to keep one run/operation identity across an AgentLoop provider boundary.
+   */
+  execution?: Pick<import("../modules/protocol.js").AgentExecutionContext, "runId" | "operationId" | "idempotencyKey" | "operationDeadline">;
   maxTurns?: number;
   metadata?: Record<string, unknown>;
   runMode?: AgentRunMode;

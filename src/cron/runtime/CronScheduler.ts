@@ -1,6 +1,6 @@
 import type { CronConfig } from "../config/parseCronConfig.js";
 import type { CronTask } from "../protocol/types.js";
-import type { CronTaskStore } from "../storage/CronTaskStore.js";
+import type { CronTaskStorePort } from "./CronProjectStorageProvider.js";
 import { resolveCronTimezone } from "../CronTimezone.js";
 import { computeNextRunAt } from "./CronSchedule.js";
 import type { CronFire } from "./CronFire.js";
@@ -10,7 +10,7 @@ const MIN_TIMER_MS = 250;
 
 export type CronSchedulerDependencies = {
   config: CronConfig;
-  store: CronTaskStore;
+  store: CronTaskStorePort;
   fire: CronFire;
   uuid: () => string;
   now: () => Date;

@@ -1,3 +1,5 @@
+import type { InteractionPolicy, InteractionPolicyMode } from "../../interaction/index.js";
+
 /**
  * Elicitation channel — abstraction over how a synchronous user prompt is
  * delivered (CLI / TUI / Feishu / in-memory test). Owned by the host
@@ -44,10 +46,57 @@ export type PilotDeckElicitationAnswer =
   | { type: "answered"; answers: Record<string, string | string[]>; annotations?: Record<string, { preview?: string; notes?: string }> }
   | { type: "cancelled"; reason?: string };
 
+/** Host-independent answerer used by headless profiles. */
+export type PilotDeckElicitationAnswerer = {
+  answer(request: PilotDeckElicitationRequest): Promise<PilotDeckElicitationAnswer>;
+};
+
 export type PilotDeckElicitationChannel = {
   /** Send a question batch to the user and await one answer batch. */
   askUser(request: PilotDeckElicitationRequest): Promise<PilotDeckElicitationAnswer>;
+  /** Stop accepting requests and release any pending host round-trips. */
+  dispose?(reason?: string): void | Promise<void>;
 };
+
+export function createElicitationChannelFromAnswerer(
+  answerer: PilotDeckElicitationAnswerer,
+  options: {
+    policy?: InteractionPolicy;
+    policyMode?: InteractionPolicyMode;
+    canPrompt?: boolean;
+  } = {},
+): PilotDeckElicitationChannel {
+  let state: "active" | "draining" | "disposed" = "active";
+  const pending = new Set<Promise<PilotDeckElicitationAnswer>>();
+  return {
+    askUser: (request) => {
+      if (state !== "active") {
+        return Promise.reject(new Error(`Elicitation channel is ${state}.`));
+      }
+      const decision = options.policy?.decide({
+        kind: "question",
+        mode: options.policyMode ?? "headless",
+        hasAnswerer: true,
+        canPrompt: options.canPrompt,
+      });
+      if (decision && decision.outcome !== "ask") {
+        return Promise.resolve({ type: "cancelled", reason: decision.reason });
+      }
+      const result = Promise.resolve().then(() => answerer.answer(request));
+      pending.add(result);
+      const cleanup = () => pending.delete(result);
+      void result.then(cleanup, cleanup);
+      return result;
+    },
+    dispose: async (reason = "elicitation_channel_disposed") => {
+      if (state === "disposed") return;
+      state = "draining";
+      await Promise.allSettled([...pending]);
+      state = "disposed";
+      void reason;
+    },
+  };
+}
 
 /**
  * Test/in-memory channel: pre-canned answers keyed by question text.

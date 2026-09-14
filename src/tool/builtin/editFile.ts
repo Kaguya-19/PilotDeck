@@ -1,11 +1,11 @@
-import { stat } from "node:fs/promises";
 import type { PilotDeckToolDefinition } from "../protocol/types.js";
 import { PilotDeckToolRuntimeError } from "../protocol/errors.js";
 import { isNotebookPath } from "./filesystem/fileTypeSafety.js";
 import { resolvePilotDeckWorkspacePath } from "./filesystem/pathSafety.js";
 import { checkFilesystemWritePermission } from "./filesystem/writePermissions.js";
 import { readTextFile } from "./filesystem/readTextFile.js";
-import { writeTextFile } from "./filesystem/writeTextFile.js";
+import { createNodeFsPort } from "../execution-world/NodeFsPort.js";
+import type { FsPort } from "../execution-world/FsPort.js";
 import {
   ensureWriteSnapshotFresh,
   invalidateReadFileState,
@@ -14,6 +14,7 @@ import {
 } from "./filesystem/writeSnapshots.js";
 import { findActualString, normalizeEditInput } from "./filesystem/editNormalization.js";
 import { formatSyntaxDiagnostics } from "./filesystem/syntaxDiagnostics.js";
+import type { SubprocessPort } from "../execution-world/SubprocessPort.js";
 
 export type EditFileInput = {
   file_path: string;
@@ -22,7 +23,13 @@ export type EditFileInput = {
   replace_all?: boolean;
 };
 
-export function createEditFileTool(): PilotDeckToolDefinition<EditFileInput> {
+export type CreateEditFileToolOptions = {
+  fs?: FsPort;
+  subprocess?: Pick<SubprocessPort, "executeFile">;
+};
+
+export function createEditFileTool(options: CreateEditFileToolOptions = {}): PilotDeckToolDefinition<EditFileInput> {
+  const fs = options.fs ?? createNodeFsPort();
   return {
     name: "edit_file",
     aliases: ["Edit"],
@@ -98,7 +105,7 @@ export function createEditFileTool(): PilotDeckToolDefinition<EditFileInput> {
 
       let freshness: { exists: boolean };
       try {
-        freshness = await validateWriteSnapshotFresh(context, resolved.absolutePath);
+        freshness = await validateWriteSnapshotFresh(context, resolved.absolutePath, fs);
       } catch (error) {
         const normalized = error instanceof PilotDeckToolRuntimeError ? error.message : String(error);
         if (
@@ -135,7 +142,7 @@ export function createEditFileTool(): PilotDeckToolDefinition<EditFileInput> {
         return { ok: true, input };
       }
 
-      const content = await readTextFile(resolved.absolutePath);
+      const content = await readTextFile(resolved.absolutePath, fs);
       if (content.length === 0) {
         return { ok: true, input };
       }
@@ -158,7 +165,7 @@ export function createEditFileTool(): PilotDeckToolDefinition<EditFileInput> {
         throw new PilotDeckToolRuntimeError(resolved.error.code, resolved.error.message, resolved.error.details);
       }
 
-      const freshness = await ensureWriteSnapshotFresh(context, resolved.absolutePath);
+      const freshness = await ensureWriteSnapshotFresh(context, resolved.absolutePath, fs);
       if (context.fileHistory) {
         await context.fileHistory.trackEdit(
           resolved.absolutePath,
@@ -200,10 +207,12 @@ export function createEditFileTool(): PilotDeckToolDefinition<EditFileInput> {
           : content.replace(actualOldString, normalizedNew);
       }
 
-      const action = await writeTextFile(resolved.absolutePath, nextContent, { allowOverwrite: true });
-      const fileStat = await stat(resolved.absolutePath);
+      const write = await fs.writeText(resolved.absolutePath, nextContent, {
+        allowOverwrite: true,
+        workspaceRoot: resolved.root,
+      });
       invalidateReadFileState(context, resolved.absolutePath);
-      recordWriteSnapshot(context, resolved.absolutePath, nextContent, Math.floor(fileStat.mtimeMs));
+      recordWriteSnapshot(context, resolved.absolutePath, nextContent, write.mtimeMs);
 
       const update = {
         absolutePath: resolved.absolutePath,
@@ -217,8 +226,10 @@ export function createEditFileTool(): PilotDeckToolDefinition<EditFileInput> {
 
       const replacements = input.old_string === "" ? 0 : input.replace_all ? occurrences : 1;
       const successText =
-        `${action === "created" ? "Created" : "Updated"} ${resolved.relativePath}${replacements > 0 ? ` (${replacements} replacement).` : "."}`;
-      const syntaxDiagnostics = await formatSyntaxDiagnostics(resolved.relativePath, nextContent);
+        `${write.action === "created" ? "Created" : "Updated"} ${resolved.relativePath}${replacements > 0 ? ` (${replacements} replacement).` : "."}`;
+      const syntaxDiagnostics = await formatSyntaxDiagnostics(resolved.relativePath, nextContent, {
+        subprocess: options.subprocess,
+      });
       return {
         content: [{
           type: "text",
@@ -227,11 +238,11 @@ export function createEditFileTool(): PilotDeckToolDefinition<EditFileInput> {
         data: {
           filePath: resolved.relativePath,
           replacements,
-          changed: action === "created" || nextContent !== content,
+          changed: write.action === "created" || nextContent !== content,
         },
         metadata: {
           bytesWritten: Buffer.byteLength(nextContent, "utf8"),
-          mtimeMs: Math.floor(fileStat.mtimeMs),
+          mtimeMs: write.mtimeMs,
         },
       };
     },

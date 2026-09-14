@@ -1,10 +1,12 @@
 import type { DiscoveryPlanRecord, WorkspaceHandle } from "../protocol/types.js";
-import type { DiscoveryPlanStore } from "../storage/DiscoveryPlanStore.js";
-import type { DiscoveryReportStore } from "../storage/DiscoveryReportStore.js";
-import type { DiscoveryStateStore } from "../storage/DiscoveryStateStore.js";
-import type { WorkCycleStore } from "../storage/WorkCycleStore.js";
 import type { AlwaysOnPaths } from "../storage/AlwaysOnPaths.js";
 import type { WorkspaceProviderRegistry } from "../workspace/WorkspaceProviderRegistry.js";
+import type {
+  DiscoveryPlanStorePort,
+  DiscoveryReportStorePort,
+  DiscoveryStateStorePort,
+  WorkCycleStorePort,
+} from "./AlwaysOnProjectStorageProvider.js";
 
 export type DiscoveryRunContext = {
   kind: "discovery";
@@ -13,7 +15,7 @@ export type DiscoveryRunContext = {
   projectKey: string;
   paths: AlwaysOnPaths;
   startedAt: Date;
-  planStore: DiscoveryPlanStore;
+  planStore: DiscoveryPlanStorePort;
   /** Set after the plan tool succeeds. */
   plan?: { record: DiscoveryPlanRecord; markdown: string };
   /** Number of plan-tool calls in this fire (success and failure). */
@@ -30,8 +32,8 @@ export type WorkspaceRunContext = {
   projectKey: string;
   paths: AlwaysOnPaths;
   workspaceRegistry: WorkspaceProviderRegistry;
-  stateStore: DiscoveryStateStore;
-  cycleStore: WorkCycleStore;
+  stateStore: DiscoveryStateStorePort;
+  cycleStore: WorkCycleStorePort;
   now: () => Date;
   /** Set after the workspace tool succeeds. */
   handle?: WorkspaceHandle;
@@ -55,7 +57,7 @@ export type ReportRunContext = {
   paths: AlwaysOnPaths;
   workspace: WorkspaceHandle;
   plan: DiscoveryPlanRecord;
-  reportStore: DiscoveryReportStore;
+  reportStore: DiscoveryReportStorePort;
   reportCallCount: number;
   /** Set after the first successful report tool call. */
   report?: { markdown: string; filePath: string; finishedAt: Date };

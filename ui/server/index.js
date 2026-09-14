@@ -59,6 +59,8 @@ import { readPermissionSettings } from './services/permissionSettings.js';
 import { regenerateLastMessageTransaction } from './services/regenerateLastMessage.js';
 import { getDefaultPtyShell } from './utils/defaultShell.js';
 import { getOpenUrlSpawnCommand } from './utils/processSpawn.js';
+import { TerminalSessionRegistry } from './services/terminalSessionRegistry.js';
+import { createNodeTerminalPtyPort } from './services/terminalPtyPort.js';
 
 import { getProjects, getProjectCronJobsOverview, getSessions, renameProject, deleteSession, deleteProject, addProjectManually, extractProjectDirectory, clearProjectDirectoryCache, searchConversations } from './projects.js';
 import {
@@ -374,8 +376,8 @@ app.locals.restartInstanceInfo = {
 };
 const server = http.createServer(app);
 
-const ptySessionsMap = new Map();
-const PTY_SESSION_TIMEOUT = 30 * 60 * 1000;
+const terminalSessions = new TerminalSessionRegistry();
+const terminalPty = createNodeTerminalPtyPort(pty);
 const SHELL_URL_PARSE_BUFFER_LIMIT = 32768;
 const ANSI_ESCAPE_SEQUENCE_REGEX = /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))/g;
 const TRAILING_URL_PUNCTUATION_REGEX = /[)\]}>.,;:!?]+$/;
@@ -2742,8 +2744,15 @@ function handleShellConnection(ws) {
     console.log('🐚 Shell client connected');
     let shellProcess = null;
     let ptySessionKey = null;
+    let boundTerminal = null;
     let urlDetectionBuffer = '';
     const announcedAuthUrls = new Set();
+    const detachBoundTerminal = () => {
+        const binding = boundTerminal;
+        boundTerminal = null;
+        if (!binding) return null;
+        return terminalSessions.detach(binding.key, binding.pty, ws);
+    };
 
     ws.on('message', async (message) => {
         try {
@@ -2774,38 +2783,39 @@ function handleShellConnection(ws) {
 
                 // Kill any existing login session before starting fresh
                 if (isLoginCommand) {
-                    const oldSession = ptySessionsMap.get(ptySessionKey);
+                    const oldSession = terminalSessions.get(ptySessionKey);
                     if (oldSession) {
                         console.log('🧹 Cleaning up existing login session:', ptySessionKey);
-                        if (oldSession.timeoutId) clearTimeout(oldSession.timeoutId);
-                        if (oldSession.pty && oldSession.pty.kill) oldSession.pty.kill();
-                        ptySessionsMap.delete(ptySessionKey);
+                        terminalSessions.replace(ptySessionKey);
                     }
                 }
 
-                const existingSession = isLoginCommand ? null : ptySessionsMap.get(ptySessionKey);
+                const existingSession = isLoginCommand ? null : terminalSessions.get(ptySessionKey);
                 if (existingSession) {
                     console.log('♻️  Reconnecting to existing PTY session:', ptySessionKey);
                     shellProcess = existingSession.pty;
-
-                    clearTimeout(existingSession.timeoutId);
+                    detachBoundTerminal();
+                    const reconnected = terminalSessions.reconnect(ptySessionKey, shellProcess, ws);
+                    if (!reconnected) {
+                        shellProcess = null;
+                        return;
+                    }
+                    boundTerminal = { key: ptySessionKey, pty: shellProcess };
 
                     ws.send(JSON.stringify({
                         type: 'output',
                         data: `\x1b[36m[Reconnected to existing session]\x1b[0m\r\n`
                     }));
 
-                    if (existingSession.buffer && existingSession.buffer.length > 0) {
-                        console.log(`📜 Sending ${existingSession.buffer.length} buffered messages`);
-                        existingSession.buffer.forEach(bufferedData => {
+                    if (reconnected.buffer.length > 0) {
+                        console.log(`📜 Sending ${reconnected.buffer.length} buffered messages`);
+                        reconnected.buffer.forEach(bufferedData => {
                             ws.send(JSON.stringify({
                                 type: 'output',
                                 data: bufferedData
                             }));
                         });
                     }
-
-                    existingSession.ws = ws;
 
                     return;
                 }
@@ -2932,7 +2942,9 @@ function handleShellConnection(ws) {
                     const termRows = data.rows || 24;
                     console.log('📐 Using terminal dimensions:', termCols, 'x', termRows);
 
-                    shellProcess = pty.spawn(shell, shellArgs, {
+                    const spawnedPty = terminalPty.spawn({
+                        shell,
+                        args: shellArgs,
                         name: 'xterm-256color',
                         cols: termCols,
                         rows: termRows,
@@ -2944,29 +2956,29 @@ function handleShellConnection(ws) {
                             FORCE_COLOR: '3'
                         }
                     });
+                    shellProcess = spawnedPty;
+                    const spawnedSessionKey = ptySessionKey;
 
-                    console.log('🟢 Shell process started with PTY, PID:', shellProcess.pid);
+                    console.log('🟢 Shell process started with PTY, PID:', spawnedPty.pid);
 
-                    ptySessionsMap.set(ptySessionKey, {
-                        pty: shellProcess,
+                    detachBoundTerminal();
+                    const registeredSession = terminalSessions.register(spawnedSessionKey, {
+                        pty: spawnedPty,
                         ws: ws,
-                        buffer: [],
-                        timeoutId: null,
                         projectPath,
                         sessionId
                     });
+                    if (!registeredSession) {
+                        shellProcess = null;
+                        ws.send(JSON.stringify({ type: 'error', message: 'Terminal server is shutting down' }));
+                        return;
+                    }
+                    boundTerminal = { key: spawnedSessionKey, pty: spawnedPty };
 
                     // Handle data output
-                    shellProcess.onData((data) => {
-                        const session = ptySessionsMap.get(ptySessionKey);
+                    spawnedPty.onData((data) => {
+                        const session = terminalSessions.appendOutput(spawnedSessionKey, spawnedPty, data);
                         if (!session) return;
-
-                        if (session.buffer.length < 5000) {
-                            session.buffer.push(data);
-                        } else {
-                            session.buffer.shift();
-                            session.buffer.push(data);
-                        }
 
                         if (session.ws && session.ws.readyState === WebSocket.OPEN) {
                             let outputData = data;
@@ -3022,20 +3034,19 @@ function handleShellConnection(ws) {
                     });
 
                     // Handle process exit
-                    shellProcess.onExit((exitCode) => {
+                    spawnedPty.onExit((exitCode) => {
                         console.log('🔚 Shell process exited with code:', exitCode.exitCode, 'signal:', exitCode.signal);
-                        const session = ptySessionsMap.get(ptySessionKey);
+                        const session = terminalSessions.complete(spawnedSessionKey, spawnedPty);
                         if (session && session.ws && session.ws.readyState === WebSocket.OPEN) {
                             session.ws.send(JSON.stringify({
                                 type: 'output',
                                 data: `\r\n\x1b[33mProcess exited with code ${exitCode.exitCode}${exitCode.signal ? ` (${exitCode.signal})` : ''}\x1b[0m\r\n`
                             }));
                         }
-                        if (session && session.timeoutId) {
-                            clearTimeout(session.timeoutId);
+                        if (boundTerminal?.key === spawnedSessionKey && boundTerminal.pty === spawnedPty) {
+                            boundTerminal = null;
                         }
-                        ptySessionsMap.delete(ptySessionKey);
-                        shellProcess = null;
+                        if (shellProcess === spawnedPty) shellProcess = null;
                     });
 
                 } catch (spawnError) {
@@ -3048,9 +3059,11 @@ function handleShellConnection(ws) {
 
             } else if (data.type === 'input') {
                 // Send input to shell process
-                if (shellProcess && shellProcess.write) {
+                if (boundTerminal) {
                     try {
-                        shellProcess.write(data.data);
+                        if (!terminalSessions.write(boundTerminal.key, boundTerminal.pty, ws, data.data)) {
+                            console.warn('No active shell process to send input to');
+                        }
                     } catch (error) {
                         console.error('Error writing to shell:', error);
                     }
@@ -3059,9 +3072,11 @@ function handleShellConnection(ws) {
                 }
             } else if (data.type === 'resize') {
                 // Handle terminal resize
-                if (shellProcess && shellProcess.resize) {
+                if (boundTerminal) {
                     console.log('Terminal resize requested:', data.cols, 'x', data.rows);
-                    shellProcess.resize(data.cols, data.rows);
+                    if (!terminalSessions.resize(boundTerminal.key, boundTerminal.pty, ws, data.cols, data.rows)) {
+                        console.warn('No active shell process to resize');
+                    }
                 }
             }
         } catch (error) {
@@ -3078,20 +3093,9 @@ function handleShellConnection(ws) {
     ws.on('close', () => {
         console.log('🔌 Shell client disconnected');
 
-        if (ptySessionKey) {
-            const session = ptySessionsMap.get(ptySessionKey);
-            if (session) {
-                console.log('⏳ PTY session kept alive, will timeout in 30 minutes:', ptySessionKey);
-                session.ws = null;
-
-                session.timeoutId = setTimeout(() => {
-                    console.log('⏰ PTY session timeout, killing process:', ptySessionKey);
-                    if (session.pty && session.pty.kill) {
-                        session.pty.kill();
-                    }
-                    ptySessionsMap.delete(ptySessionKey);
-                }, PTY_SESSION_TIMEOUT);
-            }
+        const detached = detachBoundTerminal();
+        if (detached) {
+            console.log('⏳ PTY session kept alive, will timeout in 30 minutes:', detached.key);
         }
     });
 
@@ -3798,6 +3802,7 @@ async function startServer() {
 
             shutdownPromise = (async () => {
                 try {
+                    terminalSessions.dispose();
                     stopMemoryScheduler();
                     closeMemoryServices();
                     stopPilotDeckConfigWatcher();

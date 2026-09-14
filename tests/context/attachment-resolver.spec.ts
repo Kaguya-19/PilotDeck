@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { AttachmentResolver } from "../../src/context/attachments/AttachmentResolver.js";
+import type { AttachmentPort } from "../../src/context/attachments/AttachmentPort.js";
 
 test("Office attachments are reported unsupported before size checks", async () => {
   const root = await mkdtemp(join(tmpdir(), "pilotdeck-attachment-resolver-"));
@@ -22,4 +23,38 @@ test("Office attachments are reported unsupported before size checks", async () 
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("AttachmentResolver consumes an injected attachment storage provider", async () => {
+  const calls: string[] = [];
+  const attachmentPort: AttachmentPort = {
+    async stat(path) {
+      calls.push(`stat:${path}`);
+      return { size: 12 };
+    },
+    async readText(path) {
+      calls.push(`text:${path}`);
+      return "from provider";
+    },
+    async readBytes(path) {
+      calls.push(`bytes:${path}`);
+      return new Uint8Array([0, 1, 2]);
+    },
+  };
+  const resolver = new AttachmentResolver({ attachmentPort });
+
+  const text = await resolver.resolve({ type: "file", path: "/attachments/notes.txt" });
+  const image = await resolver.resolve({ type: "image", path: "/attachments/image.png" });
+
+  assert.deepEqual(text.blocks, [{
+    type: "text",
+    text: '<attachment path="/attachments/notes.txt">\nfrom provider\n</attachment>',
+  }]);
+  assert.equal(image.diagnostics[0]?.code, "image_invalid");
+  assert.deepEqual(calls, [
+    "stat:/attachments/notes.txt",
+    "text:/attachments/notes.txt",
+    "stat:/attachments/image.png",
+    "bytes:/attachments/image.png",
+  ]);
 });

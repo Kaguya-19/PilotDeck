@@ -1,8 +1,8 @@
 import type { PilotDeckToolDefinition } from "../../tool/index.js";
 import type { CronListInput, CronListResult } from "../protocol/types.js";
-import type { CronToolRuntime } from "./CronToolRuntime.js";
+import type { CronControlPort } from "../runtime/CronControlPort.js";
 
-export function createCronListTool(runtime: CronToolRuntime): PilotDeckToolDefinition<CronListInput, CronListResult> {
+export function createCronListTool(runtime: CronControlPort): PilotDeckToolDefinition<CronListInput, CronListResult> {
   return {
     name: "cron_list",
     title: "List Cron Tasks",

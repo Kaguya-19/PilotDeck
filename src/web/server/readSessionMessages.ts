@@ -21,10 +21,22 @@ import {
   type CanonicalContentBlock,
   type CanonicalImageBlock,
   type CanonicalMessage,
-  type CanonicalUsage,
 } from "../../model/index.js";
-import { listProjectSessions, readTranscript, type SessionInfo } from "../../session/index.js";
-import type { AgentTranscriptEntry } from "../../session/transcript/TranscriptEntry.js";
+import {
+  projectSubagentReferences,
+  projectWebHistory,
+  readAgentProjectSessionPersistence,
+  readSubagentProjectSessionPersistence,
+  readTranscript,
+  type WebTokenUsageProjectionResult,
+} from "../../session/index.js";
+import type { SessionCatalogPort, SessionInfo } from "../../session/catalog/SessionCatalogPort.js";
+import type { ProjectSessionStorageProvider } from "../../session/storage/ProjectSessionStorageProvider.js";
+import type {
+  AgentSubagentCompletedTranscriptEntry,
+  AgentSubagentStartedTranscriptEntry,
+  AgentTranscriptEntry,
+} from "../../session/transcript/TranscriptEntry.js";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { getPilotProjectChatDir } from "../../pilot/index.js";
 import { sanitizeSessionIdForPath } from "../../session/storage/ProjectSessionStorage.js";
@@ -37,6 +49,10 @@ import type { WebMessage, WebMessageKind, WebMessageRole } from "../client/webMe
 export type ReadWebSessionMessagesOptions = {
   projectRoot: string;
   pilotHome: string;
+  /** Application-selected read-only catalog used to resolve session metadata. */
+  sessionCatalog: SessionCatalogPort;
+  /** Optional selected persistence backend for standard Agent session history. */
+  storageProvider?: ProjectSessionStorageProvider;
   maxContextTokens?: number;
   maxOutputTokens?: number;
   /** Override clock for deterministic tests. */
@@ -53,17 +69,26 @@ export async function readWebSessionMessages(
   const chatDir = getPilotProjectChatDir(effectiveProjectRoot, options.pilotHome);
   const transcriptPath = resolveTranscriptPath(input, chatDir);
   const isBackgroundTask = isBackgroundTaskInput(input);
-  const sessionInfo = isBackgroundTask ? undefined : await locateSession(input.sessionKey, {
+  const { entries } = !isBackgroundTask && options.storageProvider
+    ? await readAgentProjectSessionPersistence({
+        projectRoot: effectiveProjectRoot,
+        pilotHome: options.pilotHome,
+        sessionId: input.sessionKey,
+        storageProvider: options.storageProvider,
+    })
+    : await readTranscript(transcriptPath);
+  const sessionInfo = isBackgroundTask ? undefined : await locateSession(input.sessionKey, entries, {
     ...options,
     projectRoot: effectiveProjectRoot,
   });
-  const { entries } = await readTranscript(transcriptPath);
+  const subagentReferences = projectSubagentReferences(entries);
+  const historyProjection = projectWebHistory(entries);
   const webReplay = extractWebVisibleMessages(entries);
   const entryTimestamps = webReplay.timestamps;
   const entryIds = webReplay.entryIds;
   const entryTurnIds = webReplay.turnIds;
   const entrySequences = webReplay.sequences;
-  const incompleteTurnIds = extractIncompleteTurnIds(entries);
+  const incompleteTurnIds = historyProjection.incompleteTurnIds;
 
   const flattenedPerMessage: WebMessage[][] = webReplay.messages
     .map((message, index) =>
@@ -90,13 +115,13 @@ export async function readWebSessionMessages(
     input.sessionKey,
     input.projectKey,
   );
-  const subagentToolUses = attachSubagentIds(entries, allMessages);
-  recoverCompletedSubagentToolResults(entries, allMessages, subagentToolUses);
+  const subagentToolUses = attachSubagentIds(subagentReferences.started, allMessages);
+  recoverCompletedSubagentToolResults(subagentReferences.completed, allMessages, subagentToolUses);
   if (resolve(effectiveProjectRoot) !== resolve(options.pilotHome)) {
-    injectFileArtifactMessages(entries, allMessages, input.sessionKey, input.projectKey);
+    injectFileArtifactMessages(historyProjection.fileArtifacts, allMessages, input.sessionKey, input.projectKey);
   }
-  injectAgentStatusMessages(entries, allMessages, input.sessionKey, input.projectKey);
-  injectErrorTurnMessages(entries, allMessages, input.sessionKey, input.projectKey);
+  injectAgentStatusMessages(historyProjection.agentStatuses, allMessages, input.sessionKey, input.projectKey);
+  injectErrorTurnMessages(historyProjection.turnErrors, allMessages, input.sessionKey, input.projectKey);
   if (incompleteTurnIds.length > 0) {
     allMessages.push(createIncompleteTurnStatusMessage(input, incompleteTurnIds, options));
   }
@@ -113,7 +138,7 @@ export async function readWebSessionMessages(
         ? String(offset + slice.length)
         : undefined,
     total: allMessages.length,
-    tokenUsage: tokenUsageFromTranscript(entries, options),
+    tokenUsage: tokenUsageFromProjection(historyProjection.tokenUsage, options),
     session: {
       sessionId: sessionInfo?.sessionId ?? input.sessionKey,
       sessionKey: input.sessionKey,
@@ -134,19 +159,19 @@ export async function readWebSessionMessages(
   };
 }
 
-function tokenUsageFromTranscript(
-  entries: AgentTranscriptEntry[],
+function tokenUsageFromProjection(
+  projection: WebTokenUsageProjectionResult,
   options: Pick<ReadWebSessionMessagesOptions, "maxContextTokens" | "maxOutputTokens">,
 ): Record<string, unknown> | undefined {
-  const latestBudget = latestContextBudget(entries);
-  const latestCompact = latestCompactBudget(entries);
+  const latestBudget = projection.latestContextBudget;
+  const latestCompact = projection.latestCompactBudget;
   if (latestCompact && (!latestBudget || latestCompact.index > latestBudget.index)) {
     return tokenUsageFromCompactBoundary(latestCompact, latestBudget?.usage, options);
   }
   if (latestBudget) {
     return latestBudget.usage;
   }
-  const latestTurn = latestTurnUsage(entries);
+  const latestTurn = projection.latestTurnUsage;
   if (!latestTurn) {
     return undefined;
   }
@@ -183,83 +208,8 @@ function tokenUsageFromTranscript(
   };
 }
 
-type IndexedTokenUsage = {
-  index: number;
-  usage: Record<string, unknown>;
-};
-
-type IndexedCompactBudget = {
-  index: number;
-  preTokens?: number;
-  postTokens: number;
-  messagesSummarized?: number;
-};
-
-function latestContextBudget(entries: AgentTranscriptEntry[]): IndexedTokenUsage | undefined {
-  for (let index = entries.length - 1; index >= 0; index -= 1) {
-    const entry = entries[index];
-    if (entry.type !== "agent_status_message" || entry.event !== "context_budget") {
-      continue;
-    }
-    const detail = isRecord(entry.detail) ? entry.detail : undefined;
-    if (!detail) {
-      continue;
-    }
-    const used = positiveNumber(detail.displayUsed) ?? positiveNumber(detail.used);
-    const total = positiveNumber(detail.total);
-    const effectiveTotal = positiveNumber(detail.effectiveTotal) ?? total;
-    if (used === undefined || total === undefined || effectiveTotal === undefined) {
-      continue;
-    }
-    return {
-      index,
-      usage: {
-        used,
-        ...(positiveNumber(detail.displayUsed) !== undefined ? { displayUsed: positiveNumber(detail.displayUsed) } : {}),
-        ...(positiveNumber(detail.budgetUsed) !== undefined ? { budgetUsed: positiveNumber(detail.budgetUsed) } : {}),
-        total,
-        effectiveTotal,
-        reservedOutputTokens: positiveNumber(detail.reservedOutputTokens) ?? 0,
-        ...(typeof detail.state === "string" ? { state: detail.state } : {}),
-        ...(typeof detail.ratio === "number" && Number.isFinite(detail.ratio) ? { ratio: detail.ratio } : {}),
-        source: "history",
-        exact: true,
-      },
-    };
-  }
-  return undefined;
-}
-
-function latestCompactBudget(entries: AgentTranscriptEntry[]): IndexedCompactBudget | undefined {
-  for (let index = entries.length - 1; index >= 0; index -= 1) {
-    const entry = entries[index];
-    if (
-      entry.type !== "control_boundary" ||
-      entry.boundary.kind !== "compact" ||
-      !("subtype" in entry.boundary) ||
-      entry.boundary.subtype !== "compact_boundary"
-    ) {
-      continue;
-    }
-    const metadata = entry.boundary.compactMetadata;
-    const postTokens = positiveNumber(metadata.postTokens);
-    if (postTokens === undefined) {
-      continue;
-    }
-    return {
-      index,
-      postTokens,
-      ...(positiveNumber(metadata.preTokens) !== undefined ? { preTokens: positiveNumber(metadata.preTokens) } : {}),
-      ...(positiveNumber(metadata.messagesSummarized) !== undefined
-        ? { messagesSummarized: positiveNumber(metadata.messagesSummarized) }
-        : {}),
-    };
-  }
-  return undefined;
-}
-
 function tokenUsageFromCompactBoundary(
-  compact: IndexedCompactBudget,
+  compact: NonNullable<WebTokenUsageProjectionResult["latestCompactBudget"]>,
   previousBudget: Record<string, unknown> | undefined,
   options: Pick<ReadWebSessionMessagesOptions, "maxContextTokens" | "maxOutputTokens">,
 ): Record<string, unknown> {
@@ -291,37 +241,15 @@ function tokenUsageFromCompactBoundary(
   };
 }
 
-function latestTurnUsage(entries: AgentTranscriptEntry[]): CanonicalUsage | undefined {
-  for (let index = entries.length - 1; index >= 0; index -= 1) {
-    const entry = entries[index];
-    if (entry.type === "turn_result" && hasPositiveUsage(entry.result.usage)) {
-      return entry.result.usage;
-    }
-  }
-  return undefined;
-}
-
-function hasPositiveUsage(usage: CanonicalUsage | undefined): boolean {
-  if (!usage) return false;
-  return positiveNumber(usage.inputTokens) !== undefined ||
-    positiveNumber(usage.outputTokens) !== undefined ||
-    positiveNumber(usage.cacheReadTokens) !== undefined ||
-    positiveNumber(usage.cacheWriteTokens) !== undefined ||
-    positiveNumber(usage.totalTokens) !== undefined;
-}
-
 function positiveNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 /**
  * Read a subagent's sidechain transcript and project it onto WebMessage[].
- * Locates the sidechain JSONL by deriving the default path from the parent
- * session transcript path + subagentId.
+ * Selected storage providers are addressed through the parent durable
+ * `subagent_started` reference; legacy and background records retain the
+ * constrained JSONL relative-path fallback.
  */
 export async function readSubagentWebMessages(
   input: {
@@ -337,26 +265,40 @@ export async function readSubagentWebMessages(
   const effectiveProjectRoot = input.projectKey ?? options.projectRoot;
   const chatDir = getPilotProjectChatDir(effectiveProjectRoot, options.pilotHome);
   const parentTranscriptPath = resolveTranscriptPath(input, chatDir);
+  const parentSessionId = input.parentSessionId ?? input.sessionKey;
+  const isBackgroundTask = isBackgroundTaskInput(input);
 
-  const { entries: parentEntries } = await readTranscript(parentTranscriptPath);
-  let sidechainRelative: string | undefined;
-  for (const entry of parentEntries) {
-    if (entry.type === "subagent_started" && entry.subagentId === input.subagentId) {
-      sidechainRelative = entry.transcriptRelativePath;
-      break;
-    }
-  }
+  const { entries: parentEntries } = !isBackgroundTask && options.storageProvider
+    ? await readAgentProjectSessionPersistence({
+        projectRoot: effectiveProjectRoot,
+        pilotHome: options.pilotHome,
+        sessionId: parentSessionId,
+        storageProvider: options.storageProvider,
+      })
+    : await readTranscript(parentTranscriptPath);
+  const sidechainReference = projectSubagentReferences(parentEntries).startedById.get(input.subagentId);
+  const sidechainRelative = sidechainReference?.transcriptRelativePath;
 
-  if (!sidechainRelative) {
+  if (!sidechainReference) {
     return { messages: [], total: 0 };
   }
 
-  const sidechainPath = resolveRelativeTranscriptPath(
-    sidechainRelative,
-    dirname(parentTranscriptPath),
-    chatDir,
-  );
-  const { entries } = await readTranscript(sidechainPath);
+  const { entries } = !isBackgroundTask && options.storageProvider && sidechainReference.subagentSessionId
+    ? await readSubagentProjectSessionPersistence({
+        projectRoot: effectiveProjectRoot,
+        pilotHome: options.pilotHome,
+        parentSessionId,
+        sessionId: sidechainReference.subagentSessionId,
+        sidechainId: input.subagentId,
+        storageProvider: options.storageProvider,
+      })
+    : sidechainRelative
+      ? await readTranscript(resolveRelativeTranscriptPath(
+          sidechainRelative,
+          dirname(parentTranscriptPath),
+          chatDir,
+        ))
+      : { entries: [] };
   const webReplay = extractSubagentExecutionMessages(entries);
 
   const flattenedPerMessage: WebMessage[][] = webReplay.messages
@@ -449,39 +391,80 @@ function createIncompleteTurnStatusMessage(
   };
 }
 
-function extractIncompleteTurnIds(entries: AgentTranscriptEntry[]): string[] {
-  const completedTurnIds = new Set(
-    entries.filter((entry) => entry.type === "turn_result").map((entry) => entry.turnId),
-  );
-  const incompleteTurnIds = new Set<string>();
-  for (const entry of entries) {
-    if (
-      (entry.type === "assistant_message" ||
-        entry.type === "tool_result_message" ||
-        entry.type === "durable_message") &&
-      !completedTurnIds.has(entry.turnId)
-    ) {
-      incompleteTurnIds.add(entry.turnId);
-    }
-  }
-  return [...incompleteTurnIds];
-}
-
 async function locateSession(
   sessionKey: string,
+  entries: readonly AgentTranscriptEntry[],
   options: ReadWebSessionMessagesOptions,
 ): Promise<SessionInfo | undefined> {
-  const sessions = await listProjectSessions({
-    projectRoot: options.projectRoot,
-    pilotHome: options.pilotHome,
-  });
+  let sessions: SessionInfo[];
+  try {
+    sessions = await options.sessionCatalog.list({
+      projectRoot: options.projectRoot,
+      pilotHome: options.pilotHome,
+    });
+  } catch (error) {
+    // Exact-session history already has durable entries from the selected
+    // provider. Catalog enumeration is optional and must not force a JSONL
+    // fallback for this direct read.
+    if (!options.storageProvider) throw error;
+    return sessionInfoFromEntries(sessionKey, entries, options.projectRoot);
+  }
   // sessionId in SessionInfo is the on-disk filename (already sanitized);
   // the incoming sessionKey may still be the raw form (e.g. tui:project=/foo:default).
   // Compare against the sanitized form so locating works for both shapes.
   const safeKey = sanitizeSessionIdForPath(sessionKey);
   return sessions.find(
     (session) => session.sessionId === sessionKey || session.sessionId === safeKey,
-  );
+  ) ?? sessionInfoFromEntries(sessionKey, entries, options.projectRoot);
+}
+
+function sessionInfoFromEntries(
+  sessionId: string,
+  entries: readonly AgentTranscriptEntry[],
+  projectRoot: string,
+): SessionInfo | undefined {
+  if (entries.length === 0) return undefined;
+  let customTitle: string | undefined;
+  let aiTitle: string | undefined;
+  let tag: string | undefined;
+  let firstPrompt: string | undefined;
+  let lastPrompt: string | undefined;
+  let parentSessionId: string | undefined;
+  let forkedFromTurnId: string | undefined;
+  for (const entry of entries) {
+    if (entry.type === "accepted_input") {
+      for (const message of entry.messages) {
+        const text = message.content.find((block) => block.type === "text")?.text?.trim();
+        if (!text) continue;
+        firstPrompt ??= text;
+        lastPrompt = text;
+      }
+      continue;
+    }
+    if (entry.type !== "session_metadata") continue;
+    customTitle = entry.metadata.title ?? customTitle;
+    aiTitle = entry.metadata.aiTitle ?? aiTitle;
+    tag = entry.metadata.tag ?? tag;
+    firstPrompt = entry.metadata.firstPrompt ?? firstPrompt;
+    lastPrompt = entry.metadata.lastPrompt ?? lastPrompt;
+    parentSessionId = entry.metadata.parentSessionId ?? parentSessionId;
+    forkedFromTurnId = entry.metadata.forkedFromTurnId ?? forkedFromTurnId;
+  }
+  const createdAt = Date.parse(entries[0]!.createdAt);
+  const lastModified = Date.parse(entries[entries.length - 1]!.createdAt);
+  return {
+    sessionId,
+    summary: customTitle ?? aiTitle ?? lastPrompt ?? firstPrompt ?? sessionId,
+    lastModified: Number.isFinite(lastModified) ? lastModified : 0,
+    customTitle,
+    aiTitle,
+    firstPrompt,
+    cwd: projectRoot,
+    tag,
+    ...(Number.isFinite(createdAt) ? { createdAt } : {}),
+    parentSessionId,
+    forkedFromTurnId,
+  };
 }
 
 function parseCursor(cursor?: string): number {
@@ -1009,17 +992,11 @@ function insertWebMessageByTranscriptOrder(
  * `subagentId` onto the WebMessage so the frontend can link to the sidechain.
  */
 function attachSubagentIds(
-  entries: AgentTranscriptEntry[],
+  startedEntries: readonly AgentSubagentStartedTranscriptEntry[],
   allMessages: WebMessage[],
 ): Map<string, WebMessage> {
-  const subagentQueue: string[] = [];
   const toolUseBySubagentId = new Map<string, WebMessage>();
-  for (let index = 0; index < entries.length; index += 1) {
-    const entry = entries[index];
-    if (entry.type === "subagent_started") {
-      subagentQueue.push(entry.subagentId);
-    }
-  }
+  const subagentQueue = startedEntries.map((entry) => entry.subagentId);
   if (subagentQueue.length === 0) return toolUseBySubagentId;
 
   let qi = 0;
@@ -1045,7 +1022,7 @@ function attachSubagentIds(
  * parent-state handling.
  */
 function recoverCompletedSubagentToolResults(
-  entries: AgentTranscriptEntry[],
+  completedEntries: readonly AgentSubagentCompletedTranscriptEntry[],
   allMessages: WebMessage[],
   toolUseBySubagentId: Map<string, WebMessage>,
 ): void {
@@ -1055,8 +1032,8 @@ function recoverCompletedSubagentToolResults(
       .map((message) => `${message.turnId ?? ""}\u0000${message.toolCallId}`),
   );
 
-  for (const entry of entries) {
-    if (entry.type !== "subagent_completed" || entry.errored === true) continue;
+  for (const entry of completedEntries) {
+    if (entry.errored === true) continue;
     const toolUse = toolUseBySubagentId.get(entry.subagentId);
     if (!toolUse?.toolCallId) continue;
 
@@ -1085,27 +1062,13 @@ function recoverCompletedSubagentToolResults(
 }
 
 function injectFileArtifactMessages(
-  entries: AgentTranscriptEntry[],
+  entries: Extract<AgentTranscriptEntry, { type: "file_artifacts" }>[],
   allMessages: WebMessage[],
   sessionKey: string,
   projectKey?: string,
 ): void {
   const artifactMessages: WebMessage[] = [];
-  const turnsWithToolResults = new Set(
-    entries
-      .filter((entry) =>
-        (entry.type === "assistant_message" || entry.type === "tool_result_message" || entry.type === "durable_message") &&
-        messageContainsToolResult(entry.message)
-      )
-      .map((entry) => entry.turnId),
-  );
-  for (let index = 0; index < entries.length; index += 1) {
-    const entry = entries[index];
-    if (entry.type !== "file_artifacts" || entry.artifacts.length === 0) continue;
-    const artifacts = turnsWithToolResults.has(entry.turnId)
-      ? entry.artifacts
-      : entry.artifacts.filter((artifact) => artifact.source !== "workspace_diff");
-    if (artifacts.length === 0) continue;
+  for (const entry of entries) {
     artifactMessages.push({
       id: entry.entryId ?? `${sessionKey}-file-artifacts-${entry.turnId}-${entry.sequence}`,
       sessionKey,
@@ -1116,7 +1079,7 @@ function injectFileArtifactMessages(
       kind: "file_artifacts",
       turnId: entry.turnId,
       sequence: entry.sequence,
-      artifacts,
+      artifacts: entry.artifacts,
       payload: { turnId: entry.turnId },
       source: "history",
       ...(entry.entryId ? { entryId: entry.entryId } : {}),
@@ -1128,10 +1091,6 @@ function injectFileArtifactMessages(
   }
 }
 
-function messageContainsToolResult(message: CanonicalMessage): boolean {
-  return message.content.some((block) => block.type === "tool_result" || block.type === "tool_result_reference");
-}
-
 /**
  * Scan transcript entries for failed turns (`turn_result` with `type === "error"`)
  * and inject corresponding `WebMessage { kind: 'error' }` into the message list
@@ -1139,24 +1098,13 @@ function messageContainsToolResult(message: CanonicalMessage): boolean {
  * already represents the same turn.
  */
 function injectErrorTurnMessages(
-  entries: AgentTranscriptEntry[],
+  entries: Extract<AgentTranscriptEntry, { type: "turn_result" }>[],
   allMessages: WebMessage[],
   sessionKey: string,
   projectKey?: string,
 ): void {
-  const visibleFailureStatusTurnIds = new Set(
-    entries
-      .filter((entry) =>
-        entry.type === "agent_status_message" &&
-        entry.kind === "error" &&
-        entry.detail?.visible !== false
-      )
-      .map((entry) => entry.turnId),
-  );
   const errorMessages: WebMessage[] = [];
   for (const entry of entries) {
-    if (entry.type !== "turn_result" || entry.result.type !== "error") continue;
-    if (visibleFailureStatusTurnIds.has(entry.turnId)) continue;
     const errorTexts = entry.result.errors?.map((e) => e.message).filter(Boolean) ?? [];
     const text = errorTexts.length > 0
       ? errorTexts.join("\n")
@@ -1184,14 +1132,13 @@ function injectErrorTurnMessages(
 }
 
 function injectAgentStatusMessages(
-  entries: AgentTranscriptEntry[],
+  entries: Extract<AgentTranscriptEntry, { type: "agent_status_message" }>[],
   allMessages: WebMessage[],
   sessionKey: string,
   projectKey?: string,
 ): void {
   const statusMessages: WebMessage[] = [];
   for (const entry of entries) {
-    if (entry.type !== "agent_status_message") continue;
     statusMessages.push({
       id: entry.entryId ?? `${sessionKey}-agent-status-${entry.turnId}-${entry.sequence}`,
       sessionKey,

@@ -11,6 +11,7 @@ import {
     getQueuedInputSteerError,
     hydrateQueuedInputOptions,
     isGatewayUnavailableError,
+    interactionReplayRequestToGatewayEvent,
     isTerminalAlwaysOnTurnEvent,
     queuedInputDispositionAfterTurn,
     reconcileRecoveredQueueItems,
@@ -21,10 +22,137 @@ import {
     resolveTurnRunId,
     resolveInputQueueProjectKey,
     restoreQueuedInputFromStorage,
+    reconnectBridgeInteraction,
     serializeQueuedInputForStorage,
     syncLocalActiveRunFromSnapshot,
     uiFilesToAttachments,
 } from './pilotdeck-bridge.js';
+
+describe('Gateway interaction replay', () => {
+    it('maps Gateway replay DTOs into the existing permission/question event vocabulary', () => {
+        expect(interactionReplayRequestToGatewayEvent({
+            kind: 'permission',
+            requestId: 'permission-1',
+            toolCallId: 'call-1',
+            toolName: 'bash',
+            payload: { payload: { command: 'pwd' } },
+        })).toEqual({
+            type: 'permission_request',
+            requestId: 'permission-1',
+            toolCallId: 'call-1',
+            toolName: 'bash',
+            payload: { command: 'pwd' },
+        });
+        expect(interactionReplayRequestToGatewayEvent({
+            kind: 'question',
+            requestId: 'question-1',
+            toolCallId: 'call-2',
+            toolName: 'ask_user_question',
+            payload: {
+                questions: [{ question: 'Continue?' }],
+                metadata: { source: 'test' },
+            },
+        })).toEqual({
+            type: 'elicitation_request',
+            requestId: 'question-1',
+            toolCallId: 'call-2',
+            toolName: 'ask_user_question',
+            questions: [{ question: 'Continue?' }],
+            metadata: { source: 'test' },
+        });
+    });
+
+    it('reconnects with the exact retired binding and does not redraw a replayed dialog from the active-turn snapshot', async () => {
+        const writer = { send: vi.fn() };
+        const previousBinding = { connectionId: 'old-connection', generation: 2 };
+        const state = {
+            sessionKey: 'web:s_interaction',
+            runId: 'run-1',
+            active: true,
+            awaitingGatewayReconnect: true,
+        };
+        const gateway = {
+            reconnectInteraction: vi.fn().mockResolvedValue({
+                outcome: 'reconnected',
+                requests: [{
+                    kind: 'question',
+                    requestId: 'question-1',
+                    toolCallId: 'call-1',
+                    toolName: 'ask_user_question',
+                    payload: { questions: [{ question: 'Continue?' }] },
+                }],
+            }),
+            getActiveTurnSnapshot: vi.fn().mockResolvedValue({
+                active: true,
+                sessionKey: state.sessionKey,
+                runId: 'run-1',
+                events: [
+                    { type: 'assistant_text_delta', text: 'Recovered output', runId: 'run-1' },
+                    {
+                        type: 'elicitation_request',
+                        requestId: 'question-1',
+                        toolCallId: 'call-1',
+                        toolName: 'ask_user_question',
+                        questions: [{ question: 'Continue?' }],
+                    },
+                ],
+            }),
+        };
+
+        const replay = await reconnectBridgeInteraction({
+            gateway,
+            state,
+            previousBinding,
+            writer,
+            schedulePolling: false,
+        });
+
+        expect(replay.outcome).toBe('reconnected');
+        expect(gateway.reconnectInteraction).toHaveBeenCalledWith({
+            sessionKey: state.sessionKey,
+            previousBinding,
+        });
+        const frames = writer.send.mock.calls.map(([frame]) => frame);
+        expect(frames.filter((frame) => frame.kind === 'permission_request')).toHaveLength(1);
+        expect(frames.find((frame) => frame.kind === 'permission_request')).toMatchObject({
+            requestId: 'question-1',
+            isElicitation: true,
+        });
+        expect(frames.find((frame) => frame.kind === 'stream_delta')).toMatchObject({
+            content: 'Recovered output',
+        });
+        expect(state.activeTurnReplayEventCount).toBe(2);
+        expect(state.awaitingGatewayReconnect).toBe(false);
+    });
+
+    it('fails closed when the retired binding is stale instead of leaving the session locally active', async () => {
+        const state = {
+            sessionKey: 'web:s_stale',
+            runId: 'run-stale',
+            active: true,
+            awaitingGatewayReconnect: true,
+        };
+        const gateway = {
+            reconnectInteraction: vi.fn().mockResolvedValue({
+                outcome: 'stale_binding',
+                requests: [],
+            }),
+            getActiveTurnSnapshot: vi.fn(),
+        };
+
+        const replay = await reconnectBridgeInteraction({
+            gateway,
+            state,
+            previousBinding: { connectionId: 'old-connection', generation: 2 },
+            writer: { send: vi.fn() },
+            schedulePolling: false,
+        });
+
+        expect(replay.outcome).toBe('stale_binding');
+        expect(gateway.getActiveTurnSnapshot).not.toHaveBeenCalled();
+        expect(state).toMatchObject({ active: false, runId: undefined, awaitingGatewayReconnect: false });
+    });
+});
 
 function deferred() {
     let resolve;

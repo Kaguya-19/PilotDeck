@@ -21,6 +21,15 @@ export type {
   WorkspaceStrategyId,
 } from "./protocol/types.js";
 export { AlwaysOnError, type AlwaysOnErrorCode } from "./protocol/errors.js";
+export type {
+  AlwaysOnControlPort,
+  AlwaysOnApplyInput,
+  AlwaysOnApplyResult,
+  AlwaysOnAbortInput,
+  AlwaysOnAbortResult,
+  AlwaysOnRerunPlanInput,
+  AlwaysOnRerunPlanResult,
+} from "./protocol/AlwaysOnControlPort.js";
 export {
   parseAlwaysOnConfig,
   defaultAlwaysOnConfig,
@@ -65,6 +74,17 @@ export {
 } from "./contracts/ReportContract.js";
 export { ChannelLeaseRegistry, type LeaseUpdateInput } from "./runtime/ChannelLeaseRegistry.js";
 export {
+  createNativeAlwaysOnProjectStorageProvider,
+  type AlwaysOnEventStorePort,
+  type AlwaysOnProjectStorage,
+  type AlwaysOnProjectStorageProvider,
+  type AlwaysOnProjectStorageProviderInput,
+  type DiscoveryPlanStorePort,
+  type DiscoveryReportStorePort,
+  type DiscoveryStateStorePort,
+  type WorkCycleStorePort,
+} from "./runtime/AlwaysOnProjectStorageProvider.js";
+export {
   evaluateAlwaysOnDiscoveryGates,
   type DiscoveryGateInput,
 } from "./runtime/DiscoveryGates.js";
@@ -103,6 +123,7 @@ export {
   type AlwaysOnRuntimeLogger,
   type CreateAlwaysOnRuntimeOptions,
 } from "./runtime/AlwaysOnRuntime.js";
+export type { AlwaysOnAgentGatewayPort } from "./runtime/AlwaysOnAgentGatewayPort.js";
 export {
   AlwaysOnManager,
   createAlwaysOnManager,
@@ -139,7 +160,12 @@ export {
   type AlwaysOnWorkspaceOutput,
   type CreateAlwaysOnWorkspaceToolOptions,
 } from "./tool/AlwaysOnWorkspaceTool.js";
-export { createApplyHandler, type CreateApplyHandlerDeps } from "./runtime/createApplyHandler.js";
+export {
+  createApplyHandler,
+  createStandaloneAlwaysOnControl,
+  type CreateApplyHandlerDeps,
+  type CreateStandaloneAlwaysOnControlDeps,
+} from "./runtime/createApplyHandler.js";
 export type { WorkspaceProvider, WorkspaceProviderId, WorkspacePrepareInput, WorkspacePublishOutput } from "./workspace/WorkspaceProvider.js";
 
 // Web-facing presentation & lifecycle services (shared by UI/CLI/SDK)

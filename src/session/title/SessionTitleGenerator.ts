@@ -1,5 +1,6 @@
 import type { ModelRuntime } from "../../model/index.js";
 import type { PilotAgentModelSelection } from "../../pilot/config/types.js";
+import type { SessionTitlePort, SessionTitleInput } from "./SessionTitlePort.js";
 
 export const SESSION_TITLE_MAX_INPUT_CHARS = 1200;
 export const SESSION_TITLE_MAX_OUTPUT_CHARS = 80;
@@ -25,12 +26,7 @@ Bad (wrong case): {"title": "Fix Login Button On Mobile"}
 
 Do not output Markdown, code fences, explanations, analysis, thinking text, <think> tags, or extra fields.`;
 
-export type SessionTitleGeneratorInput = {
-  text: string;
-  sessionId: string;
-  turnId: string;
-  signal: AbortSignal;
-};
+export type SessionTitleGeneratorInput = SessionTitleInput;
 
 export type SessionTitleGenerator = (input: SessionTitleGeneratorInput) => Promise<string | null>;
 
@@ -45,9 +41,19 @@ export type CreateSessionTitleGeneratorOptions = {
 export function createSessionTitleGenerator(
   options: CreateSessionTitleGeneratorOptions,
 ): SessionTitleGenerator {
+  return createNativeSessionTitleProvider(options).generate;
+}
+
+/** Native provider for the current model-backed title generation policy. */
+export function createNativeSessionTitleProvider(
+  options: CreateSessionTitleGeneratorOptions,
+): SessionTitlePort {
   const timeoutMs = options.timeoutMs ?? SESSION_TITLE_TIMEOUT_MS;
   const systemLanguage = options.systemLanguage ?? resolveSystemLanguage();
-  return async ({ text, sessionId, turnId, signal }) => {
+  return {
+    providerId: "native-llm",
+    modelProvenance: { provider: options.agentModel.provider, model: options.agentModel.model },
+    generate: async ({ text, sessionId, turnId, signal }) => {
     const prompt = normalizeSessionTitleInput(text);
     if (!prompt) {
       return null;
@@ -84,6 +90,7 @@ export function createSessionTitleGenerator(
       logSessionTitleFailure("provider_error", error);
       return null;
     }
+    },
   };
 }
 

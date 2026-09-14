@@ -1,4 +1,3 @@
-import { stat } from "node:fs/promises";
 import path from "node:path";
 import type { PilotDeckToolDefinition } from "../protocol/types.js";
 import { PilotDeckToolRuntimeError } from "../protocol/errors.js";
@@ -9,6 +8,10 @@ import {
   runRipgrep,
   splitRipgrepLines,
 } from "./filesystem/ripgrep.js";
+import { createNodeFsPort } from "../execution-world/NodeFsPort.js";
+import type { FsPort } from "../execution-world/FsPort.js";
+import { createNodeSubprocessPort } from "../execution-world/SubprocessPort.js";
+import type { SubprocessPort } from "../execution-world/SubprocessPort.js";
 
 export type GrepInput = {
   pattern: string;
@@ -27,6 +30,11 @@ export type GrepInput = {
   multiline?: boolean;
 };
 
+export type CreateGrepToolOptions = {
+  fs?: FsPort;
+  subprocess?: Pick<SubprocessPort, "executeFile">;
+};
+
 const DEFAULT_HEAD_LIMIT = 250;
 const MAX_COLUMNS = 500;
 const EXCLUDED_DIRECTORY_GLOBS = [
@@ -40,7 +48,9 @@ const EXCLUDED_DIRECTORY_GLOBS = [
   "!dist",
 ] as const;
 
-export function createGrepTool(): PilotDeckToolDefinition<GrepInput> {
+export function createGrepTool(options: CreateGrepToolOptions = {}): PilotDeckToolDefinition<GrepInput> {
+  const fs = options.fs ?? createNodeFsPort();
+  const subprocess = options.subprocess ?? createNodeSubprocessPort();
   return {
     name: "grep",
     aliases: ["Grep"],
@@ -127,13 +137,14 @@ export function createGrepTool(): PilotDeckToolDefinition<GrepInput> {
       }
 
       const mode = input.output_mode ?? "files_with_matches";
-      const target = await resolveSearchTarget(resolved.absolutePath, resolved.relativePath);
+      const target = await resolveSearchTarget(resolved.absolutePath, resolved.relativePath, fs);
       const stdout = await runRipgrep({
         cwd: target.cwd,
         args: buildRipgrepArgs(input, mode, target.target),
         env: context.env,
         signal: context.abortSignal,
         toolName: "grep",
+        subprocess,
       });
 
       if (mode === "content") {
@@ -189,7 +200,7 @@ export function createGrepTool(): PilotDeckToolDefinition<GrepInput> {
       const rawFiles = splitRipgrepLines(stdout)
         .map(normalizeRelativePath)
         .filter((file) => !isIgnoredPath(file));
-      const sortedFiles = await sortFilesByModifiedTime(rawFiles, target.cwd);
+      const sortedFiles = await sortFilesByModifiedTime(rawFiles, target.cwd, fs);
       const workspaceFiles = sortedFiles.map((file) => toWorkspaceFile(file, target.workspaceBaseDir));
       const page = paginate(workspaceFiles, input.head_limit, input.offset);
       return {
@@ -226,14 +237,18 @@ type ParsedCountEntry = {
   count: number;
 };
 
-async function resolveSearchTarget(absolutePath: string, relativePath: string): Promise<{
+async function resolveSearchTarget(
+  absolutePath: string,
+  relativePath: string,
+  fs: Pick<FsPort, "stat">,
+): Promise<{
   cwd: string;
   target: string;
   workspaceBaseDir: string;
 }> {
-  const fileStat = await stat(absolutePath);
+  const fileStat = await fs.stat(absolutePath);
   const normalizedRelativePath = normalizeRelativePath(relativePath);
-  if (fileStat.isDirectory()) {
+  if (fileStat.kind === "directory") {
     return {
       cwd: absolutePath,
       target: ".",
@@ -366,8 +381,12 @@ function parseCountEntry(line: string): ParsedCountEntry | undefined {
   return { file, count };
 }
 
-async function sortFilesByModifiedTime(files: string[], cwd: string): Promise<string[]> {
-  const stats = await Promise.allSettled(files.map((file) => stat(path.join(cwd, file))));
+async function sortFilesByModifiedTime(
+  files: string[],
+  cwd: string,
+  fs: Pick<FsPort, "stat">,
+): Promise<string[]> {
+  const stats = await Promise.allSettled(files.map((file) => fs.stat(path.join(cwd, file))));
   return files
     .map((file, index) => ({
       file,

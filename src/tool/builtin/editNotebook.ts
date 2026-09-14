@@ -1,9 +1,10 @@
-import { readFile, stat } from "node:fs/promises";
 import type { PilotDeckToolDefinition } from "../protocol/types.js";
 import { PilotDeckToolRuntimeError } from "../protocol/errors.js";
 import { resolvePilotDeckWorkspacePath } from "./filesystem/pathSafety.js";
 import { isNotebookPath } from "./filesystem/fileTypeSafety.js";
 import { writeTextFile } from "./filesystem/writeTextFile.js";
+import { createNodeFsPort } from "../execution-world/NodeFsPort.js";
+import type { FsPort } from "../execution-world/FsPort.js";
 import {
   ensureWriteSnapshotFresh,
   invalidateReadFileState,
@@ -53,7 +54,15 @@ export type EditNotebookOutput = {
   error?: string;
 };
 
-export function createEditNotebookTool(): PilotDeckToolDefinition<EditNotebookInput, EditNotebookOutput> {
+export type CreateEditNotebookToolOptions = {
+  /** Execution-world filesystem provider; defaults to the native Node provider. */
+  fs?: FsPort;
+};
+
+export function createEditNotebookTool(
+  options: CreateEditNotebookToolOptions = {},
+): PilotDeckToolDefinition<EditNotebookInput, EditNotebookOutput> {
+  const fs = options.fs ?? createNodeFsPort();
   return {
     name: "edit_notebook",
     aliases: ["NotebookEdit"],
@@ -160,7 +169,7 @@ export function createEditNotebookTool(): PilotDeckToolDefinition<EditNotebookIn
       }
 
       try {
-        await validateWriteSnapshotFresh(context, resolved.absolutePath);
+        await validateWriteSnapshotFresh(context, resolved.absolutePath, fs);
       } catch (error) {
         const normalized = error instanceof PilotDeckToolRuntimeError ? error.message : String(error);
         if (
@@ -179,7 +188,7 @@ export function createEditNotebookTool(): PilotDeckToolDefinition<EditNotebookIn
         throw error;
       }
 
-      const raw = await readNotebookJson(resolved.absolutePath);
+      const raw = await readNotebookJson(resolved.absolutePath, fs);
       const notebook = parseNotebook(raw);
       const cells = notebook.cells ?? [];
       if (!input.cell_id) {
@@ -225,7 +234,7 @@ export function createEditNotebookTool(): PilotDeckToolDefinition<EditNotebookIn
         );
       }
 
-      const freshness = await ensureWriteSnapshotFresh(context, resolved.absolutePath);
+      const freshness = await ensureWriteSnapshotFresh(context, resolved.absolutePath, fs);
       if (context.fileHistory) {
         await context.fileHistory.trackEdit(
           resolved.absolutePath,
@@ -233,7 +242,7 @@ export function createEditNotebookTool(): PilotDeckToolDefinition<EditNotebookIn
         );
       }
 
-      const originalContent = freshness.previousContent ?? await readNotebookJson(resolved.absolutePath);
+      const originalContent = freshness.previousContent ?? await readNotebookJson(resolved.absolutePath, fs);
       const notebook = parseNotebook(originalContent);
       notebook.cells ??= [];
       const cells = notebook.cells;
@@ -286,8 +295,11 @@ export function createEditNotebookTool(): PilotDeckToolDefinition<EditNotebookIn
       }
 
       const updatedContent = `${JSON.stringify(notebook, null, 1)}\n`;
-      await writeTextFile(resolved.absolutePath, updatedContent, { allowOverwrite: true });
-      const fileStat = await stat(resolved.absolutePath);
+      await writeTextFile(resolved.absolutePath, updatedContent, {
+        allowOverwrite: true,
+        workspaceRoot: resolved.root,
+      }, fs);
+      const fileStat = await fs.stat(resolved.absolutePath);
       invalidateReadFileState(context, resolved.absolutePath);
       recordWriteSnapshot(context, resolved.absolutePath, updatedContent, Math.floor(fileStat.mtimeMs));
 
@@ -327,13 +339,17 @@ export function createEditNotebookTool(): PilotDeckToolDefinition<EditNotebookIn
   };
 }
 
-async function readNotebookJson(filePath: string): Promise<string> {
-  return readFile(filePath, "utf8").catch((error: unknown) => {
+async function readNotebookJson(filePath: string, fs: Pick<FsPort, "readFile">): Promise<string> {
+  const raw = await fs.readFile(filePath, { encoding: "utf8" }).catch((error: unknown) => {
     if (isNodeError(error) && error.code === "ENOENT") {
       throw new PilotDeckToolRuntimeError("file_not_found", `File ${filePath} does not exist.`);
     }
     throw error;
   });
+  if (typeof raw !== "string") {
+    throw new PilotDeckToolRuntimeError("invalid_tool_input", `Notebook ${filePath} is not text.`);
+  }
+  return raw;
 }
 
 function parseNotebook(raw: string): NotebookContent {

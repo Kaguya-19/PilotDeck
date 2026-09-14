@@ -1,9 +1,11 @@
 export type {
   PilotDeckPermissionAuditRecord,
+  PilotDeckPermissionAuditFailureRecord,
+  PilotDeckPermissionAuditStartRecord,
   PilotDeckToolAuditRecord,
   PilotDeckToolAuditRecorder,
 } from "./audit/ToolAuditRecorder.js";
-export { ToolRuntime } from "./execution/ToolRuntime.js";
+export { ToolRuntime, createToolErrorResult } from "./execution/ToolRuntime.js";
 export { validateToolInput } from "./execution/validateToolInput.js";
 export {
   normalizeToolError,
@@ -38,9 +40,11 @@ export type {
   PilotDeckFileUpdateNotification,
   PilotDeckFileUpdateNotifier,
   PilotDeckPlanTodoStateHandle,
+  PilotDeckPlanTodoMutationOptions,
   PilotDeckPlanTodoStateSnapshot,
   PilotDeckToolFileHistorySink,
   PilotDeckToolKind,
+  PilotDeckToolRuntimeCapability,
   PilotDeckToolModelClient,
   PilotDeckToolProgressEvent,
   PilotDeckToolProgressSink,
@@ -55,10 +59,25 @@ export type {
 } from "./protocol/types.js";
 export {
   ToolRegistry,
+  type ToolRegistryOptions,
+  type ToolRegistration,
+  type ToolRegistryState,
   type ToolUnavailableDiagnostic,
   type ToolUnavailableDiagnosticEntry,
 } from "./registry/ToolRegistry.js";
+export {
+  registerAvailableExtensionToolContributions,
+  registerExtensionToolContributions,
+  type AvailableExtensionToolContributions,
+} from "./registry/registerExtensionToolContributions.js";
+export {
+  createToolCapabilityPolicy,
+  type CreateToolCapabilityPolicyOptions,
+  type ToolCapabilityPolicy,
+  type ToolCapabilityPolicyDecision,
+} from "./registry/ToolCapabilityPolicy.js";
 export { createBuiltinRegistry, type CreateBuiltinRegistryOptions } from "./registry/createBuiltinRegistry.js";
+export { createLspTool, type LspToolInput, type LspToolOutput } from "./builtin/lsp.js";
 export {
   filterAvailableTools,
   type FilterAvailableToolsResult,
@@ -68,6 +87,106 @@ export { ConcurrentToolScheduler } from "./scheduler/ConcurrentToolScheduler.js"
 export { SequentialToolScheduler } from "./scheduler/SequentialToolScheduler.js";
 export type { PilotDeckToolScheduler } from "./scheduler/ToolScheduler.js";
 export {
+  createNodeSubprocessPort,
+  type SubprocessPort,
+  type SubprocessFileRequest,
+  type SubprocessRequest,
+  type SubprocessResult,
+} from "./execution-world/SubprocessPort.js";
+export {
+  createNodeShellPort,
+  type ShellPort,
+  type ShellRequest,
+  type ShellResult,
+} from "./execution-world/ShellPort.js";
+export {
+  createNodeSandboxedShellPort,
+  type CreateNodeSandboxedShellPortOptions,
+  type ShellSandboxPolicyResolver,
+} from "./execution-world/SandboxedShellPort.js";
+export {
+  createNodeSandboxedDetachedShellPort,
+  type CreateNodeSandboxedDetachedShellPortOptions,
+  type DetachedShellSandboxPolicyResolver,
+} from "./execution-world/SandboxedDetachedShellPort.js";
+export {
+  createNodeDetachedExecutableStarter,
+  createNodeDetachedShellPort,
+  type DetachedExecutableRequest,
+  type DetachedExecutableStarter,
+  type DetachedShellExit,
+  type DetachedShellHandle,
+  type DetachedShellPort,
+  type DetachedShellRequest,
+} from "./execution-world/DetachedShellPort.js";
+export {
+  type FsDirectoryEntry,
+  type FsFileStat,
+  type FsPort,
+  type FsReadRangeResult,
+  type FsReadFileOptions,
+  type FsWriteTextOptions,
+  type FsWriteTextResult,
+} from "./execution-world/FsPort.js";
+export { createNodeFsPort } from "./execution-world/NodeFsPort.js";
+export {
+  createNodeSandboxedFsPort,
+  type CreateNodeSandboxedFsPortOptions,
+} from "./execution-world/SandboxedFsPort.js";
+export {
+  createExecutionWorldBundle,
+  createNodeExecutionWorldBundle,
+  type CreateNodeExecutionWorldBundleOptions,
+  type ExecuteCodeSandbox,
+  type ExecutionWorldBundle,
+  type ExecutionWorldBundleParts,
+} from "./execution-world/ExecutionWorldBundle.js";
+export {
+  type ExecutionWorkspace,
+  type ExecutionWorkspacePort,
+} from "./execution-world/ExecutionWorkspacePort.js";
+export { createNodeExecutionWorkspacePort } from "./execution-world/NodeExecutionWorkspacePort.js";
+export {
+  type CodeRuntimePort,
+  type CodeRuntimeRequest,
+  type CodeRuntimeResult,
+} from "./execution-world/CodeRuntimePort.js";
+export { createNodeCodeRuntimePort } from "./execution-world/NodeCodeRuntimePort.js";
+export {
+  createNodeExecutionTransportPort,
+  setExecuteCodeTransportOverrideForTests,
+  type ExecuteCodeTransportKind,
+  type ExecutionRpcTransport,
+  type ExecutionTransportPort,
+} from "./execution-world/ExecutionTransportPort.js";
+export {
+  DEFAULT_SANDBOX_MODE,
+  SANDBOX_MODES,
+  SandboxUnavailableError,
+  isSandboxMode,
+  resolveSandboxMode,
+  type SandboxCommandRequest,
+  type SandboxMode,
+  type SandboxPolicy,
+  type SandboxPort,
+  type SandboxedCommand,
+  type WorkspaceSandboxPolicyResolver,
+} from "./execution-world/SandboxPort.js";
+export {
+  createNodeSandboxPort,
+  seatbeltProfileArgs,
+  type CreateNodeSandboxPortOptions,
+} from "./execution-world/NodeSandboxPort.js";
+export {
+  createNodePlanStoragePort,
+  type PlanStoragePort,
+} from "./execution-world/PlanStoragePort.js";
+export {
+  createNodeAttachmentDeliveryPort,
+  type AttachmentDeliveryMetadata,
+  type AttachmentDeliveryPort,
+} from "./execution-world/AttachmentDeliveryPort.js";
+export {
   BUILTIN_SUBAGENTS,
   createAgentTool,
   type AgentSubagentDefinition,
@@ -76,10 +195,23 @@ export {
   type AgentToolOutput,
   type CreateAgentToolOptions,
 } from "./builtin/agent.js";
-export { createReadFileTool, type ReadFileInput } from "./builtin/readFile.js";
+export {
+  createSendMessageTool,
+  createSubagentContinuationTool,
+  type SubagentAdmissionToolOutput,
+  type SubagentContinuationAdmission,
+  type SubagentContinuationPort,
+  type SubagentFollowupPortRequest,
+  type SubagentStartPortRequest,
+} from "./builtin/subagentContinuation.js";
+export {
+  createReadFileTool,
+  type CreateReadFileToolOptions,
+  type ReadFileInput,
+} from "./builtin/readFile.js";
 export { createReadSkillTool, type ReadSkillDeps, type ReadSkillInput } from "./builtin/readSkill.js";
-export { createGlobTool, extractGlobBaseDirectory, type GlobInput } from "./builtin/glob.js";
-export { createGrepTool, type GrepInput } from "./builtin/grep.js";
+export { createGlobTool, extractGlobBaseDirectory, type CreateGlobToolOptions, type GlobInput } from "./builtin/glob.js";
+export { createGrepTool, type CreateGrepToolOptions, type GrepInput } from "./builtin/grep.js";
 export {
   createExecuteCodeTool,
   type CreateExecuteCodeToolOptions,
@@ -92,13 +224,23 @@ export {
   type GetCurrentTimeInput,
   type GetCurrentTimeOutput,
 } from "./builtin/getCurrentTime.js";
-export { createEditFileTool, type EditFileInput } from "./builtin/editFile.js";
+export {
+  createEditFileTool,
+  type CreateEditFileToolOptions,
+  type EditFileInput,
+} from "./builtin/editFile.js";
 export {
   createEditNotebookTool,
+  type CreateEditNotebookToolOptions,
   type EditNotebookInput,
   type EditNotebookOutput,
 } from "./builtin/editNotebook.js";
-export { createWriteFileTool, type WriteFileInput, type WriteFileOutput } from "./builtin/writeFile.js";
+export {
+  createWriteFileTool,
+  type CreateWriteFileToolOptions,
+  type WriteFileInput,
+  type WriteFileOutput,
+} from "./builtin/writeFile.js";
 export {
   createBashTool,
   type BashOutput,
@@ -120,8 +262,10 @@ export {
   type AskUserQuestionOutput,
 } from "./builtin/askUserQuestion.js";
 export {
+  createElicitationChannelFromAnswerer,
   InMemoryElicitationChannel,
   type PilotDeckElicitationAnswer,
+  type PilotDeckElicitationAnswerer,
   type PilotDeckElicitationChannel,
   type PilotDeckElicitationOption,
   type PilotDeckElicitationQuestion,
@@ -226,6 +370,15 @@ export {
   type TodoWriteInput,
   type TodoWriteOutput,
 } from "./builtin/todoWrite.js";
+export {
+  createGetGoalTool,
+  createCreateGoalTool,
+  createUpdateGoalTool,
+  createGoalTools,
+  type GetGoalInput,
+  type CreateGoalInput,
+  type UpdateGoalInput,
+} from "./builtin/goal.js";
 export {
   PLAN_MODE_ALLOWED_TOOLS,
   buildPlanModeViolationMessage,

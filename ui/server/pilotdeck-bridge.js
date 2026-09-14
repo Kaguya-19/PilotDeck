@@ -83,6 +83,8 @@ const GATEWAY_TOKEN_PATH =
 const GATEWAY_CONNECT_TIMEOUT_MS =
     Number.parseInt(process.env.PILOTDECK_BRIDGE_TIMEOUT ?? '', 10) || 60_000;
 const GATEWAY_CONNECT_RETRY_INTERVAL_MS = 500;
+const ACTIVE_TURN_REPLAY_POLL_INTERVAL_MS =
+    Number.parseInt(process.env.PILOTDECK_ACTIVE_TURN_REPLAY_POLL_MS ?? '', 10) || 750;
 const subagentActivityStarts = new Map();
 /** @type {Map<string, string[]>} sessionId → [toolCallId, ...] for pending agent/Task tool calls */
 const pendingAgentToolCalls = new Map();
@@ -194,6 +196,11 @@ const WEB_DEFAULT_PERMISSION_MODE =
 let gatewayPromise = null;
 /** @type {Awaited<ReturnType<typeof createRemoteGateway>> | null} */
 let gatewayInstance = null;
+// The bridge, not the browser, owns the Gateway WebSocket in the current Web
+// deployment. Keep the retired binding only long enough to prove ownership on
+// the replacement connection; the Gateway remains the pending-request owner.
+let disconnectedInteractionBinding = null;
+let reconnectingInteractionsPromise = null;
 
 async function readGatewayToken() {
     try {
@@ -241,6 +248,9 @@ function ensureGateway() {
             .then((gateway) => {
                 if (gatewayPromise === pending) {
                     gatewayInstance = gateway;
+                    void reconnectActiveInteractionsAfterGatewayReconnect(gateway).catch((error) => {
+                        console.warn('[pilotdeck-bridge] failed to restore Gateway interactions:', error?.message || error);
+                    });
                 }
                 return gateway;
             })
@@ -260,8 +270,291 @@ function ensureGateway() {
 
 function resetGatewayConnection(expectedGateway) {
     if (expectedGateway && gatewayInstance !== expectedGateway) return;
+    const binding = interactionBindingFromGateway(expectedGateway || gatewayInstance);
+    if (binding) disconnectedInteractionBinding = binding;
     gatewayPromise = null;
     gatewayInstance = null;
+}
+
+function interactionBindingFromGateway(gateway) {
+    const binding = gateway?.interactionBinding;
+    if (
+        !binding
+        || typeof binding.connectionId !== 'string'
+        || !binding.connectionId
+        || !Number.isSafeInteger(binding.generation)
+        || binding.generation < 0
+    ) {
+        return null;
+    }
+    return Object.freeze({
+        connectionId: binding.connectionId,
+        generation: binding.generation,
+    });
+}
+
+/**
+ * Convert a Gateway-owned replay DTO into the existing UI event shape. This
+ * is intentionally a view conversion: it cannot register, settle, or audit a
+ * request, and it never carries the original AbortSignal.
+ */
+export function interactionReplayRequestToGatewayEvent(request) {
+    if (!request || typeof request.requestId !== 'string' || !request.requestId) return null;
+    const payload = request.payload && typeof request.payload === 'object' ? request.payload : {};
+    const toolCallId = typeof request.toolCallId === 'string'
+        ? request.toolCallId
+        : typeof payload.toolCallId === 'string'
+            ? payload.toolCallId
+            : undefined;
+    const toolName = typeof request.toolName === 'string'
+        ? request.toolName
+        : typeof payload.toolName === 'string'
+            ? payload.toolName
+            : undefined;
+    if (request.kind === 'permission') {
+        return {
+            type: 'permission_request',
+            requestId: request.requestId,
+            ...(toolName ? { toolName } : {}),
+            ...(toolCallId ? { toolCallId } : {}),
+            payload: payload.payload ?? payload,
+        };
+    }
+    if (request.kind === 'question') {
+        return {
+            type: 'elicitation_request',
+            requestId: request.requestId,
+            ...(toolName ? { toolName } : {}),
+            ...(toolCallId ? { toolCallId } : {}),
+            ...(payload.previewFormat !== undefined ? { previewFormat: payload.previewFormat } : {}),
+            questions: Array.isArray(payload.questions) ? payload.questions : [],
+            ...(payload.metadata !== undefined ? { metadata: payload.metadata } : {}),
+        };
+    }
+    return null;
+}
+
+function clearActiveTurnReplayPolling(state) {
+    if (!state) return;
+    if (state.activeTurnReplayPollTimer) clearTimeout(state.activeTurnReplayPollTimer);
+    state.activeTurnReplayPollTimer = null;
+    state.activeTurnReplayPollPromise = null;
+    state.activeTurnReplayGateway = null;
+}
+
+function emitReplayFrames(
+    writer,
+    events,
+    sessionKey,
+    provider,
+    runId,
+    startIndex,
+    replayedRequestIds = new Set(),
+    suppressSnapshotInteractions = false,
+) {
+    if (!writer?.send) return;
+    for (let index = 0; index < events.length; index += 1) {
+        const event = events[index];
+        const isInteractionRequest = event?.type === 'permission_request' || event?.type === 'elicitation_request';
+        if (isInteractionRequest && (suppressSnapshotInteractions || replayedRequestIds.has(event.requestId))) {
+            continue;
+        }
+        const frames = gatewayEventToFrames(event, sessionKey, provider);
+        for (let frameIndex = 0; frameIndex < frames.length; frameIndex += 1) {
+            writer.send({
+                ...frames[frameIndex],
+                id: `gateway_replay:${sessionKey}:${runId || 'unknown'}:${startIndex + index}:${frameIndex}`,
+            });
+        }
+    }
+}
+
+function applyActiveTurnSnapshotReplay(
+    state,
+    snapshot,
+    writer,
+    provider,
+    replayedRequestIds,
+    options = {},
+) {
+    if (!state || !snapshot || (snapshot.active !== true && snapshot.terminal !== true)) return false;
+    const runId = typeof snapshot.runId === 'string' ? snapshot.runId : undefined;
+    const events = Array.isArray(snapshot.events) ? snapshot.events : [];
+    const sameRun = state.activeTurnReplayRunId === runId;
+    const previousCount = sameRun && Number.isSafeInteger(state.activeTurnReplayEventCount)
+        ? state.activeTurnReplayEventCount
+        : 0;
+    // The Gateway bounds this buffer. A truncated snapshot no longer has a
+    // trustworthy prefix, so redraw its remaining view once and keep polling
+    // from that visible cursor rather than inventing a second event stream.
+    const start = snapshot.truncated || previousCount > events.length ? 0 : previousCount;
+    emitReplayFrames(
+        writer,
+        events.slice(start),
+        state.sessionKey,
+        provider,
+        runId,
+        start,
+        replayedRequestIds,
+        options.suppressSnapshotInteractions === true,
+    );
+    state.activeTurnReplayRunId = runId;
+    state.activeTurnReplayEventCount = events.length;
+    state.activeTurnReplayTruncated = snapshot.truncated === true;
+    if (runId && snapshot.active === true) setLocalActiveRun(state, runId);
+    return true;
+}
+
+function scheduleActiveTurnReplayPolling(state, gateway, writer, provider) {
+    if (!state || !gateway?.getActiveTurnSnapshot || !writer?.send) return;
+    if (state.activeTurnReplayGateway === gateway && state.activeTurnReplayPollTimer) return;
+    clearActiveTurnReplayPolling(state);
+    state.activeTurnReplayGateway = gateway;
+
+    const poll = async () => {
+        if (state.activeTurnReplayGateway !== gateway) return;
+        try {
+            const snapshot = await gateway.getActiveTurnSnapshot({
+                sessionKey: state.sessionKey,
+                includeEvents: true,
+            });
+            if (!snapshot?.active) {
+                if (snapshot?.terminal === true) {
+                    applyActiveTurnSnapshotReplay(
+                        state,
+                        snapshot,
+                        writer,
+                        provider,
+                        state.activeTurnReplayRequestIds ?? new Set(),
+                    );
+                }
+                state.awaitingGatewayReconnect = false;
+                clearActiveRunIfCurrent(state, state.runId);
+                clearActiveTurnReplayPolling(state);
+                return;
+            }
+            applyActiveTurnSnapshotReplay(
+                state,
+                snapshot,
+                writer,
+                provider,
+                state.activeTurnReplayRequestIds ?? new Set(),
+            );
+        } catch (error) {
+            if (isGatewayUnavailableError(error)) {
+                resetGatewayConnection(gateway);
+                return;
+            }
+            console.warn('[pilotdeck-bridge] failed to replay active turn:', error?.message || error);
+        }
+        if (state.activeTurnReplayGateway !== gateway) return;
+        const timer = setTimeout(() => {
+            state.activeTurnReplayPollTimer = null;
+            void poll();
+        }, ACTIVE_TURN_REPLAY_POLL_INTERVAL_MS);
+        timer.unref?.();
+        state.activeTurnReplayPollTimer = timer;
+    };
+
+    void poll();
+}
+
+/**
+ * Reattach the bridge's existing UI view to one Gateway-owned interaction.
+ * The caller supplies the exact retired binding; without it this function
+ * refuses to replay, which preserves stale-answer rejection.
+ */
+export async function reconnectBridgeInteraction({
+    gateway,
+    state,
+    previousBinding,
+    writer,
+    provider = 'pilotdeck',
+    schedulePolling = true,
+}) {
+    if (!gateway?.reconnectInteraction || !state?.sessionKey || !previousBinding) {
+        return { outcome: 'skipped', requests: [] };
+    }
+    const replay = await gateway.reconnectInteraction({
+        sessionKey: state.sessionKey,
+        previousBinding,
+    });
+    if (replay?.outcome === 'stale_binding') {
+        state.awaitingGatewayReconnect = false;
+        clearActiveRunIfCurrent(state, state.runId);
+        clearActiveTurnReplayPolling(state);
+        return replay;
+    }
+
+    const replayedRequestIds = new Set();
+    for (const request of Array.isArray(replay?.requests) ? replay.requests : []) {
+        const event = interactionReplayRequestToGatewayEvent(request);
+        if (!event) continue;
+        replayedRequestIds.add(event.requestId);
+        const frames = gatewayEventToFrames(event, state.sessionKey, provider);
+        for (let frameIndex = 0; frameIndex < frames.length; frameIndex += 1) {
+            writer?.send?.({
+                ...frames[frameIndex],
+                id: `interaction_replay:${state.sessionKey}:${event.requestId}:${frameIndex}`,
+            });
+        }
+    }
+    state.activeTurnReplayRequestIds = replayedRequestIds;
+    state.activeTurnReplayRunId = undefined;
+    state.activeTurnReplayEventCount = undefined;
+
+    if (gateway.getActiveTurnSnapshot) {
+        const snapshot = await gateway.getActiveTurnSnapshot({
+            sessionKey: state.sessionKey,
+            includeEvents: true,
+        });
+        if (snapshot?.active) {
+            state.awaitingGatewayReconnect = false;
+            applyActiveTurnSnapshotReplay(state, snapshot, writer, provider, replayedRequestIds, {
+                suppressSnapshotInteractions: true,
+            });
+            if (schedulePolling) scheduleActiveTurnReplayPolling(state, gateway, writer, provider);
+        } else {
+            if (snapshot?.terminal === true) {
+                applyActiveTurnSnapshotReplay(state, snapshot, writer, provider, replayedRequestIds);
+            }
+            state.awaitingGatewayReconnect = false;
+            clearActiveRunIfCurrent(state, state.runId);
+            clearActiveTurnReplayPolling(state);
+        }
+    }
+    return replay;
+}
+
+async function reconnectActiveInteractionsAfterGatewayReconnect(gateway) {
+    const previousBinding = disconnectedInteractionBinding;
+    if (!previousBinding || reconnectingInteractionsPromise) return reconnectingInteractionsPromise;
+    const pending = (async () => {
+        const candidates = [...sessionState.values()].filter((state) =>
+            state.active === true || state.awaitingGatewayReconnect === true,
+        );
+        const results = await Promise.allSettled(candidates.map(async (state) => {
+            if (state.interactionReconnectPromise) return state.interactionReconnectPromise;
+            const work = reconnectBridgeInteraction({
+                gateway,
+                state,
+                previousBinding,
+                writer: state.interactionWriter,
+                provider: state.interactionProvider || 'pilotdeck',
+            }).finally(() => {
+                if (state.interactionReconnectPromise === work) state.interactionReconnectPromise = null;
+            });
+            state.interactionReconnectPromise = work;
+            return work;
+        }));
+        if (results.every((result) => result.status === 'fulfilled')) {
+            disconnectedInteractionBinding = null;
+        }
+    })().finally(() => {
+        if (reconnectingInteractionsPromise === pending) reconnectingInteractionsPromise = null;
+    });
+    reconnectingInteractionsPromise = pending;
+    return pending;
 }
 
 export function isGatewayUnavailableError(error) {
@@ -564,6 +857,16 @@ function ensureSessionState(sessionKey, projectKey, channelKey) {
             activityRevision: 0,
             activitySnapshotSequence: 0,
             pendingGatewayRunId: undefined,
+            interactionWriter: undefined,
+            interactionProvider: undefined,
+            awaitingGatewayReconnect: false,
+            interactionReconnectPromise: null,
+            activeTurnReplayGateway: null,
+            activeTurnReplayPollTimer: null,
+            activeTurnReplayPollPromise: null,
+            activeTurnReplayRunId: undefined,
+            activeTurnReplayEventCount: undefined,
+            activeTurnReplayRequestIds: undefined,
         };
         sessionState.set(sessionKey, state);
     } else {
@@ -1483,6 +1786,8 @@ export async function runChatViaGateway(
     const isNewSession = sessionKey !== incoming;
 
     const state = ensureSessionState(sessionKey, projectKey, channelKey);
+    state.interactionWriter = writer;
+    state.interactionProvider = provider;
     const staleRunId = state.active ? state.runId : undefined;
 
 
@@ -1500,6 +1805,8 @@ export async function runChatViaGateway(
 
     const runId = resolveTurnRunId(options?.runId);
     if (!staleRunId) {
+        clearActiveTurnReplayPolling(state);
+        state.awaitingGatewayReconnect = false;
         setLocalActiveRun(state, runId);
         setPendingGatewayRun(state, runId);
         state.hasVisibleFailureStatus = false;
@@ -1637,6 +1944,7 @@ export async function runChatViaGateway(
                 sawTurnCompleted = true;
                 turnFinishReason = event.finishReason || null;
                 clearActiveRunIfCurrent(state, runId);
+                clearActiveTurnReplayPolling(state);
             }
             const suppressDuplicateError = eventForFrames?.type === 'error' && state.hasVisibleFailureStatus;
             if (!suppressDuplicateError) {
@@ -1674,7 +1982,16 @@ export async function runChatViaGateway(
         const rawMessage = error instanceof Error ? error.message : String(error);
         const gatewayUnavailable = !gw || isGatewayUnavailableError(error);
         if (gatewayUnavailable && gw) {
+            // A Gateway socket may close while a permission/question is
+            // pending. Keep the local turn active until the replacement
+            // binding proves whether the Gateway preserved it.
+            state.awaitingGatewayReconnect = Boolean(interactionBindingFromGateway(gw));
             resetGatewayConnection(gw);
+            if (state.awaitingGatewayReconnect) {
+                void ensureGateway().catch((reconnectError) => {
+                    console.warn('[pilotdeck-bridge] failed to reconnect Gateway after stream loss:', reconnectError?.message || reconnectError);
+                });
+            }
         }
         const message = gatewayUnavailable ? 'PilotDeck gateway is unavailable.' : rawMessage;
         const statusEvent = gatewayUnavailable
@@ -1713,7 +2030,13 @@ export async function runChatViaGateway(
         if (state.pendingGatewayRunId === runId) {
             setPendingGatewayRun(state, undefined);
         }
-        clearActiveRunIfCurrent(state, runId);
+        if (!state.awaitingGatewayReconnect) {
+            clearActiveRunIfCurrent(state, runId);
+            clearActiveTurnReplayPolling(state);
+        }
+    }
+    if (state.awaitingGatewayReconnect) {
+        return { sessionKey, runId, inputAccepted, sawTurnCompleted, sawGatewayError, reconnecting: true };
     }
     let releasedSteeringItem = false;
     for (const item of state.inputQueue) {
@@ -2250,6 +2573,7 @@ export async function finalizeLastTurnReplacementViaGateway(
 
 export async function decidePermissionViaGateway(requestId, decision, options = {}) {
     const gw = await ensureGateway();
+    await reconnectActiveInteractionsAfterGatewayReconnect(gw);
     // PermissionBus is keyed by sessionKey + requestId. We don't know
     // which session owns the request, so try each known session.
     for (const state of sessionState.values()) {
@@ -2312,9 +2636,14 @@ export async function getSessionActivityViaGateway(
     }
 
     const localState = sessionState.get(sessionId);
+    if (localState && writer?.send) {
+        localState.interactionWriter = writer;
+        localState.interactionProvider = provider;
+    }
     let gw = null;
     try {
         gw = await ensureGateway();
+        await reconnectActiveInteractionsAfterGatewayReconnect(gw);
         if (typeof gw.getActiveTurnSnapshot !== 'function') {
             return getFallbackSessionActivity(localState);
         }
@@ -3343,6 +3672,7 @@ export function registerAlwaysOnNotificationForwarding(clients, forwardToSession
 
 export async function elicitationRespondViaGateway(requestId, answer) {
     const gw = await ensureGateway();
+    await reconnectActiveInteractionsAfterGatewayReconnect(gw);
     for (const state of sessionState.values()) {
         try {
             const result = await gw.respondElicitation({

@@ -301,11 +301,20 @@ async function dispatchModule(call: ModuleCall, signal: AbortSignal) {
     }) };
   }
 
+  if (call.module === "permission") {
+    return { decision: await permissionPort.decide(
+      resolveHostTool(call.payload.tool.name),
+      call.payload.input,
+      { ...call.payload.context, abortSignal: signal },
+      call.payload.toolCallId,
+    ) };
+  }
+
   throw new Error(`Unsupported host module: ${call.module}`);
 }
 ```
 
-当前 sidecar host adapter 的完整参考见 [`createSidecarPorts`](../src/agent/modules/sidecar.ts)
+当前 sidecar host adapter 的完整参考见 [`createSidecarPorts`](../src/agent/modules/transport/sidecarPorts.ts)
 和对拍 gateway adapter 的 [`dispatchModule`](../tools/agent-loop-parity/adapters/pilotdeck_gateway_impl.mjs)。
 真实宿主应把 `modelPort`、`toolPort`、`contextRuntime` 和 permission runtime 绑定到自己的
 session/operation；sidecar 不自行执行宿主工具，也不自行决定权限。
@@ -318,14 +327,16 @@ session/operation；sidecar 不自行执行宿主工具，也不自行决定权�
 {
   "hostModules": {
     "context": {"methods": ["prepare_for_model", "capture_turn"]},
-    "capability": {"methods": ["execute", "execute_batch"]}
+    "capability": {"methods": ["execute", "execute_batch"]},
+    "permission": {"methods": ["decide"]}
   }
 }
 ```
 
 `execute_batch` 未声明时，sidecar 回退到 unary capability call；context 未声明时使用
-默认 context runtime。这个协商逻辑位于 [`pilotdeck-agent-loop-default-factory.ts`](../src/cli/pilotdeck-agent-loop-default-factory.ts)
-和 [`sidecar.ts`](../src/agent/modules/sidecar.ts)，不要在宿主业务代码中复制一套判断。
+默认 context runtime；permission 未声明时不注入远端 permission port，继续使用既有 capability
+宿主或本地 composition 的权限路径。这个协商逻辑位于 [`pilotdeck-agent-loop-default-factory.ts`](../src/cli/pilotdeck-agent-loop-default-factory.ts)
+和 [`transport/sidecarPorts.ts`](../src/agent/modules/transport/sidecarPorts.ts)，不要在宿主业务代码中复制一套判断。
 
 #### D. 取消、deadline 和终态只通过协议传递
 
@@ -345,7 +356,7 @@ session/operation；sidecar 不自行执行宿主工具，也不自行决定权�
 
 宿主 adapter 必须校验 identity、sequence 和唯一 final；连接断开或副作用状态未知时使用
 `result_unknown`/reconciliation，而不是根据最后一段文本猜测成功。参考实现见
-[`AgentLoopSidecarServer`](../src/agent/modules/sidecar.ts)。
+[`AgentLoopSidecarServer`](../src/agent/modules/transport/agentLoopSidecarServer.ts)。
 
 #### E. 最小接入和验证顺序
 

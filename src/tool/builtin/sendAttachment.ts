@@ -1,8 +1,11 @@
-import { realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import type { PermissionResult, PermissionRule } from "../../permission/index.js";
 import type { PilotDeckToolDefinition, PilotDeckToolRuntimeContext } from "../protocol/types.js";
 import { PilotDeckToolRuntimeError } from "../protocol/errors.js";
+import {
+  createNodeAttachmentDeliveryPort,
+  type AttachmentDeliveryPort,
+} from "../execution-world/AttachmentDeliveryPort.js";
 import { isPathWithinRoot, resolvePilotDeckWorkspacePath } from "./filesystem/pathSafety.js";
 
 export type SendAttachmentInput = {
@@ -18,7 +21,15 @@ export type SendAttachmentOutput = {
   mimeType?: string;
 };
 
-export function createSendAttachmentTool(): PilotDeckToolDefinition<SendAttachmentInput, SendAttachmentOutput> {
+export type CreateSendAttachmentToolOptions = {
+  /** Execution-world provider for post-policy attachment inspection. */
+  delivery?: AttachmentDeliveryPort;
+};
+
+export function createSendAttachmentTool(
+  options: CreateSendAttachmentToolOptions = {},
+): PilotDeckToolDefinition<SendAttachmentInput, SendAttachmentOutput> {
+  const delivery = options.delivery ?? createNodeAttachmentDeliveryPort();
   return {
     name: "send_attachment",
     aliases: ["send_file"],
@@ -63,7 +74,7 @@ export function createSendAttachmentTool(): PilotDeckToolDefinition<SendAttachme
     isReadOnly: () => true,
     isConcurrencySafe: () => false,
     validateInput: async (input, context) => {
-      const internalRoot = await findInternalWorkRoot(input.file_path, context);
+      const internalRoot = await findInternalWorkRoot(input.file_path, context, delivery);
       if (internalRoot) {
         return {
           ok: false,
@@ -79,7 +90,7 @@ export function createSendAttachmentTool(): PilotDeckToolDefinition<SendAttachme
     checkPermissions: async (input, context): Promise<PermissionResult> =>
       checkSendAttachmentPermission(input.file_path, context),
     execute: async (input, context) => {
-      const internalRoot = await findInternalWorkRoot(input.file_path, context);
+      const internalRoot = await findInternalWorkRoot(input.file_path, context, delivery);
       if (internalRoot) {
         throw new PilotDeckToolRuntimeError(
           "invalid_tool_input",
@@ -95,8 +106,8 @@ export function createSendAttachmentTool(): PilotDeckToolDefinition<SendAttachme
       if (!resolved.ok) {
         throw new PilotDeckToolRuntimeError(resolved.error.code, resolved.error.message, resolved.error.details);
       }
-      const fileStat = await stat(resolved.absolutePath);
-      if (!fileStat.isFile()) {
+      const fileStat = await delivery.stat(resolved.absolutePath);
+      if (fileStat.kind !== "file") {
         throw new PilotDeckToolRuntimeError("invalid_tool_input", `Path ${input.file_path} is not a file.`);
       }
       const name = sanitizeAttachmentName(input.name) ?? path.basename(resolved.absolutePath);
@@ -126,6 +137,7 @@ export function createSendAttachmentTool(): PilotDeckToolDefinition<SendAttachme
 async function findInternalWorkRoot(
   inputPath: string,
   context: PilotDeckToolRuntimeContext,
+  delivery: AttachmentDeliveryPort,
 ): Promise<string | undefined> {
   const absolutePath = path.resolve(path.isAbsolute(inputPath) ? inputPath : path.join(context.cwd, inputPath));
   const configuredWorkDir = context.env?.PILOTDECK_WORK_DIR?.trim();
@@ -138,18 +150,18 @@ async function findInternalWorkRoot(
   const lexicalMatch = roots.find((root) => isPathWithinRoot(absolutePath, root));
   if (lexicalMatch) return lexicalMatch;
 
-  const realCandidate = await tryRealpath(absolutePath);
+  const realCandidate = await tryRealpath(delivery, absolutePath);
   if (!realCandidate) return undefined;
-  const realRoots = await Promise.all(roots.map((root) => tryRealpath(root)));
+  const realRoots = await Promise.all(roots.map((root) => tryRealpath(delivery, root)));
   const realMatchIndex = realRoots.findIndex(
     (root): root is string => Boolean(root && isPathWithinRoot(realCandidate, root)),
   );
   return realMatchIndex >= 0 ? roots[realMatchIndex] : undefined;
 }
 
-async function tryRealpath(value: string): Promise<string | undefined> {
+async function tryRealpath(delivery: AttachmentDeliveryPort, value: string): Promise<string | undefined> {
   try {
-    return await realpath(value);
+    return await delivery.realpath(value);
   } catch {
     return undefined;
   }

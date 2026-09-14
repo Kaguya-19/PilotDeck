@@ -1,5 +1,3 @@
-import { mkdir, writeFile, access, copyFile } from "node:fs/promises";
-import { constants as fsConstants } from "node:fs";
 import { basename, dirname, extname, relative, resolve } from "node:path";
 import type {
   CanonicalContentBlock,
@@ -12,6 +10,7 @@ import type {
 } from "../../model/index.js";
 import { flattenToolResultBlockText } from "../../model/index.js";
 import { countTokens } from "./tokenizer.js";
+import { createNodeToolResultSpillPort, type ToolResultSpillPort } from "./ToolResultSpillPort.js";
 
 /** Default model-visible text cap for inline tool results. */
 export const DEFAULT_MAX_RESULT_SIZE_TOKENS = 10_000;
@@ -58,6 +57,8 @@ export type ToolResultBudgetOptions = {
   previewBytes?: number;
   toolResultsDir: string;
   state?: ToolResultBudgetState;
+  /** Context-owned storage provider for oversized tool-result bodies and aliases. */
+  spillPort?: ToolResultSpillPort;
 };
 
 export type ToolResultBudgetApplyOptions = {
@@ -80,6 +81,7 @@ export class ToolResultBudget {
   private readonly previewBytes: number;
   private readonly toolResultsDir: string;
   private readonly state: ToolResultBudgetState;
+  private readonly spillPort: ToolResultSpillPort;
 
   constructor(options: ToolResultBudgetOptions) {
     this.maxResultSizeChars = options.maxResultSizeChars ?? DEFAULT_MAX_RESULT_SIZE_CHARS;
@@ -87,6 +89,7 @@ export class ToolResultBudget {
     this.previewBytes = options.previewBytes ?? PREVIEW_SIZE_BYTES;
     this.toolResultsDir = resolve(options.toolResultsDir);
     this.state = options.state ?? createToolResultBudgetState();
+    this.spillPort = options.spillPort ?? createNodeToolResultSpillPort();
   }
 
   getState(): ToolResultBudgetState {
@@ -196,13 +199,7 @@ export class ToolResultBudget {
     const isJson = looksLikeJson(flat);
     const ext = isJson ? "json" : "txt";
     const path = resolve(this.toolResultsDir, `${replacementKey}.${ext}`);
-    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-    try {
-      await access(path);
-      // already exists — do not overwrite (legacy 'wx' flag); reuse existing record.
-    } catch {
-      await writeFile(path, flat, { flag: "wx", mode: 0o600, encoding: "utf8" });
-    }
+    await this.spillPort.writeTextIfAbsent(path, flat);
     const readFilePath = await this.createReadFileAlias(path, ext);
 
     const preview = headTailPreview(flat, this.previewBytes);
@@ -244,16 +241,16 @@ export class ToolResultBudget {
 
   private async createReadFileAlias(sourcePath: string, ext: string): Promise<string> {
     const { refsDir, workspaceRoot } = this.resolveReadFileAliasLocation();
-    await mkdir(refsDir, { recursive: true, mode: 0o700 });
-
     const normalizedExt = extname(ext) ? ext.slice(1) : ext;
     while (true) {
       const index = this.state.nextReadFileAliasIndex ?? 1;
       this.state.nextReadFileAliasIndex = index + 1;
       const aliasPath = resolve(refsDir, `result-${String(index).padStart(4, "0")}.${normalizedExt || "txt"}`);
       try {
-        await copyFile(sourcePath, aliasPath, fsConstants.COPYFILE_EXCL);
-        return relative(workspaceRoot, aliasPath);
+        const copy = await this.spillPort.copyFileIfAbsent(sourcePath, aliasPath);
+        if (copy.created) {
+          return relative(workspaceRoot, aliasPath);
+        }
       } catch (error) {
         if (isFileExistsError(error)) {
           continue;
@@ -297,12 +294,7 @@ export class ToolResultBudget {
     const ext = extensionForMedia(mediaType, mimeType);
     const id = `${scopedToolResultKey(toolCallId, options.turnId)}-${mediaType}-${index}-${hashString(block.data).slice(0, 12)}`;
     const path = resolve(this.toolResultsDir, `${id}.${ext}`);
-    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-    try {
-      await access(path);
-    } catch {
-      await writeFile(path, block.data, { flag: "wx", mode: 0o600, encoding: "utf8" });
-    }
+    await this.spillPort.writeTextIfAbsent(path, block.data);
 
     const record: MediaReplacementRecord = {
       id,

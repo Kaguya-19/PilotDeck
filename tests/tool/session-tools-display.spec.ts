@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import { createTodoWriteTool } from "../../src/tool/builtin/todoWrite.js";
 import { createTaskListTool } from "../../src/tool/builtin/taskTools.js";
-import type { BackgroundTaskRuntime } from "../../src/task/runtime/BackgroundTaskRuntime.js";
+import type { BackgroundTaskPort } from "../../src/task/runtime/BackgroundTaskPort.js";
 import type { PilotDeckBackgroundBashTask } from "../../src/task/protocol/types.js";
 
 function baseContext() {
@@ -66,7 +66,7 @@ test("task_list returns model-visible status and next action hints", async () =>
   };
   const runtime = {
     list: () => [task],
-  } as unknown as BackgroundTaskRuntime;
+  } as unknown as BackgroundTaskPort;
 
   const result = await createTaskListTool(runtime).execute({}, baseContext());
   const text = textOf(result);

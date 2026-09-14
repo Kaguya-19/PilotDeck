@@ -1,4 +1,4 @@
-import type { ChatHistorySearchMatch, SearchChatHistoryResult } from "./searchChatHistory.js";
+import type { SessionSearchMatch, SessionSearchResult } from "./SessionSearchPort.js";
 
 export type FormatChatHistorySearchOptions = {
   locale?: "zh" | "en";
@@ -6,7 +6,7 @@ export type FormatChatHistorySearchOptions = {
 };
 
 export function formatChatHistorySearchResults(
-  result: SearchChatHistoryResult,
+  result: SessionSearchResult,
   options: FormatChatHistorySearchOptions = {},
 ): string {
   const locale = options.locale ?? "zh";
@@ -47,7 +47,7 @@ export function formatChatHistorySearchResults(
 }
 
 function formatMatchLine(
-  match: ChatHistorySearchMatch,
+  match: SessionSearchMatch,
   index: number,
   options: { locale: "zh" | "en"; includeProject: boolean },
 ): string {

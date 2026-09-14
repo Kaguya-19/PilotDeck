@@ -83,10 +83,11 @@ Gateway、Permission、Elicitation 等外部等待可以继续使用各自的 `r
 | 字段 | 仅在以下场景使用 |
 | --- | --- |
 | `streamId`、`sequence` | streaming execute 的 accepted response 和 event |
-| `idempotencyKey` | 有副作用的 execute |
+| `idempotencyKey` | 有副作用的 execute 或宿主 `module_call` |
 | `toolCallId` | 工具相关 event 和唯一 `tool_result` 投影 |
 | `operationDeadline`、`attemptDeadline` | execute request；retry 不得重置 operation deadline |
 | `final`、`outcome` | response/event 的终态表达 |
+| `code` | response/event 的稳定错误分类；不得覆盖业务层原始错误码 |
 | `error` | 结构化业务失败或错误响应 |
 
 `stepId` 不属于公共 envelope。需要步骤标识的模块将其放入业务 `payload` 或自己的扩展 Schema。
@@ -96,6 +97,8 @@ Gateway、Permission、Elicitation 等外部等待可以继续使用各自的 `r
 `protocolVersion`、`moduleId`、`moduleInstanceId`、`connectionGeneration` 只在 `hello`、能力协商和 stream binding 中出现。普通业务 event 不重复携带连接字段；当前 binding 由 transport 上下文保存。
 
 `previousBinding` 至少包含旧的 `moduleInstanceId` 和 `connectionGeneration`。模块重启必须生成新的 `moduleInstanceId`，每次连接建立必须生成新的 `connectionGeneration`。恢复后的重放 event 保留原 `runId`、`operationId`、`requestId`、`toolCallId` 和 `streamId`，但使用当前连接 binding 发送。
+
+`resume.lastAppliedSequence = -1` 只表示 accepted stream 尚未应用 sequence `0`；它让断线发生在首个 event 前时也能从 sequence `0` 开始恢复。`ack.lastAppliedSequence` 仍必须为非负数，因为 ack 只用于回收已经由宿主消费的 event history。
 
 完整 Schema：[`docs/pilotdeck-module-protocol-v2.schema.json`](pilotdeck-module-protocol-v2.schema.json)。
 
@@ -144,19 +147,42 @@ override 的字段优先于普通 `agent`、`messages`、`tools` 字段；显式
 ```json
 {
   "hostModules": {
+    "model": {
+      "methods": ["prepare", "stream"]
+    },
     "context": {
-      "methods": ["prepare_for_model", "apply_tool_results", "recover_from_model_error", "capture_turn"]
+      "methods": ["prepare_for_model", "apply_tool_results", "recover_from_model_error", "capture_turn", "try_auto_compact"]
     },
     "capability": {
-      "methods": ["execute", "execute_batch"]
+      "methods": ["execute", "execute_batch", "plan_todo"]
+    },
+    "permission": {
+      "methods": ["decide"]
+    },
+    "lifecycle": {
+      "methods": ["dispatch"]
+    },
+    "event": {
+      "methods": ["emit"]
     }
   }
 }
 ```
 
 sidecar 仅代理宿主显式声明的方法。未声明 context 时继续使用本地默认 context；未声明
-`execute_batch` 时继续使用兼容的单工具调用。`tryAutoCompact` 依赖进程内
-`budgetEvaluator`，当前不能跨协议声明或代理。
+`model.prepare` 时 host model consumer 保持本地 canonical request 的兼容 prepare；未声明
+`execute_batch` 时继续使用兼容的单工具调用；未声明 permission 时不注入远端 permission port，
+继续使用 capability owner 或本地 composition 已有的权限路径。未声明 `plan_todo` 时 sidecar 不创建
+远端 Plan/Todo port；它不得从工具名、prompt 或宿主私有字段猜测 workflow 状态。
+未声明 `lifecycle.dispatch` 时 sidecar 不创建远端 hook runtime；它不得加载、匹配或执行宿主 plugin/hook。
+未声明 `event.emit` 时 sidecar 不创建 host event bridge；它不得把 AgentLoop live event 写成 Session event
+或尝试由 transport 恢复。
+
+需要保持 route-aware retry 或 compaction 语义的宿主必须同时声明 `model.prepare` 和
+`model.stream`。`prepare` 返回可公开的 canonical request、provider/model 和 context/output
+limits，并只用本次 execute 的 `preparationId` 与随后的 `stream` 关联。Router decision、请求
+物化对象和校准 token state 继续由宿主保存；它们不能进入 Protocol payload、Session event 或
+跨 execute 的缓存。
 
 ### 4.2 Streaming execute
 
@@ -203,15 +229,103 @@ event 中的 `messageId` 可选，因为 `(streamId, sequence)` 已经提供去�
 宿主必须将整批请求交给自己的 scheduler，并按输入顺序返回 `results`。permission preflight、
 并发策略和副作用控制属于宿主 ToolRuntime；sidecar 不逐项重排或重新实现权限判断。
 
+host 不信任 wire `context` 中的 ambient service。它以 active execute 的 session/turn/cwd 重建
+`messageId`、permission context、abort signal、turn environment、audit recorder、elicitation、file history、
+file-update notifier、plan directory 以及辅助 model routing；这些对象和 process env 不跨 wire。sidecar 可以提供
+当前 `toolCallId` 等调用事实，但不得决定 host 的工具别名、output cap、plan storage 或执行服务。read/write file
+seed state 和 full-fork subagent parent state 由其各自 checkpoint/R3 contract 持有，不能伪造为每次 tool call 的
+无 owner payload。
+
 工具 descriptor 的 `requiresUserInteraction` 是宿主计算后的能力元数据。AgentLoop 使用它和
 `canPrompt` 过滤当前模型可见工具；sidecar 不按具体工具名称做特殊判断。
+
+#### 4.4.1 可选 Plan/Todo capability
+
+`capability.methods` 只有在宿主已经拥有 session-bound `PlanTodoPort` 时才可广告 `plan_todo`。
+它不是通用 workflow API，不能创建第二个 plan/todo store、run owner 或 recovery contract。调用使用：
+
+```json
+{
+  "operation": "plan_todo",
+  "method": "read | mark_plan_approved | record_todo_write | write_todos | mark_tool_progress",
+  "sessionId": "session-1",
+  "turnId": "turn-1"
+}
+```
+
+响应始终是 `{ "snapshot": { ... } }`。宿主除验证外层 `runId` / `operationId` 外，必须把 payload 的
+`sessionId` / `turnId` 与 active host turn 精确比对；不匹配、未知 method、非法 todo 输入或非法 snapshot
+均失败关闭。`mark_plan_approved` 带 `plan`，`record_todo_write` 带 `markdown` 和完整 `todos`，
+`write_todos` 带 update `todos` 以及可选 `markdown`、`merge`、`reason`，`mark_tool_progress` 带 `toolName`。
+
+sidecar 仅保存已验证 snapshot 的 volatile cache，用于当前 AgentLoop 的同步 prompt/gate 查询；host projection
+仍是 durable truth。执行 host tool 后 consumer 必须 refresh 该 cache，host ToolRuntime 使用同一个
+session-bound handle 来记录 progress 和执行 tool gate。transport reconnect、process restart 或没有重新 `read`
+的场景不能把 cache 当作可恢复状态。
 
 ### 4.5 Context
 
 context module call 使用 `{ operation, input }`，响应使用 `{ result }`。宿主将
-`prepare_for_model`、`apply_tool_results`、`recover_from_model_error` 和 `capture_turn` 转发给当前
+`prepare_for_model`、`apply_tool_results`、`recover_from_model_error`、`capture_turn` 和 `try_auto_compact` 转发给当前
 session 的 ContextRuntime。系统提示、skill catalog、上下文裁剪和工具结果投影策略仍由宿主拥有；
 sidecar 只负责调用和验证响应。`AbortSignal` 不进入 JSON，由宿主绑定当前 execution 的取消信号。
+
+`try_auto_compact` 的 input 除 canonical messages 外可携带 `budgetProjection`：`stage`、`trigger`、
+`maxContextTokens`、`reservedOutputTokens`、`manualForce` 与 `allowFallbackOnFailure`。它是预算意图，
+不包含 `budgetEvaluator`、`AbortSignal`、Router opaque decision、Session state 或已校准 token state。
+宿主以当前 run 的 Context/Router/token-meter provider 重建预算评估；若需复用一次 `model.prepare` 的
+route materialization，只能以 `(runId, operationId, preparationId)` 关联宿主 run-local cache，并在 terminal
+或异常路径清理。未广告该 context method 的宿主继续走原有 context fallback，不能伪造 native compaction。
+
+### 4.6 Permission
+
+permission module call 使用 `{ operation: "decide", tool, input, context, toolCallId }`，响应使用
+`{ decision }`。`tool` 只包含名称、描述、kind、input schema，以及针对当前输入计算出的
+`readOnly` 和 `requiresUserInteraction`；函数和宿主 registry 对象不进入协议。
+
+权限 provider 必须返回结构化 `allow`、`deny`、`ask` 或 `cancel`。模块失败、缺失 decision 或非法
+decision 必须 fail closed，不能回退为 allow。`canPrompt=false`、permission preset、持久化授权规则和
+最终审批交互仍由宿主拥有；consumer 不按工具名硬编码例外。
+
+### 4.7 Lifecycle / Hook
+
+`lifecycle.methods` 只有宿主已经拥有 `LifecycleRuntime` 时才可广告 `dispatch`。sidecar 发出：
+
+```json
+{
+  "operation": "dispatch",
+  "event": "Stop",
+  "payload": {"lastAssistantMessage": "..."}
+}
+```
+
+它不传 `baseInput`、`matchQuery`、`AbortSignal`、process environment、plugin configuration、hook runtime
+或 transcript path。host 必须以 active execute 的 session/turn/cwd、permission mode 和取消信号重建这些字段，
+并按 event 作为 matcher。响应为 `{ "result": LifecycleDispatchResult }`，包括 effects、messages、events
+及 blocking/non-blocking errors；格式不合法或 host failure 必须作为 module failure 返回。
+
+hook registry、async-hook completion、plugin resource lease 与 lifecycle teardown 都是 host deployment state，
+不是 sidecar cache 或 Session projection。sidecar 只消费本次 dispatch 的 serializable result；对于 core 中
+fire-and-forget 的 hook 调用仍保持 fire-and-forget，对于被 core await 的 hook 调用仍保留其阻塞语义。
+
+### 4.8 Volatile Agent event
+
+`event.methods` 只有 host 已经拥有当前 agent 的 `AgentEventEmitter` consumer 时才可广告 `emit`。sidecar 发出：
+
+```json
+{
+  "operation": "emit",
+  "event": {"type": "instructions_loaded", "sessionId": "session-1", "turnId": "turn-1", "hasSystemPrompt": true}
+}
+```
+
+module call 仍必须绑定当前 `runId` / `operationId`；host 必须拒绝不属于 active session/turn 的 event，然后交给
+已有的 emitter。sidecar 对已受理 event 串行 delivery，并在 publish execute final 前等待 delivery chain settle，
+从而不让 final 越过已发出的 live event。
+
+这是纯 volatile projection：它不追加 Session event、不参与 operation ledger、不能从 replay buffer 或 reconnect
+恢复。host event consumer/module-call failure 必须隔离，不能改写 AgentLoop 的 completed/failed/cancelled terminal；
+后续 event 仍可继续投递。需要在重启后可重建的事实必须先写入宿主 Session truth，而不是经此 bridge 补发。
 
 ## 五、控制方法和能力
 
@@ -295,6 +409,8 @@ operation cancel 的线性化点在宿主：先原子写入 `cancel_requested`�
 - 每个 request 只有一个终态，operation 只有一个最终 snapshot；
 - 取消、deadline、retry、`result_unknown` 和副作用确认按适用 profile 测试；
 - 有重复、乱序、断线、重连和 cursor gap 的测试；
+- 若广告 `event.emit`，验证 active session/turn fence、event 到 final 的顺序、delivery failure 隔离，以及不产生
+  durable/replay state；
 - adapter 与业务实现分离，外部进程退出不会污染新 run；
 - 没有把绝对路径、token 或内部文件格式写入公共契约。
 
@@ -320,7 +436,12 @@ git status --short
 | --- | --- | --- |
 | 通用 execute payload -> AgentLoop input | [`src/cli/pilotdeck-agent-loop-default-factory.ts`](../src/cli/pilotdeck-agent-loop-default-factory.ts) | 读取 `agent`、`messages`、`tools`、`permissionContext`、`seedState` 和 `hostModules`，不识别宿主业务对象。 |
 | stdio sidecar 启动 | [`src/cli/pilotdeck-agent-loop-sidecar.ts`](../src/cli/pilotdeck-agent-loop-sidecar.ts) | 只负责加载 factory 和运行 Module Protocol server。 |
-| context/model/capability module bridge | [`src/agent/modules/sidecar.ts`](../src/agent/modules/sidecar.ts) | 将 sidecar module call 转换为宿主 ports；支持 context 与 `execute_batch` 能力协商。 |
+| local TCP reconnect provider | [`src/agent/modules/transport/tcpAgentLoopSidecarConnection.ts`](../src/agent/modules/transport/tcpAgentLoopSidecarConnection.ts) | client 只负责 socket/NDJSON/reconnect；listener 由同目录的 `tcpAgentLoopSidecarServer.ts` 持有，Session 与 host module owner 不迁移。 |
+| context/model/capability module bridge | [`src/agent/modules/transport/sidecarPorts.ts`](../src/agent/modules/transport/sidecarPorts.ts) | 将 sidecar module call 转换为宿主 ports；支持 context、`execute_batch` 与可选 `plan_todo` 能力协商。 |
+| host-owned Plan/Todo mirror | [`src/agent/modules/capability/hostPlanTodoPort.ts`](../src/agent/modules/capability/hostPlanTodoPort.ts) | 只缓存已验证的 host projection，并在 host tool execution 后 refresh；不持久化或拥有 session state。 |
+| host-owned lifecycle bridge | [`src/agent/modules/lifecycle/hostLifecycleRuntime.ts`](../src/agent/modules/lifecycle/hostLifecycleRuntime.ts) | 仅转发 hook event/payload；host 重建环境并继续拥有 plugin/hook lifecycle。 |
+| host-owned volatile event bridge | [`src/agent/modules/events/hostAgentEventBridge.ts`](../src/agent/modules/events/hostAgentEventBridge.ts) | 串行回传 AgentLoop live event，并在 final 前 flush；不持久化或参与恢复。 |
+| NDJSON sidecar provider | [`src/agent/modules/transport/agentLoopSidecarServer.ts`](../src/agent/modules/transport/agentLoopSidecarServer.ts) | 处理握手、execute、module call、cancel、deadline 和唯一终态。 |
 | 协议类型与 profile | [`src/agent/modules/protocol.ts`](../src/agent/modules/protocol.ts) | 定义 host module method、execution identity 和通用调用类型。 |
 | native/sidecar gateway 对拍 | [`tools/agent-loop-parity/README.md`](../tools/agent-loop-parity/README.md) | 使用真实 Gateway/session 与确定性 mock 验证同一组语义。 |
 
@@ -332,7 +453,7 @@ Host session/turn
   -> transport adapter (stdio / Unix Socket / HTTP / WS)
   -> PilotDeck sidecar factory
   -> AgentLoop
-  -> module_call(model | context | capability)
+  -> module_call(model | context | capability | lifecycle | event)
   -> Host ports/runtime
   -> final event
   -> Host operation aggregation
@@ -349,3 +470,7 @@ Host session/turn
 | v0.1 | 归档 | 建立进程内、外部 worker 和远程服务的通信规则 |
 | v0.2 | 归档 | 收敛跨语言模块接入规则，补充 retry、resume 和唯一终态 |
 | v0.3 | 执行稿 | Module Protocol v2.0；按 profile 瘦身字段，移除 `attemptId`/`stepId` 的公共必填性 |
+| v0.4 | 执行稿 | 增加可选、host-owned `capability.plan_todo`：session/turn fence、validated cache 和 tool-context 约束 |
+| v0.5 | 执行稿 | 增加可选、host-owned `lifecycle.dispatch`：sidecar 只传 hook event/payload，host 重建环境并拥有 plugin lifecycle |
+| v0.6 | 执行稿 | 明确 capability tool call 的 host execution-context reconstruction，防止 ambient service、env 或 storage owner 由 sidecar 决定 |
+| v0.7 | 执行稿 | 增加可选、host-owned `event.emit`：有序 volatile AgentLoop event 在 final 前回传 host；不写 durable state、不参与恢复且失败不改写业务 terminal |

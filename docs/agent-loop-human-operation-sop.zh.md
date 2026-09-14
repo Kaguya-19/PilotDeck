@@ -9,6 +9,7 @@
 - [Module Communication SOP](pilotdeck-module-communication-sop.zh.md)
 - [Module Protocol v2 Schema](pilotdeck-module-protocol-v2.schema.json)
 - [AgentLoop Modular Framework TRD](trd/03-agent-loop-modular.zh.md)
+- [DSH 与 PilotDeck 当前执行 Roadmap](trd/05-dsh-pilotdeck-current-roadmap.zh.md)
 
 为准。
 
@@ -29,6 +30,7 @@
 3. docs/pilotdeck-module-communication-sop.zh.md
 4. docs/pilotdeck-module-protocol-v2.schema.json
 5. docs/trd/03-agent-loop-modular.zh.md
+6. docs/trd/05-dsh-pilotdeck-current-roadmap.zh.md
 
 先不要改代码。请先返回：问题理解、DSH 能力族归属、ownership、mapping、允许/禁止修改文件、测试计划和风险。
 ```
@@ -40,7 +42,7 @@ agent 第一次回复必须能回答：
 - 这个问题属于哪个 DSH 能力族；
 - 哪些逻辑属于 PilotDeck core，哪些属于宿主 glue；
 - 哪些字段进入通用 payload，哪些字段留在宿主；
-- 哪些模块由宿主提供：context、model、capability、permission等等；
+- 哪些模块由宿主提供：context、model、capability、permission、lifecycle 和 live event；并说明每项是 durable、live 还是 volatile；
 - 是否会改变 native/direct 语义**（一般不允许）**；
 - 是否需要更新 Schema、SOP、TRD 或接口文档；
 - 哪些测试能证明问题，而不是只证明最终文本相同。
@@ -117,8 +119,8 @@ known gap：
 人类重点复核四件事：
 
 1. 修改文件是否超出批准范围；
-2. 是否把宿主语义塞进 PilotDeck 默认 factory 或 sidecar；
-3. 是否通过放宽比较规则掩盖差异；
+2. 是否把宿主语义塞进 PilotDeck 默认 factory 或 sidecar；得保证核心agent loop 泛化性
+3. 是否通过放宽比较规则掩盖差异；允许部分协议上的不同，但禁止传给llm的input和output有不一致
 4. 失败、取消、超时和副作用不明是否被错误地当成成功。
 
 ## 6. 接受、返工或停止

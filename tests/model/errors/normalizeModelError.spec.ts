@@ -57,6 +57,20 @@ test("rate-limit signals take precedence over exhausted quota", () => {
   }
 });
 
+test("normalizeModelError preserves explicit host retry metadata", () => {
+  const source = Object.assign(new Error("host module is temporarily unavailable"), {
+    code: "provider_unavailable",
+    retryable: true,
+    retryAfterMs: 250,
+  });
+
+  const error = normalizeModelError("test", "openai", source);
+
+  assert.equal(error.code, "provider_unavailable");
+  assert.equal(error.retryable, true);
+  assert.equal(error.retryAfterMs, 250);
+});
+
 test("specific request errors remain ahead of generic retry wording", () => {
   const error = normalizeModelError(
     "test",

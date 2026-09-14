@@ -12,4 +12,6 @@ test("browser and canonical gateway clients use the same protocol version", () =
 test("browser gateway client exposes the steer RPCs added in protocol 1.1", () => {
   assert.equal(typeof GatewayBrowserClient.prototype.steerTurn, "function");
   assert.equal(typeof GatewayBrowserClient.prototype.cancelSteer, "function");
+  assert.equal(typeof Object.getOwnPropertyDescriptor(GatewayBrowserClient.prototype, "interactionBinding")?.get, "function");
+  assert.equal(typeof GatewayBrowserClient.prototype.reconnectInteraction, "function");
 });

@@ -1,5 +1,4 @@
 import { setTimeout as sleep } from "node:timers/promises";
-import path from "node:path";
 import {
   applyModelEventToAssembler,
   assembleAssistantMessage,
@@ -25,16 +24,11 @@ import {
 import type {
   PilotDeckToolDefinition,
   PilotDeckReadFileStateMap,
-  PilotDeckSubagentForkApi,
   PilotDeckToolErrorResult,
   PilotDeckToolResult,
   PilotDeckToolRuntimeContext,
   PilotDeckWriteSnapshotMap,
 } from "../../tool/index.js";
-import {
-  SUBAGENT_DEFINITIONS,
-  getSubagentDefinition,
-} from "../sub/builtinSubagentTypes.js";
 import { agentError } from "../protocol/errors.js";
 import type { AgentEvent } from "../protocol/events.js";
 import type { AgentPermissionDenial, AgentTurnResult } from "../protocol/result.js";
@@ -58,6 +52,7 @@ import type { PermissionMode, PermissionRule, PermissionRuleSet } from "../../pe
 import type { AgentControlBoundaryTranscriptEntry } from "../../session/transcript/TranscriptEntry.js";
 import type { AgentSteerMessage } from "../session/SteerMailbox.js";
 import { collectToolCalls } from "./collectToolCalls.js";
+import { buildTurnEnvironment } from "../turn/TurnEnvironment.js";
 import { createMissingToolResult, ensureToolResultPairing } from "./ensureToolResultPairing.js";
 import { LargeFileRepair, type LargeFileRepairDecision } from "./LargeFileRepair.js";
 import { resolveOutputTokenRetryBump } from "./outputTokenRetry.js";
@@ -65,7 +60,11 @@ import { projectToolResults } from "./projectToolResults.js";
 import { requiresPromptCapability } from "../../tool/userInteractionConstraints.js";
 import type { AgentRunMode } from "../protocol/input.js";
 import type { AgentExecutionContext, ModelInvokerPort, PreparedModelInvocation, ToolPort } from "../modules/protocol.js";
-import { createRouterModelInvokerPort, createToolSchedulerPort } from "../modules/adapters.js";
+import {
+  createAgentTurnCapabilities,
+  isAgentTurnCapabilities,
+  type AgentTurnCapabilities,
+} from "./AgentTurnCapabilities.js";
 import type { RouterDecision } from "../../router/index.js";
 import {
   ASK_MODE_DESCRIPTION_SUFFIX,
@@ -178,25 +177,36 @@ export class AgentLoop {
     attemptMaxOutputTokens?: number;
     hardMaxOutputTokens?: number;
   }>();
+  private readonly capabilities: AgentTurnCapabilities;
   private readonly modelPort: ModelInvokerPort;
   private readonly toolPort: ToolPort;
 
+  /**
+   * Direct compatibility adapter for callers that have not yet moved their
+   * composition boundary to AgentTurnCapabilities.
+   */
+  static fromDependencies(
+    config: AgentRuntimeConfig,
+    dependencies: AgentRuntimeDependencies,
+    seedState?: AgentLoopSeedState,
+  ): AgentLoop {
+    return new AgentLoop(config, createAgentTurnCapabilities(config, dependencies), seedState);
+  }
+
   constructor(
     private readonly config: AgentRuntimeConfig,
-    private readonly dependencies: AgentRuntimeDependencies,
+    capabilities: AgentTurnCapabilities,
     seedState?: AgentLoopSeedState,
   ) {
     this.readFileState = cloneReadFileStateMap(seedState?.readFileState);
     this.writeSnapshots = cloneWriteSnapshotMap(seedState?.writeSnapshots);
     this.allowedReadFiles = new Set(seedState?.allowedReadFiles ?? []);
-    this.modelPort = dependencies.ports?.model ?? createRouterModelInvokerPort(dependencies.router, {
-      isMainAgent: !config.isSubagent,
-      projectPath: config.cwd,
-    });
-    this.toolPort = dependencies.ports?.tools ?? createToolSchedulerPort(
-      dependencies.tools.registry,
-      dependencies.tools.scheduler,
-    );
+    if (!isAgentTurnCapabilities(capabilities)) {
+      throw new TypeError("AgentLoop requires an AgentTurnCapabilities view.");
+    }
+    this.capabilities = capabilities;
+    this.modelPort = this.capabilities.model.invoker;
+    this.toolPort = this.capabilities.tools.port;
   }
 
   snapshotFileState(): AgentLoopSeedState {
@@ -255,10 +265,10 @@ export class AgentLoop {
       }
     };
     const captureTurn = async (errored: boolean): Promise<void> => {
-      const hook = this.dependencies.context?.captureTurn;
+      const hook = this.capabilities.context?.captureTurn;
       if (!hook) return;
       try {
-        await hook.call(this.dependencies.context, {
+        await hook.call(this.capabilities.context, {
           sessionId: input.sessionId,
           turnId: input.turnId,
           messages,
@@ -326,7 +336,7 @@ export class AgentLoop {
     const activeTransientPromptIds = new Set<string>();
 
     const pushTransientSyntheticPrompt = (prompt: string, purpose: string): void => {
-      const transientId = this.dependencies.uuid?.() ?? `transient-${++transientPromptCounter}`;
+      const transientId = this.capabilities.clock.uuid?.() ?? `transient-${++transientPromptCounter}`;
       messages.push({
         role: "user",
         content: [{ type: "text", text: prompt }],
@@ -375,10 +385,10 @@ export class AgentLoop {
       return { error, result };
     };
 
-    const stickyInfo = this.dependencies.router.invalidateSticky?.(input.sessionId);
+    const stickyInfo = this.capabilities.model.routing.invalidateSticky?.(input.sessionId);
     let previousTier: string | undefined = stickyInfo?.previousTier;
     const executionRunId = input.execution?.runId
-      ?? this.dependencies.uuid?.()
+      ?? this.capabilities.clock.uuid?.()
       ?? `${input.sessionId}:${input.turnId}`;
 
     const continueWithSyntheticPrompt = async (
@@ -459,7 +469,7 @@ export class AgentLoop {
       }
 
       let pendingContextBudget: TokenBudgetSnapshot | undefined;
-      const ctx = this.dependencies.context;
+      const ctx = this.capabilities.context;
       const preRoutingMaxContextTokens = this.preRoutingMaxContextTokens();
       if (ctx?.tryAutoCompact) {
         try {
@@ -661,7 +671,7 @@ export class AgentLoop {
       }
 
       const calibrationRequest = prepared.request;
-      const requestInputEstimate = this.dependencies.tokenAccounting?.estimateRequestInput?.(calibrationRequest);
+      const requestInputEstimate = this.capabilities.model.tokenAccounting?.estimateRequestInput?.(calibrationRequest);
       const calibrationRequestFingerprint = requestFingerprint(calibrationRequest);
       const assembler = createModelMessageAssemblerState();
       let executedRequest: { provider: string; model: string; fingerprint?: string } | undefined;
@@ -1777,7 +1787,7 @@ export class AgentLoop {
 
       let results: PilotDeckToolResult[];
       try {
-        const toolContext = this.createToolContext(input, messages);
+        const toolContext = this.createToolContext(input);
         if (assembled.finishReason === "length" || assembled.hasRepairedToolCalls) {
           toolContext.outputTruncated = true;
         }
@@ -1864,10 +1874,10 @@ export class AgentLoop {
       const [toolResultMsg, ...supplementalMsgs] = projected;
       const supplementalInputs = bindSupplementalMessagesToToolCalls(pairedResults, supplementalMsgs);
       let appendedMessages: CanonicalMessage[] = projected;
-      const ctxApply = this.dependencies.context?.applyToolResults;
+      const ctxApply = this.capabilities.context?.applyToolResults;
       if (ctxApply) {
         try {
-          const applied = await ctxApply.call(this.dependencies.context, {
+          const applied = await ctxApply.call(this.capabilities.context, {
             sessionId: input.sessionId,
             turnId: input.turnId,
             toolResultMessage: toolResultMsg,
@@ -2063,7 +2073,7 @@ export class AgentLoop {
     messages: CanonicalMessage[],
     hasAttemptedCompact: boolean,
   ): Promise<ContextRecoveryDecision | undefined> {
-    const ctx: AgentContextRuntime | undefined = this.dependencies.context;
+    const ctx: AgentContextRuntime | undefined = this.capabilities.context;
     if (!ctx?.recoverFromModelError) {
       return undefined;
     }
@@ -2086,8 +2096,8 @@ export class AgentLoop {
     input: AgentLoopInput,
     options: { emitInstructionEvents?: boolean } = {},
   ): Promise<CanonicalModelRequest> {
-    const contextRuntime = this.dependencies.context ?? new NullContextRuntime();
-    const planTodo = this.dependencies.planTodoManager?.forSession(input.sessionId);
+    const contextRuntime = this.capabilities.context ?? new NullContextRuntime();
+    const planTodo = this.capabilities.tools.planTodoManager?.forSession(input.sessionId);
     const canPrompt = input.canPrompt ?? this.config.permissionContext.canPrompt;
     const promptBlockedToolNames = canPrompt
       ? new Set<string>()
@@ -2114,10 +2124,11 @@ export class AgentLoop {
       sessionId: input.sessionId,
       turnId: input.turnId,
       cwd: this.config.cwd,
+      runtimeContextSurface: this.config.runtimeContextSurface,
       provider: requestProvider,
       model: requestModel,
-      protocol: this.dependencies.getModelProtocol?.(requestProvider),
-      supportsPromptCache: this.dependencies.getModelSupportsPromptCache?.(requestProvider, requestModel),
+      protocol: this.capabilities.model.getModelProtocol?.(requestProvider),
+      supportsPromptCache: this.capabilities.model.getModelSupportsPromptCache?.(requestProvider, requestModel),
       permissionMode: this.config.permissionMode,
       runMode: this.config.runMode ?? "agent",
       additionalWorkingDirectories: this.config.permissionContext.additionalWorkingDirectories,
@@ -2133,7 +2144,7 @@ export class AgentLoop {
       this.dispatchLifecycle(input, "InstructionsLoaded", {
         hasSystemPrompt: !!prepared.systemPrompt,
       }).catch(() => {});
-      this.dependencies.eventEmitter?.({
+      this.capabilities.events.emit?.({
         type: "instructions_loaded",
         sessionId: input.sessionId,
         turnId: input.turnId,
@@ -2194,7 +2205,7 @@ export class AgentLoop {
       reservedOutputTokens: number;
     },
   ): ((candidateMessages: CanonicalMessage[]) => Promise<TokenBudgetSnapshot>) | undefined {
-    const tokenAccounting = this.dependencies.tokenAccounting;
+    const tokenAccounting = this.capabilities.model.tokenAccounting;
     const maxContextTokens = options.maxContextTokens;
     if (!tokenAccounting || !maxContextTokens) {
       return undefined;
@@ -2213,8 +2224,8 @@ export class AgentLoop {
           cachePlan: candidateRequest.cachePlan,
         };
         const preparedDecision = options.prepared.opaque as RouterDecision | undefined;
-        candidateRequest = preparedDecision && this.dependencies.router.materializeRequest
-          ? this.dependencies.router.materializeRequest(preparedDecision, materializedRequest)
+        candidateRequest = preparedDecision && this.capabilities.model.routing.materializeRequest
+          ? this.capabilities.model.routing.materializeRequest(preparedDecision, materializedRequest)
           : {
               ...materializedRequest,
               provider: options.prepared.provider,
@@ -2263,10 +2274,10 @@ export class AgentLoop {
   }
 
   private getModelTokenLimits(provider: string, model: string): { maxContextTokens?: number; maxOutputTokens?: number } | undefined {
-    const combined = this.dependencies.getModelTokenLimits?.(provider, model);
+    const combined = this.capabilities.model.getModelTokenLimits?.(provider, model);
     if (combined) return combined;
-    const maxContextTokens = this.dependencies.getModelMaxContextTokens?.(provider, model);
-    const maxOutputTokens = this.dependencies.getModelMaxOutputTokens?.(provider, model);
+    const maxContextTokens = this.capabilities.model.getModelMaxContextTokens?.(provider, model);
+    const maxOutputTokens = this.capabilities.model.getModelMaxOutputTokens?.(provider, model);
     if (maxContextTokens === undefined && maxOutputTokens === undefined) return undefined;
     return { maxContextTokens, maxOutputTokens };
   }
@@ -2276,7 +2287,7 @@ export class AgentLoop {
     return transient
       ?? this.getBaselineSubagentTokenLimits(provider, model)?.maxContextTokens
       ?? this.currentConfigMaxContextTokens()
-      ?? this.dependencies.getModelMaxContextTokens?.(provider, model)
+      ?? this.capabilities.model.getModelMaxContextTokens?.(provider, model)
       ?? this.getModelTokenLimits(provider, model)?.maxContextTokens
       ?? 1_000_000;
   }
@@ -2443,12 +2454,9 @@ export class AgentLoop {
     };
   }
 
-  private createToolContext(
-    input: AgentLoopInput,
-    messages: CanonicalMessage[],
-  ): PilotDeckToolRuntimeContext {
-    const planDirectoryPath = this.dependencies.planFileManager?.getPlanDirectoryPath();
-    const planTodo = this.dependencies.planTodoManager?.forSession(input.sessionId);
+  private createToolContext(input: AgentLoopInput): PilotDeckToolRuntimeContext {
+    const planDirectoryPath = this.capabilities.tools.planFileManager?.getPlanDirectoryPath();
+    const planTodo = this.capabilities.tools.planTodoManager?.forSession(input.sessionId);
     const canPrompt = input.canPrompt ?? this.config.permissionContext.canPrompt;
     const permissionContext = {
       ...this.config.permissionContext,
@@ -2471,7 +2479,7 @@ export class AgentLoop {
       runMode: this.config.runMode ?? "agent",
       permissionMode: this.config.permissionMode,
       permissionContext,
-      auditRecorder: this.dependencies.auditRecorder,
+      auditRecorder: this.capabilities.tools.auditRecorder,
       now: this.now,
       env: buildTurnEnvironment(
         this.config.env,
@@ -2486,7 +2494,7 @@ export class AgentLoop {
       // zero-usage retry.
       model: {
         stream: (request, signal) =>
-          this.dependencies.router.stream(request, {
+          this.capabilities.model.routing.stream(request, {
             sessionId: input.sessionId,
             turnId: input.turnId,
             projectPath: this.config.cwd,
@@ -2494,188 +2502,36 @@ export class AgentLoop {
             isMainAgent: false,
           }),
       },
-      elicitation: this.dependencies.elicitation,
-      fileHistory: this.dependencies.fileHistory,
+      elicitation: this.capabilities.tools.elicitation,
+      fileHistory: this.capabilities.tools.fileHistory,
       subagentDepth: this.config.subagentDepth ?? 0,
-      subagent: this.buildSubagentForkApi(input, messages),
+      ...(this.capabilities.tools.oneShotSubagentPort ? {
+        subagent: this.capabilities.tools.oneShotSubagentPort.createForkApi({
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          parentReadFileState: this.readFileState,
+          parentWriteSnapshots: this.writeSnapshots,
+        }),
+      } : {}),
       modelMultimodal: this.config.modelMultimodal,
       maxOutputTokens: this.config.maxOutputTokens,
       readFileState: this.readFileState,
       allowedReadFiles: [...this.allowedReadFiles],
       writeSnapshots: this.writeSnapshots,
-      fileUpdateNotifier: this.dependencies.fileUpdateNotifier,
+      fileUpdateNotifier: this.capabilities.tools.fileUpdateNotifier,
       ...(planTodo ? { planTodo } : {}),
+      ...(this.capabilities.tools.goalManager ? { goal: this.capabilities.tools.goalManager.forSession(input.sessionId) } : {}),
       ...(planDirectoryPath
         ? {
             planDirectory: {
               path: planDirectoryPath,
               resolve: (filePath: string) =>
-                this.dependencies.planFileManager?.resolvePlanFilePath(filePath, this.config.cwd),
+                this.capabilities.tools.planFileManager?.resolvePlanFilePath(filePath, this.config.cwd),
               read: (filePath: string) =>
-                this.dependencies.planFileManager?.readPlanFile(filePath, this.config.cwd),
+                this.capabilities.tools.planFileManager?.readPlanFile(filePath, this.config.cwd),
             },
           }
         : {}),
-    };
-  }
-
-  private buildSubagentForkApi(
-    input: AgentLoopInput,
-    messages: CanonicalMessage[],
-  ): PilotDeckSubagentForkApi {
-    const depth = this.config.subagentDepth ?? 0;
-    const maxDepth = this.config.maxSubagentDepth ?? 1;
-    return {
-      depth,
-      maxSubagentDepth: maxDepth,
-      listDefinitions: () =>
-        Object.values(SUBAGENT_DEFINITIONS).map((d) => ({
-          id: d.id,
-          description: d.description,
-        })),
-      isAllowedDefinition: (id: string) => getSubagentDefinition(id) !== undefined,
-      fork: async ({ definitionId, directive, subagentId, toolCallId, abortSignal, timeoutMs }) => {
-        // Defer SubAgentSession import to avoid the runtime cycle (sub → loop → sub).
-        const { SubAgentSession } = await import("../sub/SubAgentSession.js");
-        const def = getSubagentDefinition(definitionId);
-        if (!def) throw new Error(`Unknown subagent type: ${definitionId}`);
-        const composedAbort = composeAbortSignal({
-          parent: abortSignal,
-          timeoutMs,
-        });
-
-        const subagentSessionId = `${this.config.cwd}::sub::${subagentId}`;
-        const transcriptHooks = this.dependencies.subagentTranscript;
-        const sidechain = transcriptHooks?.subagentTranscriptResolver?.(subagentId);
-        const transcriptRelativePath = sidechain?.transcriptRelativePath ?? "";
-
-        await transcriptHooks?.recordSubagentStarted?.({
-          sessionId: input.sessionId,
-          turnId: input.turnId,
-          subagentId,
-          subagentType: def.id,
-          prompt: directive,
-          transcriptRelativePath,
-          subagentSessionId,
-        });
-        await this.dispatchLifecycle(input, "SubagentStart", {
-          subagentId,
-          subagentType: def.id,
-        });
-        this.dependencies.eventEmitter?.({
-          type: "subagent_started",
-          sessionId: input.sessionId,
-          turnId: input.turnId,
-          subagentId,
-          subagentType: def.id,
-          toolCallId,
-        });
-
-        const subSession = new SubAgentSession({
-          definition: def,
-          directive,
-          parentConfig: {
-            ...this.config,
-            subagentDepth: depth + 1,
-            isSubagent: true,
-          },
-          parentDependencies: this.dependencies,
-          parentReadFileState: this.readFileState,
-          parentWriteSnapshots: this.writeSnapshots,
-          parentSessionId: input.sessionId,
-          parentTurnId: input.turnId,
-          subagentSessionId,
-          subagentId,
-          abortSignal: composedAbort.signal,
-          sidechainTranscript: sidechain
-            ? {
-                recordAcceptedInput: sidechain.recordAcceptedInput.bind(sidechain),
-                recordDurableMessage: sidechain.recordDurableMessage.bind(sidechain),
-              }
-            : undefined,
-        });
-
-        let report;
-        let errored = false;
-        try {
-          report = await subSession.run();
-          if (composedAbort.timedOut()) {
-            throw new Error(`Subagent timed out after ${timeoutMs}ms.`);
-          }
-          if (abortSignal?.aborted) {
-            throw new Error("Subagent aborted before completion.");
-          }
-        } catch (err) {
-          const timedOut = composedAbort.timedOut();
-          const aborted = Boolean(abortSignal?.aborted && !timedOut);
-          const failure = timedOut
-            ? new Error(`Subagent timed out after ${timeoutMs}ms.`)
-            : err;
-          composedAbort.cleanup();
-          errored = true;
-          await transcriptHooks?.recordSubagentCompleted?.({
-            sessionId: input.sessionId,
-            turnId: input.turnId,
-            subagentId,
-            subagentType: def.id,
-            summary: failure instanceof Error ? failure.message : String(failure),
-            turns: 0,
-            durationMs: 0,
-            errored: true,
-          });
-          await this.dispatchLifecycle(input, "SubagentStop", {
-            subagentId,
-            subagentType: def.id,
-            success: false,
-          });
-          this.dependencies.eventEmitter?.({
-            type: "subagent_completed",
-            sessionId: input.sessionId,
-            turnId: input.turnId,
-            subagentId,
-            subagentType: def.id,
-            success: false,
-            aborted,
-            durationMs: 0,
-          });
-          throw failure;
-        }
-        composedAbort.cleanup();
-
-        await transcriptHooks?.recordSubagentCompleted?.({
-          sessionId: input.sessionId,
-          turnId: input.turnId,
-          subagentId,
-          subagentType: def.id,
-          summary: report.markdown,
-          usage: report.usage,
-          turns: report.turns,
-          durationMs: report.durationMs,
-          errored,
-        });
-        await this.dispatchLifecycle(input, "SubagentStop", {
-          subagentId,
-          subagentType: def.id,
-          success: !errored,
-        });
-        this.dependencies.eventEmitter?.({
-          type: "subagent_completed",
-          sessionId: input.sessionId,
-          turnId: input.turnId,
-          subagentId,
-          subagentType: def.id,
-          success: !errored,
-          durationMs: report.durationMs,
-        });
-
-        return {
-          markdown: report.markdown,
-          usage: report.usage,
-          turns: report.turns,
-          durationMs: report.durationMs,
-          parsed: report.parsed as unknown as Record<string, string> | undefined,
-        };
-      },
     };
   }
 
@@ -2684,7 +2540,7 @@ export class AgentLoop {
     event: PilotDeckHookEvent,
     payload: Record<string, unknown>,
   ): Promise<LifecycleDispatchResult> {
-    return this.dependencies.lifecycle?.dispatch({
+    return this.capabilities.hooks.lifecycle?.dispatch({
       event,
       baseInput: {
         sessionId: input.sessionId,
@@ -2711,7 +2567,7 @@ export class AgentLoop {
   }
 
   private *drainEventBuffer(): Generator<AgentEvent> {
-    const events = this.dependencies.drainEvents?.() ?? [];
+    const events = this.capabilities.events.drain?.() ?? [];
     for (const event of events) {
       yield event;
     }
@@ -2762,7 +2618,7 @@ export class AgentLoop {
     input: AgentLoopInput,
     activeSubagents: Map<string, ActiveSubagentStatus>,
   ): Generator<AgentEvent> {
-    const events = this.dependencies.drainEvents?.() ?? [];
+    const events = this.capabilities.events.drain?.() ?? [];
     for (const event of events) {
       const statusEvent = this.updateSubagentStatusFromEvent(input, activeSubagents, event);
       yield event;
@@ -2894,33 +2750,10 @@ export class AgentLoop {
     }
   }
 
-  private readonly now = (): Date => this.dependencies.now?.() ?? new Date();
+  private readonly now = (): Date => this.capabilities.clock.now?.() ?? new Date();
 }
 
-export function buildTurnEnvironment(
-  baseEnv: NodeJS.ProcessEnv | undefined,
-  cwd: string,
-  sessionId: string,
-  turnId: string,
-): NodeJS.ProcessEnv {
-  return {
-    ...(baseEnv ?? process.env),
-    PILOTDECK_SESSION_ID: sessionId,
-    PILOTDECK_TURN_ID: turnId,
-    PILOTDECK_WORK_DIR: path.join(
-      path.resolve(cwd),
-      ".pilotdeck",
-      "work",
-      safeWorkPathSegment(sessionId),
-      safeWorkPathSegment(turnId),
-    ),
-  };
-}
-
-function safeWorkPathSegment(value: string): string {
-  const normalized = value.normalize("NFKC").replace(/[^a-zA-Z0-9._-]+/g, "-");
-  return normalized.replace(/^[-.]+|[-.]+$/g, "").slice(0, 96) || "unknown";
-}
+export { buildTurnEnvironment } from "../turn/TurnEnvironment.js";
 
 function mergeUserRules(target: PermissionRule[], userRules: PermissionRule[] | undefined): void {
   const nonUserRules = target.filter((rule) => rule.source !== "user");

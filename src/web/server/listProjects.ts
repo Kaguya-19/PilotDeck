@@ -9,12 +9,14 @@
 
 import { readdir, readFile, stat } from "node:fs/promises";
 import { resolve, basename } from "node:path";
-import { listProjectSessions } from "../../session/index.js";
+import type { SessionCatalogPort } from "../../session/catalog/SessionCatalogPort.js";
 import { createProjectId } from "../../pilot/index.js";
 import type { WebListProjectsResult, WebProjectSummary } from "../client/protocol.js";
 
 export type ListWebProjectsOptions = {
   pilotHome: string;
+  /** Application-selected read-only catalog used for project activity summaries. */
+  sessionCatalog: SessionCatalogPort;
 };
 
 export async function listWebProjects(
@@ -128,7 +130,7 @@ async function summarizeProject(
     }
   }
   try {
-    const sessions = await listProjectSessions({
+    const sessions = await options.sessionCatalog.list({
       projectRoot,
       pilotHome: options.pilotHome,
     });

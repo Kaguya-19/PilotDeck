@@ -53,6 +53,17 @@ export class GatewayWsClient {
 
   constructor(private readonly options: GatewayWsClientOptions) {}
 
+  /**
+   * Binding assigned by the Gateway to this WebSocket connection.
+   *
+   * A reconnecting application consumer must retain this exact value and
+   * present it on its replacement connection. It is intentionally read-only:
+   * only the Gateway server can mint the next binding.
+   */
+  get interactionBinding(): WsHelloOk["interactionBinding"] | undefined {
+    return this.hello?.interactionBinding;
+  }
+
   onNotification(handler: GatewayWsNotificationHandler): void {
     this.notificationHandlers.push(handler);
   }

@@ -1,11 +1,11 @@
-import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import type { PilotDeckToolDefinition } from "../protocol/types.js";
 import type { PermissionResult, PermissionRule } from "../../permission/index.js";
 import { PilotDeckToolRuntimeError } from "../protocol/errors.js";
 import { applyResultSizeLimit } from "../protocol/result.js";
 import { resolvePilotDeckWorkspacePath } from "./filesystem/pathSafety.js";
-import { readFileInRange } from "./filesystem/readFileInRange.js";
+import { createNodeFsPort } from "../execution-world/NodeFsPort.js";
+import type { FsPort } from "../execution-world/FsPort.js";
 import {
   countPdfPages,
   getImageMimeType,
@@ -27,6 +27,11 @@ export type ReadFileInput = {
   pages?: string;
 };
 
+export type CreateReadFileToolOptions = {
+  /** Execution-world filesystem provider; defaults to the native Node provider. */
+  fs?: FsPort;
+};
+
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 const MAX_TEXT_TOKENS = 25_000;
 const LARGE_TEXT_AUTO_PAGE_BYTES = 200_000;
@@ -39,7 +44,8 @@ const PDF_EXTRACT_SIZE_THRESHOLD = 3 * 1024 * 1024;
 const FILE_UNCHANGED_STUB =
   "File unchanged since the last read. Refer to the earlier read_file result instead of re-reading it.";
 
-export function createReadFileTool(): PilotDeckToolDefinition<ReadFileInput> {
+export function createReadFileTool(options: CreateReadFileToolOptions = {}): PilotDeckToolDefinition<ReadFileInput> {
+  const fs = options.fs ?? createNodeFsPort();
   return {
     name: "read_file",
     aliases: ["Read"],
@@ -163,7 +169,7 @@ export function createReadFileTool(): PilotDeckToolDefinition<ReadFileInput> {
         throw new PilotDeckToolRuntimeError(resolved.error.code, resolved.error.message, resolved.error.details);
       }
 
-      const fileStat = await stat(resolved.absolutePath);
+      const fileStat = await fs.stat(resolved.absolutePath, context.abortSignal);
       const kind = classifyReadKind(resolved.absolutePath);
       const readState = context.readFileState ?? (context.readFileState = new Map());
       const dedupKey = buildReadStateKey(resolved.absolutePath, kind, input.offset, input.limit, input.pages);
@@ -195,7 +201,11 @@ export function createReadFileTool(): PilotDeckToolDefinition<ReadFileInput> {
             data: { filePath: resolved.relativePath, kind, modelSupportsImage: false },
           };
         }
-        const imageBuffer = await readFile(resolved.absolutePath, { signal: context.abortSignal });
+        const imageBytes = await fs.readFile(resolved.absolutePath, { signal: context.abortSignal });
+        if (typeof imageBytes === "string") {
+          throw new PilotDeckToolRuntimeError("invalid_tool_input", `Expected binary image data for ${resolved.relativePath}.`);
+        }
+        const imageBuffer = Buffer.from(imageBytes);
         const maxImageBytes = Math.min(MAX_IMAGE_BYTES, context.modelMultimodal?.maxImageBytes ?? MAX_IMAGE_BYTES);
         const preparedImage = await prepareImageForModel(imageBuffer, mimeType, maxImageBytes);
         if (!preparedImage.ok) {
@@ -248,7 +258,11 @@ export function createReadFileTool(): PilotDeckToolDefinition<ReadFileInput> {
           throw new PilotDeckToolRuntimeError("invalid_tool_input", `Invalid PDF page range: ${input.pages}.`);
         }
 
-        const pdfBuffer = await readFile(resolved.absolutePath, { signal: context.abortSignal });
+        const pdfBytes = await fs.readFile(resolved.absolutePath, { signal: context.abortSignal });
+        if (typeof pdfBytes === "string") {
+          throw new PilotDeckToolRuntimeError("invalid_tool_input", `Expected binary PDF data for ${resolved.relativePath}.`);
+        }
+        const pdfBuffer = Buffer.from(pdfBytes);
         const pageCount = await countPdfPages(pdfBuffer);
 
         if (
@@ -430,7 +444,7 @@ export function createReadFileTool(): PilotDeckToolDefinition<ReadFileInput> {
 
       const offset = input.offset ?? 1;
       if (kind === "notebook") {
-        const notebook = await readNotebook(resolved.absolutePath);
+        const notebook = await readNotebook(resolved.absolutePath, fs);
         const ranged = sliceRenderedText(notebook.text, offset, input.limit);
         const numbered = renderNumberedLines(ranged.lines, ranged.startLine);
         ensureTokenBudget(numbered, resolved.relativePath);
@@ -444,7 +458,7 @@ export function createReadFileTool(): PilotDeckToolDefinition<ReadFileInput> {
         recordWriteSnapshot(
           context,
           resolved.absolutePath,
-          await readFile(resolved.absolutePath, { encoding: "utf8", signal: context.abortSignal }),
+          await fs.readFile(resolved.absolutePath, { encoding: "utf8", signal: context.abortSignal }) as string,
           fileStat.mtimeMs,
           { offset: input.offset, limit: input.limit },
         );
@@ -464,21 +478,21 @@ export function createReadFileTool(): PilotDeckToolDefinition<ReadFileInput> {
       }
 
       const effectiveLimit = input.limit ?? (fileStat.size > LARGE_TEXT_AUTO_PAGE_BYTES ? DEFAULT_LARGE_TEXT_PREVIEW_LINES : undefined);
-      let ranged = await readFileInRange(resolved.absolutePath, offset, effectiveLimit, context.abortSignal);
+      let ranged = await fs.readFileInRange(resolved.absolutePath, offset, effectiveLimit, context.abortSignal);
       let text = renderReadableRange(ranged.content, ranged.startLine, ranged.totalLines);
       let autoPaged = input.limit === undefined && effectiveLimit !== undefined;
       let toolResultRefAutoPaged = false;
       if (autoPaged) {
         while (isOverTextBudget(text) && ranged.lineCount > 1) {
           const nextLimit = Math.max(1, Math.floor(ranged.lineCount / 2));
-          ranged = await readFileInRange(resolved.absolutePath, offset, nextLimit, context.abortSignal);
+          ranged = await fs.readFileInRange(resolved.absolutePath, offset, nextLimit, context.abortSignal);
           text = renderReadableRange(ranged.content, ranged.startLine, ranged.totalLines);
         }
       }
       if (!autoPaged && isManagedToolResultRefPath(resolved.relativePath)) {
         while (isOverTextBudget(text) && ranged.lineCount > 1) {
           const nextLimit = Math.max(1, Math.floor(ranged.lineCount / 2));
-          ranged = await readFileInRange(resolved.absolutePath, offset, nextLimit, context.abortSignal);
+          ranged = await fs.readFileInRange(resolved.absolutePath, offset, nextLimit, context.abortSignal);
           text = renderReadableRange(ranged.content, ranged.startLine, ranged.totalLines);
           toolResultRefAutoPaged = true;
         }

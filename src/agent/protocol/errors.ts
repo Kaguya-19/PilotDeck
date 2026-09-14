@@ -7,6 +7,7 @@ export type AgentErrorCode =
   | "agent_context_recovery_failed"
   | "agent_tool_result_pairing_failed"
   | "agent_transcript_error"
+  | "agent_execution_rejected"
   | "agent_invalid_state"
   | "agent_unsupported_feature"
   | "agent_tool_error_loop";

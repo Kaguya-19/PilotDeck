@@ -1,10 +1,10 @@
-import type { BackgroundTaskRuntime } from "../../task/runtime/BackgroundTaskRuntime.js";
+import type { BackgroundTaskPort } from "../../task/runtime/BackgroundTaskPort.js";
 import { createAgentTool, type CreateAgentToolOptions } from "../builtin/agent.js";
 import { createAskUserQuestionTool } from "../builtin/askUserQuestion.js";
 import { createBashTool, type CreateBashToolOptions } from "../builtin/bash.js";
 import { createEditFileTool } from "../builtin/editFile.js";
 import { createEditNotebookTool } from "../builtin/editNotebook.js";
-import { createExecuteCodeTool } from "../builtin/executeCode.js";
+import { createExecuteCodeTool, type CreateExecuteCodeToolOptions } from "../builtin/executeCode.js";
 import { createGlobTool } from "../builtin/glob.js";
 import { createGrepTool } from "../builtin/grep.js";
 import { createGetCurrentTimeTool } from "../builtin/getCurrentTime.js";
@@ -13,6 +13,8 @@ import { createSendAttachmentTool } from "../builtin/sendAttachment.js";
 import { createEnterPlanModeTool, createExitPlanModeTool } from "../builtin/planMode.js";
 import { createStructuredOutputTool } from "../builtin/structuredOutput.js";
 import { createTodoWriteTool } from "../builtin/todoWrite.js";
+import { createLspTool } from "../builtin/lsp.js";
+import type { LspServicePort } from "../../lsp/index.js";
 import {
   createTaskCreateTool,
   createTaskListTool,
@@ -24,9 +26,42 @@ import { createWebFetchTool, type CreateWebFetchToolOptions } from "../builtin/w
 import { createWebSearchTool, type CreateWebSearchToolOptions } from "../builtin/webSearch.js";
 import { createReadSkillTool, type ReadSkillDeps } from "../builtin/readSkill.js";
 import { createWriteFileTool } from "../builtin/writeFile.js";
+import { createGoalTools } from "../builtin/goal.js";
+import { createNodeFsPort } from "../execution-world/NodeFsPort.js";
+import type { FsPort } from "../execution-world/FsPort.js";
+import { createNodeSubprocessPort } from "../execution-world/SubprocessPort.js";
+import type { SubprocessPort } from "../execution-world/SubprocessPort.js";
+import { createNodeShellPort } from "../execution-world/ShellPort.js";
+import type { ShellPort } from "../execution-world/ShellPort.js";
+import { createNodeExecutionWorkspacePort } from "../execution-world/NodeExecutionWorkspacePort.js";
+import type { ExecutionWorkspacePort } from "../execution-world/ExecutionWorkspacePort.js";
+import { createNodeCodeRuntimePort } from "../execution-world/NodeCodeRuntimePort.js";
+import type { CodeRuntimePort } from "../execution-world/CodeRuntimePort.js";
+import { createNodeExecutionTransportPort } from "../execution-world/ExecutionTransportPort.js";
+import type { ExecutionTransportPort } from "../execution-world/ExecutionTransportPort.js";
+import { createNodeAttachmentDeliveryPort } from "../execution-world/AttachmentDeliveryPort.js";
+import type { AttachmentDeliveryPort } from "../execution-world/AttachmentDeliveryPort.js";
 import { ToolRegistry } from "./ToolRegistry.js";
 
 export type CreateBuiltinRegistryOptions = {
+  /** Optional project-scoped LSP service. When present, registers the `lsp` consumer. */
+  lsp?: LspServicePort;
+  /** Execution-world filesystem provider used by filesystem tools. */
+  fs?: FsPort;
+  /** Execution-world subprocess provider used by search consumers. */
+  subprocess?: SubprocessPort;
+  /** Execution-world shell provider used by the `bash` consumer. */
+  shell?: ShellPort;
+  /** Private temporary workspace provider used by `execute_code`. */
+  executionWorkspace?: ExecutionWorkspacePort;
+  /** Code process provider used by `execute_code`. */
+  codeRuntime?: CodeRuntimePort;
+  /** Private RPC transport provider used by `execute_code`. */
+  executionTransport?: ExecutionTransportPort;
+  /** Optional sandbox adapter/policy for the `execute_code` consumer. */
+  executeCodeSandbox?: NonNullable<CreateExecuteCodeToolOptions["sandbox"]>;
+  /** Attachment-delivery provider used by `send_attachment`. */
+  attachmentDelivery?: AttachmentDeliveryPort;
   bash?: CreateBashToolOptions;
   /**
    * `web_search` defaults to the GLM/Z.AI provider. Pass `false` to skip
@@ -55,10 +90,10 @@ export type CreateBuiltinRegistryOptions = {
    * Background task tools (`task_create` / `task_list` / `task_output` /
    * `task_wait` / `task_stop`). **Opt-in** — pass `{ runtime }` to register; absent or
    * `false` keeps them out of the registry. Stand-alone runtimes that do
-   * not provide a `BackgroundTaskRuntime` would otherwise see every call
+   * not provide a `BackgroundTaskPort` would otherwise see every call
    * fail with `unsupported_tool`.
    */
-  backgroundTasks?: { runtime: BackgroundTaskRuntime } | false;
+  backgroundTasks?: { runtime: BackgroundTaskPort } | false;
   /**
    * `structured_output` builtin (A3). Registered by default — the tool is
    * inert without a model client requesting it via `tool_choice`, but the
@@ -90,17 +125,30 @@ export type CreateBuiltinRegistryOptions = {
 
 export function createBuiltinRegistry(options?: CreateBuiltinRegistryOptions): ToolRegistry {
   const registry = new ToolRegistry();
+  const fs = options?.fs ?? createNodeFsPort();
+  const subprocess = options?.subprocess ?? createNodeSubprocessPort();
+  const executionWorkspace = options?.executionWorkspace ?? createNodeExecutionWorkspacePort();
+  const codeRuntime = options?.codeRuntime ?? createNodeCodeRuntimePort();
+  const executionTransport = options?.executionTransport ?? createNodeExecutionTransportPort();
+  const attachmentDelivery = options?.attachmentDelivery ?? createNodeAttachmentDeliveryPort();
+  const bashOptions = options?.bash?.shell || options?.bash?.subprocess || options?.bash?.runner
+    ? options.bash
+    : { ...(options?.bash ?? {}), shell: options?.shell ?? createNodeShellPort(subprocess) };
   registry.register(createGetCurrentTimeTool());
-  registry.register(createReadFileTool());
-  registry.register(createSendAttachmentTool());
-  registry.register(createGlobTool());
-  registry.register(createGrepTool());
-  registry.register(createEditFileTool());
-  registry.register(createEditNotebookTool());
-  registry.register(createWriteFileTool());
-  registry.register(createBashTool(options?.bash));
+  registry.register(createReadFileTool({ fs }));
+  registry.register(createSendAttachmentTool({ delivery: attachmentDelivery }));
+  registry.register(createGlobTool({ fs, subprocess }));
+  registry.register(createGrepTool({ fs, subprocess }));
+  registry.register(createEditFileTool({ fs, subprocess }));
+  registry.register(createEditNotebookTool({ fs }));
+  registry.register(createWriteFileTool({ fs }));
+  registry.register(createBashTool(bashOptions));
   registry.register(createExecuteCodeTool({
     webSearch: options?.webSearch !== false,
+    executionWorkspace,
+    codeRuntime,
+    executionTransport,
+    ...(options?.executeCodeSandbox ? { sandbox: options.executeCodeSandbox } : {}),
   }));
   if (options?.webSearch !== false) {
     registry.register(createWebSearchTool(options?.webSearch));
@@ -143,8 +191,12 @@ export function createBuiltinRegistry(options?: CreateBuiltinRegistryOptions): T
     registry.register(createExitPlanModeTool());
   }
   registry.register(createTodoWriteTool());
+  for (const tool of createGoalTools()) registry.register(tool);
   if (options?.readSkill) {
     registry.register(createReadSkillTool(options.readSkill));
+  }
+  if (options?.lsp) {
+    registry.register(createLspTool(options.lsp));
   }
   return registry;
 }

@@ -31,3 +31,8 @@ export const CRON_SCHEDULE_SCHEMA = {
     },
   ],
 } as const;
+
+/** Existing tasks cannot be converted to a relative-delay schedule by update. */
+export const CRON_TASK_SCHEDULE_SCHEMA = {
+  anyOf: CRON_SCHEDULE_SCHEMA.anyOf.slice(0, 2),
+} as const;

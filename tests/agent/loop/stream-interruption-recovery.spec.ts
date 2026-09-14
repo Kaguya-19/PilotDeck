@@ -436,7 +436,7 @@ function createLoop(
     recoverFromModelError: async () => ({ type: "give_up", reason: "test" }),
     captureTurn: async () => undefined,
   };
-  return new AgentLoop(config, {
+  return AgentLoop.fromDependencies(config, {
     router,
     tools: {
       registry: new ToolRegistry(),

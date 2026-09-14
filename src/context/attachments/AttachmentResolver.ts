@@ -1,6 +1,6 @@
-import { readFile, stat } from "node:fs/promises";
 import { extname, resolve } from "node:path";
 import type { CanonicalContentBlock, CanonicalMessage } from "../../model/index.js";
+import { createNodeAttachmentPort, type AttachmentPort } from "./AttachmentPort.js";
 
 export type AttachmentRequest =
   | { type: "file"; path: string }
@@ -29,6 +29,8 @@ export type AttachmentResolverOptions = {
   maxImageBytes?: number;
   /** Approximate bytes-per-page for PDF estimation (legacy fallback: 102_400). */
   bytesPerPdfPage?: number;
+  /** Attachment storage provider; defaults to the native filesystem provider. */
+  attachmentPort?: AttachmentPort;
 };
 
 const DEFAULT_MAX_FILE_BYTES = 1_000_000; // 1 MB
@@ -88,11 +90,13 @@ export class AttachmentResolver {
   private readonly maxFileBytes: number;
   private readonly maxImageBytes: number;
   private readonly bytesPerPdfPage: number;
+  private readonly attachmentPort: AttachmentPort;
 
   constructor(options: AttachmentResolverOptions = {}) {
     this.maxFileBytes = options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES;
     this.maxImageBytes = options.maxImageBytes ?? DEFAULT_MAX_IMAGE_BYTES;
     this.bytesPerPdfPage = options.bytesPerPdfPage ?? DEFAULT_BYTES_PER_PDF_PAGE;
+    this.attachmentPort = options.attachmentPort ?? createNodeAttachmentPort();
   }
 
   async resolve(request: AttachmentRequest): Promise<ResolvedAttachment> {
@@ -125,7 +129,7 @@ export class AttachmentResolver {
     const absolute = resolve(path);
     let info;
     try {
-      info = await stat(absolute);
+      info = await this.attachmentPort.stat(absolute);
     } catch (error) {
       return {
         blocks: [],
@@ -163,7 +167,7 @@ export class AttachmentResolver {
         ],
       };
     }
-    const text = await readFile(absolute, "utf8");
+    const text = await this.attachmentPort.readText(absolute);
     return {
       blocks: [
         { type: "text", text: `<attachment path="${absolute}">\n${text}\n</attachment>` },
@@ -176,7 +180,7 @@ export class AttachmentResolver {
     const absolute = resolve(path);
     let info;
     try {
-      info = await stat(absolute);
+      info = await this.attachmentPort.stat(absolute);
     } catch (error) {
       return {
         blocks: [],
@@ -215,7 +219,7 @@ export class AttachmentResolver {
         ],
       };
     }
-    const buffer = await readFile(absolute);
+    const buffer = Buffer.from(await this.attachmentPort.readBytes(absolute));
     const actualMime = detectImageMime(buffer);
     if (!actualMime) {
       return {
@@ -278,7 +282,7 @@ export class AttachmentResolver {
     const absolute = resolve(path);
     let info;
     try {
-      info = await stat(absolute);
+      info = await this.attachmentPort.stat(absolute);
     } catch (error) {
       return {
         blocks: [],

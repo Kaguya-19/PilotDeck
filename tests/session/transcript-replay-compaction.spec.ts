@@ -123,3 +123,259 @@ test("transcript replay resumes from persisted post-compact replacement messages
   assert.match(replayText, /kept tail input/);
   assert.equal(replay.messages.every((message) => message.metadata?.compactReplacement === true), true);
 });
+
+test("transcript replay applies an atomic compact replacement only after its turn completes", () => {
+  const replacement = [
+    {
+      role: "assistant" as const,
+      metadata: { compactReplacement: true },
+      content: [{ type: "text" as const, text: "atomic summary" }],
+    },
+    {
+      role: "user" as const,
+      metadata: { compactReplacement: true },
+      content: [{ type: "text" as const, text: "atomic tail" }],
+    },
+  ];
+  const completedEntries: AgentTranscriptEntry[] = [
+    {
+      type: "accepted_input",
+      sessionId: "session-atomic-compact",
+      turnId: "turn-old",
+      sequence: 1,
+      createdAt,
+      messages: [{ role: "user", content: [{ type: "text", text: "old history" }] }],
+    },
+    {
+      type: "turn_result",
+      sessionId: "session-atomic-compact",
+      turnId: "turn-old",
+      sequence: 2,
+      createdAt,
+      result: {
+        type: "success",
+        sessionId: "session-atomic-compact",
+        turnId: "turn-old",
+        stopReason: "completed",
+        usage: {},
+        permissionDenials: [],
+        turns: 1,
+        startedAt: createdAt,
+        completedAt: createdAt,
+      },
+    },
+    {
+      type: "control_boundary",
+      sessionId: "session-atomic-compact",
+      turnId: "turn-compact",
+      sequence: 3,
+      createdAt,
+      boundary: {
+        kind: "compact",
+        subtype: "compact_boundary",
+        compactMetadata: { trigger: "auto", preTokens: 100, postTokens: 20 },
+        replacementMessages: replacement,
+      },
+    },
+    {
+      type: "turn_result",
+      sessionId: "session-atomic-compact",
+      turnId: "turn-compact",
+      sequence: 4,
+      createdAt,
+      result: {
+        type: "success",
+        sessionId: "session-atomic-compact",
+        turnId: "turn-compact",
+        stopReason: "completed",
+        usage: {},
+        permissionDenials: [],
+        turns: 1,
+        startedAt: createdAt,
+        completedAt: createdAt,
+      },
+    },
+  ];
+  const completedReplay = replayTranscriptEntries(completedEntries);
+  assert.deepEqual(completedReplay.messages.map(messageText), ["atomic summary", "atomic tail"]);
+
+  const crashReplay = replayTranscriptEntries(completedEntries.slice(0, 3));
+  assert.deepEqual(crashReplay.messages, []);
+});
+
+test("transcript replay composes conversation, turn summary, metadata, and diagnostics projections", () => {
+  const entries: AgentTranscriptEntry[] = [
+    {
+      type: "accepted_input",
+      sessionId: "session-projections",
+      turnId: "turn-complete",
+      sequence: 1,
+      createdAt,
+      messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+    },
+    {
+      type: "assistant_message",
+      sessionId: "session-projections",
+      turnId: "turn-complete",
+      sequence: 2,
+      createdAt,
+      message: { role: "assistant", content: [{ type: "text", text: "world" }] },
+    },
+    {
+      type: "turn_result",
+      sessionId: "session-projections",
+      turnId: "turn-complete",
+      sequence: 3,
+      createdAt,
+      result: {
+        type: "success",
+        sessionId: "session-projections",
+        turnId: "turn-complete",
+        stopReason: "completed",
+        usage: { inputTokens: 3, outputTokens: 2, totalTokens: 5 },
+        permissionDenials: [{ toolName: "write_file", toolCallId: "call-denied", errorCode: "denied" }],
+        turns: 1,
+        startedAt: createdAt,
+        completedAt: createdAt,
+      },
+    },
+    {
+      type: "session_metadata",
+      sessionId: "session-projections",
+      turnId: "turn-complete",
+      sequence: 4,
+      createdAt,
+      metadata: { title: "Projected title", firstPrompt: "hello" },
+    },
+    {
+      type: "session_metadata",
+      sessionId: "session-projections",
+      turnId: "turn-complete",
+      sequence: 5,
+      createdAt,
+      metadata: { tag: "projection" },
+    },
+    {
+      type: "durable_message",
+      sessionId: "session-projections",
+      turnId: "turn-incomplete",
+      sequence: 6,
+      createdAt,
+      message: { role: "user", content: [{ type: "text", text: "must not replay" }] },
+    },
+  ];
+
+  const replay = replayTranscriptEntries(entries);
+
+  assert.deepEqual(replay.messages.map(messageText), ["hello", "world"]);
+  assert.deepEqual(replay.usage, {
+    inputTokens: 3,
+    outputTokens: 2,
+    cacheReadTokens: undefined,
+    cacheWriteTokens: undefined,
+    totalTokens: 5,
+  });
+  assert.deepEqual(replay.permissionDenials, [
+    { toolName: "write_file", toolCallId: "call-denied", errorCode: "denied" },
+  ]);
+  assert.deepEqual(replay.metadata, {
+    title: "Projected title",
+    firstPrompt: "hello",
+    tag: "projection",
+    linkedPullRequest: undefined,
+  });
+  assert.deepEqual(replay.events.map((event) => event.type), [
+    "input_accepted",
+    "assistant_message",
+    "turn_completed",
+  ]);
+  assert.deepEqual(replay.diagnostics, [
+    {
+      code: "transcript_entry_invalid",
+      severity: "warning",
+      message: "Skipping durable message for incomplete turn turn-incomplete.",
+    },
+  ]);
+});
+
+test("transcript replay restores runtime context before its completed turn request and skips crash tails", () => {
+  const runtimeContextMessage = {
+    role: "user" as const,
+    metadata: { synthetic: true, purpose: "runtime_context" },
+    content: [{ type: "text" as const, text: "<runtime-context name=\"cwd\">/workspace</runtime-context>" }],
+  };
+  const entries: AgentTranscriptEntry[] = [
+    {
+      type: "accepted_input",
+      sessionId: "session-runtime-context",
+      turnId: "turn-complete",
+      sequence: 1,
+      createdAt,
+      messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+    },
+    {
+      type: "context_snapshot",
+      sessionId: "session-runtime-context",
+      turnId: "turn-complete",
+      sequence: 2,
+      createdAt,
+      step: 1,
+      contexts: [{ name: "cwd", text: "/workspace" }],
+      runtimeContextMessages: [runtimeContextMessage],
+    },
+    {
+      type: "assistant_message",
+      sessionId: "session-runtime-context",
+      turnId: "turn-complete",
+      sequence: 3,
+      createdAt,
+      message: { role: "assistant", content: [{ type: "text", text: "world" }] },
+    },
+    {
+      type: "turn_result",
+      sessionId: "session-runtime-context",
+      turnId: "turn-complete",
+      sequence: 4,
+      createdAt,
+      result: {
+        type: "success",
+        sessionId: "session-runtime-context",
+        turnId: "turn-complete",
+        stopReason: "completed",
+        usage: {},
+        permissionDenials: [],
+        turns: 1,
+        startedAt: createdAt,
+        completedAt: createdAt,
+      },
+    },
+    {
+      type: "accepted_input",
+      sessionId: "session-runtime-context",
+      turnId: "turn-incomplete",
+      sequence: 5,
+      createdAt,
+      messages: [{ role: "user", content: [{ type: "text", text: "crash tail" }] }],
+    },
+    {
+      type: "context_snapshot",
+      sessionId: "session-runtime-context",
+      turnId: "turn-incomplete",
+      sequence: 6,
+      createdAt,
+      step: 1,
+      contexts: [{ name: "cwd", text: "/workspace" }],
+      runtimeContextMessages: [runtimeContextMessage],
+    },
+  ];
+
+  const replay = replayTranscriptEntries(entries);
+
+  assert.deepEqual(replay.messages.map(messageText), [
+    "<runtime-context name=\"cwd\">/workspace</runtime-context>",
+    "hello",
+    "world",
+    "crash tail",
+  ]);
+  assert.equal(replay.diagnostics.length, 0);
+});

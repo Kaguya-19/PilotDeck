@@ -3,7 +3,23 @@ export {
   McpClientError,
   type McpClientOptions,
 } from "./client/McpClient.js";
-export { McpRuntime, type McpRuntimeOptions } from "./runtime/McpRuntime.js";
+export {
+  McpRuntime,
+  createNativeMcpRuntime,
+  type McpRuntimeOptions,
+} from "./runtime/McpRuntime.js";
+export type {
+  McpRuntimeFactory,
+  McpRuntimePort,
+  McpRuntimeServerInfo,
+  McpToolCallResult,
+} from "./runtime/McpRuntimePort.js";
+export {
+  ProjectMcpRuntimeProvider,
+  type ProjectMcpRuntimeLease,
+  type ProjectMcpRuntimeProviderOptions,
+  type ProjectMcpRuntimeProviderState,
+} from "./runtime/ProjectMcpRuntimeProvider.js";
 export {
   parsePluginMcpServers,
   type ParsePluginMcpServersResult,

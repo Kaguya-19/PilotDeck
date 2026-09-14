@@ -1,0 +1,2660 @@
+import assert from "node:assert/strict";
+import { PassThrough } from "node:stream";
+import test from "node:test";
+import { fileURLToPath } from "node:url";
+
+import {
+  AgentLoopSidecarServer,
+  createAgentLoopSidecarRuntimeFactory,
+  createStdioAgentLoopSidecarConnectionFactory,
+  SessionAgentLoopOperationLedger,
+} from "../../../src/agent/index.js";
+import { createSidecarExecution } from "../../../src/cli/pilotdeck-agent-loop-default-factory.js";
+import { createAgentSession } from "../../../src/agent/session/createAgentSession.js";
+import { createDefaultPermissionContext, PermissionRuntime } from "../../../src/permission/index.js";
+import type { AgentLoopSeedState } from "../../../src/agent/loop/AgentLoop.js";
+import type { AgentRuntimeConfig } from "../../../src/agent/runtime/AgentRuntimeConfig.js";
+import type { OneShotSubagentPort } from "../../../src/agent/sub/OneShotSubagentPort.js";
+import type { ModelInvokerPort, ToolPort } from "../../../src/agent/modules/protocol.js";
+import type { CanonicalModelEvent } from "../../../src/model/index.js";
+import { createPlanTodoSnapshot } from "../../../src/plan-todo/projection/PlanTodoProjection.js";
+import { emptyLifecycleDispatchResult, LifecycleRuntime, type LifecycleDispatchInput } from "../../../src/lifecycle/index.js";
+import { InMemoryTranscriptWriter } from "../../../src/session/transcript/InMemoryTranscriptWriter.js";
+import {
+  ToolRegistry,
+  ToolRuntime,
+  type PilotDeckPlanTodoStateHandle,
+  type PilotDeckToolDefinition,
+  type PilotDeckToolRuntimeContext,
+} from "../../../src/tool/index.js";
+
+test("capability-only sidecar factory completes a durable host tool turn and restores terminal seed state", async () => {
+  let modelCalls = 0;
+  const durableCalls: string[] = [];
+  const model: ModelInvokerPort = {
+    async prepare({ request }) {
+      return { request, provider: request.provider, model: request.model };
+    },
+    async *stream(): AsyncIterable<CanonicalModelEvent> {
+      modelCalls += 1;
+      yield { type: "message_start", role: "assistant" };
+      if (modelCalls === 1) {
+        yield { type: "tool_call_end", toolCall: { id: "tool-1", name: "lookup", input: { query: "status" } } };
+        yield { type: "message_end", finishReason: "tool_call" };
+      } else {
+        yield { type: "text_delta", text: "remote complete" };
+        yield { type: "message_end", finishReason: "stop" };
+      }
+    },
+  };
+  const tools: ToolPort = {
+    list: () => [{
+      name: "lookup",
+      description: "lookup state",
+      kind: "custom",
+      inputSchema: { type: "object" },
+      isReadOnly: () => true,
+      isConcurrencySafe: () => true,
+      execute: async () => ({ content: [{ type: "text", text: "unused" }] }),
+    }],
+    async executeAll(calls, _context, execution) {
+      durableCalls.push(`${execution.runId}:${calls[0]?.id}`);
+      return calls.map((call) => ({
+        type: "success" as const,
+        toolCallId: call.id,
+        toolName: call.name,
+        content: [{ type: "text" as const, text: "host value" }],
+        startedAt: "2026-09-10T00:00:00.000Z",
+        completedAt: "2026-09-10T00:00:00.001Z",
+      }));
+    },
+  };
+  const initialSeed: AgentLoopSeedState = {
+    allowedReadFiles: ["/workspace/input.txt"],
+    readFileState: new Map([["/workspace/input.txt", { mtimeMs: 1, kind: "text" }]]),
+  };
+  const sidecarFactory = createAgentLoopSidecarRuntimeFactory({
+    connect: () => loopbackConnection(),
+    uuid: deterministicIds(),
+  });
+  const session = createAgentSession({
+    sessionId: "remote-session",
+    config: config(),
+    seedState: initialSeed,
+    dependencies: {
+      router: {} as never,
+      ports: { model, tools },
+      tools: { registry: { list: () => [] } as never, scheduler: { executeAll: async () => [] } as never },
+    },
+    agentLoopFactory: sidecarFactory,
+  });
+
+  const events = [];
+  for await (const event of session.submit({ type: "text", text: "inspect remote state" }, {
+    turnId: "remote-turn",
+  })) events.push(event);
+
+  assert.equal(durableCalls.length, 1);
+  assert.match(durableCalls[0] ?? "", /^run-[0-9]+:tool-1$/);
+  assert.equal(events.filter((event) => event.type === "tool_result").length, 1);
+  const terminal = events.find((event) => event.type === "turn_completed") as { result?: { type?: string } } | undefined;
+  assert.equal(terminal?.result?.type, "success");
+  const restoredFileState = session.snapshotForRuntimeReload().fileState;
+  assert.ok(restoredFileState);
+  assert.deepEqual(restoredFileState.allowedReadFiles, ["/workspace/input.txt"]);
+  assert.equal(restoredFileState.readFileState?.get("/workspace/input.txt")?.kind, "text");
+});
+
+test("sidecar known terminal keeps host tool checkpoint state and current attachment authorization", async () => {
+  const toolContexts: PilotDeckToolRuntimeContext[] = [];
+  const forkSnapshots: Array<{ readFiles: string[]; writeFiles: string[] }> = [];
+  const firstHostRead = "/workspace/host-first.txt";
+  const secondHostRead = "/workspace/host-second.txt";
+  const firstHostWrite = "/workspace/host-first-write.txt";
+  const secondHostWrite = "/workspace/host-second-write.txt";
+  const currentAttachment = "/tmp/current-turn-attachment.txt";
+  const transcript = new InMemoryTranscriptWriter();
+  const oneShotSubagentPort: OneShotSubagentPort = {
+    createForkApi(input) {
+      return {
+        depth: 0,
+        maxSubagentDepth: 1,
+        listDefinitions: () => [{ id: "checkpoint", description: "Checkpoint inspection" }],
+        isAllowedDefinition: (id) => id === "checkpoint",
+        async fork() {
+          forkSnapshots.push({
+            readFiles: [...(input.parentReadFileState?.keys() ?? [])],
+            writeFiles: [...(input.parentWriteSnapshots?.keys() ?? [])],
+          });
+          return {
+            markdown: "checkpoint complete",
+            usage: {},
+            turns: 1,
+            durationMs: 1,
+            subagentSessionId: "checkpoint-session::sub::child",
+          };
+        },
+      };
+    },
+  };
+  const tools: ToolPort = {
+    list: () => [{
+      name: "checkpoint",
+      description: "Mutates host file checkpoint state.",
+      kind: "custom",
+      inputSchema: { type: "object" },
+      isReadOnly: () => false,
+      isConcurrencySafe: () => false,
+      execute: async () => ({ content: [] }),
+    }],
+    async executeAll(calls, context) {
+      toolContexts.push(context);
+      assert.ok(context.readFileState);
+      assert.ok(context.writeSnapshots);
+      assert.deepEqual(context.allowedReadFiles, ["/workspace/seed-attachment.txt", currentAttachment]);
+      if (calls[0]?.id === "checkpoint-1") {
+        context.readFileState.set(firstHostRead, { mtimeMs: 2, kind: "text" });
+        context.writeSnapshots.set(firstHostWrite, {
+          absolutePath: firstHostWrite,
+          mtimeMs: 2,
+          contentHash: "host-first",
+        });
+      } else {
+        assert.equal(context.readFileState, toolContexts[0]?.readFileState);
+        assert.equal(context.writeSnapshots, toolContexts[0]?.writeSnapshots);
+        assert.ok(context.readFileState.has(firstHostRead));
+        assert.ok(context.writeSnapshots.has(firstHostWrite));
+        context.readFileState.set(secondHostRead, { mtimeMs: 3, kind: "text" });
+        context.writeSnapshots.set(secondHostWrite, {
+          absolutePath: secondHostWrite,
+          mtimeMs: 3,
+          contentHash: "host-second",
+        });
+        assert.ok(context.subagent);
+        await context.subagent.fork({
+          definitionId: "checkpoint",
+          directive: "Inspect the shared host checkpoint.",
+          subagentId: "child",
+          toolCallId: calls[0]?.id,
+        });
+      }
+      return calls.map((call) => ({
+        type: "success" as const,
+        toolCallId: call.id,
+        toolName: call.name,
+        content: [],
+        startedAt: "2026-09-12T00:00:00.000Z",
+        completedAt: "2026-09-12T00:00:00.001Z",
+      }));
+    },
+  };
+  let modelCalls = 0;
+  const model: ModelInvokerPort = {
+    async prepare({ request }) {
+      return { request, provider: request.provider, model: request.model };
+    },
+    async *stream(): AsyncIterable<CanonicalModelEvent> {
+      modelCalls += 1;
+      yield { type: "message_start", role: "assistant" };
+      if (modelCalls <= 2) {
+        yield {
+          type: "tool_call_end",
+          toolCall: { id: `checkpoint-${modelCalls}`, name: "checkpoint", input: {} },
+        };
+        yield { type: "message_end", finishReason: "tool_call" };
+        return;
+      }
+      yield { type: "text_delta", text: "host checkpoint retained" };
+      yield { type: "message_end", finishReason: "stop" };
+    },
+  };
+  const session = createAgentSession({
+    sessionId: "checkpoint-session",
+    config: {
+      ...config(),
+      permissionMode: "bypassPermissions",
+      permissionContext: createDefaultPermissionContext({
+        cwd: "/workspace",
+        mode: "bypassPermissions",
+        bypassAvailable: true,
+        canPrompt: false,
+      }),
+    },
+    seedState: {
+      allowedReadFiles: ["/workspace/seed-attachment.txt"],
+      readFileState: new Map([["/workspace/seed.txt", { mtimeMs: 1, kind: "text" }]]),
+      writeSnapshots: new Map([["/workspace/seed-write.txt", {
+        absolutePath: "/workspace/seed-write.txt",
+        mtimeMs: 1,
+        contentHash: "seed",
+      }]]),
+    },
+    dependencies: {
+      router: {} as never,
+      ports: { model, tools },
+      tools: { registry: { list: () => [] } as never, scheduler: { executeAll: async () => [] } as never },
+      oneShotSubagentPort,
+    },
+    transcript,
+    agentLoopFactory: createAgentLoopSidecarRuntimeFactory({
+      connect: () => loopbackConnection(),
+      uuid: deterministicIds(),
+    }),
+  });
+
+  const events = [];
+  for await (const event of session.submit({ type: "text", text: "exercise host checkpoint" }, {
+    turnId: "checkpoint-turn",
+    allowedReadFiles: [currentAttachment],
+  })) events.push(event);
+
+  assert.equal(modelCalls, 3);
+  assert.equal(toolContexts.length, 2);
+  assert.deepEqual(forkSnapshots, [{
+    readFiles: ["/workspace/seed.txt", firstHostRead, secondHostRead],
+    writeFiles: ["/workspace/seed-write.txt", firstHostWrite, secondHostWrite],
+  }]);
+  const fileState = session.snapshotForRuntimeReload().fileState;
+  assert.ok(fileState);
+  assert.deepEqual(fileState.allowedReadFiles, ["/workspace/seed-attachment.txt", currentAttachment]);
+  assert.equal(fileState.readFileState?.get(firstHostRead)?.mtimeMs, 2);
+  assert.equal(fileState.readFileState?.get(secondHostRead)?.mtimeMs, 3);
+  assert.equal(fileState.writeSnapshots?.get(firstHostWrite)?.contentHash, "host-first");
+  assert.equal(fileState.writeSnapshots?.get(secondHostWrite)?.contentHash, "host-second");
+  const operationTerminal = transcript.entries.find((entry) => entry.type === "agent_loop_operation_terminal");
+  assert.ok(operationTerminal && operationTerminal.type === "agent_loop_operation_terminal");
+  const persistedReadState = operationTerminal.seedState?.readFileState as Record<string, { mtimeMs?: number }> | undefined;
+  const persistedWriteSnapshots = operationTerminal.seedState?.writeSnapshots as Record<string, { contentHash?: string }> | undefined;
+  assert.equal(persistedReadState?.[secondHostRead]?.mtimeMs, 3);
+  assert.equal(persistedWriteSnapshots?.[secondHostWrite]?.contentHash, "host-second");
+  const terminal = events.find((event) => event.type === "turn_completed") as { result?: { type?: string } } | undefined;
+  assert.equal(terminal?.result?.type, "success");
+});
+
+test("sidecar permission callback uses the canonical host tool cwd", async () => {
+  const actualCwd = "/workspace/actual";
+  const stalePermissionCwd = "/workspace/stale";
+  const writeTool: PilotDeckToolDefinition = {
+    name: "write_file",
+    description: "Writes one workspace file.",
+    kind: "custom",
+    inputSchema: { type: "object" },
+    isReadOnly: () => false,
+    isConcurrencySafe: () => false,
+    execute: async () => ({ content: [] }),
+  };
+
+  const run = async (mode: "native" | "sidecar") => {
+    const permissionRuntime = new PermissionRuntime();
+    const permissionContexts: PilotDeckToolRuntimeContext[] = [];
+    let executed = 0;
+    const permission = {
+      async decide(
+        tool: PilotDeckToolDefinition,
+        input: unknown,
+        context: PilotDeckToolRuntimeContext,
+        toolCallId: string,
+      ) {
+        permissionContexts.push(context);
+        return permissionRuntime.decide(tool, input, context, toolCallId);
+      },
+    };
+    const tools: ToolPort = {
+      list: () => [writeTool],
+      async executeAll(calls, context) {
+        const call = calls[0];
+        assert.ok(call);
+        const decision = await permission.decide(writeTool, call.input, context, call.id);
+        assert.equal(decision.type, "allow");
+        executed += 1;
+        return [{
+          type: "success" as const,
+          toolCallId: call.id,
+          toolName: call.name,
+          content: [{ type: "text" as const, text: "written" }],
+          startedAt: "2026-09-12T00:00:00.000Z",
+          completedAt: "2026-09-12T00:00:00.001Z",
+        }];
+      },
+    };
+    let modelCalls = 0;
+    const model: ModelInvokerPort = {
+      async prepare({ request }) {
+        return { request, provider: request.provider, model: request.model };
+      },
+      async *stream(): AsyncIterable<CanonicalModelEvent> {
+        modelCalls += 1;
+        yield { type: "message_start", role: "assistant" };
+        if (modelCalls === 1) {
+          yield {
+            type: "tool_call_end",
+            toolCall: { id: "write-call", name: "write_file", input: { file_path: "notes.md" } },
+          };
+          yield { type: "message_end", finishReason: "tool_call" };
+          return;
+        }
+        yield { type: "text_delta", text: "write complete" };
+        yield { type: "message_end", finishReason: "stop" };
+      },
+    };
+    const session = createAgentSession({
+      sessionId: `${mode}-permission-cwd-session`,
+      config: {
+        ...config(),
+        cwd: actualCwd,
+        permissionContext: createDefaultPermissionContext({
+          cwd: stalePermissionCwd,
+          canPrompt: false,
+          rules: {
+            allow: [{ source: "user", behavior: "allow", toolName: "write_file" }],
+          },
+        }),
+      },
+      dependencies: {
+        router: {} as never,
+        ports: { model, tools },
+        tools: { registry: { list: () => [] } as never, scheduler: { executeAll: async () => [] } as never },
+        permission,
+      },
+      ...(mode === "sidecar"
+        ? {
+            agentLoopFactory: createAgentLoopSidecarRuntimeFactory({
+              connect: () => loopbackConnection(),
+              uuid: deterministicIds(),
+            }),
+          }
+        : {}),
+    });
+    const events = [];
+    for await (const event of session.submit({ type: "text", text: "write the note" }, {
+      turnId: `${mode}-permission-cwd-turn`,
+    })) events.push(event);
+    return { executed, permissionContexts, events };
+  };
+
+  const native = await run("native");
+  const sidecar = await run("sidecar");
+
+  for (const result of [native, sidecar]) {
+    assert.equal(result.executed, 1);
+    assert.ok(result.permissionContexts.length > 0);
+    assert.deepEqual(result.permissionContexts.map((context) => context.cwd), result.permissionContexts.map(() => actualCwd));
+    assert.deepEqual(
+      result.permissionContexts.map((context) => context.permissionContext.cwd),
+      result.permissionContexts.map(() => actualCwd),
+    );
+    const terminal = result.events.find((event) => event.type === "turn_completed") as { result?: { type?: string } } | undefined;
+    assert.equal(terminal?.result?.type, "success");
+  }
+});
+
+test("sidecar host owns tool-driven plan mode across callbacks and turns", async () => {
+  const enterPlanTool: PilotDeckToolDefinition = {
+    name: "enter_plan_mode",
+    description: "Enter plan mode.",
+    kind: "session",
+    inputSchema: { type: "object" },
+    isReadOnly: () => true,
+    isConcurrencySafe: () => true,
+    execute: async () => ({ content: [] }),
+  };
+  const exitPlanTool: PilotDeckToolDefinition = {
+    name: "exit_plan_mode",
+    description: "Exit plan mode.",
+    kind: "session",
+    inputSchema: { type: "object" },
+    isReadOnly: () => true,
+    isConcurrencySafe: () => true,
+    execute: async () => ({ content: [] }),
+  };
+  const writeTool: PilotDeckToolDefinition = {
+    name: "write_file",
+    description: "Writes a workspace file.",
+    kind: "custom",
+    inputSchema: { type: "object" },
+    isReadOnly: () => false,
+    isConcurrencySafe: () => false,
+    execute: async () => ({ content: [] }),
+  };
+
+  const run = async (kind: "native" | "sidecar") => {
+    const runtimeConfig = config();
+    const permissionRuntime = new PermissionRuntime();
+    const permissionModes: string[] = [];
+    const lifecycle = new RecordingLifecycleRuntime();
+    const permission = {
+      async decide(
+        tool: PilotDeckToolDefinition,
+        input: unknown,
+        context: PilotDeckToolRuntimeContext,
+        toolCallId: string,
+      ) {
+        permissionModes.push(context.permissionMode);
+        return permissionRuntime.decide(tool, input, context, toolCallId);
+      },
+    };
+    const tools: ToolPort = {
+      list: () => [enterPlanTool, exitPlanTool, writeTool],
+      async executeAll(calls, context) {
+        return Promise.all(calls.map(async (call) => {
+          // Native ToolPort callers perform permission preflight here. The
+          // sidecar's host port does the same preflight through the permission
+          // module before it invokes this host capability.
+          if (kind === "native") {
+            const tool = [enterPlanTool, exitPlanTool, writeTool].find((candidate) => candidate.name === call.name);
+            assert.ok(tool);
+            const decision = await permission.decide(tool, call.input, context, call.id);
+            if (decision.type !== "allow") {
+              const message = decision.type === "ask"
+                ? "Permission is required to run write_file."
+                : decision.message;
+              return {
+                type: "error" as const,
+                toolCallId: call.id,
+                toolName: call.name,
+                error: { code: "permission_denied" as const, message },
+                content: [{ type: "text" as const, text: message }],
+                startedAt: "2026-09-12T00:00:00.000Z",
+                completedAt: "2026-09-12T00:00:00.001Z",
+              };
+            }
+          }
+          const requestedMode = call.name === "enter_plan_mode"
+            ? "plan"
+            : call.name === "exit_plan_mode"
+              ? "default"
+              : undefined;
+          return {
+            type: "success" as const,
+            toolCallId: call.id,
+            toolName: call.name,
+            content: [{ type: "text" as const, text: `${call.name} complete` }],
+            ...(requestedMode ? { data: { requestedMode } } : {}),
+            startedAt: "2026-09-12T00:00:00.000Z",
+            completedAt: "2026-09-12T00:00:00.001Z",
+          };
+        }));
+      },
+    };
+    let modelCalls = 0;
+    const model: ModelInvokerPort = {
+      async prepare({ request }) {
+        return { request, provider: request.provider, model: request.model };
+      },
+      async *stream(): AsyncIterable<CanonicalModelEvent> {
+        modelCalls += 1;
+        yield { type: "message_start", role: "assistant" };
+        const toolByModelCall: Record<number, string> = {
+          1: "enter_plan_mode",
+          3: "write_file",
+          5: "exit_plan_mode",
+          7: "write_file",
+        };
+        const toolName = toolByModelCall[modelCalls];
+        if (toolName) {
+          yield {
+            type: "tool_call_end",
+            toolCall: { id: `mode-call-${modelCalls}`, name: toolName, input: { path: "notes.md" } },
+          };
+          yield { type: "message_end", finishReason: "tool_call" };
+          return;
+        }
+        yield { type: "text_delta", text: `model pass ${modelCalls}` };
+        yield { type: "message_end", finishReason: "stop" };
+      },
+    };
+    const session = createAgentSession({
+      sessionId: `${kind}-mode-session`,
+      config: runtimeConfig,
+      dependencies: {
+        router: {} as never,
+        ports: { model, tools },
+        tools: { registry: { list: () => [] } as never, scheduler: { executeAll: async () => [] } as never },
+        permission,
+        lifecycle,
+      },
+      ...(kind === "sidecar" ? {
+        agentLoopFactory: createAgentLoopSidecarRuntimeFactory({
+          connect: () => loopbackConnection(),
+          uuid: deterministicIds(),
+        }),
+      } : {}),
+    });
+
+    const submit = async (turnId: string, allowPlanModeTools = false) => {
+      const events = [];
+      for await (const event of session.submit({ type: "text", text: turnId }, {
+        turnId,
+        ...(allowPlanModeTools ? { allowPlanModeTools: true } : {}),
+      })) events.push(event);
+      return events;
+    };
+
+    const entered = await submit(`${kind}-enter`, true);
+    const plannedWrite = await submit(`${kind}-planned-write`);
+    const exited = await submit(`${kind}-exit`, true);
+    const defaultWrite = await submit(`${kind}-default-write`);
+    return { runtimeConfig, permissionModes, lifecycle, entered, plannedWrite, exited, defaultWrite };
+  };
+
+  const native = await run("native");
+  const sidecar = await run("sidecar");
+
+  for (const result of [native, sidecar]) {
+    assert.deepEqual(result.permissionModes, ["default", "plan", "plan", "default"]);
+    assert.deepEqual(
+      result.lifecycle.inputs.filter((input) => input.event === "Stop").map((input) => input.baseInput.permissionMode),
+      ["plan", "plan", "default", "default"],
+    );
+    assert.equal(result.runtimeConfig.permissionMode, "default");
+    assert.equal(result.runtimeConfig.permissionContext.mode, "default");
+    const plannedResult = result.plannedWrite.find((event) => event.type === "tool_result") as {
+      result?: { type?: string; error?: { code?: string } };
+    } | undefined;
+    assert.equal(plannedResult?.result?.type, "error");
+    assert.equal(plannedResult?.result?.error?.code, "permission_denied");
+  }
+});
+
+test("sidecar host applies submit ask mode before capability execution", async () => {
+  const registry = new ToolRegistry();
+  let writeExecutions = 0;
+  registry.register({
+    name: "write_file",
+    description: "Writes a workspace file.",
+    kind: "custom",
+    inputSchema: { type: "object" },
+    isReadOnly: () => false,
+    isConcurrencySafe: () => false,
+    execute: async () => {
+      writeExecutions += 1;
+      return { content: [] };
+    },
+  });
+  const hostRuntime = new ToolRuntime(registry, new PermissionRuntime());
+  const hostContexts: PilotDeckToolRuntimeContext[] = [];
+  const runtimeConfig: AgentRuntimeConfig = {
+    ...config(),
+    runMode: "agent",
+    permissionMode: "bypassPermissions",
+    permissionContext: createDefaultPermissionContext({
+      cwd: "/workspace",
+      mode: "bypassPermissions",
+      canPrompt: false,
+    }),
+  };
+  const tools: ToolPort = {
+    list: () => registry.list(),
+    async executeAll(calls, context) {
+      hostContexts.push(context);
+      return Promise.all(calls.map((call) => hostRuntime.execute(call, context)));
+    },
+  };
+  let modelCalls = 0;
+  const model: ModelInvokerPort = {
+    async prepare({ request }) {
+      return { request, provider: request.provider, model: request.model };
+    },
+    async *stream(): AsyncIterable<CanonicalModelEvent> {
+      modelCalls += 1;
+      yield { type: "message_start", role: "assistant" };
+      if (modelCalls === 1) {
+        yield {
+          type: "tool_call_end",
+          toolCall: { id: "ask-mode-write-call", name: "write_file", input: { path: "blocked.txt" } },
+        };
+        yield { type: "message_end", finishReason: "tool_call" };
+        return;
+      }
+      yield { type: "text_delta", text: "inspection complete" };
+      yield { type: "message_end", finishReason: "stop" };
+    },
+  };
+  const session = createAgentSession({
+    sessionId: "ask-mode-host-session",
+    config: runtimeConfig,
+    dependencies: {
+      router: {} as never,
+      ports: { model, tools },
+      tools: { registry, scheduler: { executeAll: async () => [] } },
+    },
+    agentLoopFactory: createAgentLoopSidecarRuntimeFactory({
+      connect: () => loopbackConnection(),
+      uuid: deterministicIds(),
+    }),
+  });
+
+  const events = [];
+  for await (const event of session.submit({ type: "text", text: "inspect only" }, {
+    turnId: "ask-mode-host-turn",
+    runMode: "ask",
+  })) events.push(event);
+
+  assert.equal(runtimeConfig.runMode, "ask");
+  assert.deepEqual(hostContexts.map((context) => context.runMode), ["ask"]);
+  assert.equal(writeExecutions, 0);
+  const toolResult = events.find((event) => event.type === "tool_result") as {
+    result?: { type?: string; error?: { code?: string } };
+  } | undefined;
+  assert.equal(toolResult?.result?.type, "error");
+  assert.equal(toolResult?.result?.error?.code, "ask_mode_violation");
+});
+
+test("sidecar host canonicalizes forged context policy to its live config", async () => {
+  const inputs: Array<Record<string, unknown>> = [];
+  const connectedRunModes: Array<string | undefined> = [];
+  const runtimeConfig = config();
+  const session = createAgentSession({
+    sessionId: "forged-policy-session",
+    config: runtimeConfig,
+    dependencies: {
+      router: {} as never,
+      ports: { model: noopModel(), tools: noopTools() },
+      tools: { registry: { list: () => [] } as never, scheduler: { executeAll: async () => [] } as never },
+      context: {
+        async prepareForModel(input) {
+          inputs.push(input as unknown as Record<string, unknown>);
+          return { messages: [], systemPromptParts: [], tools: [], diagnostics: [], boundaries: [] };
+        },
+      },
+    },
+    agentLoopFactory: createAgentLoopSidecarRuntimeFactory({
+      connect: (input) => {
+        connectedRunModes.push(input.config.runMode);
+        return forgedPolicyContextConnection(input.input.sessionId, input.input.turnId);
+      },
+      uuid: deterministicIds(),
+    }),
+  });
+
+  for await (const _event of session.submit({ type: "text", text: "inspect only" }, {
+    turnId: "forged-policy-turn",
+    runMode: "ask",
+  })) {
+    // The protocol fixture only exercises host context dispatch.
+  }
+  for await (const _event of session.submit({ type: "text", text: "continue inspecting" }, {
+    turnId: "forged-policy-next-turn",
+  })) {
+    // The omitted override must preserve the native live run mode.
+  }
+
+  assert.deepEqual(connectedRunModes, ["ask", "ask"]);
+  assert.equal(runtimeConfig.runMode, "ask");
+  assert.equal(inputs.length, 2);
+  assert.equal(inputs[0]?.sessionId, "forged-policy-session");
+  assert.equal(inputs[0]?.turnId, "forged-policy-turn");
+  assert.equal(inputs[0]?.cwd, "/workspace");
+  assert.equal(inputs[0]?.permissionMode, "default");
+  assert.equal(inputs[0]?.runMode, "ask");
+  assert.equal(inputs[1]?.sessionId, "forged-policy-session");
+  assert.equal(inputs[1]?.turnId, "forged-policy-next-turn");
+  assert.equal(inputs[1]?.permissionMode, "default");
+  assert.equal(inputs[1]?.runMode, "ask");
+});
+
+test("sidecar factory maps an unknown terminal to a failure without publishing a success", async () => {
+  const transcript = new InMemoryTranscriptWriter();
+  const observations: string[] = [];
+  const factory = createAgentLoopSidecarRuntimeFactory({
+    connect: () => unknownTerminalConnection(),
+    transportObserver: { observe: (observation) => { observations.push(observation.type); } },
+    uuid: deterministicIds(),
+  });
+  const session = createAgentSession({
+    sessionId: "unknown-session",
+    config: config(),
+    dependencies: {
+      router: {} as never,
+      ports: { model: noopModel(), tools: noopTools() },
+      tools: { registry: { list: () => [] } as never, scheduler: { executeAll: async () => [] } as never },
+    },
+    transcript,
+    agentLoopFactory: factory,
+  });
+
+  const events = [];
+  for await (const event of session.submit({ type: "text", text: "unknown" }, { turnId: "unknown-turn" })) {
+    events.push(event);
+  }
+  const complete = events.find((event) => event.type === "turn_completed") as { result: { type: string; errors?: Array<{ code: string }> } };
+  assert.equal(complete.result.type, "error");
+  assert.equal(complete.result.errors?.[0]?.code, "agent_invalid_state");
+  const operationEntries = transcript.entries.filter((entry) => entry.type.startsWith("agent_loop_operation_"));
+  assert.deepEqual(operationEntries.map((entry) => entry.type), [
+    "agent_loop_operation_started",
+    "agent_loop_operation_accepted",
+    "agent_loop_operation_terminal",
+  ]);
+  const terminalEntry = operationEntries.at(-1);
+  assert.equal(terminalEntry?.type, "agent_loop_operation_terminal");
+  if (terminalEntry?.type === "agent_loop_operation_terminal") {
+    assert.equal(terminalEntry.outcome, "result_unknown");
+  }
+  assert.deepEqual(observations, ["stream_accepted", "result_unknown_fail_closed"]);
+});
+
+test("sidecar factory projects a preflight final execute rejection as one failed turn", async () => {
+  const factory = createAgentLoopSidecarRuntimeFactory({
+    connect: () => loopbackConnection(),
+    uuid: deterministicIds(),
+  });
+  const session = createAgentSession({
+    sessionId: "expired-session",
+    config: config(),
+    dependencies: {
+      router: {} as never,
+      ports: { model: noopModel(), tools: noopTools() },
+      tools: { registry: { list: () => [] } as never, scheduler: { executeAll: async () => [] } as never },
+    },
+    agentLoopFactory: factory,
+  });
+
+  const events = [];
+  for await (const event of session.submit({ type: "text", text: "expired" }, {
+    turnId: "expired-turn",
+    execution: {
+      runId: "expired-run",
+      operationId: "expired-operation",
+      operationDeadline: "2020-01-01T00:00:00.000Z",
+    },
+  })) events.push(event);
+
+  const terminals = events.filter((event) => event.type === "turn_completed") as Array<{
+    result: { type: string; stopReason: string; errors?: Array<{ code: string; details?: unknown }> };
+  }>;
+  assert.equal(terminals.length, 1);
+  assert.equal(terminals[0]?.result.type, "error");
+  assert.equal(terminals[0]?.result.stopReason, "aborted_streaming");
+  assert.equal(terminals[0]?.result.errors?.[0]?.code, "agent_execution_rejected");
+  assert.deepEqual(terminals[0]?.result.errors?.[0]?.details, {
+    sidecarCode: "DEADLINE_EXCEEDED",
+  });
+});
+
+test("sidecar factory delegates result_unknown reconciliation to the host operation owner", async () => {
+  const reconciliations: Array<Record<string, unknown>> = [];
+  const observations: Array<Record<string, unknown>> = [];
+  const factory = createAgentLoopSidecarRuntimeFactory({
+    connect: () => unknownTerminalConnection(),
+    transportObserver: { observe: (observation) => { observations.push({ ...observation }); } },
+    reconcileResultUnknown: async (input) => {
+      reconciliations.push(input);
+      return {
+        outcome: "completed",
+        result: completedResult("reconciled-session", "reconciled-turn"),
+        messages: [],
+      };
+    },
+    uuid: deterministicIds(),
+  });
+  const session = createAgentSession({
+    sessionId: "reconciled-session",
+    config: config(),
+    dependencies: {
+      router: {} as never,
+      ports: { model: noopModel(), tools: noopTools() },
+      tools: { registry: { list: () => [] } as never, scheduler: { executeAll: async () => [] } as never },
+    },
+    agentLoopFactory: factory,
+  });
+
+  const events = [];
+  for await (const event of session.submit({ type: "text", text: "reconcile" }, { turnId: "reconciled-turn" })) {
+    events.push(event);
+  }
+
+  assert.equal(reconciliations.length, 1);
+  assert.match(String(reconciliations[0]?.runId), /^run-[0-9]+$/);
+  assert.equal(reconciliations[0]?.operationId, "reconciled-turn");
+  assert.match(String(reconciliations[0]?.requestId), /^request-[0-9]+$/);
+  assert.equal(reconciliations[0]?.streamId, "stream-1");
+  assert.equal(reconciliations[0]?.lastAppliedSequence, 0);
+  assert.deepEqual(reconciliations[0]?.binding, {
+    moduleInstanceId: "test-sidecar-instance",
+    connectionGeneration: "test-sidecar-connection",
+  });
+  const terminals = events.filter((event) => event.type === "turn_completed") as Array<{ result?: { type?: string } }>;
+  assert.equal(terminals.length, 1);
+  assert.equal(terminals[0]?.result?.type, "success");
+  assert.deepEqual(observations, [
+    { type: "stream_accepted", resumeSupported: false },
+    { type: "result_unknown_resolved", source: "sidecar_final", outcome: "completed" },
+  ]);
+});
+
+test("restored session composition reconciles a matching sidecar result_unknown from its durable ledger", async () => {
+  const transcript = new InMemoryTranscriptWriter();
+  const identity = {
+    runId: "restored-run",
+    operationId: "restored-operation",
+    requestId: "request-4",
+    sessionId: "restored-session",
+    turnId: "restored-turn",
+    binding: {
+      moduleInstanceId: "test-sidecar-instance",
+      connectionGeneration: "test-sidecar-connection",
+    },
+  };
+  const priorLedger = new SessionAgentLoopOperationLedger({
+    sessionId: identity.sessionId,
+    transcript,
+  });
+  await priorLedger.start(identity);
+  await priorLedger.accept({ ...identity, streamId: "stream-1" });
+  await priorLedger.terminal({
+    ...identity,
+    streamId: "stream-1",
+    lastAppliedSequence: 0,
+    outcome: "completed",
+    result: completedResult(identity.sessionId, identity.turnId),
+    messages: [{ role: "assistant", content: [{ type: "text", text: "settled before restart" }] }],
+  });
+
+  const factory = createAgentLoopSidecarRuntimeFactory({
+    connect: () => unknownTerminalConnection(),
+    uuid: deterministicIds(),
+  });
+  const session = createAgentSession({
+    sessionId: identity.sessionId,
+    config: config(),
+    dependencies: {
+      router: {} as never,
+      ports: { model: noopModel(), tools: noopTools() },
+      tools: { registry: { list: () => [] } as never, scheduler: { executeAll: async () => [] } as never },
+    },
+    transcript,
+    restoredEntries: transcript.entries,
+    agentLoopFactory: factory,
+  });
+
+  const events = [];
+  for await (const event of session.submit({ type: "text", text: "recover" }, {
+    turnId: identity.turnId,
+    execution: { runId: identity.runId, operationId: identity.operationId },
+  })) events.push(event);
+
+  const terminals = events.filter((event) => event.type === "turn_completed") as Array<{
+    result?: { type?: string };
+  }>;
+  assert.equal(terminals.length, 1);
+  assert.equal(terminals[0]?.result?.type, "success");
+  const operationEntries = transcript.entries.filter((entry) => entry.type.startsWith("agent_loop_operation_"));
+  assert.deepEqual(operationEntries.map((entry) => entry.type), [
+    "agent_loop_operation_started",
+    "agent_loop_operation_accepted",
+    "agent_loop_operation_terminal",
+  ]);
+  const terminal = operationEntries.at(-1);
+  assert.equal(terminal?.type, "agent_loop_operation_terminal");
+  if (terminal?.type === "agent_loop_operation_terminal") {
+    assert.equal(terminal.outcome, "completed");
+  }
+});
+
+test("sidecar factory requires a v2 streaming handshake before execute", async () => {
+  const methods: string[] = [];
+  const factory = createAgentLoopSidecarRuntimeFactory({
+    connect: () => ({
+      send(message) {
+        const request = message as Record<string, unknown>;
+        methods.push(String(request.method));
+        if (request.method === "hello") {
+          responses.push({
+            kind: "response",
+            messageId: "hello-response",
+            inReplyTo: request.messageId,
+            ok: true,
+            protocolVersion: "9.0",
+            moduleId: "wrong-version",
+            moduleInstanceId: "wrong-version-instance",
+            connectionGeneration: "wrong-version-connection",
+            capabilitiesVersion: "1",
+            payload: {},
+          });
+        }
+      },
+      receive: () => responses,
+    }),
+    uuid: deterministicIds(),
+  });
+  const responses = queue<unknown>();
+  const session = createAgentSession({
+    sessionId: "handshake-session",
+    config: config(),
+    dependencies: {
+      router: {} as never,
+      ports: { model: noopModel(), tools: noopTools() },
+      tools: { registry: { list: () => [] } as never, scheduler: { executeAll: async () => [] } as never },
+    },
+    agentLoopFactory: factory,
+  });
+
+  const events = [];
+  for await (const event of session.submit({ type: "text", text: "handshake" }, { turnId: "handshake-turn" })) {
+    events.push(event);
+  }
+
+  assert.deepEqual(methods, ["hello"]);
+  const terminal = events.find((event) => event.type === "turn_completed") as { result?: { type?: string } } | undefined;
+  assert.equal(terminal?.result?.type, "error");
+});
+
+test("sidecar factory sends cancel only after the streaming execute accepted response", async () => {
+  const methods: string[] = [];
+  const responses = queue<unknown>();
+  let session: ReturnType<typeof createAgentSession> | undefined;
+  const factory = createAgentLoopSidecarRuntimeFactory({
+    connect: () => ({
+      send(message) {
+        const request = message as Record<string, unknown>;
+        methods.push(String(request.method));
+        if (request.method === "hello") {
+          responses.push(handshakeResponse(request, {}));
+        } else if (request.method === "capabilities") {
+          responses.push(handshakeResponse(request, {
+            capabilitiesVersion: "1",
+            methods: [{ name: "execute", enabled: true, profiles: ["streaming"], cancel: true }],
+          }));
+        } else if (request.method === "execute") {
+          session?.abort("user_cancelled");
+          queueMicrotask(() => {
+            assert.deepEqual(methods, ["hello", "capabilities", "execute"]);
+            responses.push({
+              kind: "response",
+              messageId: "execute-accepted",
+              inReplyTo: request.messageId,
+              requestId: request.requestId,
+              ok: true,
+              streamId: "cancel-stream",
+              cursor: 0,
+            });
+          });
+        } else if (request.method === "cancel") {
+          responses.push({
+            kind: "response",
+            messageId: "cancel-accepted",
+            inReplyTo: request.messageId,
+            requestId: request.requestId,
+            ok: true,
+            payload: {},
+          });
+          responses.push({
+            kind: "event",
+            eventType: "agent.turn_completed",
+            streamId: "cancel-stream",
+            sequence: 0,
+            runId: request.runId,
+            operationId: request.operationId,
+            requestId: request.requestId,
+            final: false,
+            payload: {
+              type: "turn_completed",
+              sessionId: "cancel-session",
+              turnId: "cancel-turn",
+              result: cancelledResult("cancel-session", "cancel-turn"),
+            },
+          });
+          responses.push({
+            kind: "event",
+            eventType: "agent.execute.cancelled",
+            streamId: "cancel-stream",
+            sequence: 1,
+            runId: request.runId,
+            operationId: request.operationId,
+            requestId: request.requestId,
+            final: true,
+            outcome: "cancelled",
+            payload: {
+              result: cancelledResult("cancel-session", "cancel-turn"),
+              messages: [],
+            },
+          });
+          responses.end();
+        }
+      },
+      receive: () => responses,
+    }),
+    uuid: deterministicIds(),
+  });
+  session = createAgentSession({
+    sessionId: "cancel-session",
+    config: config(),
+    dependencies: {
+      router: {} as never,
+      ports: { model: noopModel(), tools: noopTools() },
+      tools: { registry: { list: () => [] } as never, scheduler: { executeAll: async () => [] } as never },
+    },
+    agentLoopFactory: factory,
+  });
+
+  const events = [];
+  for await (const event of session.submit({ type: "text", text: "cancel" }, { turnId: "cancel-turn" })) {
+    events.push(event);
+  }
+
+  assert.deepEqual(methods, ["hello", "capabilities", "execute", "cancel"]);
+  const terminal = events.find((event) => event.type === "turn_completed") as { result?: { type?: string } } | undefined;
+  assert.equal(terminal?.result?.type, "aborted");
+});
+
+test("sidecar factory resumes an accepted stream on an explicit reconnectable transport", async () => {
+  const transcript = new InMemoryTranscriptWriter();
+  const reconnects: Array<Record<string, unknown>> = [];
+  const observations: Array<Record<string, unknown>> = [];
+  const factory = createAgentLoopSidecarRuntimeFactory({
+    connect: () => reconnectingConnection(reconnects),
+    transportObserver: {
+      observe(observation) {
+        observations.push({ ...observation });
+        throw new Error("observer failure must not affect the sidecar turn");
+      },
+    },
+    uuid: deterministicIds(),
+  });
+  const session = createAgentSession({
+    sessionId: "reconnect-session",
+    config: config(),
+    dependencies: {
+      router: {} as never,
+      ports: { model: noopModel(), tools: noopTools() },
+      tools: { registry: { list: () => [] } as never, scheduler: { executeAll: async () => [] } as never },
+    },
+    transcript,
+    agentLoopFactory: factory,
+  });
+
+  const events = [];
+  for await (const event of session.submit({ type: "text", text: "resume transport" }, {
+    turnId: "reconnect-turn",
+    execution: { runId: "reconnect-run", operationId: "reconnect-operation" },
+  })) events.push(event);
+
+  assert.equal(reconnects.length, 1);
+  assert.equal(reconnects[0]?.streamId, "reconnect-stream");
+  assert.equal(reconnects[0]?.lastAppliedSequence, 0);
+  assert.deepEqual(reconnects[0]?.previousBinding, {
+    moduleInstanceId: "reconnect-sidecar",
+    connectionGeneration: "connection-a",
+  });
+  assert.equal(events.filter((event) => event.type === "warning").length, 1);
+  const terminals = events.filter((event) => event.type === "turn_completed") as Array<{ result?: { type?: string } }>;
+  assert.equal(terminals.length, 1);
+  assert.equal(terminals[0]?.result?.type, "success");
+  assert.deepEqual(observations, [
+    { type: "stream_accepted", resumeSupported: true },
+    { type: "reconnect_started", attempt: 1, lastAppliedSequence: 0 },
+    { type: "reconnect_succeeded", attempt: 1 },
+  ]);
+  assert.deepEqual(
+    transcript.entries.filter((entry) => entry.type.startsWith("agent_loop_operation_")).map((entry) => entry.type),
+    ["agent_loop_operation_started", "agent_loop_operation_accepted", "agent_loop_operation_terminal"],
+  );
+});
+
+test("sidecar factory reconciles a process-restarted stream without replaying execute", async () => {
+  const transcript = new InMemoryTranscriptWriter();
+  const reconnects: Array<Record<string, unknown>> = [];
+  const methods: string[] = [];
+  const reconciliations: Array<Record<string, unknown>> = [];
+  const observations: Array<Record<string, unknown>> = [];
+  const factory = createAgentLoopSidecarRuntimeFactory({
+    connect: () => restartingConnection(reconnects, methods),
+    transportObserver: { observe: (observation) => { observations.push({ ...observation }); } },
+    reconcileResultUnknown: async (input) => {
+      reconciliations.push(structuredClone(input));
+      return {
+        outcome: "completed",
+        result: completedResult("restart-session", "restart-turn"),
+        messages: [{ role: "assistant", content: [{ type: "text", text: "host status confirmed completion" }] }],
+      };
+    },
+    uuid: deterministicIds(),
+  });
+  const session = createAgentSession({
+    sessionId: "restart-session",
+    config: config(),
+    transcript,
+    dependencies: {
+      router: {} as never,
+      ports: { model: noopModel(), tools: noopTools() },
+      tools: { registry: { list: () => [] } as never, scheduler: { executeAll: async () => [] } as never },
+    },
+    agentLoopFactory: factory,
+  });
+
+  const events = [];
+  for await (const event of session.submit({ type: "text", text: "recover process restart" }, {
+    turnId: "restart-turn",
+    execution: { runId: "restart-run", operationId: "restart-operation" },
+  })) events.push(event);
+
+  assert.equal(reconnects.length, 1);
+  assert.equal(methods.filter((method) => method === "execute").length, 1);
+  assert.equal(methods.includes("resume"), false);
+  assert.equal(reconciliations.length, 1);
+  assert.equal(reconciliations[0]?.code, "SIDECAR_INSTANCE_RESTARTED");
+  assert.deepEqual(reconciliations[0]?.binding, {
+    moduleInstanceId: "restart-instance-a",
+    connectionGeneration: "restart-connection-a",
+  });
+  const terminals = events.filter((event) => event.type === "turn_completed") as Array<{ result?: { type?: string } }>;
+  assert.equal(terminals.length, 1);
+  assert.equal(terminals[0]?.result?.type, "success");
+  assert.deepEqual(
+    transcript.entries
+      .filter((entry) => entry.type === "agent_loop_operation_terminal")
+      .map((entry) => entry.outcome),
+    ["result_unknown", "completed"],
+  );
+  assert.deepEqual(observations, [
+    { type: "stream_accepted", resumeSupported: true },
+    { type: "reconnect_started", attempt: 1, lastAppliedSequence: 0 },
+    { type: "sidecar_instance_restarted" },
+    { type: "reconnect_failed", attempt: 1 },
+    { type: "result_unknown_resolved", source: "transport_interruption", outcome: "completed" },
+  ]);
+});
+
+test("sidecar transport observes a replayed pending module call without dispatching it again", async () => {
+  const observations: Array<Record<string, unknown>> = [];
+  const responses: Array<Record<string, unknown>> = [];
+  const factory = createAgentLoopSidecarRuntimeFactory({
+    connect: () => replayedModuleCallConnection(responses),
+    transportObserver: { observe: (observation) => { observations.push({ ...observation }); } },
+    uuid: deterministicIds(),
+  });
+  const session = createAgentSession({
+    sessionId: "module-replay-session",
+    config: config(),
+    dependencies: {
+      router: {} as never,
+      ports: { model: noopModel(), tools: noopTools() },
+      tools: { registry: { list: () => [] } as never, scheduler: { executeAll: async () => [] } as never },
+    },
+    agentLoopFactory: factory,
+  });
+
+  const events = [];
+  for await (const event of session.submit({ type: "text", text: "replay module response" }, {
+    turnId: "module-replay-turn",
+    execution: { runId: "module-replay-run", operationId: "module-replay-operation" },
+  })) events.push(event);
+
+  assert.equal(responses.length, 1);
+  assert.equal(responses[0]?.inReplyTo, "replayed-context-call");
+  assert.equal(responses[0]?.ok, false);
+  assert.equal(events.filter((event) => event.type === "turn_completed").length, 1);
+  assert.deepEqual(observations, [
+    { type: "stream_accepted", resumeSupported: true },
+    { type: "reconnect_started", attempt: 1, lastAppliedSequence: -1 },
+    { type: "reconnect_succeeded", attempt: 1 },
+    { type: "pending_module_call_replayed", module: "context" },
+    { type: "cached_module_response_replayed", module: "context" },
+  ]);
+});
+
+test("stdio sidecar connection runs the built binary and keeps model and tool execution in the host", async () => {
+  let modelCalls = 0;
+  const hostToolCalls: string[] = [];
+  const model: ModelInvokerPort = {
+    async prepare({ request }) {
+      return { request, provider: request.provider, model: request.model };
+    },
+    async *stream(): AsyncIterable<CanonicalModelEvent> {
+      modelCalls += 1;
+      yield { type: "message_start", role: "assistant" };
+      if (modelCalls === 1) {
+        yield { type: "tool_call_end", toolCall: { id: "stdio-tool-1", name: "lookup", input: { query: "stdio" } } };
+        yield { type: "message_end", finishReason: "tool_call" };
+      } else {
+        yield { type: "text_delta", text: "stdio complete" };
+        yield { type: "message_end", finishReason: "stop" };
+      }
+    },
+  };
+  const tools: ToolPort = {
+    list: () => [lookupTool()],
+    async executeAll(calls, _context, execution) {
+      hostToolCalls.push(`${execution.runId}:${calls[0]?.id}`);
+      return calls.map((call) => ({
+        type: "success" as const,
+        toolCallId: call.id,
+        toolName: call.name,
+        content: [{ type: "text" as const, text: "stdio host value" }],
+        startedAt: "2026-09-10T00:00:00.000Z",
+        completedAt: "2026-09-10T00:00:00.001Z",
+      }));
+    },
+  };
+  const sidecarFactory = createAgentLoopSidecarRuntimeFactory({
+    connect: createStdioAgentLoopSidecarConnectionFactory({
+      command: process.execPath,
+      args: [builtSidecarPath()],
+      killTimeoutMs: 5_000,
+    }),
+    uuid: deterministicIds(),
+  });
+  const session = createAgentSession({
+    sessionId: "stdio-session",
+    config: config(),
+    dependencies: {
+      router: {} as never,
+      ports: { model, tools },
+      tools: { registry: { list: () => [] } as never, scheduler: { executeAll: async () => [] } as never },
+    },
+    agentLoopFactory: sidecarFactory,
+  });
+
+  const events = [];
+  for await (const event of session.submit({ type: "text", text: "run via stdio" }, { turnId: "stdio-turn" })) {
+    events.push(event);
+  }
+
+  assert.equal(hostToolCalls.length, 1);
+  assert.match(hostToolCalls[0] ?? "", /^run-[0-9]+:stdio-tool-1$/);
+  assert.equal(events.filter((event) => event.type === "tool_result").length, 1);
+  const terminal = events.find((event) => event.type === "turn_completed") as { result?: { type?: string } } | undefined;
+  assert.equal(terminal?.result?.type, "success");
+});
+
+test("stdio sidecar keeps one unknown terminal when a host tool returns after its deadline", async () => {
+  let releaseTool!: () => void;
+  const toolGate = new Promise<void>((resolve) => { releaseTool = resolve; });
+  let signalToolStarted!: () => void;
+  const toolStarted = new Promise<void>((resolve) => { signalToolStarted = resolve; });
+  let toolReturned = false;
+  const deadlineAt = Date.now() + 5_000;
+  const model: ModelInvokerPort = {
+    async prepare({ request }) {
+      return { request, provider: request.provider, model: request.model };
+    },
+    async *stream(): AsyncIterable<CanonicalModelEvent> {
+      yield { type: "message_start", role: "assistant" };
+      yield { type: "tool_call_end", toolCall: { id: "stdio-late-tool", name: "slow_tool", input: {} } };
+      yield { type: "message_end", finishReason: "tool_call" };
+    },
+  };
+  const tools: ToolPort = {
+    list: () => [{
+      name: "slow_tool",
+      description: "Completes only after the sidecar deadline.",
+      kind: "custom",
+      inputSchema: { type: "object" },
+      isReadOnly: () => false,
+      isConcurrencySafe: () => true,
+      execute: async () => ({ content: [] }),
+    }],
+    async executeAll(calls) {
+      signalToolStarted();
+      await toolGate;
+      toolReturned = true;
+      return calls.map((call) => ({
+        type: "success" as const,
+        toolCallId: call.id,
+        toolName: call.name,
+        content: [{ type: "text" as const, text: "late stdio host success" }],
+        startedAt: "2026-09-11T00:00:00.000Z",
+        completedAt: "2026-09-11T00:00:00.001Z",
+      }));
+    },
+  };
+  const transcript = new InMemoryTranscriptWriter();
+  const session = createAgentSession({
+    sessionId: "stdio-late-tool-session",
+    config: {
+      ...config(),
+      permissionMode: "bypassPermissions",
+      permissionContext: createDefaultPermissionContext({
+        cwd: "/workspace",
+        mode: "bypassPermissions",
+        bypassAvailable: true,
+        canPrompt: false,
+      }),
+    },
+    transcript,
+    dependencies: {
+      router: {} as never,
+      ports: { model, tools },
+      tools: { registry: { list: () => [] } as never, scheduler: { executeAll: async () => [] } as never },
+    },
+    agentLoopFactory: createAgentLoopSidecarRuntimeFactory({
+      connect: createStdioAgentLoopSidecarConnectionFactory({
+        command: process.execPath,
+        args: [builtSidecarPath()],
+        killTimeoutMs: 5_000,
+      }),
+      uuid: deterministicIds(),
+    }),
+  });
+
+  const submitted = (async () => {
+    const emitted = [];
+    for await (const event of session.submit({ type: "text", text: "run a slow stdio host tool" }, {
+      turnId: "stdio-late-tool-turn",
+      execution: {
+        runId: "stdio-late-tool-run",
+        operationId: "stdio-late-tool-operation",
+        operationDeadline: new Date(deadlineAt).toISOString(),
+      },
+    })) emitted.push(event);
+    return emitted;
+  })();
+  await waitForSignal(toolStarted, 7_000, "stdio sidecar did not begin the host tool before its deadline");
+  await new Promise((resolve) => setTimeout(resolve, Math.max(0, deadlineAt - Date.now() + 50)));
+  releaseTool();
+  const events = await submitted;
+
+  assert.equal(toolReturned, true, "the host tool completion is intentionally late");
+  assert.equal(events.filter((event) => event.type === "tool_result").length, 0);
+  const terminals = events.filter((event) => event.type === "turn_completed") as Array<{
+    result?: { type?: string; errors?: Array<{ code?: string }> };
+  }>;
+  assert.equal(terminals.length, 1);
+  assert.equal(terminals[0]?.result?.type, "error");
+  assert.equal(terminals[0]?.result?.errors?.[0]?.code, "agent_invalid_state");
+  const operationEntries = transcript.entries.filter((entry) => entry.type.startsWith("agent_loop_operation_"));
+  assert.deepEqual(operationEntries.map((entry) => entry.type), [
+    "agent_loop_operation_started",
+    "agent_loop_operation_accepted",
+    "agent_loop_operation_terminal",
+  ]);
+  const operationTerminal = operationEntries.at(-1);
+  assert.equal(operationTerminal?.type === "agent_loop_operation_terminal" && operationTerminal.outcome, "result_unknown");
+  assert.equal(operationTerminal?.type === "agent_loop_operation_terminal" && operationTerminal.code, "DEADLINE_EXCEEDED");
+});
+
+test("stdio sidecar connection reports malformed stdout and exit diagnostics", async () => {
+  const malformed = createStdioAgentLoopSidecarConnectionFactory({
+    command: process.execPath,
+    args: ["--eval", "process.stdout.write('{\\n')"],
+  });
+  const malformedConnection = await malformed({} as never);
+  await assert.rejects(drain(malformedConnection.receive()), /malformed NDJSON/);
+  await malformedConnection.close?.();
+
+  const failed = createStdioAgentLoopSidecarConnectionFactory({
+    command: process.execPath,
+    args: ["--eval", "process.stderr.write('sidecar startup failed'); process.exit(9)"],
+  });
+  const failedConnection = await failed({} as never);
+  await assert.rejects(
+    drain(failedConnection.receive()),
+    /exited with code 9 before execute reached a terminal event\. stderr: sidecar startup failed/,
+  );
+  await failedConnection.close?.();
+});
+
+test("sidecar host capability calls reconstruct plan/todo and host execution services", async () => {
+  const moduleResponses: Array<Record<string, unknown>> = [];
+  const toolContexts: PilotDeckToolRuntimeContext[] = [];
+  const toolExecutions: Array<{ operationDeadline?: string }> = [];
+  const routedModelContexts: Array<Record<string, unknown>> = [];
+  const auditRecorder = {};
+  const elicitation = {};
+  const fileHistory = {};
+  const fileUpdateNotifier = {};
+  const planFileManager = {
+    getPlanDirectoryPath: () => "/workspace/.pilotdeck/plans",
+    resolvePlanFilePath: (filePath: string) => `/workspace/.pilotdeck/plans/${filePath}`,
+    readPlanFile: (filePath: string) => `# ${filePath}`,
+  };
+  const snapshot = {
+    ...createPlanTodoSnapshot(),
+    approvedPlan: "# Approved plan\nWrite the artifact.",
+    requiresInitialization: true,
+  };
+  const handle: PilotDeckPlanTodoStateHandle = {
+    getSnapshot: () => structuredClone(snapshot),
+    async markPlanApproved() {},
+    async recordTodoWrite() { return []; },
+    async writeTodos() { return []; },
+    async markToolProgressChanged() {},
+    buildPromptAddendum: () => "host plan/todo prompt",
+    blockingMessageFor: () => undefined,
+  };
+  const tools: ToolPort = {
+    list: () => [
+      {
+        name: "write",
+        description: "write",
+        kind: "custom",
+        inputSchema: { type: "object" },
+        isReadOnly: () => false,
+        isConcurrencySafe: () => false,
+        execute: async () => ({ content: [] }),
+      },
+    ],
+    async executeAll(calls, context, execution) {
+      toolContexts.push(context);
+      toolExecutions.push(execution);
+      return calls.map((call) => ({
+        type: "success" as const,
+        toolCallId: call.id,
+        toolName: call.name,
+        content: [],
+        startedAt: "2026-09-10T00:00:00.000Z",
+        completedAt: "2026-09-10T00:00:00.001Z",
+      }));
+    },
+  };
+  const factory = createAgentLoopSidecarRuntimeFactory({
+    connect: () => planTodoFenceConnection(moduleResponses),
+    uuid: deterministicIds(),
+  });
+  const session = createAgentSession({
+    sessionId: "plan-todo-host-session",
+    config: {
+      ...config(),
+      env: { HOST_EXECUTION_ENV: "present" },
+      toolAliases: { legacy_write: "write" },
+      maxResultBytes: 777,
+      maxOutputTokens: 321,
+      subagentDepth: 1,
+      subagentTimeoutMs: 456,
+    },
+    dependencies: {
+      router: {
+        stream: async function* (_request: unknown, context: Record<string, unknown>) {
+          routedModelContexts.push(context);
+        },
+      } as never,
+      ports: { model: noopModel(), tools },
+      tools: { registry: { list: () => [] } as never, scheduler: { executeAll: async () => [] } as never },
+      planTodoManager: { forSession: () => handle },
+      auditRecorder: auditRecorder as never,
+      elicitation: elicitation as never,
+      fileHistory: fileHistory as never,
+      fileUpdateNotifier: fileUpdateNotifier as never,
+      planFileManager,
+    },
+    agentLoopFactory: factory,
+  });
+
+  const events = [];
+  for await (const event of session.submit({ type: "text", text: "write it" }, {
+    turnId: "plan-todo-host-turn",
+    execution: {
+      runId: "plan-todo-host-run",
+      operationId: "plan-todo-host-operation",
+      operationDeadline: "2099-09-11T00:00:00.000Z",
+    },
+  })) {
+    events.push(event);
+  }
+
+  const rejected = moduleResponses.find((response) => response.inReplyTo === "wrong-plan-todo");
+  assert.equal(rejected?.ok, false);
+  assert.match(String((rejected?.error as Record<string, unknown> | undefined)?.message), /identity does not match/);
+  const accepted = moduleResponses.find((response) => response.inReplyTo === "valid-plan-todo");
+  assert.equal(accepted?.ok, true);
+  assert.deepEqual((accepted?.payload as Record<string, unknown> | undefined)?.snapshot, snapshot);
+  const executed = moduleResponses.find((response) => response.inReplyTo === "execute-with-plan-todo");
+  assert.equal(executed?.ok, true, JSON.stringify(executed));
+  assert.equal(toolContexts.length, 1);
+  assert.equal(toolExecutions[0]?.operationDeadline, "2099-09-11T00:00:00.000Z");
+  assert.equal(toolContexts[0]?.sessionId, "plan-todo-host-session");
+  assert.equal(toolContexts[0]?.turnId, "plan-todo-host-turn");
+  assert.equal(toolContexts[0]?.planTodo, handle);
+  assert.equal(toolContexts[0]?.messageId, "plan-todo-host-turn");
+  assert.equal(typeof toolContexts[0]?.auditRecorder?.recordTool, "function");
+  assert.equal(typeof toolContexts[0]?.elicitation?.askUser, "function");
+  assert.equal(toolContexts[0]?.fileHistory, fileHistory);
+  assert.equal(toolContexts[0]?.fileUpdateNotifier, fileUpdateNotifier);
+  assert.equal(toolContexts[0]?.env?.HOST_EXECUTION_ENV, "present");
+  assert.equal(toolContexts[0]?.env?.PILOTDECK_SESSION_ID, "plan-todo-host-session");
+  assert.equal(toolContexts[0]?.env?.PILOTDECK_TURN_ID, "plan-todo-host-turn");
+  assert.deepEqual(toolContexts[0]?.toolAliases, { legacy_write: "write" });
+  assert.equal(toolContexts[0]?.maxResultBytes, 777);
+  assert.equal(toolContexts[0]?.maxOutputTokens, 321);
+  assert.equal(toolContexts[0]?.subagentDepth, 1);
+  assert.equal(toolContexts[0]?.subagentTimeoutMs, 456);
+  assert.equal(toolContexts[0]?.planDirectory?.path, "/workspace/.pilotdeck/plans");
+  assert.equal(toolContexts[0]?.planDirectory?.resolve("proposal.md"), "/workspace/.pilotdeck/plans/proposal.md");
+  assert.equal(toolContexts[0]?.planDirectory?.read("proposal.md"), "# proposal.md");
+  assert.equal(typeof toolContexts[0]?.model?.stream, "function");
+  for await (const _event of toolContexts[0]!.model!.stream({
+    provider: "host-provider",
+    model: "host-model",
+    messages: [],
+  }, new AbortController().signal)) {
+    // The injected host routing port has no events in this focused test.
+  }
+  assert.deepEqual(routedModelContexts, [{
+    sessionId: "plan-todo-host-session",
+    turnId: "plan-todo-host-turn",
+    projectPath: "/workspace",
+    abortSignal: routedModelContexts[0]?.abortSignal,
+    isMainAgent: false,
+  }]);
+  const terminal = events.find((event) => event.type === "turn_completed") as { result?: { type?: string } } | undefined;
+  assert.equal(terminal?.result?.type, "success");
+});
+
+test("sidecar context compaction uses the host default before routing and preserves a routed override", async () => {
+  const inputs: Array<Record<string, unknown>> = [];
+  const factory = createAgentLoopSidecarRuntimeFactory({
+    connect: () => compactionContextConnection(),
+    uuid: deterministicIds(),
+  });
+  const session = createAgentSession({
+    sessionId: "compaction-host-session",
+    config: { ...config(), maxContextTokens: 128_000 },
+    dependencies: {
+      router: {} as never,
+      ports: { model: noopModel(), tools: noopTools() },
+      tools: { registry: { list: () => [] } as never, scheduler: { executeAll: async () => [] } as never },
+      context: {
+        async prepareForModel() {
+          return { messages: [], systemPromptParts: [], tools: [], diagnostics: [], boundaries: [] };
+        },
+        async tryAutoCompact(input) {
+          inputs.push(input as unknown as Record<string, unknown>);
+          return {
+            type: "skipped" as const,
+            snapshot: {
+              tokens: 0,
+              maxContextTokens: input.maxContextTokens ?? 0,
+              warningRatio: 0,
+              blockingRatio: 0,
+              state: "ok" as const,
+              ratio: 0,
+            },
+          };
+        },
+      },
+    },
+    agentLoopFactory: factory,
+  });
+
+  for await (const _event of session.submit({ type: "text", text: "compact" }, {
+    turnId: "compaction-host-turn",
+  })) {
+    // The protocol fixture only exercises host context dispatch.
+  }
+
+  assert.equal(inputs.length, 2);
+  assert.equal(inputs[0]?.maxContextTokens, 128_000);
+  assert.equal(inputs[1]?.maxContextTokens, 32_000);
+  assert.equal(inputs[0]?.sessionId, "compaction-host-session");
+  assert.equal(inputs[0]?.turnId, "compaction-host-turn");
+});
+
+test("sidecar agent tool delegates through the host-owned one-shot subagent port", async () => {
+  const forkBindings: Array<{ sessionId: string; turnId: string; parentFiles: number }> = [];
+  const forkRequests: Array<{ definitionId: string; directive: string; subagentId: string }> = [];
+  let transportSeed: AgentLoopSeedState | undefined;
+  const oneShotSubagentPort: OneShotSubagentPort = {
+    createForkApi(input) {
+      forkBindings.push({
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        parentFiles: input.parentReadFileState?.size ?? 0,
+      });
+      return {
+        depth: 0,
+        maxSubagentDepth: 1,
+        listDefinitions: () => [{ id: "explore", description: "Inspect" }],
+        isAllowedDefinition: (id) => id === "explore",
+        async fork(request) {
+          forkRequests.push({
+            definitionId: request.definitionId,
+            directive: request.directive,
+            subagentId: request.subagentId,
+          });
+          return {
+            markdown: "Scope: delegated\nResult: complete",
+            usage: { totalTokens: 2 },
+            turns: 1,
+            durationMs: 3,
+            subagentSessionId: "sidecar-subagent-session::sub::sidecar-child",
+            transcriptRelativePath: "sessions/sidecar-subagent-session/subagents/sidecar-child.jsonl",
+          };
+        },
+      };
+    },
+  };
+  const agentTool: PilotDeckToolDefinition = {
+    name: "agent",
+    description: "Delegates through the host-owned subagent port.",
+    kind: "agent",
+    inputSchema: { type: "object" },
+    isReadOnly: () => false,
+    isConcurrencySafe: () => true,
+    async execute(_arguments, context) {
+      assert.ok(context.subagent, "host tool execution must receive a one-shot subagent port");
+      const report = await context.subagent.fork({
+        definitionId: "explore",
+        directive: "Inspect the host-owned delegation boundary.",
+        subagentId: "sidecar-child",
+        toolCallId: context.currentToolCallId,
+      });
+      return {
+        content: [{ type: "text", text: report.markdown }],
+        data: {
+          subagentSessionId: report.subagentSessionId,
+          transcriptRelativePath: report.transcriptRelativePath,
+        },
+        metadata: {
+          subagentSessionId: report.subagentSessionId,
+          transcriptRelativePath: report.transcriptRelativePath,
+        },
+      };
+    },
+  };
+  const tools: ToolPort = {
+    list: () => [agentTool],
+    async executeAll(calls, context) {
+      return Promise.all(calls.map(async (call) => {
+        const output = await agentTool.execute(call.input, context);
+        return {
+          type: "success" as const,
+          toolCallId: call.id,
+          toolName: call.name,
+          content: output.content,
+          data: output.data,
+          metadata: output.metadata,
+          startedAt: "2026-09-10T00:00:00.000Z",
+          completedAt: "2026-09-10T00:00:00.001Z",
+        };
+      }));
+    },
+  };
+  let modelCalls = 0;
+  const model: ModelInvokerPort = {
+    async prepare({ request }) {
+      return { request, provider: request.provider, model: request.model };
+    },
+    async *stream(): AsyncIterable<CanonicalModelEvent> {
+      modelCalls += 1;
+      yield { type: "message_start", role: "assistant" };
+      if (modelCalls === 1) {
+        yield { type: "tool_call_end", toolCall: { id: "delegate-call", name: "agent", input: {} } };
+        yield { type: "message_end", finishReason: "tool_call" };
+        return;
+      }
+      yield { type: "text_delta", text: "delegation complete" };
+      yield { type: "message_end", finishReason: "stop" };
+    },
+  };
+  const session = createAgentSession({
+    sessionId: "sidecar-subagent-session",
+    config: {
+      ...config(),
+      permissionMode: "bypassPermissions",
+      permissionContext: createDefaultPermissionContext({
+        cwd: "/workspace",
+        mode: "bypassPermissions",
+        bypassAvailable: true,
+        canPrompt: false,
+      }),
+    },
+    seedState: {
+      readFileState: new Map([["/workspace/already-read.txt", { mtimeMs: 1, kind: "text" }]]),
+    },
+    dependencies: {
+      router: {} as never,
+      ports: { model, tools },
+      tools: { registry: { list: () => [] } as never, scheduler: { executeAll: async () => [] } as never },
+      oneShotSubagentPort,
+    },
+    agentLoopFactory: createAgentLoopSidecarRuntimeFactory({
+      connect: (input) => {
+        transportSeed = input.seedState;
+        return loopbackConnection();
+      },
+      uuid: deterministicIds(),
+    }),
+  });
+
+  const events = [];
+  for await (const event of session.submit({ type: "text", text: "delegate" }, {
+    turnId: "sidecar-subagent-turn",
+  })) {
+    events.push(event);
+  }
+
+  assert.equal(modelCalls, 2);
+  assert.equal(transportSeed?.readFileState?.size, 1);
+  assert.deepEqual(forkBindings, [{
+    sessionId: "sidecar-subagent-session",
+    turnId: "sidecar-subagent-turn",
+    parentFiles: 1,
+  }]);
+  assert.equal(forkRequests.length, 1);
+  assert.deepEqual(forkRequests[0]?.definitionId, "explore");
+  assert.equal(forkRequests[0]?.directive, "Inspect the host-owned delegation boundary.");
+  const toolResult = events.find((event) => event.type === "tool_result") as {
+    result?: {
+      type?: string;
+      data?: Record<string, unknown>;
+      metadata?: Record<string, unknown>;
+    };
+  } | undefined;
+  assert.equal(toolResult?.result?.type, "success");
+  assert.equal(toolResult?.result?.data?.subagentSessionId, "sidecar-subagent-session::sub::sidecar-child");
+  assert.equal(toolResult?.result?.data?.transcriptRelativePath, "sessions/sidecar-subagent-session/subagents/sidecar-child.jsonl");
+  assert.equal(toolResult?.result?.metadata?.subagentSessionId, "sidecar-subagent-session::sub::sidecar-child");
+  assert.equal(toolResult?.result?.metadata?.transcriptRelativePath, "sessions/sidecar-subagent-session/subagents/sidecar-child.jsonl");
+  const terminal = events.find((event) => event.type === "turn_completed") as { result?: { type?: string } } | undefined;
+  assert.equal(terminal?.result?.type, "success", JSON.stringify(events));
+});
+
+test("sidecar lifecycle calls run with host-owned turn identity and environment", async () => {
+  const moduleResponses: Array<Record<string, unknown>> = [];
+  const lifecycle = new RecordingLifecycleRuntime();
+  const factory = createAgentLoopSidecarRuntimeFactory({
+    connect: () => lifecycleFenceConnection(moduleResponses),
+    uuid: deterministicIds(),
+  });
+  const session = createAgentSession({
+    sessionId: "lifecycle-host-session",
+    config: config(),
+    dependencies: {
+      router: {} as never,
+      ports: { model: noopModel(), tools: noopTools() },
+      tools: { registry: { list: () => [] } as never, scheduler: { executeAll: async () => [] } as never },
+      lifecycle,
+    },
+    agentLoopFactory: factory,
+  });
+
+  const events = [];
+  for await (const event of session.submit({ type: "text", text: "stop" }, { turnId: "lifecycle-host-turn" })) {
+    events.push(event);
+  }
+
+  assert.equal(moduleResponses.find((response) => response.inReplyTo === "lifecycle-dispatch")?.ok, true);
+  const input = lifecycle.inputs.find((candidate) => candidate.event === "Stop");
+  assert.ok(input);
+  assert.equal(input.event, "Stop");
+  assert.deepEqual(input.payload, { lastAssistantMessage: "done" });
+  assert.deepEqual(input.baseInput, {
+    sessionId: "lifecycle-host-session",
+    transcriptPath: "",
+    cwd: "/workspace",
+    permissionMode: "default",
+  });
+  assert.equal(input.matchQuery, "Stop");
+  assert.equal(input.env?.PILOTDECK_SESSION_ID, "lifecycle-host-session");
+  assert.equal(input.env?.PILOTDECK_TURN_ID, "lifecycle-host-turn");
+  assert.equal(events.find((event) => event.type === "turn_completed")?.type, "turn_completed");
+});
+
+test("loopback sidecar flushes AgentLoop-emitted events to the host before final", async () => {
+  const hostEvents: Array<{ type: string; sessionId: string; turnId?: string }> = [];
+  const model: ModelInvokerPort = {
+    async prepare({ request }) {
+      return { request, provider: request.provider, model: request.model };
+    },
+    async *stream() {
+      yield { type: "message_start", role: "assistant" };
+      yield { type: "text_delta", text: "event bridge complete" };
+      yield { type: "message_end", finishReason: "stop" };
+    },
+  };
+  const session = createAgentSession({
+    sessionId: "event-bridge-session",
+    config: config(),
+    dependencies: {
+      router: {} as never,
+      ports: { model, tools: noopTools() },
+      tools: { registry: { list: () => [] } as never, scheduler: { executeAll: async () => [] } as never },
+      eventEmitter: (event) => hostEvents.push(event),
+    },
+    agentLoopFactory: createAgentLoopSidecarRuntimeFactory({
+      connect: () => loopbackConnection(),
+      uuid: deterministicIds(),
+    }),
+  });
+
+  const events = [];
+  for await (const event of session.submit({ type: "text", text: "emit an instruction event" }, {
+    turnId: "event-bridge-turn",
+  })) {
+    events.push(event);
+  }
+
+  assert.deepEqual(hostEvents.find((event) => event.type === "instructions_loaded"), {
+    type: "instructions_loaded",
+    sessionId: "event-bridge-session",
+    turnId: "event-bridge-turn",
+    hasSystemPrompt: false,
+  });
+  assert.equal(events.find((event) => event.type === "turn_completed")?.type, "turn_completed");
+});
+
+function config(): AgentRuntimeConfig {
+  return {
+    provider: "host-provider",
+    model: "host-model",
+    cwd: "/workspace",
+    permissionMode: "default",
+    permissionContext: createDefaultPermissionContext({ cwd: "/workspace", canPrompt: false }),
+  };
+}
+
+class RecordingLifecycleRuntime extends LifecycleRuntime {
+  readonly inputs: LifecycleDispatchInput[] = [];
+
+  override async dispatch(input: LifecycleDispatchInput) {
+    this.inputs.push(input);
+    return emptyLifecycleDispatchResult();
+  }
+}
+
+function noopModel(): ModelInvokerPort {
+  return {
+    async prepare({ request }) { return { request, provider: request.provider, model: request.model }; },
+    async *stream() {},
+  };
+}
+
+function noopTools(): ToolPort {
+  return { list: () => [], executeAll: async () => [] };
+}
+
+function lookupTool() {
+  return {
+    name: "lookup",
+    description: "lookup state",
+    kind: "custom" as const,
+    inputSchema: { type: "object" as const },
+    isReadOnly: () => true,
+    isConcurrencySafe: () => true,
+    execute: async () => ({ content: [{ type: "text" as const, text: "unused" }] }),
+  };
+}
+
+function builtSidecarPath(): string {
+  return fileURLToPath(new URL("../../../src/cli/pilotdeck-agent-loop-sidecar.js", import.meta.url));
+}
+
+async function drain(values: AsyncIterable<unknown>): Promise<void> {
+  for await (const _ of values) {
+    // The test only needs to observe the connection's terminal error.
+  }
+}
+
+function deterministicIds(): () => string {
+  let sequence = 0;
+  return () => String(++sequence);
+}
+
+function loopbackConnection() {
+  const sidecarToHost = queue<unknown>();
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const server = new AgentLoopSidecarServer(createSidecarExecution, { uuid: deterministicIds() });
+  let buffered = "";
+  output.on("data", (chunk: Buffer) => {
+    buffered += chunk.toString("utf8");
+    const lines = buffered.split("\n");
+    buffered = lines.pop() ?? "";
+    for (const line of lines) {
+      if (line) sidecarToHost.push(JSON.parse(line));
+    }
+  });
+  void server.serve(input, output).finally(() => sidecarToHost.end());
+  return {
+    send: (message: unknown) => { input.write(`${JSON.stringify(message)}\n`); },
+    receive: () => sidecarToHost,
+    close: () => { input.end(); },
+  };
+}
+
+function planTodoFenceConnection(moduleResponses: Array<Record<string, unknown>>) {
+  const responses = queue<unknown>();
+  let runId = "";
+  let operationId = "";
+  let requestId = "";
+  const capabilities = {
+    capabilitiesVersion: "2.0",
+    methods: [{ name: "execute", enabled: true, profiles: ["streaming"] }],
+  };
+  const moduleCall = (
+    messageId: string,
+    module: "model" | "capability",
+    payload: Record<string, unknown>,
+  ) => ({
+    kind: "request",
+    messageId,
+    method: "module_call",
+    runId,
+    operationId,
+    requestId,
+    module,
+    payload,
+  });
+  return {
+    send(message: unknown) {
+      const request = message as Record<string, unknown>;
+      if (request.method === "hello") {
+        responses.push(handshakeResponse(request, {}, "plan-todo-host", capabilities));
+        return;
+      }
+      if (request.method === "capabilities") {
+        responses.push(handshakeResponse(request, capabilities, "plan-todo-host", capabilities));
+        return;
+      }
+      if (request.method === "execute") {
+        runId = String(request.runId);
+        operationId = String(request.operationId);
+        requestId = String(request.requestId);
+        responses.push({
+          kind: "response",
+          messageId: "accepted-plan-todo",
+          inReplyTo: request.messageId,
+          requestId,
+          ok: true,
+          streamId: "plan-todo-stream",
+          cursor: 0,
+        });
+        responses.push(moduleCall("prepare-host-model", "model", {
+          operation: "prepare",
+          preparationId: "host-prepare",
+          request: { provider: "host-provider", model: "host-model", messages: [] },
+        }));
+        return;
+      }
+      if (request.kind !== "response") return;
+      moduleResponses.push(structuredClone(request));
+      if (request.inReplyTo === "prepare-host-model") {
+        responses.push(moduleCall("stream-host-model", "model", {
+          operation: "stream",
+          preparationId: "host-prepare",
+        }));
+        return;
+      }
+      if (request.inReplyTo === "stream-host-model") {
+        responses.push(moduleCall("wrong-plan-todo", "capability", {
+          operation: "plan_todo",
+          method: "read",
+          sessionId: "other-session",
+          turnId: "other-turn",
+        }));
+        return;
+      }
+      if (request.inReplyTo === "wrong-plan-todo") {
+        responses.push(moduleCall("valid-plan-todo", "capability", {
+          operation: "plan_todo",
+          method: "read",
+          sessionId: "plan-todo-host-session",
+          turnId: "plan-todo-host-turn",
+        }));
+        return;
+      }
+      if (request.inReplyTo === "valid-plan-todo") {
+        responses.push(moduleCall("execute-with-plan-todo", "capability", {
+          operation: "execute",
+          toolCallId: "write-call",
+          name: "write",
+          arguments: {},
+          context: {
+            currentToolCallId: "untrusted-call-id",
+            sessionId: "other-session",
+            turnId: "other-turn",
+          },
+        }));
+        return;
+      }
+      if (request.inReplyTo === "execute-with-plan-todo") {
+        responses.push({
+          kind: "event",
+          eventType: "agent.execute.completed",
+          streamId: "plan-todo-stream",
+          sequence: 0,
+          runId,
+          operationId,
+          requestId,
+          final: true,
+          outcome: "completed",
+          payload: {
+            result: completedResult("plan-todo-host-session", "plan-todo-host-turn"),
+            messages: [],
+          },
+        });
+        responses.end();
+      }
+    },
+    receive: () => responses,
+  };
+}
+
+function lifecycleFenceConnection(moduleResponses: Array<Record<string, unknown>>) {
+  const responses = queue<unknown>();
+  let runId = "";
+  let operationId = "";
+  let requestId = "";
+  const capabilities = {
+    capabilitiesVersion: "2.0",
+    methods: [{ name: "execute", enabled: true, profiles: ["streaming"] }],
+  };
+  return {
+    send(message: unknown) {
+      const request = message as Record<string, unknown>;
+      if (request.method === "hello") {
+        responses.push(handshakeResponse(request, {}, "lifecycle-host", capabilities));
+        return;
+      }
+      if (request.method === "capabilities") {
+        responses.push(handshakeResponse(request, capabilities, "lifecycle-host", capabilities));
+        return;
+      }
+      if (request.method === "execute") {
+        runId = String(request.runId);
+        operationId = String(request.operationId);
+        requestId = String(request.requestId);
+        responses.push({
+          kind: "response",
+          messageId: "accepted-lifecycle",
+          inReplyTo: request.messageId,
+          requestId,
+          ok: true,
+          streamId: "lifecycle-stream",
+          cursor: 0,
+        });
+        responses.push({
+          kind: "request",
+          messageId: "lifecycle-dispatch",
+          method: "module_call",
+          runId,
+          operationId,
+          requestId,
+          module: "lifecycle",
+          payload: {
+            operation: "dispatch",
+            event: "Stop",
+            payload: { lastAssistantMessage: "done" },
+          },
+        });
+        return;
+      }
+      if (request.kind !== "response" || request.inReplyTo !== "lifecycle-dispatch") return;
+      moduleResponses.push(structuredClone(request));
+      responses.push({
+        kind: "event",
+        eventType: "agent.execute.completed",
+        streamId: "lifecycle-stream",
+        sequence: 0,
+        runId,
+        operationId,
+        requestId,
+        final: true,
+        outcome: "completed",
+        payload: {
+          result: completedResult("lifecycle-host-session", "lifecycle-host-turn"),
+          messages: [],
+        },
+      });
+      responses.end();
+    },
+    receive: () => responses,
+  };
+}
+
+function compactionContextConnection() {
+  const responses = queue<unknown>();
+  let runId = "";
+  let operationId = "";
+  let requestId = "";
+  const capabilities = {
+    capabilitiesVersion: "2.0",
+    methods: [{ name: "execute", enabled: true, profiles: ["streaming"] }],
+  };
+  const moduleCall = (messageId: string, input: Record<string, unknown>) => ({
+    kind: "request",
+    messageId,
+    method: "module_call",
+    runId,
+    operationId,
+    requestId,
+    module: "context",
+    payload: { operation: "try_auto_compact", input },
+  });
+  return {
+    send(message: unknown) {
+      const request = message as Record<string, unknown>;
+      if (request.method === "hello") {
+        responses.push(handshakeResponse(request, {}, "context-host", capabilities));
+        return;
+      }
+      if (request.method === "capabilities") {
+        responses.push(handshakeResponse(request, capabilities, "context-host", capabilities));
+        return;
+      }
+      if (request.method === "execute") {
+        runId = String(request.runId);
+        operationId = String(request.operationId);
+        requestId = String(request.requestId);
+        responses.push({
+          kind: "response",
+          messageId: "accepted-context",
+          inReplyTo: request.messageId,
+          requestId,
+          ok: true,
+          streamId: "context-stream",
+          cursor: 0,
+        });
+        responses.push(moduleCall("pre-route-compact", {
+          messages: [],
+          reservedOutputTokens: 8192,
+          budgetProjection: { stage: "pre_route", trigger: "auto", reservedOutputTokens: 8192 },
+        }));
+        return;
+      }
+      if (request.kind !== "response") return;
+      if (request.inReplyTo === "pre-route-compact") {
+        responses.push(moduleCall("routed-compact", {
+          messages: [],
+          maxContextTokens: 32_000,
+          budgetProjection: { stage: "routed", trigger: "auto", maxContextTokens: 32_000 },
+        }));
+        return;
+      }
+      if (request.inReplyTo !== "routed-compact") return;
+      responses.push({
+        kind: "event",
+        eventType: "agent.execute.completed",
+        streamId: "context-stream",
+        sequence: 0,
+        runId,
+        operationId,
+        requestId,
+        final: true,
+        outcome: "completed",
+        payload: {
+          result: completedResult("compaction-host-session", "compaction-host-turn"),
+          messages: [],
+        },
+      });
+      responses.end();
+    },
+    receive: () => responses,
+  };
+}
+
+function forgedPolicyContextConnection(sessionId: string, turnId: string) {
+  const responses = queue<unknown>();
+  let runId = "";
+  let operationId = "";
+  let requestId = "";
+  const capabilities = {
+    capabilitiesVersion: "2.0",
+    methods: [{ name: "execute", enabled: true, profiles: ["streaming"] }],
+  };
+  return {
+    send(message: unknown) {
+      const request = message as Record<string, unknown>;
+      if (request.method === "hello") {
+        responses.push(handshakeResponse(request, {}, "forged-policy-host", capabilities));
+        return;
+      }
+      if (request.method === "capabilities") {
+        responses.push(handshakeResponse(request, capabilities, "forged-policy-host", capabilities));
+        return;
+      }
+      if (request.method === "execute") {
+        runId = String(request.runId);
+        operationId = String(request.operationId);
+        requestId = String(request.requestId);
+        responses.push({
+          kind: "response",
+          messageId: "accepted-forged-policy",
+          inReplyTo: request.messageId,
+          requestId,
+          ok: true,
+          streamId: "forged-policy-stream",
+          cursor: 0,
+        });
+        responses.push({
+          kind: "request",
+          messageId: "forged-policy-context",
+          method: "module_call",
+          runId,
+          operationId,
+          requestId,
+          module: "context",
+          payload: {
+            operation: "prepare_for_model",
+            input: {
+              sessionId: "wire-session",
+              turnId: "wire-turn",
+              cwd: "/wire-workspace",
+              provider: "wire-provider",
+              model: "wire-model",
+              permissionMode: "bypassPermissions",
+              runMode: "agent",
+              additionalWorkingDirectories: [],
+              messages: [],
+              tools: [],
+            },
+          },
+        });
+        return;
+      }
+      if (request.kind !== "response" || request.inReplyTo !== "forged-policy-context") return;
+      responses.push({
+        kind: "event",
+        eventType: "agent.execute.completed",
+        streamId: "forged-policy-stream",
+        sequence: 0,
+        runId,
+        operationId,
+        requestId,
+        final: true,
+        outcome: "completed",
+        payload: {
+          result: completedResult(sessionId, turnId),
+          messages: [],
+        },
+      });
+      responses.end();
+    },
+    receive: () => responses,
+  };
+}
+
+function unknownTerminalConnection() {
+  const responses = queue<unknown>();
+  return {
+    send: (message: unknown) => {
+      const request = message as Record<string, unknown>;
+      if (request.method === "hello") {
+        responses.push(handshakeResponse(request, {}));
+        return;
+      }
+      if (request.method === "capabilities") {
+        responses.push(handshakeResponse(request, {
+          capabilitiesVersion: "1",
+          methods: [{ name: "execute", enabled: true, profiles: ["streaming"] }],
+        }));
+        return;
+      }
+      if (request.method !== "execute") return;
+      responses.push({
+        kind: "response",
+        messageId: "accepted",
+        inReplyTo: request.messageId,
+        requestId: request.requestId,
+        ok: true,
+        streamId: "stream-1",
+        cursor: 0,
+      });
+      responses.push({
+        kind: "event",
+        eventType: "agent.execute.unknown",
+        streamId: "stream-1",
+        sequence: 0,
+        runId: request.runId,
+        operationId: request.operationId,
+        requestId: request.requestId,
+        final: true,
+        outcome: "result_unknown",
+        payload: {},
+      });
+      responses.end();
+    },
+    receive: () => responses,
+  };
+}
+
+function reconnectingConnection(reconnects: Array<Record<string, unknown>>) {
+  const first = queue<unknown>();
+  const second = queue<unknown>();
+  let activeRequestId = "";
+  const capabilities = {
+    capabilitiesVersion: "2.0",
+    methods: [
+      { name: "execute", enabled: true, profiles: ["streaming"], resumeSupport: "streaming" },
+      { name: "resume", enabled: true },
+      { name: "ack", enabled: true },
+    ],
+  };
+  const firstConnection = {
+    send(message: unknown) {
+      const request = message as Record<string, unknown>;
+      if (request.method === "hello") {
+        first.push(handshakeResponse(request, {}, "connection-a", capabilities));
+      } else if (request.method === "capabilities") {
+        first.push(handshakeResponse(request, capabilities, "connection-a", capabilities));
+      } else if (request.method === "execute") {
+        activeRequestId = String(request.requestId);
+        first.push({
+          kind: "response",
+          messageId: "accepted-a",
+          inReplyTo: request.messageId,
+          requestId: request.requestId,
+          ok: true,
+          streamId: "reconnect-stream",
+          cursor: 0,
+        });
+        first.push({
+          kind: "event",
+          eventType: "agent.warning",
+          streamId: "reconnect-stream",
+          sequence: 0,
+          runId: request.runId,
+          operationId: request.operationId,
+          requestId: request.requestId,
+          final: false,
+          payload: {
+            type: "warning",
+            sessionId: "reconnect-session",
+            turnId: "reconnect-turn",
+            code: "TRANSPORT_TEST",
+            message: "first connection",
+          },
+        });
+        first.end();
+      }
+    },
+    receive: () => first,
+    reconnect(input: {
+      streamId: string;
+      previousBinding: { moduleInstanceId: string; connectionGeneration: string };
+      lastAppliedSequence: number;
+    }) {
+      reconnects.push(structuredClone(input));
+      return secondConnection;
+    },
+  };
+  const secondConnection = {
+    send(message: unknown) {
+      const request = message as Record<string, unknown>;
+      if (request.method === "hello") {
+        second.push(handshakeResponse(request, {}, "connection-b", capabilities));
+      } else if (request.method === "capabilities") {
+        second.push(handshakeResponse(request, capabilities, "connection-b", capabilities));
+      } else if (request.method === "resume") {
+        second.push({
+          kind: "response",
+          messageId: "resumed-b",
+          inReplyTo: request.messageId,
+          ok: true,
+          streamId: "reconnect-stream",
+          replayedThroughSequence: 0,
+        });
+        second.push({
+          kind: "event",
+          eventType: "agent.execute.completed",
+          streamId: "reconnect-stream",
+          sequence: 1,
+          runId: "reconnect-run",
+          operationId: "reconnect-operation",
+          requestId: activeRequestId,
+          final: true,
+          outcome: "completed",
+          payload: {
+            result: completedResult("reconnect-session", "reconnect-turn"),
+            messages: [],
+          },
+        });
+        second.end();
+      }
+    },
+    receive: () => second,
+  };
+  return firstConnection;
+}
+
+function restartingConnection(reconnects: Array<Record<string, unknown>>, methods: string[]) {
+  const first = queue<unknown>();
+  const second = queue<unknown>();
+  let activeRequestId = "";
+  const capabilities = {
+    capabilitiesVersion: "2.0",
+    methods: [
+      { name: "execute", enabled: true, profiles: ["streaming"], resumeSupport: "streaming" },
+      { name: "resume", enabled: true },
+      { name: "ack", enabled: true },
+    ],
+  };
+  const firstConnection = {
+    send(message: unknown) {
+      const request = message as Record<string, unknown>;
+      methods.push(String(request.method));
+      if (request.method === "hello") {
+        first.push(handshakeResponse(request, {}, "restart-connection-a", capabilities, "restart-instance-a"));
+      } else if (request.method === "capabilities") {
+        first.push(handshakeResponse(request, capabilities, "restart-connection-a", capabilities, "restart-instance-a"));
+      } else if (request.method === "execute") {
+        activeRequestId = String(request.requestId);
+        first.push({
+          kind: "response",
+          messageId: "restart-accepted",
+          inReplyTo: request.messageId,
+          requestId: activeRequestId,
+          ok: true,
+          streamId: "restart-stream",
+          cursor: 0,
+        });
+        first.push({
+          kind: "event",
+          eventType: "agent.warning",
+          streamId: "restart-stream",
+          sequence: 0,
+          runId: request.runId,
+          operationId: request.operationId,
+          requestId: activeRequestId,
+          final: false,
+          payload: {
+            type: "warning",
+            sessionId: "restart-session",
+            turnId: "restart-turn",
+            code: "RESTART_TEST",
+            message: "first sidecar instance",
+          },
+        });
+        first.end();
+      }
+    },
+    receive: () => first,
+    reconnect(input: {
+      streamId: string;
+      previousBinding: { moduleInstanceId: string; connectionGeneration: string };
+      lastAppliedSequence: number;
+    }) {
+      reconnects.push(structuredClone(input));
+      return secondConnection;
+    },
+  };
+  const secondConnection = {
+    send(message: unknown) {
+      const request = message as Record<string, unknown>;
+      methods.push(String(request.method));
+      if (request.method === "hello") {
+        second.push(handshakeResponse(request, {}, "restart-connection-b", capabilities, "restart-instance-b"));
+      }
+    },
+    receive: () => second,
+  };
+  return firstConnection;
+}
+
+function replayedModuleCallConnection(responses: Array<Record<string, unknown>>) {
+  const first = queue<unknown>();
+  const second = queue<unknown>();
+  const capabilities = {
+    capabilitiesVersion: "2.0",
+    methods: [
+      { name: "execute", enabled: true, profiles: ["streaming"], resumeSupport: "streaming" },
+      { name: "resume", enabled: true },
+      { name: "ack", enabled: true },
+    ],
+  };
+  let runId = "";
+  let operationId = "";
+  let requestId = "";
+  const moduleCall = () => ({
+    kind: "request",
+    messageId: "replayed-context-call",
+    method: "module_call",
+    runId,
+    operationId,
+    requestId,
+    module: "context",
+    payload: {},
+  });
+  const firstConnection = {
+    send(message: unknown) {
+      const request = message as Record<string, unknown>;
+      if (request.method === "hello") {
+        first.push(handshakeResponse(request, {}, "module-replay-a", capabilities, "module-replay-instance"));
+      } else if (request.method === "capabilities") {
+        first.push(handshakeResponse(request, capabilities, "module-replay-a", capabilities, "module-replay-instance"));
+      } else if (request.method === "execute") {
+        runId = String(request.runId);
+        operationId = String(request.operationId);
+        requestId = String(request.requestId);
+        first.push({
+          kind: "response",
+          messageId: "module-replay-accepted",
+          inReplyTo: request.messageId,
+          requestId,
+          ok: true,
+          streamId: "module-replay-stream",
+          cursor: 0,
+        });
+        first.push(moduleCall());
+      } else if (request.kind === "response" && request.inReplyTo === "replayed-context-call") {
+        throw new Error("simulate lost module response write");
+      }
+    },
+    receive: () => first,
+    reconnect() {
+      return secondConnection;
+    },
+  };
+  const secondConnection = {
+    send(message: unknown) {
+      const request = message as Record<string, unknown>;
+      if (request.method === "hello") {
+        second.push(handshakeResponse(request, {}, "module-replay-b", capabilities, "module-replay-instance"));
+      } else if (request.method === "capabilities") {
+        second.push(handshakeResponse(request, capabilities, "module-replay-b", capabilities, "module-replay-instance"));
+      } else if (request.method === "resume") {
+        second.push({
+          kind: "response",
+          messageId: "module-replay-resumed",
+          inReplyTo: request.messageId,
+          ok: true,
+          streamId: "module-replay-stream",
+          replayedThroughSequence: -1,
+        });
+        second.push(moduleCall());
+      } else if (request.kind === "response" && request.inReplyTo === "replayed-context-call") {
+        responses.push(structuredClone(request));
+        second.push({
+          kind: "event",
+          eventType: "agent.execute.completed",
+          streamId: "module-replay-stream",
+          sequence: 0,
+          runId,
+          operationId,
+          requestId,
+          final: true,
+          outcome: "completed",
+          payload: {
+            result: completedResult("module-replay-session", "module-replay-turn"),
+            messages: [],
+          },
+        });
+        second.end();
+      }
+    },
+    receive: () => second,
+  };
+  return firstConnection;
+}
+
+function handshakeResponse(
+  request: Record<string, unknown>,
+  payload: Record<string, unknown>,
+  connectionGeneration = "test-sidecar-connection",
+  capabilities: Record<string, unknown> = {},
+  moduleInstanceId = connectionGeneration.startsWith("connection-") ? "reconnect-sidecar" : "test-sidecar-instance",
+) {
+  return {
+    kind: "response",
+    messageId: `response-${request.method}`,
+    inReplyTo: request.messageId,
+    ok: true,
+    protocolVersion: "2.0",
+    moduleId: "test-sidecar",
+    moduleInstanceId,
+    connectionGeneration,
+    capabilitiesVersion: String(capabilities.capabilitiesVersion ?? "1"),
+    payload,
+  };
+}
+
+function cancelledResult(sessionId: string, turnId: string) {
+  return {
+    type: "aborted",
+    sessionId,
+    turnId,
+    stopReason: "aborted_streaming",
+    usage: {},
+    permissionDenials: [],
+    turns: 1,
+    startedAt: "2026-09-10T00:00:00.000Z",
+    completedAt: "2026-09-10T00:00:00.001Z",
+  };
+}
+
+function completedResult(sessionId: string, turnId: string) {
+  return {
+    type: "success" as const,
+    sessionId,
+    turnId,
+    stopReason: "completed" as const,
+    usage: {},
+    permissionDenials: [],
+    turns: 1,
+    startedAt: "2026-09-10T00:00:00.000Z",
+    completedAt: "2026-09-10T00:00:00.001Z",
+  };
+}
+
+function queue<T>() {
+  const values: T[] = [];
+  const waiters: Array<(result: IteratorResult<T>) => void> = [];
+  let ended = false;
+  return {
+    push(value: T) {
+      const waiter = waiters.shift();
+      if (waiter) waiter({ value, done: false });
+      else values.push(value);
+    },
+    end() {
+      ended = true;
+      while (waiters.length > 0) waiters.shift()!({ value: undefined as never, done: true });
+    },
+    async *[Symbol.asyncIterator](): AsyncGenerator<T, void, unknown> {
+      while (true) {
+        const value = values.shift();
+        if (value !== undefined) yield value;
+        else if (ended) return;
+        else yield await new Promise<T>((resolve) => waiters.push((result) => {
+          if (result.done) resolve(undefined as never);
+          else resolve(result.value);
+        }));
+      }
+    },
+  };
+}
+
+async function waitForSignal(signal: Promise<void>, timeoutMs: number, message: string): Promise<void> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      signal,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}

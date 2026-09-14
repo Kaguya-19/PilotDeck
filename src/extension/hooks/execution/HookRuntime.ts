@@ -9,9 +9,18 @@ import { CommandHookExecutor, PILOTDECK_SESSION_END_HOOK_TIMEOUT_MS } from "./Co
 import { PromptHookExecutor } from "./PromptHookExecutor.js";
 import { HttpHookExecutor } from "./HttpHookExecutor.js";
 import { AgentHookExecutor } from "./AgentHookExecutor.js";
-import { AsyncHookRegistry } from "./AsyncHookRegistry.js";
+import {
+  AsyncHookRegistry,
+  type AsyncHookCompletion,
+  type PendingAsyncHookDescriptor,
+} from "./AsyncHookRegistry.js";
 import { CallbackHookExecutor } from "./CallbackHookExecutor.js";
-import { HookExecutionEventBus, type PilotDeckHookExecutionEvent } from "../events/HookExecutionEventBus.js";
+import {
+  HookExecutionEventBus,
+  type HookExecutionEventSubscription,
+  type PilotDeckHookExecutionEvent,
+  type PilotDeckHookExecutionEventHandler,
+} from "../events/HookExecutionEventBus.js";
 
 export type HookRuntimeRunInput = {
   event: PilotDeckHookEvent;
@@ -27,7 +36,10 @@ export type HookRuntimeRunResult = {
   events: PilotDeckHookExecutionEvent[];
   blockingErrors: PilotDeckLifecycleError[];
   nonBlockingErrors: PilotDeckLifecycleError[];
+  pendingAsyncHooks: PendingAsyncHookDescriptor[];
 };
+
+export type HookRuntimeState = "active" | "draining" | "disposed";
 
 export class HookRuntime {
   constructor(
@@ -41,6 +53,16 @@ export class HookRuntime {
     private readonly callbackExecutor = new CallbackHookExecutor(),
   ) {}
 
+  private state: HookRuntimeState = "active";
+  private inFlight = 0;
+  private nextAsyncHookId = 0;
+  private drainPromise?: Promise<void>;
+  private resolveDrain?: () => void;
+
+  get lifecycleState(): HookRuntimeState {
+    return this.state;
+  }
+
   /**
    * Expose the {@link CallbackHookExecutor} so the caller can register
    * per-process callbacks (e.g. the gateway's interactive permission
@@ -50,16 +72,64 @@ export class HookRuntime {
     return this.callbackExecutor;
   }
 
+  /**
+   * Subscribe to volatile hook execution transitions for this runtime.
+   * Consumers own the returned registration at their exact session scope.
+   */
+  subscribeExecutionEvents(handler: PilotDeckHookExecutionEventHandler): HookExecutionEventSubscription {
+    this.assertActive("subscribe to hook execution events");
+    return this.eventBus.subscribe(handler);
+  }
+
+  /** Stop new callback registrations and wait for callback executions to drain. */
+  dispose(): Promise<void> {
+    if (this.drainPromise && this.state === "draining") return this.drainPromise;
+    if (this.state === "disposed") return Promise.resolve();
+    this.state = "draining";
+    this.eventBus.dispose();
+    this.drainPromise = (async () => {
+      try {
+        await this.asyncRegistry.dispose();
+        await this.callbackExecutor.dispose();
+        if (this.inFlight > 0) {
+          await new Promise<void>((resolve) => {
+            this.resolveDrain = resolve;
+          });
+        }
+      } finally {
+        this.state = "disposed";
+        this.resolveDrain = undefined;
+      }
+    })();
+    return this.drainPromise;
+  }
+
   async run(input: HookRuntimeRunInput): Promise<HookRuntimeRunResult> {
+    this.assertActive("run hooks");
+    this.inFlight += 1;
+    try {
+      return await this.runActive(input);
+    } finally {
+      this.inFlight -= 1;
+      if (this.state === "draining" && this.inFlight === 0) {
+        this.resolveDrain?.();
+        this.resolveDrain = undefined;
+      }
+    }
+  }
+
+  private async runActive(input: HookRuntimeRunInput): Promise<HookRuntimeRunResult> {
     const effects: PilotDeckHookEffect[] = [];
     const events: PilotDeckHookExecutionEvent[] = [];
     const blockingErrors: PilotDeckLifecycleError[] = [];
     const nonBlockingErrors: PilotDeckLifecycleError[] = [];
+    const pendingAsyncHooks: PendingAsyncHookDescriptor[] = [];
 
     for (const { matcher, hook } of this.matchHooks(input)) {
       const hookName = matcher.pluginName ? `${matcher.pluginName}:${hook.type}` : hook.type;
       const started: PilotDeckHookExecutionEvent = {
         type: "started",
+        sessionId: input.hookInput.sessionId,
         hookName,
         hookEvent: input.event,
       };
@@ -69,6 +139,7 @@ export class HookRuntime {
       const result = await this.executeHook(hook, input, matcher.pluginRoot);
       const response: PilotDeckHookExecutionEvent = {
         type: "response",
+        sessionId: input.hookInput.sessionId,
         hookName,
         hookEvent: input.event,
         stdout: result.stdout,
@@ -80,8 +151,8 @@ export class HookRuntime {
       this.eventBus.emit(response);
 
       if (result.output.type === "async") {
-        this.asyncRegistry.register({
-          id: `${hookName}:${Date.now()}`,
+        const registration = this.asyncRegistry.register({
+          id: `${hookName}:${++this.nextAsyncHookId}`,
           startedAt: new Date(),
           hookName,
           hookEvent: input.event,
@@ -90,6 +161,8 @@ export class HookRuntime {
           responseDelivered: false,
           asyncRewake: hook.type === "command" ? hook.asyncRewake : undefined,
         });
+        const pending = this.asyncRegistry.describe(registration.id);
+        if (pending) pendingAsyncHooks.push(pending);
       }
 
       if (result.outcome === "blocking") {
@@ -108,11 +181,21 @@ export class HookRuntime {
       effects.push(...effectsFromHookOutput(result.output, hookName));
     }
 
-    return { effects, events, blockingErrors, nonBlockingErrors };
+    return { effects, events, blockingErrors, nonBlockingErrors, pendingAsyncHooks };
   }
 
   collectAsyncResponses(): ReturnType<AsyncHookRegistry["collectResponses"]> {
     return this.asyncRegistry.collectResponses();
+  }
+
+  /** Complete a pending external hook. Late completion is rejected safely. */
+  completeAsyncHook(id: string, completion: AsyncHookCompletion = {}): boolean {
+    return this.asyncRegistry.complete(id, completion);
+  }
+
+  /** Explicitly cancel a pending external hook without emitting a result. */
+  cancelAsyncHook(id: string): boolean {
+    return this.asyncRegistry.cancel(id);
   }
 
   removeDeliveredAsyncResponses(): void {
@@ -163,6 +246,12 @@ export class HookRuntime {
         return this.agentExecutor.execute({ hook, hookInput: input.hookInput, signal: input.signal });
       case "callback":
         return this.callbackExecutor.execute({ hook, hookInput: input.hookInput, signal: input.signal });
+    }
+  }
+
+  private assertActive(action: string): void {
+    if (this.state !== "active") {
+      throw new Error(`Cannot ${action}; hook runtime is ${this.state}.`);
     }
   }
 }

@@ -1,6 +1,6 @@
-import { mkdirSync, readFileSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 import { PILOT_PROJECT_DIR_NAME } from "../../pilot/index.js";
+import { createNodePlanStoragePort, type PlanStoragePort } from "../execution-world/PlanStoragePort.js";
 
 export type PlanFileManager = {
   getPlanDirectoryPath(): string;
@@ -10,11 +10,13 @@ export type PlanFileManager = {
 
 export function createPlanFileManager(options: {
   projectRoot: string;
+  storage?: PlanStoragePort;
 }): PlanFileManager {
   const planDir = resolve(options.projectRoot, PILOT_PROJECT_DIR_NAME, "plans");
+  const storage = options.storage ?? createNodePlanStoragePort();
 
   function getPlanDirectoryPath(): string {
-    mkdirSync(planDir, { recursive: true });
+    storage.ensureDirectory(planDir);
     return planDir;
   }
 
@@ -42,7 +44,7 @@ export function createPlanFileManager(options: {
       return undefined;
     }
     try {
-      const content = readFileSync(absolutePath, "utf8");
+      const content = storage.readText(absolutePath);
       return content.trim() || undefined;
     } catch {
       return undefined;

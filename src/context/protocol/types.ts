@@ -5,6 +5,7 @@ import type {
   CachePlan,
   ModelProtocol,
 } from "../../model/index.js";
+import type { RuntimeContextSurface } from "../RuntimeContextSurface.js";
 
 /** Diagnostic produced by context runtime; non-fatal except for `severity:"fatal"`. */
 export type ContextDiagnostic = {
@@ -27,6 +28,27 @@ export type ContextBoundary = {
   metadata?: Record<string, unknown>;
 };
 
+export type ContextRuntimeSnapshotSection = {
+  name: string;
+  text: string;
+};
+
+export type ContextInstructionSnapshotLayer = {
+  scope: string;
+  path: string;
+  content: string;
+};
+
+export type ContextMaterialization = {
+  /** Stable request-admission step supplied by the durable context adapter. */
+  stepId?: number;
+  promptGeneration?: number;
+  runtimeContexts: ContextRuntimeSnapshotSection[];
+  /** Durable user-role projection of runtimeContexts when that profile is enabled. */
+  runtimeContextMessages?: CanonicalMessage[];
+  instructionLayers?: ContextInstructionSnapshotLayer[];
+};
+
 /** Fully-prepared model context produced by `prepareForModel`. */
 export type ModelContext = {
   messages: CanonicalMessage[];
@@ -36,6 +58,8 @@ export type ModelContext = {
   diagnostics: ContextDiagnostic[];
   boundaries: ContextBoundary[];
   metadata?: Record<string, unknown>;
+  /** Structured dynamic facts persisted before the corresponding model request. */
+  materialization?: ContextMaterialization;
   /** A4: final three non-system message indices for Anthropic recent3 cache layout. */
   cacheBreakpoints?: number[];
   /** Internal provider-boundary cache plan; never persisted to transcript. */
@@ -45,8 +69,16 @@ export type ModelContext = {
 export type ContextPrepareInput = {
   sessionId: string;
   turnId: string;
+  /**
+   * Optional durable request-admission identity. Native/direct callers may
+   * omit it; the session-owned durable context adapter injects it before the
+   * provider assembles a model request.
+   */
+  stepId?: number;
   cwd: string;
   abortSignal?: AbortSignal;
+  /** Profile-selected projection for dynamic runtime context. */
+  runtimeContextSurface?: RuntimeContextSurface;
   /** Provider/model identifier. */
   provider: string;
   model: string;

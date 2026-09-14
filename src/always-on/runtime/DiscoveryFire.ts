@@ -1,8 +1,12 @@
 import { existsSync } from "node:fs";
 import { mkdir, unlink, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import type { Gateway, GatewayChannelKey, GatewayEvent } from "../../gateway/index.js";
 import { getPilotProjectChatDir } from "../../pilot/paths.js";
+import type { SessionCatalogPort } from "../../session/catalog/SessionCatalogPort.js";
+import {
+  createProjectSessionTranscriptReader,
+  type SessionTranscriptReaderPort,
+} from "../../session/index.js";
 import { buildChatDigest } from "../context/ChatDigestBuilder.js";
 import type { AlwaysOnConfig } from "../config/parseAlwaysOnConfig.js";
 import { buildFallbackReport, parseReportMarkdown, type ReportMetadata } from "../contracts/ReportContract.js";
@@ -18,11 +22,6 @@ import type {
   WorkspaceHandle,
 } from "../protocol/types.js";
 import type { AlwaysOnPaths } from "../storage/AlwaysOnPaths.js";
-import { AlwaysOnEventStore } from "../storage/AlwaysOnEventStore.js";
-import { DiscoveryPlanStore } from "../storage/DiscoveryPlanStore.js";
-import { DiscoveryReportStore } from "../storage/DiscoveryReportStore.js";
-import { DiscoveryStateStore } from "../storage/DiscoveryStateStore.js";
-import { WorkCycleStore } from "../storage/WorkCycleStore.js";
 import type { WorkspaceProviderRegistry } from "../workspace/WorkspaceProviderRegistry.js";
 import type { AlwaysOnRunContextRegistry, ExecutionRunContext, DiscoveryRunContext, WorkspaceRunContext, ReportRunContext } from "./AlwaysOnRunContextRegistry.js";
 import { generateWorkspaceDiff } from "../workspace/WorkspaceApply.js";
@@ -33,20 +32,36 @@ import {
 } from "./SessionConfigOverrides.js";
 import type { PermissionRule } from "../../permission/index.js";
 import type { TelemetryClient } from "../../telemetry/index.js";
+import type {
+  AlwaysOnAgentGatewayPort,
+  GatewayChannelKey,
+  GatewayEvent,
+} from "./AlwaysOnAgentGatewayPort.js";
+import type {
+  AlwaysOnEventStorePort,
+  DiscoveryPlanStorePort,
+  DiscoveryReportStorePort,
+  DiscoveryStateStorePort,
+  WorkCycleStorePort,
+} from "./AlwaysOnProjectStorageProvider.js";
 
 export type DiscoveryFireDependencies = {
   config: AlwaysOnConfig;
   paths: AlwaysOnPaths;
   projectKey: string;
-  gateway: Gateway;
+  gateway: AlwaysOnAgentGatewayPort;
   runContexts: AlwaysOnRunContextRegistry;
   workspaceRegistry: WorkspaceProviderRegistry;
   sessionOverrides: SessionConfigOverrides;
-  stateStore: DiscoveryStateStore;
-  planStore: DiscoveryPlanStore;
-  cycleStore: WorkCycleStore;
-  reportStore: DiscoveryReportStore;
-  eventStore: AlwaysOnEventStore;
+  stateStore: DiscoveryStateStorePort;
+  planStore: DiscoveryPlanStorePort;
+  cycleStore: WorkCycleStorePort;
+  reportStore: DiscoveryReportStorePort;
+  eventStore: AlwaysOnEventStorePort;
+  /** Application-selected durable-session catalog for the discovery prompt. */
+  sessionCatalog: SessionCatalogPort;
+  /** Application-selected reader for durable user-chat content. */
+  sessionTranscriptReader?: SessionTranscriptReaderPort;
   uuid: () => string;
   now: () => Date;
   logger?: { info: (msg: string, data?: Record<string, unknown>) => void; warn: (msg: string, data?: Record<string, unknown>) => void };
@@ -93,8 +108,8 @@ export type EnsureActiveWorkCycleInput = {
   planTitle: string;
   cycleId: string;
   workspaceRegistry: WorkspaceProviderRegistry;
-  stateStore: DiscoveryStateStore;
-  cycleStore: WorkCycleStore;
+  stateStore: DiscoveryStateStorePort;
+  cycleStore: WorkCycleStorePort;
   now: () => Date;
   fileExists?: (path: string) => boolean;
 };
@@ -164,7 +179,11 @@ export async function ensureActiveWorkCycle(
 }
 
 export class DiscoveryFire {
-  constructor(private readonly deps: DiscoveryFireDependencies) {}
+  private readonly sessionTranscriptReader: SessionTranscriptReaderPort;
+
+  constructor(private readonly deps: DiscoveryFireDependencies) {
+    this.sessionTranscriptReader = deps.sessionTranscriptReader ?? createProjectSessionTranscriptReader();
+  }
 
   private emitEvent(
     runId: string,
@@ -560,6 +579,8 @@ export class DiscoveryFire {
     const chatDigest = await buildChatDigest({
       projectRoot: this.deps.projectKey,
       pilotHome: this.deps.paths.pilotHome,
+      sessionCatalog: this.deps.sessionCatalog,
+      sessionTranscriptReader: this.sessionTranscriptReader,
       maxSessions: 10,
       maxPromptsPerSession: 8,
       maxPromptLength: 500,
