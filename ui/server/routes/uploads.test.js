@@ -16,6 +16,7 @@ vi.mock('../pilotdeck-bridge.js', () => ({
 const nativeFetch = globalThis.fetch;
 const originalPilotHome = process.env.PILOT_HOME;
 const temporaryRoots = [];
+let testUserId = 0;
 
 afterEach(async () => {
   vi.restoreAllMocks();
@@ -29,6 +30,39 @@ afterEach(async () => {
 });
 
 describe('upload routes', () => {
+  it.each([0, 1, 2, 3, 4, 65537])('encodes %i preview bytes correctly across stream boundaries', async length => {
+    const { createPreviewEncoder } = await import('./uploads.js');
+    const bytes = Buffer.alloc(length, 0xab);
+    const chunks = [];
+    for (let i = 0; i < length; i += 7) chunks.push(bytes.subarray(i, i + 7));
+    let encoded = '';
+    for await (const chunk of Readable.from(chunks).pipe(createPreviewEncoder('image/png'))) encoded += chunk;
+    expect(JSON.parse(encoded)).toEqual({ data: `data:image/png;base64,${bytes.toString('base64')}` });
+  });
+
+  it('limits repeated preview requests before file access, independently per user', async () => {
+    const { app, store } = await createUploadsApp();
+    const get = vi.spyOn(store, 'get').mockRejectedValue(Object.assign(new Error('missing'), { code: 'UPLOAD_NOT_FOUND' }));
+    const server = app.listen(0);
+    try {
+      const url = `http://127.0.0.1:${server.address().port}/api/uploads/upload-1/attachments/image/preview`;
+      for (let i = 0; i < 600; i++) {
+        const response = await nativeFetch(url);
+        expect(response.status).toBe(404);
+        await response.text();
+      }
+      const limited = await nativeFetch(url);
+      expect(limited.status).toBe(429);
+      expect(limited.headers.get('retry-after')).toBeTruthy();
+      expect((await limited.json()).error.code).toBe('PREVIEW_RATE_LIMITED');
+      expect(get).toHaveBeenCalledTimes(600);
+      const otherUser = await nativeFetch(url, { headers: { 'X-Test-User': 'another-user' } });
+      expect(otherUser.status).toBe(404);
+      await otherUser.text();
+      expect(get).toHaveBeenCalledTimes(601);
+    } finally { await new Promise(resolve => server.close(resolve)); }
+  }, 20_000);
+
   it('serves a verified uploaded image without placing it in a queue frame', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pilotdeck-preview-'));
     temporaryRoots.push(root);
@@ -128,6 +162,8 @@ async function createUploadsApp() {
   const { default: routes, uploadStore } = await import('./uploads.js');
   const app = express();
   app.use(express.json());
+  const userId = `uploads-route-test-${++testUserId}`;
+  app.use((req, _res, next) => { req.user = { id: req.get('X-Test-User') || userId }; next(); });
   app.use('/api/uploads', routes);
   return { app, store: uploadStore };
 }
