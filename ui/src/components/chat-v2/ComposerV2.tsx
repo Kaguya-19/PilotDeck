@@ -1597,7 +1597,11 @@ export default function ComposerV2({
                                   key={provider === null ? "auto" : `provider:${provider}`}
                                   role="group"
                                   aria-label={provider ?? (t("input.models.auto", { defaultValue: "Auto" }) as string)}
-                                  className="mb-1 last:mb-0"
+                                  className={cn(
+                                    "mb-1 last:mb-0",
+                                    provider === null && modelGroups.length > 1 &&
+                                      "border-b border-neutral-200 pb-2 dark:border-neutral-700",
+                                  )}
                                 >
                                   {provider !== null ? (
                                     <div className="sticky top-0 z-10 truncate bg-white px-[9px] pb-1 pt-2 text-[10px] font-medium text-neutral-400 dark:bg-neutral-900 dark:text-neutral-500" title={provider}>
