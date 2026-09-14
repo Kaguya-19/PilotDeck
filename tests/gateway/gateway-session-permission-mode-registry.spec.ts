@@ -53,13 +53,36 @@ test("permission mode registry clears volatile session state", () => {
   assert.equal(registry.get("session-b"), undefined);
 });
 
+test("Gateway uses the application base permission mode when client mode is omitted", async () => {
+  const submitted: Array<{ mode?: string; baseMode?: string }> = [];
+  const session = fakeSession(
+    () => undefined,
+    () => undefined,
+    (mode, baseMode) => submitted.push({ mode, baseMode }),
+  );
+  const router = new SessionRouter({ idleSweepIntervalMs: 0, createSession: () => session });
+  const gateway = new InProcessGateway(router, { defaultPermissionMode: "default" });
+
+  for await (const _event of gateway.submitTurn({
+    sessionKey: "session-base-mode",
+    channelKey: "test",
+    message: "turn",
+  })) {
+    // Drain the turn.
+  }
+
+  assert.deepEqual(submitted, [{ mode: "default", baseMode: "default" }]);
+});
+
 function fakeSession(
   requestedMode: () => "plan" | "default" | undefined,
   observeMode: (mode: string | undefined) => void,
+  observeModes?: (mode: string | undefined, baseMode: string | undefined) => void,
 ): AgentSession {
   return {
     async *submit(_input: AgentInput, options: AgentSubmitOptions = {}) {
       observeMode(options.permissionMode);
+      observeModes?.(options.permissionMode, options.basePermissionMode);
       const turnId = options.turnId ?? "turn-mode";
       yield { type: "turn_started", sessionId: "session-mode", turnId };
       const mode = requestedMode();

@@ -208,6 +208,9 @@ export const createSidecarExecution: SidecarExecutionFactory = async ({ request,
       runMode,
       abortSignal,
       permissionMode,
+      basePermissionMode: isPermissionMode(payload.basePermissionMode)
+        ? payload.basePermissionMode
+        : undefined,
       allowPlanModeTools: payload.allowPlanModeTools === true,
       canPrompt,
       permissionRules: asPermissionRules(permissionContextInput.rules),

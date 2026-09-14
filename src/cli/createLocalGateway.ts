@@ -522,6 +522,7 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
     telemetry,
     permissionGrants: registry.permissionGrantPort(),
     permissionModes: registry.permissionModePort(),
+    defaultPermissionMode: permissionMode,
     toolResultArtifacts,
     agentEventProjector,
     agentEventTelemetryObserver,

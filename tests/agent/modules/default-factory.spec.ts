@@ -32,6 +32,7 @@ test("default sidecar factory maps host-neutral execution payloads", async () =>
           { role: "user", content: [{ type: "text", text: "Additional context" }, { type: "image", source: "base64", mimeType: "image/png", data: "abc" }] },
           { role: "assistant", content: "Acknowledged" },
         ],
+        basePermissionMode: "default",
         allowPlanModeTools: true,
         permissionContext: {
           mode: "plan",
@@ -50,6 +51,7 @@ test("default sidecar factory maps host-neutral execution payloads", async () =>
   assert.equal(execution.input.maxTurns, 2);
   assert.equal(execution.input.runMode, "ask");
   assert.equal(execution.input.permissionMode, "plan");
+  assert.equal(execution.input.basePermissionMode, "default");
   assert.equal(execution.input.allowPlanModeTools, true);
   assert.equal(execution.input.canPrompt, true);
   assert.deepEqual(execution.input.modelOverride, { provider: "provider-b", model: "model-b" });

@@ -83,6 +83,7 @@ import {
   isPermissionMode,
   permissionSettingsToRuleSet,
   readPermissionSettings,
+  type PermissionMode,
 } from "../../permission/index.js";
 import {
   GatewaySessionPermissionModeRegistry,
@@ -250,6 +251,8 @@ export type InProcessGatewayOptions = {
   permissionGrants?: GatewaySessionPermissionGrantPort;
   /** Provider-neutral owner of live session permission mode transitions. */
   permissionModes?: GatewaySessionPermissionModePort;
+  /** Application-selected base mode used when a client omits its legacy mode field. */
+  defaultPermissionMode?: PermissionMode;
   /** Provider-neutral Always-On control seam. */
   alwaysOnControl?: AlwaysOnControlPort;
   /**
@@ -598,8 +601,11 @@ export class InProcessGateway implements Gateway {
         const livePermissionMode = this.permissionModes.get(input.sessionKey);
         const permissionMode = inputMode
           ?? livePermissionMode
+          ?? this.options.defaultPermissionMode
           ?? (permissionSettings.skipPermissions ? "bypassPermissions" : undefined);
-        const basePermissionMode = normalizeGatewayModeForLegacyInput((input as { basePermissionMode?: unknown }).basePermissionMode);
+        const basePermissionMode = normalizeGatewayModeForLegacyInput(
+          (input as { basePermissionMode?: unknown }).basePermissionMode,
+        ) ?? this.options.defaultPermissionMode;
         const allowPlanModeTools = input.allowPlanModeTools ?? inputMode === "plan";
         const persistedRules = permissionSettingsToRuleSet(permissionSettings);
         const sessionAllowRules = this.interactionCoordinator.sessionAllowRules(input.sessionKey);

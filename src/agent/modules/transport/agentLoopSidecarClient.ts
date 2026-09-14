@@ -454,6 +454,7 @@ class SidecarTurnProtocol {
       payload: {
         agent: serializeAgentConfig(config),
         messages: input.messages,
+        ...(input.basePermissionMode !== undefined ? { basePermissionMode: input.basePermissionMode } : {}),
         ...(input.allowPlanModeTools !== undefined ? { allowPlanModeTools: input.allowPlanModeTools } : {}),
         tools: capabilities.tools.port.list().map(serializeToolDescriptor),
         permissionContext,
