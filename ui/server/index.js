@@ -65,7 +65,7 @@ import { pickNativeFolder } from './utils/nativeFolderPicker.js';
 import { browseDirectories } from './utils/browseDirectories.js';
 import { getOpenUrlSpawnCommand } from './utils/processSpawn.js';
 
-import { getProjects, getProjectCronJobsOverview, getSessions, renameProject, deleteSession, deleteProject, addProjectManually, extractProjectDirectory, clearProjectDirectoryCache, searchConversations } from './projects.js';
+import { getProjectsSnapshot, getProjectCronJobsOverview, getSessions, renameProject, deleteSession, deleteProject, addProjectManually, extractProjectDirectory, clearProjectDirectoryCache, searchConversations } from './projects.js';
 import {
     runChatViaGateway,
     replaceLastTurnViaGateway,
@@ -338,12 +338,13 @@ async function setupProjectsWatcher() {
                 clearProjectDirectoryCache();
 
                 // Get updated projects list
-                const updatedProjects = await getProjects(broadcastProgress);
+                const snapshot = await getProjectsSnapshot(broadcastProgress);
 
                 // Notify all connected clients about the project changes
                 const updateMessage = JSON.stringify({
                     type: 'projects_updated',
-                    projects: updatedProjects,
+                    projects: snapshot.projects,
+                    projectListRevision: snapshot.revision,
                     timestamp: new Date().toISOString(),
                     changeType: eventType,
                     changedFile: path.relative(rootPath, filePath),
@@ -916,8 +917,9 @@ app.use(express.static(path.join(__dirname, '../dist'), {
 
 app.get('/api/projects', authenticateToken, async (req, res) => {
     try {
-        const projects = await getProjects(broadcastProgress);
-        res.json(projects);
+        const snapshot = await getProjectsSnapshot(broadcastProgress);
+        res.setHeader('X-Projects-Revision', String(snapshot.revision));
+        res.json(snapshot.projects);
     } catch (error) {
         if (isGatewayUnavailableError(error)) {
             return res.status(503).json({

@@ -304,6 +304,7 @@ export function useProjectsState({
   // Mirror `projects` into a ref so async callbacks can read the latest list
   // without closing over stale state (e.g. loadMoreSessions early-bail check).
   const projectsRef = useRef<Project[]>([]);
+  const projectListRevisionRef = useRef(0);
   useEffect(() => {
     projectsRef.current = projects;
   }, [projects]);
@@ -332,6 +333,11 @@ export function useProjectsState({
         throw new Error('Unable to load projects: the server returned an invalid response.');
       }
       const projectData = payload;
+      const revision = Number(response.headers.get('X-Projects-Revision')) || 0;
+      if (revision < projectListRevisionRef.current) {
+        return projectsRef.current;
+      }
+      projectListRevisionRef.current = revision;
 
       setProjects((prevProjects) => {
         if (prevProjects.length === 0) {
@@ -361,6 +367,28 @@ export function useProjectsState({
     // Keep chat view stable while still syncing sidebar/session metadata in background.
     await fetchProjects({ showLoadingState: false });
   }, [fetchProjects]);
+
+  const addCreatedProject = useCallback((project: Project) => {
+    const revision = Number(project.projectListRevision) || 0;
+    projectListRevisionRef.current = Math.max(projectListRevisionRef.current, revision);
+    setProjects((previous) => {
+      const existing = previous.find((item) => item.name === project.name);
+      if (existing) {
+        // Re-registering an existing workspace must keep its loaded sessions.
+        return previous.map((item) => item === existing
+          ? {
+              ...item,
+              ...project,
+              sessions: item.sessions,
+              sessionMeta: item.sessionMeta,
+              lastActivity: item.lastActivity ?? project.lastActivity,
+            }
+          : item);
+      }
+      return [{ ...project, sessions: [], sessionMeta: { total: 0, hasMore: false } }, ...previous];
+    });
+    setProjectsLoadError(null);
+  }, []);
 
   const openSettings = useCallback((tab = 'appearance') => {
     setSettingsInitialTab(tab);
@@ -406,7 +434,6 @@ export function useProjectsState({
     }
 
     const projectsMessage = latestMessage as ProjectsUpdatedMessage;
-
     if (projectsMessage.changedFile && selectedSession && selectedProject) {
       const normalized = projectsMessage.changedFile.replace(/\\/g, '/');
       const projectPrefix = `${selectedProject.name}/`;
@@ -428,6 +455,12 @@ export function useProjectsState({
         }
       }
     }
+
+    // Even an outdated list can carry a transcript-change notification that
+    // was not part of the newer HTTP response. Only discard its list state.
+    const revision = projectsMessage.projectListRevision ?? 0;
+    if (revision < projectListRevisionRef.current) return;
+    projectListRevisionRef.current = revision;
 
     const hasActiveSession =
       (selectedSession && activeSessions.has(selectedSession.id)) ||
@@ -944,6 +977,7 @@ export function useProjectsState({
     openSettings,
     fetchProjects,
     refreshProjectsSilently,
+    addCreatedProject,
     sidebarSharedProps,
     handleProjectSelect,
     handleSessionSelect,
