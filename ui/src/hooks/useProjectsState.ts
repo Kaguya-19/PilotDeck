@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { NavigateFunction } from 'react-router-dom';
 import { api } from '../utils/api';
+import { ProjectActivity } from './projectActivity';
 import type {
   AppSocketMessage,
   AppTab,
@@ -306,6 +307,8 @@ export function useProjectsState({
   const projectsRef = useRef<Project[]>([]);
   const projectListRevisionRef = useRef(0);
   const pendingCreatedProjectsRef = useRef(new Map<string, Project>());
+  const activityRef = useRef(new ProjectActivity());
+  const handledSocketMessageRef = useRef<AppSocketMessage | null>(null);
   useEffect(() => {
     projectsRef.current = projects;
   }, [projects]);
@@ -352,11 +355,11 @@ export function useProjectsState({
         throw new Error('Unable to load projects: the server returned an invalid response.');
       }
       const revision = Number(response.headers.get('X-Projects-Revision')) || 0;
-      if (revision < projectListRevisionRef.current) {
+      if (revision < projectListRevisionRef.current || (revision > 0 && revision === projectListRevisionRef.current)) {
         return projectsRef.current;
       }
       projectListRevisionRef.current = revision;
-      const projectData = retainPendingCreatedProjects(payload, revision);
+      const projectData = retainPendingCreatedProjects(activityRef.current.merge(payload, projectsRef.current), revision);
 
       setProjects((prevProjects) => {
         if (prevProjects.length === 0) {
@@ -433,6 +436,9 @@ export function useProjectsState({
     if (!latestMessage) {
       return;
     }
+    // Selection/activity state can rerun this effect without a new frame.
+    if (handledSocketMessageRef.current === latestMessage) return;
+    handledSocketMessageRef.current = latestMessage;
 
     if (latestMessage.type === 'loading_progress') {
       if (loadingProgressTimeoutRef.current) {
@@ -482,14 +488,16 @@ export function useProjectsState({
     // Even an outdated list can carry a transcript-change notification that
     // was not part of the newer HTTP response. Only discard its list state.
     const revision = projectsMessage.projectListRevision ?? 0;
-    if (revision < projectListRevisionRef.current) return;
+    if (revision < projectListRevisionRef.current || (revision > 0 && revision === projectListRevisionRef.current)) return;
     projectListRevisionRef.current = revision;
 
     const hasActiveSession =
       (selectedSession && activeSessions.has(selectedSession.id)) ||
       (activeSessions.size > 0 && Array.from(activeSessions).some((id) => id.startsWith('new-session-')));
 
-    const updatedProjects = retainPendingCreatedProjects(projectsMessage.projects, revision);
+    const updatedProjects = retainPendingCreatedProjects(
+      activityRef.current.merge(projectsMessage.projects, projectsRef.current), revision,
+    );
 
     // While a session is streaming we must NOT replace `selectedProject` /
     // `selectedSession` mid-flight (the chat pane and downstream hooks key
@@ -668,6 +676,7 @@ export function useProjectsState({
 
 	  const handleSessionDelete = useCallback(
 	    (sessionIdToDelete: string) => {
+        activityRef.current.remove(undefined, sessionIdToDelete);
 	      if (selectedSession?.id === sessionIdToDelete) {
 	        setSelectedSession(null);
 	        navigate('/');
@@ -806,6 +815,7 @@ export function useProjectsState({
   const handleProjectDelete = useCallback(
     (projectName: string) => {
       pendingCreatedProjectsRef.current.delete(projectName);
+      activityRef.current.remove(projectName);
       if (selectedProject?.name === projectName) {
         setSelectedProject(null);
         setSelectedSession(null);
@@ -829,13 +839,16 @@ export function useProjectsState({
   // We do NOT wait for the server's chokidar-debounced `projects_updated`
   // round-trip — instead we either bump the existing session's lastActivity
   // (so "sort by date" reorders immediately) or prepend a placeholder
-  // entry for a brand-new session. The placeholder uses a `new-session-*`
-  // id and is filtered out automatically the next time `preserveLoadedSessions`
-  // runs against a server payload.
+  // entry for a brand-new session. Keep the local activity until the server
+  // catches up; failed sends roll back only their own unconfirmed activity.
   const bumpSessionActivity = useCallback(
     (projectName: string, sessionId: string, optimisticTitle?: string) => {
       if (!projectName || !sessionId) return;
-      const now = new Date().toISOString();
+      const project = projectsRef.current.find((item) => item.name === projectName);
+      if (!project) return;
+      const at = Date.now();
+      const now = new Date(at).toISOString();
+      const activity = activityRef.current.begin(project, sessionId, at);
 
       const apply = (project: Project): Project => {
         if (project.name !== projectName) return project;
@@ -878,6 +891,12 @@ export function useProjectsState({
 
       setProjects((prev) => prev.map(apply));
       setSelectedProject((prev) => (prev && prev.name === projectName ? apply(prev) : prev));
+      return () => {
+        const rollback = activityRef.current.cancel(activity);
+        if (!rollback) return;
+        setProjects((prev) => prev.map(rollback));
+        setSelectedProject((prev) => prev ? rollback(prev) : prev);
+      };
     },
     [],
   );
@@ -888,6 +907,7 @@ export function useProjectsState({
   // real session in.
   const replaceOptimisticInProjects = useCallback((realSessionId: string) => {
     if (!realSessionId || isTemporarySessionId(realSessionId)) return;
+    activityRef.current.replaceTemporarySession(realSessionId);
     const apply = (project: Project): Project => {
       const sessions = project.sessions ?? [];
       const tempIdx = sessions.findIndex((s) => isTemporarySessionId(s.id));
@@ -914,7 +934,9 @@ export function useProjectsState({
   // before the agent emitted `session_created`).
   const dropOptimisticInProjects = useCallback((sessionId: string) => {
     if (!sessionId || !isTemporarySessionId(sessionId)) return;
+    const rollback = activityRef.current.cancelSession(sessionId);
     const apply = (project: Project): Project => {
+      project = rollback(project);
       const sessions = project.sessions ?? [];
       if (!sessions.some((s) => s.id === sessionId)) return project;
       return {

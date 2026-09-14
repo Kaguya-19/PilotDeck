@@ -593,13 +593,9 @@ export default function AppShellV2() {
 
   const handleSessionActivityBump = useCallback(
     (projectName: string, sessionId: string, optimisticTitle?: string) => {
-      bumpSessionActivity(projectName, sessionId, optimisticTitle);
-      if (selectedSession) return;
-      const project = sidebarSharedProps.projects.find((item) => item.name === projectName);
-      if (!project) return;
-      setSelectedProject(project);
+      return bumpSessionActivity(projectName, sessionId, optimisticTitle);
     },
-    [bumpSessionActivity, selectedSession, sidebarSharedProps.projects, setSelectedProject],
+    [bumpSessionActivity],
   );
 
   // Wrap the two session-lifecycle callbacks coming out of useSessionProtection
