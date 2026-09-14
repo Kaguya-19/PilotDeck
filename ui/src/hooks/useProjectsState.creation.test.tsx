@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AppSocketMessage, Project } from '../types/app';
 import { api } from '../utils/api';
 import { useProjectsState } from './useProjectsState';
+import { createProjectUpdateScheduler } from '../../server/projectUpdateScheduler.js';
 
 vi.mock('../utils/api', () => ({ api: { projects: vi.fn() } }));
 
@@ -53,19 +54,19 @@ describe('new project visibility', () => {
     expect(api.projects).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps the project when an older HTTP scan finishes after creation', async () => {
+  it('loads existing projects and General from a pre-creation HTTP scan while retaining the new project', async () => {
     const pending = deferred<Response>();
     vi.mocked(api.projects).mockReturnValue(pending.promise);
     const { result } = renderProjects();
     act(() => result.current.addCreatedProject(project('new', 20)));
 
-    await act(async () => { pending.resolve(response([], 10)); });
+    await act(async () => { pending.resolve(response([project('existing'), project('general')], 10)); });
 
-    expect(result.current.projects.map((p) => p.name)).toEqual(['new']);
+    expect(result.current.projects.map((p) => p.name).sort()).toEqual(['existing', 'general', 'new']);
     expect(result.current.isLoadingProjects).toBe(false);
   });
 
-  it('rejects old socket snapshots, accepts enrichment, and allows later deletion', async () => {
+  it('retains a registration across older snapshots, accepts enrichment, and allows later deletion', async () => {
     vi.mocked(api.projects).mockResolvedValue(response([], 10));
     const { result, rerender } = renderProjects();
     await waitFor(() => expect(result.current.isLoadingProjects).toBe(false));
@@ -137,5 +138,80 @@ describe('new project visibility', () => {
     } });
     expect(result.current.externalMessageUpdate).toBe(previousUpdates + 1);
     expect(result.current.projects).toHaveLength(1);
+  });
+
+  it.each([true, false])('merges unrelated data before a queued watcher rescan finishes (initial load: %s)', async (initialLoad) => {
+    const initial = deferred<Response>();
+    const firstScan = deferred<{ projects: Project[]; revision: number }>();
+    const followupScan = deferred<{ projects: Project[]; revision: number }>();
+    const existing = [project('existing'), project('general')];
+    vi.mocked(api.projects).mockReturnValueOnce(initialLoad
+      ? initial.promise : Promise.resolve(response(existing, 10)));
+    const { result, rerender } = renderProjects();
+    if (!initialLoad) await waitFor(() => expect(result.current.projects).toHaveLength(2));
+    vi.useFakeTimers();
+    const scan = vi.fn().mockReturnValueOnce(firstScan.promise).mockReturnValueOnce(followupScan.promise);
+    const scheduler = createProjectUpdateScheduler({
+      scan,
+      publish: (snapshot: { projects: Project[]; revision: number }) => rerender({ latestMessage: {
+        type: 'projects_updated', projects: snapshot.projects, projectListRevision: snapshot.revision,
+      } }),
+      onError: (error: unknown) => { throw error; },
+    });
+    try {
+      scheduler.schedule('existing-session-change');
+      await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+      act(() => result.current.addCreatedProject(project('new', 20)));
+      scheduler.schedule('project-created');
+      await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+      expect(scan).toHaveBeenCalledTimes(1);
+
+      const updated = [
+        { ...project('existing'), sessions: [{ id: 'session-1', title: 'Completed conversation' }] },
+        project('general'),
+      ];
+      await act(async () => {
+        initial.resolve(response(existing, 10));
+        firstScan.resolve({ projects: updated, revision: 15 });
+      });
+      // The review's two failures must be fixed even before the rescan returns.
+      expect(result.current.projects.map((p) => p.name).sort()).toEqual(['existing', 'general', 'new']);
+      expect(result.current.projects.find((p) => p.name === 'existing')?.sessions?.[0]?.id).toBe('session-1');
+      expect(result.current.isLoadingProjects).toBe(false);
+      expect(scan).toHaveBeenCalledTimes(2);
+
+      await act(async () => { followupScan.resolve({ projects: [...updated, project('new')], revision: 30 }); });
+      expect(result.current.projects).toHaveLength(3);
+      expect(result.current.projects.filter((p) => p.name === 'new')).toHaveLength(1);
+    } finally {
+      scheduler.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it('protects multiple registrations independently and releases protection for authoritative deletions', async () => {
+    vi.mocked(api.projects).mockResolvedValue(response([project('general')], 10));
+    const { result, rerender } = renderProjects();
+    await waitFor(() => expect(result.current.isLoadingProjects).toBe(false));
+    act(() => {
+      result.current.addCreatedProject(project('first', 20));
+      result.current.addCreatedProject(project('second', 40));
+    });
+    rerender({ latestMessage: { type: 'projects_updated', projects: [project('general'), project('first')], projectListRevision: 30 } });
+    expect(result.current.projects.map((p) => p.name).sort()).toEqual(['first', 'general', 'second']);
+    rerender({ latestMessage: { type: 'projects_updated', projects: [project('general')], projectListRevision: 35 } });
+    expect(result.current.projects.map((p) => p.name).sort()).toEqual(['general', 'second']);
+    rerender({ latestMessage: { type: 'projects_updated', projects: [project('general')], projectListRevision: 50 } });
+    expect(result.current.projects.map((p) => p.name)).toEqual(['general']);
+  });
+
+  it('does not resurrect a locally deleted registration when an older scan arrives', async () => {
+    vi.mocked(api.projects).mockResolvedValue(response([project('general')], 10));
+    const { result, rerender } = renderProjects();
+    await waitFor(() => expect(result.current.isLoadingProjects).toBe(false));
+    act(() => result.current.addCreatedProject(project('new', 20)));
+    act(() => result.current.handleProjectDelete('new'));
+    rerender({ latestMessage: { type: 'projects_updated', projects: [project('general')], projectListRevision: 15 } });
+    expect(result.current.projects.map((p) => p.name)).toEqual(['general']);
   });
 });

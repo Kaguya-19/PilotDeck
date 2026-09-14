@@ -305,9 +305,28 @@ export function useProjectsState({
   // without closing over stale state (e.g. loadMoreSessions early-bail check).
   const projectsRef = useRef<Project[]>([]);
   const projectListRevisionRef = useRef(0);
+  const pendingCreatedProjectsRef = useRef(new Map<string, Project>());
   useEffect(() => {
     projectsRef.current = projects;
   }, [projects]);
+
+  // A registration confirms only one project, not the rest of the list.
+  // Accept useful pre-registration snapshots and retain only the new entries
+  // they could not have observed. A scan started after registration is
+  // authoritative again (including when a project has since been deleted).
+  const retainPendingCreatedProjects = useCallback((snapshot: Project[], revision: number) => {
+    const names = new Set(snapshot.map((project) => project.name));
+    const current = new Map(projectsRef.current.map((project) => [project.name, project]));
+    const missing: Project[] = [];
+    for (const [name, created] of pendingCreatedProjectsRef.current) {
+      if (revision >= (created.projectListRevision ?? 0)) {
+        pendingCreatedProjectsRef.current.delete(name);
+      } else if (!names.has(name)) {
+        missing.push(current.get(name) ?? created);
+      }
+    }
+    return missing.length > 0 ? [...missing, ...snapshot] : snapshot;
+  }, []);
 
   const fetchProjects = useCallback(async ({ showLoadingState = true }: FetchProjectsOptions = {}) => {
     try {
@@ -332,12 +351,12 @@ export function useProjectsState({
       if (!Array.isArray(payload)) {
         throw new Error('Unable to load projects: the server returned an invalid response.');
       }
-      const projectData = payload;
       const revision = Number(response.headers.get('X-Projects-Revision')) || 0;
       if (revision < projectListRevisionRef.current) {
         return projectsRef.current;
       }
       projectListRevisionRef.current = revision;
+      const projectData = retainPendingCreatedProjects(payload, revision);
 
       setProjects((prevProjects) => {
         if (prevProjects.length === 0) {
@@ -361,7 +380,7 @@ export function useProjectsState({
         setIsLoadingProjects(false);
       }
     }
-  }, []);
+  }, [retainPendingCreatedProjects]);
 
   const refreshProjectsSilently = useCallback(async () => {
     // Keep chat view stable while still syncing sidebar/session metadata in background.
@@ -370,7 +389,11 @@ export function useProjectsState({
 
   const addCreatedProject = useCallback((project: Project) => {
     const revision = Number(project.projectListRevision) || 0;
-    projectListRevisionRef.current = Math.max(projectListRevisionRef.current, revision);
+    if (revision > projectListRevisionRef.current) {
+      pendingCreatedProjectsRef.current.set(project.name, {
+        ...project, sessions: [], sessionMeta: { total: 0, hasMore: false },
+      });
+    }
     setProjects((previous) => {
       const existing = previous.find((item) => item.name === project.name);
       if (existing) {
@@ -466,7 +489,7 @@ export function useProjectsState({
       (selectedSession && activeSessions.has(selectedSession.id)) ||
       (activeSessions.size > 0 && Array.from(activeSessions).some((id) => id.startsWith('new-session-')));
 
-    const updatedProjects = projectsMessage.projects;
+    const updatedProjects = retainPendingCreatedProjects(projectsMessage.projects, revision);
 
     // While a session is streaming we must NOT replace `selectedProject` /
     // `selectedSession` mid-flight (the chat pane and downstream hooks key
@@ -559,7 +582,7 @@ export function useProjectsState({
     if (serialize(normalizedUpdatedSelectedSession) !== serialize(selectedSession)) {
       setSelectedSession(normalizedUpdatedSelectedSession);
     }
-  }, [latestMessage, selectedProject, selectedSession, activeSessions]);
+  }, [latestMessage, selectedProject, selectedSession, activeSessions, retainPendingCreatedProjects]);
 
   useEffect(() => {
     return () => {
@@ -782,6 +805,7 @@ export function useProjectsState({
 
   const handleProjectDelete = useCallback(
     (projectName: string) => {
+      pendingCreatedProjectsRef.current.delete(projectName);
       if (selectedProject?.name === projectName) {
         setSelectedProject(null);
         setSelectedSession(null);
