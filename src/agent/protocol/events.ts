@@ -15,7 +15,7 @@ export type AgentEvent =
   | { type: "user_prompt_submitted"; sessionId: string; turnId: string; prompt: string }
   | { type: "setup_completed"; sessionId: string }
   | { type: "model_request_started"; sessionId: string; turnId: string; model: string; provider: string }
-  | { type: "model_event"; sessionId: string; turnId: string; event: CanonicalModelEvent }
+  | { type: "model_event"; sessionId: string; turnId: string; event: CanonicalModelEvent; blockId?: string }
   | { type: "instructions_loaded"; sessionId: string; turnId: string; hasSystemPrompt: boolean }
   | { type: "assistant_message"; sessionId: string; turnId: string; message: CanonicalMessage }
   | { type: "steer_applied"; sessionId: string; turnId: string; itemId: string; message: CanonicalMessage }

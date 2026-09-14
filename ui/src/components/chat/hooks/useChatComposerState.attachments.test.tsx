@@ -212,6 +212,7 @@ describe('useChatComposerState attachment submission', () => {
     await waitFor(() => {
       expect(result.current.input).toBe('send this file');
       expect(result.current.attachedImages).toHaveLength(1);
+      expect(result.current.imageErrors.size).toBe(1);
     });
 
     await result.current.handleSubmit({ preventDefault: vi.fn() } as never);

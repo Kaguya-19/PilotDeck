@@ -958,6 +958,7 @@ export function gatewayEventToFrames(event, sessionId, provider) {
                     ...base,
                     kind: 'stream_delta',
                     content: event.text,
+                    ...(event.blockId ? { blockId: event.blockId } : {}),
                     ...(event.model ? { model: event.model } : {}),
                 }),
             ];
@@ -967,6 +968,7 @@ export function gatewayEventToFrames(event, sessionId, provider) {
                     ...base,
                     kind: 'thinking',
                     content: event.text,
+                    ...(event.blockId ? { blockId: event.blockId } : {}),
                 }),
             ];
         case 'file_artifacts':

@@ -177,6 +177,7 @@ function mapWebMessageToNormalized(message, sessionId) {
       : undefined;
   const base = {
     id: message.id,
+    ...(message.blockId ? { blockId: message.blockId } : {}),
     sessionId,
     timestamp: message.createdAt,
     provider: message.provider || 'pilotdeck',

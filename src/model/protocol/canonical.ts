@@ -9,11 +9,15 @@ export type CanonicalRole = "user" | "assistant";
 export type CanonicalTextBlock = {
   type: "text";
   text: string;
+  /** UI stream/history identity; never a provider request field. */
+  blockId?: string;
 };
 
 export type CanonicalThinkingBlock = {
   type: "thinking";
   text: string;
+  /** UI stream/history identity; never a provider request field. */
+  blockId?: string;
   /**
    * Provider-supplied signature accompanying the thinking block (Anthropic
    * extended-thinking signature_delta). Required for prompt-cache validity

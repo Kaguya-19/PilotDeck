@@ -102,6 +102,8 @@ function parseAssistantStreamTimestamp(value?: string): number | null {
 }
 
 function isCompatibleAssistantStreamRun(incoming: NormalizedMessage, existing: NormalizedMessage): boolean {
+  if (incoming.blockId || existing.blockId) return incoming.blockId === existing.blockId
+    && getMessageRunId(incoming) === getMessageRunId(existing);
   if (incoming.runId != null && existing.runId != null) return incoming.runId === existing.runId;
   const isActiveStream = existing.kind === 'stream_delta' && String(existing.id || '').startsWith('__streaming_');
   if (!isActiveStream) return false;
@@ -148,11 +150,18 @@ type ActiveTurnReplayState = {
   serverMessages?: NormalizedMessage[];
 };
 
+function getKnownCompactions(message: NormalizedMessage, state: ActiveTurnReplayState): NormalizedMessage[] {
+  if (message.kind !== 'compact_boundary' || !message.compactionId) return [];
+  return [...(state.realtimeMessages || []), ...(state.serverMessages || [])].filter(existing =>
+    existing.compactionId === message.compactionId && getMessageRunId(existing) === getMessageRunId(message));
+}
+
 type VolatileReplayBlock = {
   kind: 'stream_delta' | 'thinking';
   messages: LatestChatMessage[];
   text: string;
   runId?: string;
+  blockId?: string;
 };
 
 function isRenderedVolatileBlockCandidate(
@@ -165,6 +174,10 @@ function isRenderedVolatileBlockCandidate(
   const messageRunId = getMessageRunId(message);
   if (block.runId && messageRunId && block.runId !== messageRunId) {
     return false;
+  }
+  if (block.blockId || message.blockId) {
+    return block.blockId === message.blockId
+      && normalizeAssistantStreamText(message.content).startsWith(blockText);
   }
 
   if (block.kind === 'stream_delta') {
@@ -224,10 +237,11 @@ export function getActiveTurnReplayMessagesToApply(
     block = null;
   };
 
-  for (const message of activeTurnMessages) {
+  for (const rawMessage of activeTurnMessages) {
+    const message = normalizeCompactionMessage(rawMessage as NormalizedMessage);
     const kind = String(message?.kind || '');
     if (kind === 'thinking' || kind === 'stream_delta') {
-      if (block && block.kind !== kind) {
+      if (block && (block.kind !== kind || block.blockId !== message.blockId)) {
         flushBlock();
       }
       if (!block) {
@@ -236,6 +250,7 @@ export function getActiveTurnReplayMessagesToApply(
           messages: [],
           text: '',
           runId: getMessageRunId(message),
+          blockId: message.blockId,
         };
       }
       block.messages.push(message);
@@ -254,7 +269,11 @@ export function getActiveTurnReplayMessagesToApply(
     }
 
     flushBlock();
-    if (!hasRenderedNonVolatileReplayMessage(message, state)) {
+    const knownCompacts = getKnownCompactions(message, state);
+    if (knownCompacts.length > 0) {
+      if (message.compactState !== 'running'
+        && !knownCompacts.some(existing => normalizeCompactionMessage(existing).compactState === 'completed')) output.push(message);
+    } else if (!hasRenderedNonVolatileReplayMessage(message, state)) {
       output.push(message);
     }
   }
@@ -665,6 +684,12 @@ export function useChatRealtimeHandlers({
       return;
     }
     msg = normalizeCompactionMessage({ ...msg, sessionId: sid } as NormalizedMessage);
+    // A replay must be idempotent before any stream-finalization side effects.
+    // Completion may enrich a running row, but an already-known boundary
+    // cannot end a newer answer that happens to be streaming now.
+    const knownCompacts = getKnownCompactions(msg as NormalizedMessage, sessionStore.getSessionSlot?.(sid) || {});
+    if (knownCompacts.length > 0 && (msg.compactState === 'running'
+      || knownCompacts.some(message => normalizeCompactionMessage(message).compactState === 'completed'))) return;
     const msgRunId = typeof msg.runId === 'string' && msg.runId.trim() ? msg.runId.trim() : undefined;
     const streamKey = msgRunId ? `${sid}_${msgRunId}` : sid;
 
@@ -758,6 +783,19 @@ export function useChatRealtimeHandlers({
       return;
     }
 
+    // The same turn can contain several model responses. A new block closes
+    // the old accumulator before reading its text, even without a tool call.
+    if (msg.blockId && (msg.kind === 'stream_delta' || msg.kind === 'thinking')) {
+      const slot = sessionStore.getSessionSlot?.(sid);
+      const activeText = slot?.realtimeMessages.find(message => message.id === `__streaming_${streamKey}`);
+      const activeThinking = slot?.realtimeMessages.find(message => message.id === `__streaming_thinking_${streamKey}`);
+      if (activeText && activeText.blockId !== msg.blockId) sessionStore.finalizeStreaming(sid, msgRunId);
+      if (activeThinking && activeThinking.blockId !== msg.blockId) {
+        sessionStore.finalizeStreamingThinking(sid, msgRunId);
+        thinkingBySessionRef.current.delete(sid);
+      }
+    }
+
     // --- Streaming: direct accumulation (no smoother animation) ---
     if (msg.kind === 'stream_delta') {
       const text = msg.content || '';
@@ -771,7 +809,7 @@ export function useChatRealtimeHandlers({
       const streamId = `__streaming_${streamKey}`;
       const existing = slot?.realtimeMessages.find((m: any) => m.id === streamId);
       const currentText = existing?.content || '';
-      sessionStore.updateStreaming(sid, currentText + text, provider, msgRunId, msg.model);
+      sessionStore.updateStreaming(sid, currentText + text, provider, msgRunId, msg.model, msg.blockId);
       return;
     }
 
@@ -786,7 +824,7 @@ export function useChatRealtimeHandlers({
       const streamId = `__streaming_thinking_${streamKey}`;
       const existing = slot?.realtimeMessages.find((m: any) => m.id === streamId);
       const currentText = existing?.content || '';
-      sessionStore.updateStreamingThinking(sid, currentText + text, provider, msgRunId);
+      sessionStore.updateStreamingThinking(sid, currentText + text, provider, msgRunId, msg.blockId);
       return;
     }
 
@@ -805,7 +843,7 @@ export function useChatRealtimeHandlers({
     const flushKinds = new Set([
       'tool_use', 'tool_result', 'text', 'complete', 'error', 'permission_request', 'compact_boundary',
     ]);
-    if (flushKinds.has(msg.kind as string) && (msg.kind !== 'error' || isTerminalError)) {
+    if (knownCompacts.length === 0 && flushKinds.has(msg.kind as string) && (msg.kind !== 'error' || isTerminalError)) {
       // Finalize thinking if still active (model moved past thinking)
       if (!isTerminalForSupersededRun && thinkingBySessionRef.current.has(sid)) {
         thinkingBySessionRef.current.delete(sid);

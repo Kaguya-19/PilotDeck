@@ -138,3 +138,37 @@ node --import tsx --test --test-force-exit tests/agent/loop/context-cap.spec.ts 
 ```
 
 结果：UI/桥接 26 文件、384 项通过；AgentLoop/压缩/历史回放 51 项通过；两端类型检查通过。修改的前端文件 ESLint 为 0 错误、4 条既有警告。仍明确排除上文记录的既有失败，不代表全仓测试全部通过。
+
+## 2026-09-14：修复基于 9e4f4012 的三项审阅回归
+
+三项最小复现先在 `9e4f4012` 失败，修复后通过：
+
+1. 已完成压缩的开始事件重放：在 replay 筛选和实际 handler 中先归一压缩事件、检查压缩身份，再决定是否结束流。已知压缩的完成事件仍可更新原来的运行中记录，但不能截断后续正在输出的回答。覆盖 `session-status` 重放、直接事件以及仅包含状态的恢复路径，最终只保留一条 `Hello world`。
+2. 历史先于增量：新生成的正文/思考块使用稳定 `blockId`；实时增量和落盘历史携带相同编号，不再用历史到达时的尾部排除当前块。旧数据没有编号时，允许同轮同类尾部作为候选，同时保留用户、工具、压缩边界限制。
+3. 输出上限自动续写：每次模型响应使用新的编号，思考和正文各自具有块身份。前端遇到新块先结束原累积器，避免同轮两次响应混在一起。旧格式流记录额外保存前一个已完成块作为匹配锚点，不使用跨阶段的全文去重。
+
+编号贯通 AgentLoop、模型组装器、Gateway、WebSocket 桥接、JSONL 内容块及 HTTP 历史投影；不进入模型供应商请求字段。新增 AgentLoop 测试实际走 `length` 触发的第二次请求，使用确定性模型替身输出完全相同的两组思考/回答，验证四个不同编号在实时与持久化路径一一对应。另覆盖同一响应内的工具边界，以及旧格式相邻文本合并。
+
+### 自动验证
+
+UI 命令在上轮的测试集上增加 `server/routes/messages.test.js`；`src/stores` 自动包含本轮新增的 `useSessionStore.review-regressions.test.tsx`。结果为 **28 文件、398 项通过**。
+
+根目录运行：
+
+```sh
+node --import tsx --test --test-force-exit tests/agent/loop/*.spec.ts tests/gateway/map-agent-event-runid.spec.ts tests/gateway/active-turn-snapshot.spec.ts tests/web/queued-input-history.spec.ts tests/web/compact-replay.spec.ts tests/context/autoCompaction.spec.ts tests/context/compaction-engine.spec.ts tests/session/transcript-replay-compaction.spec.ts tests/model/streaming/block-identity.spec.ts
+```
+
+结果为 **86 项通过**；前后端 TypeScript、修改的前端文件 ESLint、`git diff --check`、`npm run build:web` 均通过。上传失败测试补充等待错误状态，避免在文件读取尚未结束时提前断言。仍排除上文记录的 `streamSmoother.test.ts` 既有失败，未声称全仓测试通过。
+
+### 真实浏览器验证
+
+发现 5173 已由 `PilotDeck-special-token-fix` 工作目录提供服务，因此本轮在临时独立数据目录启动本次代码，使用 5174 / 3003 / 18790 测试；未替换 5173。
+
+真实模型：`qwen3.8-27b`。测试会话：`web:s_4105ad62-6c5b-462e-a5a9-aa3c43b59f81`。
+
+- R570：通过页面输入框发送，要求输出“段落边界验收”、执行只读 `pwd`、再次输出同一句。展开过程可见：思考、第一段正文、工具、第二段思考、第二段正文；完成后刷新保持一致。
+- R571：同会话发送，要求输出“刷新边界验收”、执行 `sleep 20 && pwd`、再次输出同一句。在工具执行期间刷新，仍恢复原思考、第一段正文和运行中工具。完成后展开并再次刷新，没有额外尾段或重复思考。
+- 旁路只读订阅该测试会话的实时事件，与 HTTP 历史比对：两次模型响应的四个块编号及各自完整内容全部一致。
+
+本轮真实操作覆盖多次模型响应及运行中刷新。旧压缩事件重放、历史先到以及输出达到上限的精确时序由上述确定性回归验证；未将其表述为本轮真实模型自动压缩或输出上限测试。测试后停止临时实例并删除临时配置中的模型凭据。

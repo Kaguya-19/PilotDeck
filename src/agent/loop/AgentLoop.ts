@@ -1,10 +1,12 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import {
   applyModelEventToAssembler,
   assembleAssistantMessage,
   cloneMessages,
   createModelMessageAssemblerState,
+  getModelStreamBlockId,
   messageContent,
   type CanonicalToolCall,
   PROMPT_TOO_LONG_ANTHROPIC_PATTERN,
@@ -615,7 +617,7 @@ export class AgentLoop {
         : { ...request, provider: decision.provider, model: decision.model };
       const requestInputEstimate = this.dependencies.tokenAccounting?.estimateRequestInput?.(calibrationRequest);
       const calibrationRequestFingerprint = requestFingerprint(calibrationRequest);
-      const assembler = createModelMessageAssemblerState();
+      const assembler = createModelMessageAssemblerState(randomUUID());
       let executedRequest: { provider: string; model: string; fingerprint?: string } | undefined;
       try {
         for await (const event of this.dependencies.router.execute(decision, request, {
@@ -631,7 +633,10 @@ export class AgentLoop {
               fingerprint: event.requestFingerprint,
             };
           }
-          yield { type: "model_event", sessionId: input.sessionId, turnId: input.turnId, event };
+          const blockId = event.type === 'text_delta' || event.type === 'thinking_delta'
+            ? getModelStreamBlockId(assembler, event.type === 'text_delta' ? 'text' : 'thinking') : undefined;
+          yield { type: "model_event", sessionId: input.sessionId, turnId: input.turnId, event,
+            ...(blockId ? { blockId } : {}) };
           applyModelEventToAssembler(assembler, event);
           if (event.type === "error") {
             break;

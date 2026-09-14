@@ -51,6 +51,8 @@ export interface NormalizedMessage {
   id: string;
   /** Stable UI identity across streaming finalization. */
   renderKey?: string;
+  /** Identity assigned by the model assembler and preserved in history. */
+  blockId?: string;
   sessionId: string;
   timestamp: string;
   provider: SessionProvider;
@@ -176,6 +178,8 @@ export interface NormalizedMessage {
   toolBoundaryIdAtStart?: string;
   /** The last tool/compaction/user boundary when this stream block began. */
   streamBoundaryAtStart?: NormalizedMessage | null;
+  /** Previous completed response block, including same-turn continuations. */
+  streamPredecessorAtStart?: NormalizedMessage;
   /** Persisted neighbours retained when refresh removes confirmed live rows. */
   serverPredecessorId?: string;
   serverSuccessorId?: string;
@@ -790,6 +794,11 @@ export function isRealtimeMessageRepresentedOnServer(
   serverMessages: NormalizedMessage[],
 ): boolean {
   if (serverMessages.some((message) => message.id === realtimeMessage.id)) return true;
+  if (realtimeMessage.blockId) {
+    return serverMessages.some(message => message.blockId === realtimeMessage.blockId
+      && getMessageTurnId(message) === getMessageTurnId(realtimeMessage)
+      && normalizeRealtimeText(message.content).startsWith(normalizeRealtimeText(realtimeMessage.content)));
+  }
   if (isTrackedStream(realtimeMessage) && getMessageTurnId(realtimeMessage)) {
     return getStreamSnapshotCandidateIndexes(serverMessages, realtimeMessage).some(index => (
       normalizeRealtimeText(serverMessages[index].content).startsWith(normalizeRealtimeText(realtimeMessage.content))
@@ -1048,11 +1057,21 @@ function getStreamSnapshotCandidateIndexes(
 ): number[] {
   const turnId = getMessageTurnId(stream);
   if (!isTrackedStream(stream) || !turnId) return [];
+  if (stream.blockId) {
+    return server.flatMap((message, index) => message.blockId === stream.blockId
+      && getMessageTurnId(message) === turnId ? [index] : []);
+  }
+  const kind = stream.kind === 'thinking' ? 'thinking' : 'text';
   let startIndex = 0;
   if (stream.serverTailIdAtStart !== null) {
     const tailIndex = server.findIndex(message => message.id === stream.serverTailIdAtStart);
     if (tailIndex < 0) return [];
-    startIndex = tailIndex + 1;
+    // Legacy frames have no block ID. HTTP can already contain this block
+    // when its first buffered delta arrives, so the captured tail itself
+    // remains a candidate. An observed predecessor below disambiguates a
+    // genuinely new block whose text happens to equal the old tail.
+    startIndex = tailIndex + (server[tailIndex].kind === kind && server[tailIndex].role !== 'user'
+      && getMessageTurnId(server[tailIndex]) === turnId ? 0 : 1);
   } else {
     // The initial request may have been in flight at stream start. Earlier
     // turns in that response are not part of this stream's search range.
@@ -1092,9 +1111,16 @@ function getStreamSnapshotCandidateIndexes(
     }
   }
 
+  if (stream.streamPredecessorAtStart) {
+    const predecessor = stream.streamPredecessorAtStart;
+    const byId = server.findIndex(message => message.id === predecessor.id);
+    const predecessorIndex = byId >= 0 ? byId : getStreamSnapshotCandidateIndexes(server, predecessor)[0];
+    if (predecessorIndex === undefined) return [];
+    startIndex = Math.max(startIndex, predecessorIndex + 1);
+  }
+
   const content = normalizeRealtimeText(stream.content);
   if (!content) return [];
-  const kind = stream.kind === 'thinking' ? 'thinking' : 'text';
   for (let index = startIndex; index < server.length; index += 1) {
     const message = server[index];
     // Runtime status events are overlaid independently of transcript order.
@@ -1238,6 +1264,7 @@ function preserveUserInputs(message: NormalizedMessage, previous?: NormalizedMes
 }
 
 function getUpsertKey(message: NormalizedMessage): string {
+  if (message.blockId) return `block::${getMessageTurnId(message)}::${message.blockId}`;
   if (isUnconfirmedUserMessage(message) && getMessageTurnId(message)) {
     return `optimistic_user::${getMessageTurnId(message)}`;
   }
@@ -1252,6 +1279,7 @@ function getUpsertKey(message: NormalizedMessage): string {
 }
 
 function isCompatibleRealtimeTextRun(a: NormalizedMessage, b: NormalizedMessage): boolean {
+  if (a.blockId || b.blockId) return a.blockId === b.blockId && getMessageTurnId(a) === getMessageTurnId(b);
   if (a.runId != null && b.runId != null) return a.runId === b.runId;
   const hasActiveStream = a.kind === 'stream_delta' || b.kind === 'stream_delta';
   if (!hasActiveStream) return false;
@@ -1380,6 +1408,7 @@ export function inheritMessageRenderKeys(previous: NormalizedMessage[], next: No
       if (candidate.id === message.id) return true;
       const turn = getMessageTurnId(candidate);
       if (!turn || turn !== getMessageTurnId(message)) return false;
+      if (candidate.blockId || message.blockId) return candidate.blockId === message.blockId;
       const sameKind = candidate.kind === message.kind
         || (candidate.kind === 'stream_delta' && message.kind === 'text' && message.role === 'assistant');
       return sameKind && Boolean(candidate.content) && candidate.content === message.content;
@@ -1428,6 +1457,12 @@ function captureStreamBoundary(messages: NormalizedMessage[], runId?: string): N
     }
   }
   return null;
+}
+
+function captureStreamPredecessor(messages: NormalizedMessage[], runId?: string): NormalizedMessage | undefined {
+  if (!runId) return undefined;
+  return [...messages].reverse().find(message => getMessageTurnId(message) === runId
+    && message.isFinal && isTrackedStream(message));
 }
 
 export function getFinalizedSubagentThinkingId(
@@ -2158,7 +2193,7 @@ export function useSessionStore() {
    * Update or create a streaming message (accumulated text so far).
    * Uses a well-known ID so subsequent calls replace the same message.
    */
-  const updateStreaming = useCallback((sessionId: string, accumulatedText: string, msgProvider: SessionProvider, runId?: string, model?: string) => {
+  const updateStreaming = useCallback((sessionId: string, accumulatedText: string, msgProvider: SessionProvider, runId?: string, model?: string, blockId?: string) => {
     const slot = getSlot(sessionId);
     const streamId = `__streaming_${streamingKey(sessionId, runId)}`;
     const idx = slot.realtimeMessages.findIndex(m => m.id === streamId);
@@ -2203,6 +2238,8 @@ export function useSessionStore() {
         runId,
         serverTailIdAtStart: serverTailId,
         streamBoundaryAtStart: captureStreamBoundary(slot.realtimeMessages, runId),
+        streamPredecessorAtStart: blockId ? undefined : captureStreamPredecessor(slot.realtimeMessages, runId),
+        ...(blockId ? { blockId } : {}),
       };
       slot.realtimeMessages = [...slot.realtimeMessages, msg];
     }
@@ -2239,7 +2276,7 @@ export function useSessionStore() {
    * Update or create a streaming thinking message (accumulated thinking so far).
    * Mirrors updateStreaming but uses kind='thinking' and a separate well-known ID.
    */
-  const updateStreamingThinking = useCallback((sessionId: string, accumulatedText: string, msgProvider: SessionProvider, runId?: string) => {
+  const updateStreamingThinking = useCallback((sessionId: string, accumulatedText: string, msgProvider: SessionProvider, runId?: string, blockId?: string) => {
     const slot = getSlot(sessionId);
     const streamId = `__streaming_thinking_${streamingKey(sessionId, runId)}`;
     const idx = slot.realtimeMessages.findIndex(m => m.id === streamId);
@@ -2276,6 +2313,8 @@ export function useSessionStore() {
         runId,
         serverTailIdAtStart: serverTailId,
         streamBoundaryAtStart,
+        streamPredecessorAtStart: blockId ? undefined : captureStreamPredecessor(slot.realtimeMessages, runId),
+        ...(blockId ? { blockId } : {}),
         ...(toolBoundaryIdAtStart ? { toolBoundaryIdAtStart } : {}),
       };
       slot.realtimeMessages = [...slot.realtimeMessages, msg];

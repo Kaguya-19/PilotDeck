@@ -6,8 +6,39 @@ import type { AgentRuntimeConfig } from "../../../src/agent/runtime/AgentRuntime
 import type { AgentRouterRuntime, AgentRuntimeDependencies } from "../../../src/agent/runtime/AgentRuntimeDependencies.js";
 import type { CanonicalMessage, CanonicalModelEvent, CanonicalModelRequest, CanonicalToolCall } from "../../../src/model/protocol/canonical.js";
 import { createOpenAIStreamState, normalizeOpenAIStreamEvent } from "../../../src/model/providers/openai/stream.js";
+import type { AgentEvent } from "../../../src/agent/protocol/events.js";
+import { mapAgentEvent } from "../../../src/gateway/client/InProcessGateway.js";
+import { flattenCanonicalMessage } from "../../../src/web/server/readSessionMessages.js";
 import { createDefaultPermissionContext } from "../../../src/permission/protocol/types.js";
 import { ToolRegistry } from "../../../src/tool/registry/ToolRegistry.js";
+
+test("output-limit continuation preserves distinct block identities through live and durable history", async () => {
+  let requests = 0;
+  const durable: CanonicalMessage[] = [];
+  const events: AgentEvent[] = [];
+  const loop = createLoop(async function* () {
+    requests++;
+    yield { type: "message_start", role: "assistant" };
+    yield { type: "thinking_delta", text: "Same reasoning" };
+    yield { type: "text_delta", text: "Same answer" };
+    yield { type: "message_end", finishReason: requests === 1 ? "length" : "stop" };
+  }, () => undefined);
+  for await (const event of loop.run({
+    sessionId: "output-continuation", turnId: "turn-1",
+    messages: [{ role: "user", content: [{ type: "text", text: "continue" }] }],
+    onDurableMessage: async message => { durable.push(JSON.parse(JSON.stringify(message))); },
+  })) events.push(event);
+
+  assert.equal(requests, 2);
+  const live = events.flatMap(event => mapAgentEvent(event, "turn-1"))
+    .filter(event => event.type === "assistant_text_delta" || event.type === "assistant_thinking_delta");
+  const history = durable.flatMap((message, index) => flattenCanonicalMessage(message, { sessionKey: "output-continuation", index }));
+  assert.equal(live.length, 4);
+  assert.equal(new Set(live.map(event => event.blockId)).size, 4);
+  assert.ok(live.every(event => typeof event.blockId === "string"));
+  assert.deepEqual(history.map(message => message.blockId), live.map(event => event.blockId));
+  assert.deepEqual(history.map(message => message.text), ["Same reasoning", "Same answer", "Same reasoning", "Same answer"]);
+});
 
 test("agent loop drops interrupted tool calls and continues with a chunked-write prompt", async () => {
   const requests: CanonicalModelRequest[] = [];
@@ -437,9 +468,12 @@ for (const [name, text] of Object.entries(literalToolExamples)) {
       assert.equal(events.some((event) => ["turn_continued", "turn_failed", "warning", "tool_result_message"].includes(event.type)), false);
       assert.equal(events.find((event) => event.type === "turn_completed")?.result.type, "success");
       assert.equal(durable.length, 1);
+      const blockIds = [...new Set(events.flatMap(event =>
+        event.type === "model_event" && event.blockId ? [event.blockId] : []))];
+      assert.equal(blockIds.length, chunked ? 2 : 1);
       assert.deepEqual(durable[0]!.content, [
-        ...(chunked ? [{ type: "thinking", text: reasoning, reasoningContent: reasoning }] : []),
-        { type: "text", text },
+        ...(chunked ? [{ type: "thinking", text: reasoning, reasoningContent: reasoning, blockId: blockIds[0] }] : []),
+        { type: "text", text, blockId: blockIds.at(-1) },
       ]);
     });
   }

@@ -29,6 +29,15 @@ import {
     uiFilesToAttachments,
 } from './pilotdeck-bridge.js';
 
+describe('model block identity', () => {
+    it('preserves model block identity on both live output kinds', () => {
+        for (const type of ['assistant_text_delta', 'assistant_thinking_delta']) {
+            expect(gatewayEventToFrames({ type, runId: 'turn-1', text: 'same', blockId: `${type}:1` }, 'session', 'pilotdeck'))
+                .toEqual([expect.objectContaining({ blockId: `${type}:1`, runId: 'turn-1', content: 'same' })]);
+        }
+    });
+});
+
 describe('per-turn permission precedence', () => {
     it('lets an explicit default selection turn off persisted full access for one turn', () => {
         expect(resolvePermissionMode(
