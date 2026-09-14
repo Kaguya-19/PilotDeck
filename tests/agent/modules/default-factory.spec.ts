@@ -375,7 +375,7 @@ test("default sidecar factory initializes an advertised host-owned plan/todo mir
     },
   });
 
-  const planTodo = (execution.loop as any).capabilities.tools.planTodoManager.forSession("session-plan-todo");
+  const planTodo = (execution.loop as any).capabilities.planMode.planTodoManager.forSession("session-plan-todo");
   assert.match(planTodo.buildPromptAddendum() ?? "", /Before using any non-read-only tool/);
   assert.equal(calls.length, 1);
   assert.deepEqual((calls[0]?.payload as Record<string, unknown>), {
@@ -564,7 +564,7 @@ test("default sidecar factory injects only an advertised host permission module"
     callModule: async () => ({ kind: "response", messageId: "response-1", inReplyTo: "call-1", ok: true }),
   });
 
-  assert.equal(typeof (execution.loop as any).capabilities.tools.permission?.decide, "function");
+  assert.equal(typeof (execution.loop as any).capabilities.permission?.decide, "function");
 });
 
 test("default sidecar factory preserves host tool interaction metadata", async () => {

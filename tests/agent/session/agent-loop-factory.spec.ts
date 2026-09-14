@@ -55,7 +55,7 @@ test("createAgentSession can run a turn through an injected AgentLoop transport"
     agentLoopFactory: (input) => {
       factoryCalls += 1;
       assert.equal(input.seedState, seedState);
-      assert.equal(input.capabilities.tools.permission, permission);
+      assert.equal(input.capabilities.permission, permission);
       return {
         snapshotFileState: () => seedState,
         async *run(options): AsyncGenerator<AgentEvent, AgentLoopRunResult, unknown> {

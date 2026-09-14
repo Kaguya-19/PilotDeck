@@ -46,7 +46,10 @@ import type {
 } from "../protocol.js";
 import { MODULE_PROTOCOL_VERSION, validateModuleMessage } from "../protocol.js";
 import type { AgentLoopRuntimeFactory } from "../../loop/AgentLoopRuntimeFactory.js";
-import type { AgentTurnCapabilities } from "../../loop/AgentTurnCapabilities.js";
+import {
+  isNoopAgentTurnContextPort,
+  type AgentTurnCapabilities,
+} from "../../loop/AgentTurnCapabilities.js";
 import type { AgentLoopInput, AgentLoopRunResult, AgentLoopSeedState } from "../../loop/AgentLoop.js";
 import type { AgentEvent } from "../../protocol/events.js";
 import { agentError } from "../../protocol/errors.js";
@@ -456,7 +459,7 @@ class SidecarTurnProtocol {
         messages: input.messages,
         ...(input.basePermissionMode !== undefined ? { basePermissionMode: input.basePermissionMode } : {}),
         ...(input.allowPlanModeTools !== undefined ? { allowPlanModeTools: input.allowPlanModeTools } : {}),
-        tools: capabilities.tools.port.list().map(serializeToolDescriptor),
+        tools: capabilities.toolExecution.list().map(serializeToolDescriptor),
         permissionContext,
         hostModules: hostModuleCapabilities(capabilities),
         ...(seedState ? { seedState: serializeAgentLoopSeedStateProjection(seedState) } : {}),
@@ -854,7 +857,7 @@ class SidecarTurnProtocol {
 
   private async dispatchCapability(call: ModuleCallRequest): Promise<Record<string, unknown>> {
     const operation = stringField(call.payload, "operation");
-    const planTodo = this.options.capabilities.tools.planTodoManager?.forSession(this.options.input.sessionId);
+    const planTodo = this.options.capabilities.planMode.planTodoManager?.forSession(this.options.input.sessionId);
     if (operation === "plan_todo") return this.dispatchPlanTodo(call, planTodo);
     const context = toolRuntimeContext(
       call.payload.context,
@@ -870,7 +873,7 @@ class SidecarTurnProtocol {
       const calls = Array.isArray(call.payload.calls)
         ? call.payload.calls.map(parseToolCall)
         : (() => { throw new Error("Capability batch call must contain calls."); })();
-      const results = await this.options.capabilities.tools.port.executeAll(calls, context, execution);
+      const results = await this.options.capabilities.toolExecution.executeAll(calls, context, execution);
       if (results.length !== calls.length) throw new Error("Capability port returned an incomplete batch result.");
       this.options.permissionMode.applyCapabilityResults(results);
       return { results };
@@ -881,7 +884,7 @@ class SidecarTurnProtocol {
         name: call.payload.name,
         arguments: call.payload.arguments,
       });
-      const [result] = await this.options.capabilities.tools.port.executeAll([callInput], context, execution);
+      const [result] = await this.options.capabilities.toolExecution.executeAll([callInput], context, execution);
       if (!result) throw new Error("Capability port returned no result.");
       this.options.permissionMode.applyCapabilityResults([result]);
       return result as unknown as Record<string, unknown>;
@@ -928,10 +931,10 @@ class SidecarTurnProtocol {
     if (stringField(call.payload, "operation") !== "decide") {
       throw new Error("Unsupported sidecar permission operation.");
     }
-    const permission = this.options.capabilities.tools.permission;
+    const permission = this.options.capabilities.permission;
     if (!permission) throw new Error("Host did not provide a permission capability.");
     const toolName = stringField(asRecord(call.payload.tool), "name");
-    const tool = this.options.capabilities.tools.port.list().find((candidate) => candidate.name === toolName);
+    const tool = this.options.capabilities.toolExecution.list().find((candidate) => candidate.name === toolName);
     if (!tool) throw new Error(`Permission request references unavailable tool: ${toolName}`);
     const decision = await permission.decide(
       tool,
@@ -1102,6 +1105,7 @@ function moduleResponse(
 function hostModuleCapabilities(capabilities: AgentTurnCapabilities): Record<string, unknown> {
   const context = capabilities.context;
   const contextMethods = context
+    && !isNoopAgentTurnContextPort(context)
     ? [
         "prepare_for_model",
         ...(context.applyToolResults ? ["apply_tool_results"] : []),
@@ -1116,11 +1120,11 @@ function hostModuleCapabilities(capabilities: AgentTurnCapabilities): Record<str
       methods: [
         "execute",
         "execute_batch",
-        ...(capabilities.tools.planTodoManager ? ["plan_todo"] : []),
+        ...(capabilities.planMode.planTodoManager ? ["plan_todo"] : []),
       ],
     },
     ...(contextMethods.length > 0 ? { context: { methods: contextMethods } } : {}),
-    ...(capabilities.tools.permission ? { permission: { methods: ["decide"] } } : {}),
+    ...(capabilities.permission ? { permission: { methods: ["decide"] } } : {}),
     ...(capabilities.hooks.lifecycle ? { lifecycle: { methods: ["dispatch"] } } : {}),
     ...(capabilities.events.emit ? { event: { methods: ["emit"] } } : {}),
   };
@@ -1201,7 +1205,7 @@ function toolRuntimeContext(
   includeOneShotSubagent = false,
 ): PilotDeckToolRuntimeContext {
   const remote = asRecord(value);
-  const planDirectoryPath = capabilities.tools.planFileManager?.getPlanDirectoryPath();
+  const planDirectoryPath = capabilities.planMode.planFileManager?.getPlanDirectoryPath();
   const fileState = checkpoint.toolContextState();
   return {
     sessionId: input.sessionId,
@@ -1218,7 +1222,7 @@ function toolRuntimeContext(
       ...(planDirectoryPath ? { planDirectoryPath } : {}),
     },
     runMode: config.runMode ?? "agent",
-    ...(capabilities.tools.auditRecorder ? { auditRecorder: capabilities.tools.auditRecorder } : {}),
+    ...(capabilities.toolExecution.auditRecorder ? { auditRecorder: capabilities.toolExecution.auditRecorder } : {}),
     ...(capabilities.clock.now ? { now: capabilities.clock.now } : {}),
     env: buildTurnEnvironment(config.env, config.cwd, input.sessionId, input.turnId),
     ...(config.maxResultBytes ? { maxResultBytes: config.maxResultBytes } : {}),
@@ -1231,12 +1235,12 @@ function toolRuntimeContext(
         isMainAgent: false,
       }),
     },
-    ...(capabilities.tools.elicitation ? { elicitation: capabilities.tools.elicitation } : {}),
-    ...(capabilities.tools.fileHistory ? { fileHistory: capabilities.tools.fileHistory } : {}),
+    ...(capabilities.interaction.elicitation ? { elicitation: capabilities.interaction.elicitation } : {}),
+    ...(capabilities.toolExecution.fileHistory ? { fileHistory: capabilities.toolExecution.fileHistory } : {}),
     ...(config.subagentDepth !== undefined ? { subagentDepth: config.subagentDepth } : {}),
-    ...(includeOneShotSubagent && capabilities.tools.oneShotSubagentPort
+    ...(includeOneShotSubagent && capabilities.subagent.oneShot
       ? {
-          subagent: capabilities.tools.oneShotSubagentPort.createForkApi({
+          subagent: capabilities.subagent.oneShot.createForkApi({
             sessionId: input.sessionId,
             turnId: input.turnId,
             parentReadFileState: fileState.readFileState,
@@ -1249,15 +1253,15 @@ function toolRuntimeContext(
     readFileState: fileState.readFileState,
     allowedReadFiles: fileState.allowedReadFiles,
     writeSnapshots: fileState.writeSnapshots,
-    ...(capabilities.tools.fileUpdateNotifier ? { fileUpdateNotifier: capabilities.tools.fileUpdateNotifier } : {}),
+    ...(capabilities.toolExecution.fileUpdateNotifier ? { fileUpdateNotifier: capabilities.toolExecution.fileUpdateNotifier } : {}),
     ...(planTodo ? { planTodo } : {}),
-    ...(capabilities.tools.goalManager ? { goal: capabilities.tools.goalManager.forSession(input.sessionId) } : {}),
+    ...(capabilities.goal ? { goal: capabilities.goal.forSession(input.sessionId) } : {}),
     ...(planDirectoryPath
       ? {
           planDirectory: {
             path: planDirectoryPath,
-            resolve: (filePath: string) => capabilities.tools.planFileManager?.resolvePlanFilePath(filePath, config.cwd),
-            read: (filePath: string) => capabilities.tools.planFileManager?.readPlanFile(filePath, config.cwd),
+            resolve: (filePath: string) => capabilities.planMode.planFileManager?.resolvePlanFilePath(filePath, config.cwd),
+            read: (filePath: string) => capabilities.planMode.planFileManager?.readPlanFile(filePath, config.cwd),
           },
         }
       : {}),

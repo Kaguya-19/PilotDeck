@@ -1,5 +1,14 @@
-import type { AgentContextRuntime } from "../../context/ContextRuntime.js";
+import type {
+  AgentContextPrepareInput,
+  AgentPreparedContext,
+  AgentContextRecoveryInput,
+  AgentContextToolResultInput,
+  AgentContextToolResultResult,
+  AgentContextCaptureTurnInput,
+} from "../../context/ContextRuntime.js";
+import { NullContextRuntime } from "../../context/NullContextRuntime.js";
 import type { TokenAccountingRuntime } from "../../context/index.js";
+import type { AutoCompactResult, CompactionAutoCompactInput } from "../../context/compaction/CompactionPort.js";
 import type { LifecycleRuntime } from "../../lifecycle/index.js";
 import type { ModelProtocol } from "../../model/index.js";
 import type { PermissionDecisionPort } from "../../permission/index.js";
@@ -31,12 +40,14 @@ export type AgentTurnRoutingPort = Pick<
 >;
 
 export type AgentTurnContextPort = Pick<
-  AgentContextRuntime,
-  | "prepareForModel"
-  | "recoverFromModelError"
-  | "applyToolResults"
-  | "captureTurn"
-  | "tryAutoCompact"
+  {
+    prepareForModel(input: AgentContextPrepareInput): Promise<AgentPreparedContext>;
+    recoverFromModelError?(input: AgentContextRecoveryInput): Promise<import("../../context/index.js").ContextRecoveryDecision>;
+    applyToolResults?(input: AgentContextToolResultInput): Promise<AgentContextToolResultResult>;
+    captureTurn?(input: AgentContextCaptureTurnInput): Promise<void>;
+    tryAutoCompact?(input: CompactionAutoCompactInput): Promise<AutoCompactResult>;
+  },
+  "prepareForModel" | "recoverFromModelError" | "applyToolResults" | "captureTurn" | "tryAutoCompact"
 >;
 
 export type LifecycleDispatchPort = Pick<LifecycleRuntime, "dispatch">;
@@ -55,6 +66,28 @@ export type AgentTurnModelCapabilities = {
   getModelSupportsPromptCache?: (provider: string, model: string) => boolean | undefined;
 };
 
+export type ToolExecutionPort = ToolPort & {
+  auditRecorder?: PilotDeckToolAuditRecorder;
+  fileHistory?: PilotDeckToolFileHistorySink;
+  fileUpdateNotifier?: PilotDeckFileUpdateNotifier;
+};
+
+export type PermissionPort = PermissionDecisionPort;
+
+export type InteractionPort = Readonly<{
+  elicitation?: PilotDeckElicitationChannel;
+}>;
+
+export type PlanModePort = Readonly<{
+  planFileManager?: PlanFileManager;
+  planTodoManager?: PlanTodoPort;
+}>;
+
+export type SubagentPort = Readonly<{
+  oneShot?: OneShotSubagentPort;
+}>;
+
+/** @deprecated Use the consumer-specific AgentTurnCapabilities ports. */
 export type AgentTurnToolCapabilities = {
   port: ToolPort;
   auditRecorder?: PilotDeckToolAuditRecorder;
@@ -68,11 +101,22 @@ export type AgentTurnToolCapabilities = {
   oneShotSubagentPort?: OneShotSubagentPort;
 };
 
+const NOOP_CONTEXT = Symbol("pilotdeck.agent-turn-noop-context");
+
+type InternalAgentTurnContextPort = AgentTurnContextPort & { readonly [NOOP_CONTEXT]?: true };
+
 export type AgentTurnCapabilities = Readonly<{
   readonly [AGENT_TURN_CAPABILITIES]: true;
   readonly model: Readonly<AgentTurnModelCapabilities>;
+  readonly toolExecution: Readonly<ToolExecutionPort>;
+  readonly permission?: PermissionPort;
+  readonly interaction: InteractionPort;
+  readonly planMode: PlanModePort;
+  readonly subagent: SubagentPort;
+  readonly goal?: GoalPort;
+  readonly context: AgentTurnContextPort;
+  /** @deprecated Use toolExecution, permission, interaction, planMode, subagent, and goal. */
   readonly tools: Readonly<AgentTurnToolCapabilities>;
-  readonly context?: AgentTurnContextPort;
   readonly transport: Readonly<{ operationLedger?: AgentLoopOperationLedger }>;
   readonly hooks: Readonly<{ lifecycle?: LifecycleDispatchPort }>;
   readonly events: Readonly<{ emit?: AgentEventEmitter; drain?: () => AgentEvent[] }>;
@@ -91,10 +135,36 @@ export function createAgentTurnCapabilities(
     isMainAgent: !config.isSubagent,
     projectPath: config.cwd,
   });
-  const tools = dependencies.ports?.tools ?? createToolSchedulerPort(
+  const toolExecution = dependencies.ports?.tools ?? createToolSchedulerPort(
     dependencies.tools.registry,
     dependencies.tools.scheduler,
   );
+  const context = dependencies.context
+    ? createAgentTurnContextPort(dependencies.context)
+    : createNoopAgentTurnContextPort();
+  const toolExecutionView = createToolExecutionPort(toolExecution, {
+    auditRecorder: dependencies.auditRecorder,
+    fileHistory: dependencies.fileHistory,
+    fileUpdateNotifier: dependencies.fileUpdateNotifier,
+  });
+  const interaction = Object.freeze({ elicitation: dependencies.elicitation });
+  const planMode = Object.freeze({
+    planFileManager: dependencies.planFileManager,
+    planTodoManager: dependencies.planTodoManager,
+  });
+  const subagent = Object.freeze({ oneShot: dependencies.oneShotSubagentPort });
+  const legacyTools = Object.freeze({
+    port: toolExecutionView,
+    auditRecorder: dependencies.auditRecorder,
+    elicitation: dependencies.elicitation,
+    fileHistory: dependencies.fileHistory,
+    fileUpdateNotifier: dependencies.fileUpdateNotifier,
+    planFileManager: dependencies.planFileManager,
+    planTodoManager: dependencies.planTodoManager,
+    goalManager: dependencies.goalManager,
+    permission: dependencies.permission,
+    oneShotSubagentPort: dependencies.oneShotSubagentPort,
+  });
   return Object.freeze({
     [AGENT_TURN_CAPABILITIES]: true as const,
     model: Object.freeze({
@@ -107,19 +177,14 @@ export function createAgentTurnCapabilities(
       getModelProtocol: dependencies.getModelProtocol,
       getModelSupportsPromptCache: dependencies.getModelSupportsPromptCache,
     }),
-    tools: Object.freeze({
-      port: tools,
-      auditRecorder: dependencies.auditRecorder,
-      elicitation: dependencies.elicitation,
-      fileHistory: dependencies.fileHistory,
-      fileUpdateNotifier: dependencies.fileUpdateNotifier,
-      planFileManager: dependencies.planFileManager,
-      planTodoManager: dependencies.planTodoManager,
-      goalManager: dependencies.goalManager,
-      permission: dependencies.permission,
-      oneShotSubagentPort: dependencies.oneShotSubagentPort,
-    }),
-    ...(dependencies.context ? { context: createAgentTurnContextPort(dependencies.context) } : {}),
+    toolExecution: toolExecutionView,
+    permission: dependencies.permission,
+    interaction,
+    planMode,
+    subagent,
+    goal: dependencies.goalManager,
+    context,
+    tools: legacyTools,
     transport: Object.freeze({ operationLedger: dependencies.sidecarOperationLedger }),
     hooks: Object.freeze({
       lifecycle: dependencies.lifecycle
@@ -131,22 +196,57 @@ export function createAgentTurnCapabilities(
   });
 }
 
-function createAgentTurnContextPort(runtime: AgentContextRuntime): AgentTurnContextPort {
+function createToolExecutionPort(
+  port: ToolPort,
+  extensions: Omit<ToolExecutionPort, keyof ToolPort>,
+): Readonly<ToolExecutionPort> {
+  // Do not spread the injected port: implementations can keep methods on a
+  // prototype or rely on `this`. The narrow frozen view preserves both cases.
+  return Object.freeze({
+    list: () => port.list.call(port),
+    executeAll: (calls, context, execution) => port.executeAll.call(port, calls, context, execution),
+    ...extensions,
+  });
+}
+
+function createAgentTurnContextPort(runtime: {
+  prepareForModel: AgentTurnContextPort["prepareForModel"];
+  recoverFromModelError?: NonNullable<AgentTurnContextPort["recoverFromModelError"]>;
+  applyToolResults?: NonNullable<AgentTurnContextPort["applyToolResults"]>;
+  captureTurn?: NonNullable<AgentTurnContextPort["captureTurn"]>;
+  tryAutoCompact?: NonNullable<AgentTurnContextPort["tryAutoCompact"]>;
+}): AgentTurnContextPort {
   return Object.freeze({
     prepareForModel: (input) => runtime.prepareForModel.call(runtime, input),
     ...(runtime.recoverFromModelError
-      ? { recoverFromModelError: (input: Parameters<NonNullable<AgentContextRuntime["recoverFromModelError"]>>[0]) => runtime.recoverFromModelError!.call(runtime, input) }
+      ? { recoverFromModelError: (input: AgentContextRecoveryInput) => runtime.recoverFromModelError!.call(runtime, input) }
       : {}),
     ...(runtime.applyToolResults
-      ? { applyToolResults: (input: Parameters<NonNullable<AgentContextRuntime["applyToolResults"]>>[0]) => runtime.applyToolResults!.call(runtime, input) }
+      ? { applyToolResults: (input: AgentContextToolResultInput) => runtime.applyToolResults!.call(runtime, input) }
       : {}),
     ...(runtime.captureTurn
-      ? { captureTurn: (input: Parameters<NonNullable<AgentContextRuntime["captureTurn"]>>[0]) => runtime.captureTurn!.call(runtime, input) }
+      ? { captureTurn: (input: AgentContextCaptureTurnInput) => runtime.captureTurn!.call(runtime, input) }
       : {}),
     ...(runtime.tryAutoCompact
-      ? { tryAutoCompact: (input: Parameters<NonNullable<AgentContextRuntime["tryAutoCompact"]>>[0]) => runtime.tryAutoCompact!.call(runtime, input) }
+      ? { tryAutoCompact: (input: CompactionAutoCompactInput) => runtime.tryAutoCompact!.call(runtime, input) }
       : {}),
   });
+}
+
+function createNoopAgentTurnContextPort(): AgentTurnContextPort {
+  // Keep the established fallback semantics in composition. AgentLoop sees
+  // only the narrow port, while direct/native runs without a session context
+  // still receive NullContextRuntime's tool-pair-safe max-message handling.
+  const runtime = new NullContextRuntime();
+  const port: InternalAgentTurnContextPort = {
+    [NOOP_CONTEXT]: true,
+    prepareForModel: (input) => runtime.prepareForModel(input),
+  };
+  return Object.freeze(port);
+}
+
+export function isNoopAgentTurnContextPort(value: AgentTurnContextPort): boolean {
+  return (value as InternalAgentTurnContextPort)[NOOP_CONTEXT] === true;
 }
 
 function createLifecycleDispatchPort(runtime: LifecycleRuntime): LifecycleDispatchPort {

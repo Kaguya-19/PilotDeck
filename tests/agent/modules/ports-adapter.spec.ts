@@ -117,6 +117,110 @@ test("AgentLoop capability adapters expose only turn context and lifecycle dispa
   });
 });
 
+test("AgentLoop capability adapters expose consumer-specific ports and retain a read-only legacy view", () => {
+  const permission = { async decide() { return { type: "allow" as const, reason: { type: "runtime" as const, message: "allowed" } }; } };
+  const elicitation = { async askUser() { return { type: "cancelled" as const }; } };
+  const planFileManager = {
+    getPlanDirectoryPath: () => "/workspace/project/.pilotdeck/plans",
+    resolvePlanFilePath: () => undefined,
+    readPlanFile: () => undefined,
+  };
+  const planTodoManager = { forSession: () => ({}) } as never;
+  const oneShot = { createForkApi: () => ({}) } as never;
+  const goal = { forSession: () => ({}) } as never;
+  const capabilities = createAgentTurnCapabilities(config, {
+    router: {} as AgentRuntimeDependencies["router"],
+    permission,
+    elicitation,
+    planFileManager,
+    planTodoManager,
+    oneShotSubagentPort: oneShot,
+    goalManager: goal,
+    tools: {
+      registry: { list: () => [] } as never,
+      scheduler: { executeAll: async () => [] },
+    },
+  });
+
+  assert.ok(Object.isFrozen(capabilities.toolExecution));
+  assert.ok(Object.isFrozen(capabilities.tools));
+  assert.ok(Object.isFrozen(capabilities.interaction));
+  assert.ok(Object.isFrozen(capabilities.planMode));
+  assert.ok(Object.isFrozen(capabilities.subagent));
+  assert.equal(capabilities.permission, permission);
+  assert.equal(capabilities.interaction.elicitation, elicitation);
+  assert.equal(capabilities.planMode.planFileManager, planFileManager);
+  assert.equal(capabilities.planMode.planTodoManager, planTodoManager);
+  assert.equal(capabilities.subagent.oneShot, oneShot);
+  assert.equal(capabilities.goal, goal);
+  assert.equal(capabilities.tools.port, capabilities.toolExecution);
+  assert.equal(capabilities.tools.permission, capabilities.permission);
+  assert.equal(capabilities.tools.elicitation, capabilities.interaction.elicitation);
+  assert.equal(capabilities.tools.planFileManager, capabilities.planMode.planFileManager);
+  assert.equal(capabilities.tools.oneShotSubagentPort, capabilities.subagent.oneShot);
+});
+
+test("AgentLoop tool execution port preserves injected method binding", async () => {
+  const marker = Symbol("tool-port");
+  const tools = {
+    marker,
+    list(this: { marker: symbol }) {
+      assert.equal(this.marker, marker);
+      return [];
+    },
+    async executeAll(this: { marker: symbol }) {
+      assert.equal(this.marker, marker);
+      return [];
+    },
+  } satisfies ToolPort & { marker: symbol };
+  const capabilities = createAgentTurnCapabilities(config, {
+    router: {} as AgentRuntimeDependencies["router"],
+    ports: { tools },
+    tools: {
+      registry: { list: () => [] } as never,
+      scheduler: { executeAll: async () => [] },
+    },
+  });
+
+  assert.deepEqual(capabilities.toolExecution.list(), []);
+  await capabilities.toolExecution.executeAll([], {} as never, {} as never);
+  assert.deepEqual(capabilities.tools.port.list(), []);
+  await capabilities.tools.port.executeAll([], {} as never, {} as never);
+});
+
+test("AgentLoop capability composition supplies a no-op context port when no runtime is provided", async () => {
+  const capabilities = createAgentTurnCapabilities(config, {
+    router: {} as AgentRuntimeDependencies["router"],
+    tools: {
+      registry: { list: () => [] } as never,
+      scheduler: { executeAll: async () => [] },
+    },
+  });
+
+  assert.ok(Object.isFrozen(capabilities.context));
+  assert.equal(typeof capabilities.context.prepareForModel, "function");
+  assert.equal(capabilities.context.tryAutoCompact, undefined);
+  const prepared = await capabilities.context.prepareForModel({ messages: [], tools: [] } as never);
+  assert.deepEqual(prepared.messages, []);
+  assert.equal(prepared.diagnostics[0]?.code, "context_budget_not_enforced");
+
+  const toolCall = { role: "assistant" as const, content: [{ type: "tool_call" as const, id: "call-1", name: "lookup", input: {} }] };
+  const toolResult = { role: "user" as const, content: [{ type: "tool_result" as const, toolCallId: "call-1", content: [] }] };
+  const pairSafe = await capabilities.context.prepareForModel({
+    messages: [
+      { role: "user", content: [{ type: "text", text: "old" }] },
+      toolCall,
+      toolResult,
+      { role: "user", content: [{ type: "text", text: "latest" }] },
+    ],
+    tools: [],
+    maxMessages: 2,
+  } as never);
+  assert.deepEqual(pairSafe.messages, [toolCall, toolResult, { role: "user", content: [{ type: "text", text: "latest" }] }]);
+  assert.deepEqual(pairSafe.boundaries, [{ type: "compact", retainedMessages: 2 }]);
+  assert.equal(pairSafe.diagnostics[0]?.code, "context_truncated");
+});
+
 test("AgentLoop forwards the profile-selected runtime context surface to ContextRuntime", async () => {
   const surfaces: Array<string | undefined> = [];
   const model: ModelInvokerPort = {

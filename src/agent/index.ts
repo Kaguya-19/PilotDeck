@@ -2,10 +2,16 @@ export { AgentLoop, type AgentLoopInput, type AgentLoopRunResult, type AgentLoop
 export {
   createAgentTurnCapabilities,
   isAgentTurnCapabilities,
+  isNoopAgentTurnContextPort,
   type AgentTurnCapabilities,
   type AgentTurnContextPort,
   type AgentTurnModelCapabilities,
   type AgentTurnRoutingPort,
+  type ToolExecutionPort,
+  type PermissionPort,
+  type InteractionPort,
+  type PlanModePort,
+  type SubagentPort,
   type AgentTurnToolCapabilities,
   type LifecycleDispatchPort,
 } from "./loop/AgentTurnCapabilities.js";

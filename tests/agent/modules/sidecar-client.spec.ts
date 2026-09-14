@@ -734,6 +734,34 @@ test("sidecar factory maps an unknown terminal to a failure without publishing a
   assert.deepEqual(observations, ["stream_accepted", "result_unknown_fail_closed"]);
 });
 
+test("sidecar omits context host methods when composition supplies its no-op context port", async () => {
+  const executePayloads: Array<Record<string, unknown>> = [];
+  const factory = createAgentLoopSidecarRuntimeFactory({
+    connect: () => unknownTerminalConnection(executePayloads),
+    uuid: deterministicIds(),
+  });
+  const session = createAgentSession({
+    sessionId: "no-context-host-session",
+    config: config(),
+    dependencies: {
+      router: {} as never,
+      ports: { model: noopModel(), tools: noopTools() },
+      tools: { registry: { list: () => [] } as never, scheduler: { executeAll: async () => [] } as never },
+    },
+    agentLoopFactory: factory,
+  });
+
+  for await (const _event of session.submit({ type: "text", text: "no host context" }, {
+    turnId: "no-context-host-turn",
+  })) {
+    // The unknown terminal fixture stops before model dispatch.
+  }
+
+  assert.equal(executePayloads.length, 1);
+  const hostModules = executePayloads[0]?.hostModules as Record<string, unknown>;
+  assert.equal("context" in hostModules, false);
+});
+
 test("sidecar factory projects a preflight final execute rejection as one failed turn", async () => {
   const factory = createAgentLoopSidecarRuntimeFactory({
     connect: () => loopbackConnection(),
@@ -2255,7 +2283,7 @@ function forgedPolicyContextConnection(sessionId: string, turnId: string) {
   };
 }
 
-function unknownTerminalConnection() {
+function unknownTerminalConnection(executePayloads?: Array<Record<string, unknown>>) {
   const responses = queue<unknown>();
   return {
     send: (message: unknown) => {
@@ -2272,6 +2300,7 @@ function unknownTerminalConnection() {
         return;
       }
       if (request.method !== "execute") return;
+      executePayloads?.push(structuredClone(request.payload as Record<string, unknown>));
       responses.push({
         kind: "response",
         messageId: "accepted",

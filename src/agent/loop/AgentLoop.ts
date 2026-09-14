@@ -36,10 +36,8 @@ import type { AgentRuntimeConfig } from "../runtime/AgentRuntimeConfig.js";
 import type { AgentRuntimeDependencies } from "../runtime/AgentRuntimeDependencies.js";
 import type { LifecycleDispatchResult } from "../../lifecycle/index.js";
 import type { PilotDeckHookEvent } from "../../extension/hooks/protocol/events.js";
-import { NullContextRuntime } from "../../context/NullContextRuntime.js";
 import { buildCachePlan } from "../../context/cache/CachePlan.js";
 import { truncateHeadPreservingCheckpoint } from "../../context/compaction/CompactionEngine.js";
-import type { AgentContextRuntime } from "../../context/ContextRuntime.js";
 import type {
   CompactionResult,
   ContextRecoveryDecision,
@@ -63,6 +61,7 @@ import type { AgentExecutionContext, ModelInvokerPort, PreparedModelInvocation, 
 import {
   createAgentTurnCapabilities,
   isAgentTurnCapabilities,
+  type AgentTurnContextPort,
   type AgentTurnCapabilities,
 } from "./AgentTurnCapabilities.js";
 import type { RouterDecision } from "../../router/index.js";
@@ -206,7 +205,7 @@ export class AgentLoop {
     }
     this.capabilities = capabilities;
     this.modelPort = this.capabilities.model.invoker;
-    this.toolPort = this.capabilities.tools.port;
+    this.toolPort = this.capabilities.toolExecution;
   }
 
   snapshotFileState(): AgentLoopSeedState {
@@ -358,7 +357,7 @@ export class AgentLoop {
     });
 
     const contextOverflowAfterEmergency = async (
-      compact: Extract<Awaited<ReturnType<NonNullable<AgentContextRuntime["tryAutoCompact"]>>>, { type: "compacted" }>,
+      compact: Extract<Awaited<ReturnType<NonNullable<AgentTurnContextPort["tryAutoCompact"]>>>, { type: "compacted" }>,
     ): Promise<{ error: ReturnType<typeof agentError>; result: AgentTurnResult }> => {
       const error = agentError(
         "agent_context_recovery_failed",
@@ -2073,7 +2072,7 @@ export class AgentLoop {
     messages: CanonicalMessage[],
     hasAttemptedCompact: boolean,
   ): Promise<ContextRecoveryDecision | undefined> {
-    const ctx: AgentContextRuntime | undefined = this.capabilities.context;
+    const ctx = this.capabilities.context;
     if (!ctx?.recoverFromModelError) {
       return undefined;
     }
@@ -2096,8 +2095,8 @@ export class AgentLoop {
     input: AgentLoopInput,
     options: { emitInstructionEvents?: boolean } = {},
   ): Promise<CanonicalModelRequest> {
-    const contextRuntime = this.capabilities.context ?? new NullContextRuntime();
-    const planTodo = this.capabilities.tools.planTodoManager?.forSession(input.sessionId);
+    const contextRuntime = this.capabilities.context;
+    const planTodo = this.capabilities.planMode.planTodoManager?.forSession(input.sessionId);
     const canPrompt = input.canPrompt ?? this.config.permissionContext.canPrompt;
     const promptBlockedToolNames = canPrompt
       ? new Set<string>()
@@ -2378,7 +2377,7 @@ export class AgentLoop {
 
   private async persistCompactSnapshot(
     input: AgentLoopInput,
-    compact: Extract<Awaited<ReturnType<NonNullable<AgentContextRuntime["tryAutoCompact"]>>>, { type: "compacted" }>,
+    compact: Extract<Awaited<ReturnType<NonNullable<AgentTurnContextPort["tryAutoCompact"]>>>, { type: "compacted" }>,
   ): Promise<void> {
     if (!input.onCompactPersisted || !compact.result) {
       return;
@@ -2455,8 +2454,8 @@ export class AgentLoop {
   }
 
   private createToolContext(input: AgentLoopInput): PilotDeckToolRuntimeContext {
-    const planDirectoryPath = this.capabilities.tools.planFileManager?.getPlanDirectoryPath();
-    const planTodo = this.capabilities.tools.planTodoManager?.forSession(input.sessionId);
+    const planDirectoryPath = this.capabilities.planMode.planFileManager?.getPlanDirectoryPath();
+    const planTodo = this.capabilities.planMode.planTodoManager?.forSession(input.sessionId);
     const canPrompt = input.canPrompt ?? this.config.permissionContext.canPrompt;
     const permissionContext = {
       ...this.config.permissionContext,
@@ -2479,7 +2478,7 @@ export class AgentLoop {
       runMode: this.config.runMode ?? "agent",
       permissionMode: this.config.permissionMode,
       permissionContext,
-      auditRecorder: this.capabilities.tools.auditRecorder,
+      auditRecorder: this.capabilities.toolExecution.auditRecorder,
       now: this.now,
       env: buildTurnEnvironment(
         this.config.env,
@@ -2502,11 +2501,11 @@ export class AgentLoop {
             isMainAgent: false,
           }),
       },
-      elicitation: this.capabilities.tools.elicitation,
-      fileHistory: this.capabilities.tools.fileHistory,
+      elicitation: this.capabilities.interaction.elicitation,
+      fileHistory: this.capabilities.toolExecution.fileHistory,
       subagentDepth: this.config.subagentDepth ?? 0,
-      ...(this.capabilities.tools.oneShotSubagentPort ? {
-        subagent: this.capabilities.tools.oneShotSubagentPort.createForkApi({
+      ...(this.capabilities.subagent.oneShot ? {
+        subagent: this.capabilities.subagent.oneShot.createForkApi({
           sessionId: input.sessionId,
           turnId: input.turnId,
           parentReadFileState: this.readFileState,
@@ -2518,17 +2517,17 @@ export class AgentLoop {
       readFileState: this.readFileState,
       allowedReadFiles: [...this.allowedReadFiles],
       writeSnapshots: this.writeSnapshots,
-      fileUpdateNotifier: this.capabilities.tools.fileUpdateNotifier,
+      fileUpdateNotifier: this.capabilities.toolExecution.fileUpdateNotifier,
       ...(planTodo ? { planTodo } : {}),
-      ...(this.capabilities.tools.goalManager ? { goal: this.capabilities.tools.goalManager.forSession(input.sessionId) } : {}),
+      ...(this.capabilities.goal ? { goal: this.capabilities.goal.forSession(input.sessionId) } : {}),
       ...(planDirectoryPath
         ? {
             planDirectory: {
               path: planDirectoryPath,
               resolve: (filePath: string) =>
-                this.capabilities.tools.planFileManager?.resolvePlanFilePath(filePath, this.config.cwd),
+                this.capabilities.planMode.planFileManager?.resolvePlanFilePath(filePath, this.config.cwd),
               read: (filePath: string) =>
-                this.capabilities.tools.planFileManager?.readPlanFile(filePath, this.config.cwd),
+                this.capabilities.planMode.planFileManager?.readPlanFile(filePath, this.config.cwd),
             },
           }
         : {}),
