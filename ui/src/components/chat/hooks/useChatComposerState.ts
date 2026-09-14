@@ -86,6 +86,7 @@ interface UseChatComposerStateArgs {
     projectName: string,
     sessionId: string,
     optimisticTitle?: string,
+    inputId?: string,
   ) => void | (() => void);
   onInputFocusChange?: (focused: boolean) => void;
   onFileOpen?: (filePath: string, diffInfo?: unknown) => void;
@@ -1305,12 +1306,13 @@ export function useChatComposerState({
       // the sidebar because no session lifecycle event exists to remove it.
       const optimisticSessionId =
         submitTargetSessionId || createTemporarySessionId();
-      const bumpSessionActivity = () => {
+      const bumpSessionActivity = (inputId: string) => {
         if (!selectedProject?.name) return;
         return onSessionActivityBump?.(
           selectedProject.name,
           optimisticSessionId,
           userVisibleInput,
+          inputId,
         );
       };
 
@@ -1432,7 +1434,7 @@ export function useChatComposerState({
         const attempt = { fingerprint, id: runId };
         queueAttemptsRef.current.set(attemptKey, attempt);
         safeLocalStorage.setItem(attemptKey, JSON.stringify(attempt));
-        const rollbackActivity = bumpSessionActivity();
+        const rollbackActivity = bumpSessionActivity(runId);
         let result: { ok: boolean; error?: string };
         try {
           result = await enqueuePreparedInput?.({
@@ -1524,7 +1526,7 @@ export function useChatComposerState({
         return;
       }
 
-      bumpSessionActivity();
+      bumpSessionActivity(runId);
       addMessage(userMessage, submitTargetSessionId);
       setIsLoading(true); // Processing banner starts
       setCanAbortSession(true);

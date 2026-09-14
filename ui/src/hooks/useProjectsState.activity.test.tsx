@@ -147,3 +147,115 @@ it('handles a transcript notification only once when selection state changes', a
   act(() => { result.current.bumpSessionActivity('older', 'web:s_1'); });
   expect(result.current.externalMessageUpdate).toBe(count);
 });
+
+
+it.each([false, true])('honors remote deletion from a complete list (previously paginated: %s)', async (paginated) => {
+  const initial = [projects[0], { ...projects[1], sessionMeta: { total: paginated ? 6 : 1, hasMore: paginated },
+    sessions: paginated ? Array.from({ length: 5 }, (_, i) => ({ id: `web:s_${i + 1}`, updated_at: iso(1000 - i) })) : projects[1].sessions }];
+  vi.mocked(api.projects).mockResolvedValue(response(initial, 10));
+  const { result, rerender } = await setup();
+  let rollback: (() => void) | undefined;
+  act(() => { rollback = result.current.bumpSessionActivity('older', 'web:s_1', '', 'queued'); });
+  const remaining = paginated ? initial[1].sessions!.slice(1) : [];
+  const deleted = [projects[0], { ...initial[1], lastActivity: 999, sessionMeta: { total: remaining.length, hasMore: false }, sessions: remaining }];
+  rerender({ latestMessage: { type: 'projects_updated', projects: deleted, projectListRevision: 20 } });
+  expect(result.current.projects[1].sessions?.some((s) => s.id === 'web:s_1')).toBe(false);
+  expect(first(result.current.projects)).toBe('recent');
+  act(() => rollback?.());
+  vi.mocked(api.projects).mockResolvedValue(response(deleted, 30));
+  await act(async () => { await result.current.refreshProjectsSilently(); });
+  expect(result.current.projects[1].sessions).toEqual(remaining);
+});
+
+it('keeps an unconfirmed session omitted from a truncated preview', async () => {
+  const { result, rerender } = await setup();
+  act(() => { result.current.bumpSessionActivity('older', 'web:s_1', '', 'queued'); });
+  rerender({ latestMessage: { type: 'projects_updated', projectListRevision: 20, projects: [projects[0], {
+    ...projects[1], sessions: [], sessionMeta: { total: 6, hasMore: true },
+  }] } });
+  expect(result.current.projects[1].sessions?.[0].id).toBe('web:s_1');
+});
+
+it('rolls back a failed startup after migration to its real ID', async () => {
+  const { result, rerender } = await setup();
+  act(() => { result.current.bumpSessionActivity('older', 'new-session-failed', 'New', 'failed-run'); });
+  act(() => result.current.replaceOptimisticInProjects('web:s_failed'));
+  act(() => result.current.dropOptimisticInProjects('web:s_failed'));
+  rerender({ latestMessage: { type: 'projects_updated', projects, projectListRevision: 20 } });
+  expect(first(result.current.projects)).toBe('recent');
+  expect(result.current.projects[1].lastActivity).toBe(1000);
+  expect(result.current.projects[1].sessions).toEqual(projects[1].sessions);
+});
+
+it('retains an accepted startup on inactivity before the transcript snapshot catches up', async () => {
+  const { result, rerender } = await setup();
+  act(() => { result.current.bumpSessionActivity('older', 'new-session-ok', 'New', 'accepted-run'); });
+  act(() => result.current.replaceOptimisticInProjects('web:s_ok'));
+  rerender({ latestMessage: { type: 'session-input-accepted', sessionId: 'web:s_ok', runId: 'accepted-run' } });
+  act(() => result.current.dropOptimisticInProjects('web:s_ok'));
+  rerender({ latestMessage: { type: 'projects_updated', projectListRevision: 20, projects: [projects[0], {
+    ...projects[1], sessionMeta: { total: 1, hasMore: false },
+  }] } });
+  expect(first(result.current.projects)).toBe('older');
+  expect(result.current.projects[1].sessions?.[0].id).toBe('web:s_ok');
+});
+
+it('withdraws only the deleted queue item and releases protection after the last withdrawal', async () => {
+  const { result, rerender } = await setup();
+  act(() => { result.current.bumpSessionActivity('older', 'web:s_1', '', 'first'); });
+  vi.mocked(Date.now).mockReturnValue(4000);
+  act(() => { result.current.bumpSessionActivity('older', 'web:s_1', '', 'second'); });
+  act(() => result.current.dropOptimisticInProjects('web:s_1'));
+  // Dispatch/removal from queue state alone is not a withdrawal.
+  rerender({ latestMessage: { type: 'input-queue-state', sessionId: 'web:s_1', revision: 2, items: [] } });
+  expect(result.current.projects[1].sessions?.[0].updated_at).toBe(iso(4000));
+  rerender({ latestMessage: { type: 'session-input-removed', sessionId: 'web:s_1', itemId: 'second' } });
+  expect(result.current.projects[1].sessions?.[0].updated_at).toBe(iso(3000));
+  rerender({ latestMessage: { type: 'session-input-removed', sessionId: 'web:s_1', itemId: 'first' } });
+  rerender({ latestMessage: { type: 'projects_updated', projects, projectListRevision: 20 } });
+  expect(first(result.current.projects)).toBe('recent');
+  expect(result.current.projects[1].lastActivity).toBe(1000);
+});
+
+it('retains newer server activity when withdrawing an older queued input', async () => {
+  const { result, rerender } = await setup();
+  act(() => { result.current.bumpSessionActivity('older', 'web:s_1', '', 'paused'); });
+  const newer = [projects[0], { ...projects[1], lastActivity: 3500,
+    sessions: [{ ...projects[1].sessions![0], updated_at: iso(3500), lastActivity: iso(3500) }] }];
+  rerender({ latestMessage: { type: 'projects_updated', projects: newer, projectListRevision: 20 } });
+  rerender({ latestMessage: { type: 'session-input-removed', sessionId: 'web:s_1', itemId: 'paused' } });
+  expect(result.current.projects[1].sessions?.[0].updated_at).toBe(iso(3500));
+});
+
+it('receives acceptance and withdrawal even when the last React frame is unrelated', async () => {
+  let receive!: (message: AppSocketMessage) => void;
+  const subscribe = (handler: typeof receive) => { receive = handler; return () => {}; };
+  const { result } = renderHook(() => useProjectsState({ navigate: vi.fn(), activeSessions: new Set<string>(), isMobile: false,
+    latestMessage: null, subscribe }));
+  await waitFor(() => expect(result.current.projects).toHaveLength(2));
+  act(() => { result.current.bumpSessionActivity('older', 'new-session-ok', 'New', 'accepted'); });
+  act(() => result.current.replaceOptimisticInProjects('web:s_ok'));
+  act(() => { receive({ type: 'session-input-accepted', runId: 'accepted' }); receive({ type: 'unrelated' }); });
+  act(() => result.current.dropOptimisticInProjects('web:s_ok'));
+  expect(result.current.projects[1].sessions?.[0].id).toBe('web:s_ok');
+  vi.mocked(Date.now).mockReturnValue(4000);
+  act(() => { result.current.bumpSessionActivity('older', 'web:s_1', '', 'withdraw'); });
+  act(() => { receive({ type: 'session-input-removed', sessionId: 'web:s_1', itemId: 'withdraw' }); receive({ type: 'unrelated' }); });
+  expect(result.current.projects[1].sessions?.find((s) => s.id === 'web:s_1')?.updated_at).toBe(iso(1000));
+});
+
+
+it('uses explicit cross-tab deletion even with a truncated or pre-delete snapshot', async () => {
+  const { result, rerender } = await setup();
+  act(() => { result.current.bumpSessionActivity('older', 'web:s_1', '', 'queued'); });
+  rerender({ latestMessage: { type: 'session-deleted', projectName: 'older', sessionId: 'web-s_1' } });
+  expect(result.current.projects[1].sessions).toEqual([]);
+  expect(first(result.current.projects)).toBe('recent');
+  rerender({ latestMessage: { type: 'projects_updated', projects: [projects[0], {
+    ...projects[1], sessionMeta: { total: 10, hasMore: true },
+  }], projectListRevision: 20 } });
+  expect(result.current.projects[1].sessions).toEqual([]);
+  vi.mocked(api.projects).mockResolvedValue(response(projects, 30));
+  await act(async () => { await result.current.refreshProjectsSilently(); });
+  expect(result.current.projects[1].sessions).toEqual([]);
+});

@@ -18,6 +18,7 @@ type UseProjectsStateArgs = {
   latestMessage: AppSocketMessage | null;
   isMobile: boolean;
   activeSessions: Set<string>;
+  subscribe?: (handler: (message: AppSocketMessage) => void) => () => void;
 };
 
 type FetchProjectsOptions = {
@@ -131,7 +132,7 @@ export const preserveLoadedSessions = (prevProjects: Project[], nextProjects: Pr
       (s) => isTemporarySessionId(s.id) && !updatedIds.has(normalizeSessionId(s.id)),
     );
     const prevRealSessions = prevSessions.filter((s) => !isTemporarySessionId(s.id));
-    if (prevRealSessions.length <= updatedSessions.length) {
+    if (updated.sessionMeta?.hasMore === false || prevRealSessions.length <= updatedSessions.length) {
       if (optimisticToKeep.length === 0) return updated;
       return {
         ...updated,
@@ -270,6 +271,7 @@ export function useProjectsState({
   latestMessage,
   isMobile,
   activeSessions,
+  subscribe,
 }: UseProjectsStateArgs) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
@@ -312,6 +314,27 @@ export function useProjectsState({
   useEffect(() => {
     projectsRef.current = projects;
   }, [projects]);
+
+  const handleActivityMessage = useCallback((message: AppSocketMessage) => {
+    if (message.type === 'session-deleted' && typeof message.projectName === 'string' && typeof message.sessionId === 'string') {
+      const remove = activityRef.current.deleteSession(message.projectName, message.sessionId);
+      setProjects((prev) => prev.map(remove));
+      setSelectedProject((prev) => prev ? remove(prev) : prev);
+    }
+    if (message.type === 'session-input-accepted' && typeof message.runId === 'string') {
+      activityRef.current.acceptInput(message.runId);
+    }
+    if (message.kind === 'text' && message.role === 'user' && message.isSteer === true && typeof message.queueItemId === 'string') {
+      activityRef.current.acceptInput(message.queueItemId);
+    }
+    if (message.type === 'session-input-removed' && typeof message.sessionId === 'string' && typeof message.itemId === 'string') {
+      const rollback = activityRef.current.cancelInput(message.sessionId, message.itemId);
+      setProjects((prev) => prev.map(rollback));
+      setSelectedProject((prev) => prev ? rollback(prev) : prev);
+    }
+  }, []);
+  // Lifecycle events must not be lost when React batches multiple socket frames.
+  useEffect(() => subscribe?.(handleActivityMessage), [subscribe, handleActivityMessage]);
 
   // A registration confirms only one project, not the rest of the list.
   // Accept useful pre-registration snapshots and retain only the new entries
@@ -439,6 +462,7 @@ export function useProjectsState({
     // Selection/activity state can rerun this effect without a new frame.
     if (handledSocketMessageRef.current === latestMessage) return;
     handledSocketMessageRef.current = latestMessage;
+    if (!subscribe) handleActivityMessage(latestMessage);
 
     if (latestMessage.type === 'loading_progress') {
       if (loadingProgressTimeoutRef.current) {
@@ -590,7 +614,7 @@ export function useProjectsState({
     if (serialize(normalizedUpdatedSelectedSession) !== serialize(selectedSession)) {
       setSelectedSession(normalizedUpdatedSelectedSession);
     }
-  }, [latestMessage, selectedProject, selectedSession, activeSessions, retainPendingCreatedProjects]);
+  }, [latestMessage, selectedProject, selectedSession, activeSessions, retainPendingCreatedProjects, subscribe, handleActivityMessage]);
 
   useEffect(() => {
     return () => {
@@ -842,13 +866,13 @@ export function useProjectsState({
   // entry for a brand-new session. Keep the local activity until the server
   // catches up; failed sends roll back only their own unconfirmed activity.
   const bumpSessionActivity = useCallback(
-    (projectName: string, sessionId: string, optimisticTitle?: string) => {
+    (projectName: string, sessionId: string, optimisticTitle?: string, inputId?: string) => {
       if (!projectName || !sessionId) return;
       const project = projectsRef.current.find((item) => item.name === projectName);
       if (!project) return;
       const at = Date.now();
       const now = new Date(at).toISOString();
-      const activity = activityRef.current.begin(project, sessionId, at);
+      const activity = activityRef.current.begin(project, sessionId, at, inputId);
 
       const apply = (project: Project): Project => {
         if (project.name !== projectName) return project;
@@ -929,16 +953,15 @@ export function useProjectsState({
     setSelectedProject((prev) => (prev ? apply(prev) : prev));
   }, []);
 
-  // Drop any optimistic placeholders for a given session id. Used when a
-  // session goes inactive without ever receiving a real id (errors, aborts
-  // before the agent emitted `session_created`).
+  // Roll back an unaccepted startup even after session_created assigned its
+  // real ID. Accepted inputs and queued messages survive normal inactivity.
   const dropOptimisticInProjects = useCallback((sessionId: string) => {
-    if (!sessionId || !isTemporarySessionId(sessionId)) return;
+    if (!sessionId) return;
     const rollback = activityRef.current.cancelSession(sessionId);
     const apply = (project: Project): Project => {
       project = rollback(project);
       const sessions = project.sessions ?? [];
-      if (!sessions.some((s) => s.id === sessionId)) return project;
+      if (!isTemporarySessionId(sessionId) || !sessions.some((s) => s.id === sessionId)) return project;
       return {
         ...project,
         sessions: sessions.filter((s) => s.id !== sessionId),

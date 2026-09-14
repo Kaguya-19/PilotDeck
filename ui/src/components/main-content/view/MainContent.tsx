@@ -640,6 +640,7 @@ type SplitBodyProps = {
     projectName: string,
     sessionId: string,
     optimisticTitle?: string,
+    inputId?: string,
   ) => void | (() => void);
   processingSessions: Set<string>;
   unreadSessionIds: Set<string>;

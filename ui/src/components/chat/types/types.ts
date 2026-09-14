@@ -267,6 +267,7 @@ export interface ChatInterfaceProps {
     projectName: string,
     sessionId: string,
     optimisticTitle?: string,
+    inputId?: string,
   ) => void | (() => void);
   processingSessions?: Set<string>;
   onReplaceTemporarySession?: (sessionId?: string | null) => void;

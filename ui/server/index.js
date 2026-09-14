@@ -953,6 +953,11 @@ app.delete('/api/projects/:projectName/sessions/:sessionId', authenticateToken, 
             relativeTranscriptPath: req.query.relativeTranscriptPath || null,
         });
         sessionNamesDb.deleteName(sessionId, 'pilotdeck');
+        const userId = req.user?.id ?? req.user?.userId ?? null;
+        const payload = JSON.stringify({ type: 'session-deleted', projectName, sessionId });
+        connectedClients.forEach((client) => {
+            if (client.readyState === WebSocket.OPEN && (client.__pilotdeckUserId ?? null) === userId) client.send(payload);
+        });
         console.log(`[API] Session ${sessionId} deleted successfully`);
         res.json({ success: true });
     } catch (error) {
@@ -2595,6 +2600,18 @@ function handleChatConnection(ws, request) {
                 });
             } else if (data.type === 'delete-queued-input') {
                 const result = await deleteQueuedInputViaGateway(requestSessionId, data.itemId, streamWriter);
+                if (result.ok) {
+                    // A submitting tab can retain sidebar activity after navigating
+                    // away (and unwatching). Notify every socket for this user.
+                    const payload = JSON.stringify({
+                        type: 'session-input-removed', sessionId: requestSessionId, itemId: data.itemId,
+                    });
+                    connectedClients.forEach((client) => {
+                        if (client.readyState === WebSocket.OPEN && (client.__pilotdeckUserId ?? null) === userId) {
+                            client.send(payload);
+                        }
+                    });
+                }
                 writer.send({
                     type: 'input-queue-operation-result',
                     operation: 'delete',

@@ -385,7 +385,7 @@ describe('useChatComposerState attachment submission', () => {
     const pending = new Promise<{ ok: boolean; error?: string }>((resolve, fail) => { complete = resolve; reject = fail; });
     const rollback = vi.fn();
     const onSessionActivityBump = vi.fn(() => rollback);
-    const enqueuePreparedInput = vi.fn(() => pending);
+    const enqueuePreparedInput = vi.fn((_item: { id: string }) => pending);
     const addMessage = vi.fn();
     const options = {
       selectedProject: { name: 'demo', displayName: 'Demo', fullPath: '/tmp/demo' },
@@ -403,7 +403,7 @@ describe('useChatComposerState attachment submission', () => {
     let submitting!: Promise<void>;
     act(() => { submitting = result.current.handleSubmit({ preventDefault: vi.fn() } as never); });
     await waitFor(() => expect(enqueuePreparedInput).toHaveBeenCalledTimes(1));
-    expect(onSessionActivityBump).toHaveBeenCalledWith('demo', 'web:queue', 'Activity check');
+    expect(onSessionActivityBump).toHaveBeenCalledWith('demo', 'web:queue', 'Activity check', enqueuePreparedInput.mock.calls[0][0].id);
     expect(rollback).not.toHaveBeenCalled();
     await act(async () => {
       if (outcome === 'network-error') reject(new Error('Connection lost'));

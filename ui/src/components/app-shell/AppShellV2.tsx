@@ -132,6 +132,7 @@ export default function AppShellV2() {
     sessionId,
     navigate,
     latestMessage,
+    subscribe,
     isMobile,
     activeSessions,
   });
@@ -592,8 +593,8 @@ export default function AppShellV2() {
   ]);
 
   const handleSessionActivityBump = useCallback(
-    (projectName: string, sessionId: string, optimisticTitle?: string) => {
-      return bumpSessionActivity(projectName, sessionId, optimisticTitle);
+    (projectName: string, sessionId: string, optimisticTitle?: string, inputId?: string) => {
+      return bumpSessionActivity(projectName, sessionId, optimisticTitle, inputId);
     },
     [bumpSessionActivity],
   );
