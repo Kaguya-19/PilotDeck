@@ -315,11 +315,15 @@ export function useProjectsState({
     projectsRef.current = projects;
   }, [projects]);
 
+  const deleteProjectSession = useCallback((projectName: string, sessionIdToDelete: string) => {
+    const remove = activityRef.current.deleteSession(projectName, sessionIdToDelete);
+    setProjects((prev) => prev.map(remove));
+    setSelectedProject((prev) => prev ? remove(prev) : prev);
+  }, []);
+
   const handleActivityMessage = useCallback((message: AppSocketMessage) => {
     if (message.type === 'session-deleted' && typeof message.projectName === 'string' && typeof message.sessionId === 'string') {
-      const remove = activityRef.current.deleteSession(message.projectName, message.sessionId);
-      setProjects((prev) => prev.map(remove));
-      setSelectedProject((prev) => prev ? remove(prev) : prev);
+      deleteProjectSession(message.projectName, message.sessionId);
     }
     if (message.type === 'session-input-accepted' && typeof message.runId === 'string') {
       activityRef.current.acceptInput(message.runId);
@@ -332,7 +336,7 @@ export function useProjectsState({
       setProjects((prev) => prev.map(rollback));
       setSelectedProject((prev) => prev ? rollback(prev) : prev);
     }
-  }, []);
+  }, [deleteProjectSession]);
   // Lifecycle events must not be lost when React batches multiple socket frames.
   useEffect(() => subscribe?.(handleActivityMessage), [subscribe, handleActivityMessage]);
 
@@ -698,32 +702,24 @@ export function useProjectsState({
     [isMobile, navigate],
   );
 
-	  const handleSessionDelete = useCallback(
-	    (sessionIdToDelete: string) => {
-        activityRef.current.remove(undefined, sessionIdToDelete);
-	      if (selectedSession?.id === sessionIdToDelete) {
-	        setSelectedSession(null);
-	        navigate('/');
-	      }
-
-	      setProjects((prevProjects) =>
-	        prevProjects.map((project) => {
-	          const hadSession = (project.sessions ?? []).some((session) => session.id === sessionIdToDelete);
-
-	          return {
-	            ...project,
-	            sessions: project.sessions?.filter((session) => session.id !== sessionIdToDelete) ?? [],
-	            sessionMeta: {
-	              ...project.sessionMeta,
-	              total: hadSession
-	                ? Math.max(0, (project.sessionMeta?.total as number | undefined ?? 0) - 1)
-	                : project.sessionMeta?.total,
-	            },
-	          };
-	        }),
-	      );
-	    },
-    [navigate, selectedSession?.id],
+  const handleSessionDelete = useCallback(
+    (sessionIdToDelete: string) => {
+      const id = normalizeSessionId(sessionIdToDelete);
+      if (selectedSession && normalizeSessionId(selectedSession.id) === id) {
+        setSelectedSession(null);
+        navigate('/');
+      }
+      // Use the same removal path as the server notification. If it already
+      // removed the row, there is nothing left to decrement.
+      const projectNames = new Set(projectsRef.current
+        .filter((project) => project.sessions?.some((session) => normalizeSessionId(session.id) === id))
+        .map((project) => project.name));
+      if (selectedProject?.sessions?.some((session) => normalizeSessionId(session.id) === id)) {
+        projectNames.add(selectedProject.name);
+      }
+      for (const projectName of projectNames) deleteProjectSession(projectName, sessionIdToDelete);
+    },
+    [navigate, selectedSession, selectedProject, deleteProjectSession],
   );
 
   // The /api/projects payload caps each project's sessions array at 5 for a

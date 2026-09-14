@@ -259,3 +259,57 @@ it('uses explicit cross-tab deletion even with a truncated or pre-delete snapsho
   await act(async () => { await result.current.refreshProjectsSilently(); });
   expect(result.current.projects[1].sessions).toEqual([]);
 });
+
+it('decrements the paginated session total when deletion notification precedes the HTTP response', async () => {
+  const loaded = Array.from({ length: 10 }, (_, i) => ({ id: `web:s_${i + 1}`, title: `Session ${i + 1}`, updated_at: iso(1000 - i) }));
+  const initial = [projects[0], { ...projects[1], sessions: loaded, sessionMeta: { total: 20, hasMore: true } }];
+  vi.mocked(api.projects).mockResolvedValue(response(initial, 10));
+  const { result, rerender } = await setup();
+  // The delete route broadcasts this before res.json({ success: true }).
+  rerender({ latestMessage: { type: 'session-deleted', projectName: 'older', sessionId: 'web:s_1' } });
+  // AppShell's callback after the successful HTTP response.
+  act(() => result.current.handleSessionDelete('web:s_1'));
+  const afterDelete = [projects[0], { ...initial[1], sessions: loaded.slice(1, 6), sessionMeta: { total: 19, hasMore: true } }];
+  vi.mocked(api.projects).mockResolvedValue(response(afterDelete, 20));
+  await act(async () => { await result.current.refreshProjectsSilently(); });
+  expect(result.current.projects[1].sessions).toHaveLength(9);
+  expect(result.current.projects[1].sessionMeta?.total).toBe(19);
+});
+
+
+it.each(['notification-first', 'callback-first', 'same-batch'])('counts a paginated deletion exactly once (%s)', async (order) => {
+  const loaded = Array.from({ length: 10 }, (_, i) => ({ id: `web:s_${i + 1}`, updated_at: iso(1000 - i) }));
+  const initial = [projects[0], { ...projects[1], sessions: loaded, sessionMeta: { total: 20, hasMore: true } }];
+  vi.mocked(api.projects).mockResolvedValue(response(initial, 10));
+  const { result, rerender } = await setup();
+  act(() => result.current.setSelectedProject(initial[1]));
+  const notify = () => rerender({ latestMessage: { type: 'session-deleted', projectName: 'older', sessionId: 'web-s_1' } });
+  const callback = () => act(() => result.current.handleSessionDelete('web:s_1'));
+  if (order === 'notification-first') { notify(); callback(); }
+  else if (order === 'callback-first') { callback(); notify(); }
+  else act(() => { notify(); callback(); });
+  notify(); callback();
+  for (const project of [result.current.projects[1], result.current.selectedProject!]) {
+    expect(project.sessions).toHaveLength(9);
+    expect(project.sessionMeta?.total).toBe(19);
+    expect(project.sessionMeta!.total! - project.sessions!.length).toBe(10);
+  }
+  // A delayed pre-delete snapshot must not bring back the row or the old total.
+  const stale = [projects[0], { ...initial[1], sessions: loaded.slice(0, 5) }];
+  vi.mocked(api.projects).mockResolvedValue(response(stale, 20));
+  await act(async () => { await result.current.refreshProjectsSilently(); });
+  expect(result.current.projects[1].sessions).toHaveLength(9);
+  expect(result.current.projects[1].sessionMeta?.total).toBe(19);
+});
+
+it('does not count a startup rollback and its deletion twice', async () => {
+  vi.mocked(api.projects).mockResolvedValue(response([projects[0], { ...projects[1], sessionMeta: { total: 1, hasMore: false } }], 10));
+  const { result, rerender } = await setup();
+  act(() => { result.current.bumpSessionActivity('older', 'new-session-count', 'New'); });
+  act(() => result.current.replaceOptimisticInProjects('web:s_new'));
+  expect(result.current.projects[1].sessionMeta?.total).toBe(2);
+  rerender({ latestMessage: { type: 'session-deleted', projectName: 'older', sessionId: 'web:s_new' } });
+  act(() => result.current.handleSessionDelete('web:s_new'));
+  expect(result.current.projects[1].sessionMeta?.total).toBe(1);
+  expect(result.current.projects[1].sessions).toHaveLength(1);
+});

@@ -7,6 +7,23 @@ const sessionTime = (session?: ProjectSession) => Math.max(
 );
 const normalizedId = (id: string) => id.replace(/^web:s_/, 'web-s_');
 
+function removeSessions(project: Project, ids: ReadonlySet<string>): Project {
+  const previous = project.sessions ?? [];
+  const sessions = previous.filter((session) => !ids.has(normalizedId(session.id)));
+  const removedCount = previous.length - sessions.length;
+  if (removedCount === 0) return project;
+  return {
+    ...project,
+    sessions,
+    sessionMeta: {
+      ...project.sessionMeta,
+      total: typeof project.sessionMeta?.total === 'number'
+        ? Math.max(0, project.sessionMeta.total - removedCount)
+        : project.sessionMeta?.total,
+    },
+  };
+}
+
 type Activity = {
   projectName: string;
   sessionId: string;
@@ -43,8 +60,7 @@ export class ProjectActivity {
     // Session IDs are immutable; keep these tombstones for this page lifetime.
     snapshot = snapshot.map((project) => {
       const deleted = this.deletedSessions.get(project.name);
-      if (!deleted || !project.sessions?.some((s) => deleted.has(normalizedId(s.id)))) return project;
-      return { ...project, sessions: project.sessions.filter((s) => !deleted.has(normalizedId(s.id))) };
+      return deleted ? removeSessions(project, deleted) : project;
     });
     if (this.pending.size === 0) return snapshot;
     const currentByName = new Map(current.map((project) => [project.name, project]));
@@ -124,9 +140,9 @@ export class ProjectActivity {
     this.remove(projectName, sessionId);
     return (project: Project) => {
       if (project.name !== projectName) return project;
-      const restored = rollback(project);
-      const sessions = restored.sessions?.filter((s) => normalizedId(s.id) !== id);
-      return { ...restored, sessions };
+      // Rollback can already remove a provisional row and decrement its count.
+      // Only count rows still present afterward, so repeated delivery is safe.
+      return removeSessions(rollback(project), new Set([id]));
     };
   }
 
