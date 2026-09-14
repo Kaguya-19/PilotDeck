@@ -505,7 +505,7 @@ type ProjectionContext = {
 
 /**
  * Flatten a CanonicalMessage's content blocks into one or more WebMessages.
- * Adjacent text blocks within the same canonical message merge.
+ * Adjacent legacy text blocks merge; identified model blocks stay distinct.
  *
  * Tool-result images get special handling: when an `image` block immediately
  * follows a `tool_result` block (as produced by `projectToolResults`), the
@@ -524,6 +524,7 @@ export function flattenCanonicalMessage(
   const out: WebMessage[] = [];
   const role: WebMessageRole = message.role === "user" ? "user" : "assistant";
   let textBuffer = "";
+  let textBlockId: string | undefined;
   let pendingImages: NonNullable<WebMessage["images"]> = [];
   let lastToolResultMessage: WebMessage | undefined;
 
@@ -538,6 +539,7 @@ export function flattenCanonicalMessage(
       role,
       kind: "text",
       text: textBuffer,
+      ...(textBlockId ? { blockId: textBlockId } : {}),
       ...(role === "assistant" && typeof message.metadata?.model === "string" ? { model: message.metadata.model } : {}),
       ...(pendingImages.length > 0 ? { images: pendingImages } : {}),
       ...(context.forkUnsupportedContent
@@ -552,10 +554,15 @@ export function flattenCanonicalMessage(
       source: "history",
     });
     textBuffer = "";
+    textBlockId = undefined;
     pendingImages = [];
   };
 
   for (const block of message.content) {
+    if (block.type === 'text') {
+      if (textBlockId !== block.blockId) flushText();
+      textBlockId = block.blockId;
+    }
     if (block.type !== "image" && block.type !== "tool_result") {
       // Any other block breaks the tool_result → image association.
       lastToolResultMessage = undefined;
@@ -611,6 +618,7 @@ function flushBlock(
         role: "assistant",
         kind: "thinking",
         text: block.text,
+        ...(block.blockId ? { blockId: block.blockId } : {}),
         source: "history",
       });
       return;

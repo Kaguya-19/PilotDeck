@@ -1,10 +1,12 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import {
   applyModelEventToAssembler,
   assembleAssistantMessage,
   cloneMessages,
   createModelMessageAssemblerState,
+  getModelStreamBlockId,
   messageContent,
   type CanonicalToolCall,
   PROMPT_TOO_LONG_ANTHROPIC_PATTERN,
@@ -440,7 +442,7 @@ export class AgentLoop {
       if (ctx?.tryAutoCompact) {
         try {
           const reservedOutputTokens = this.getReservedOutputTokens();
-          const compact = await ctx.tryAutoCompact({
+          const compact = yield* this.awaitCompactionWithEvents(ctx.tryAutoCompact({
             sessionId: input.sessionId,
             turnId: input.turnId,
             messages,
@@ -450,7 +452,7 @@ export class AgentLoop {
               maxContextTokens: preRoutingMaxContextTokens,
               reservedOutputTokens,
             }),
-          });
+          }));
           if (compact.type === "compacted") {
             messages = compact.messages;
             this.tokenCalibrationByRoute.clear();
@@ -544,7 +546,7 @@ export class AgentLoop {
         if (routedMaxCtx !== undefined && routedMaxCtx !== currentBudgetMaxCtx) {
           try {
             const reservedOutputTokens = this.getReservedOutputTokens(decision.provider, decision.model);
-            const recompact = await ctx.tryAutoCompact({
+            const recompact = yield* this.awaitCompactionWithEvents(ctx.tryAutoCompact({
               sessionId: input.sessionId,
               turnId: input.turnId,
               messages,
@@ -557,7 +559,7 @@ export class AgentLoop {
                 maxContextTokens: routedMaxCtx,
                 reservedOutputTokens,
               }),
-            });
+            }));
             if (recompact.type === "compacted") {
               messages = recompact.messages;
               this.tokenCalibrationByRoute.clear();
@@ -615,7 +617,7 @@ export class AgentLoop {
         : { ...request, provider: decision.provider, model: decision.model };
       const requestInputEstimate = this.dependencies.tokenAccounting?.estimateRequestInput?.(calibrationRequest);
       const calibrationRequestFingerprint = requestFingerprint(calibrationRequest);
-      const assembler = createModelMessageAssemblerState();
+      const assembler = createModelMessageAssemblerState(randomUUID());
       let executedRequest: { provider: string; model: string; fingerprint?: string } | undefined;
       try {
         for await (const event of this.dependencies.router.execute(decision, request, {
@@ -631,7 +633,10 @@ export class AgentLoop {
               fingerprint: event.requestFingerprint,
             };
           }
-          yield { type: "model_event", sessionId: input.sessionId, turnId: input.turnId, event };
+          const blockId = event.type === 'text_delta' || event.type === 'thinking_delta'
+            ? getModelStreamBlockId(assembler, event.type === 'text_delta' ? 'text' : 'thinking') : undefined;
+          yield { type: "model_event", sessionId: input.sessionId, turnId: input.turnId, event,
+            ...(blockId ? { blockId } : {}) };
           applyModelEventToAssembler(assembler, event);
           if (event.type === "error") {
             break;
@@ -1228,7 +1233,7 @@ export class AgentLoop {
                 provider: target.provider,
                 model: target.model,
               };
-              const compact = await ctx.tryAutoCompact({
+              const compact = yield* this.awaitCompactionWithEvents(ctx.tryAutoCompact({
                 sessionId: input.sessionId,
                 turnId: input.turnId,
                 messages,
@@ -1242,7 +1247,7 @@ export class AgentLoop {
                   reservedOutputTokens,
                 }),
                 allowFallbackOnFailure: true,
-              });
+              }));
               if (compact.type === "compacted") {
                 messages = compact.messages;
                 this.tokenCalibrationByRoute.clear();
@@ -2548,6 +2553,23 @@ export class AgentLoop {
       blockingErrors: [],
       nonBlockingErrors: [],
     };
+  }
+
+  /** Keep compaction progress live while its summary model request is pending. */
+  private async *awaitCompactionWithEvents<T>(operation: Promise<T>): AsyncGenerator<AgentEvent, T, unknown> {
+    let settled = false;
+    const completion = operation.then(
+      value => ({ ok: true as const, value }),
+      error => ({ ok: false as const, error }),
+    ).finally(() => { settled = true; });
+    while (!settled) {
+      yield* this.drainEventBuffer();
+      await Promise.race([completion, sleep(TOOL_EVENT_PUMP_INTERVAL_MS)]);
+    }
+    yield* this.drainEventBuffer();
+    const result = await completion;
+    if (!result.ok) throw result.error;
+    return result.value;
   }
 
   private *drainEventBuffer(): Generator<AgentEvent> {

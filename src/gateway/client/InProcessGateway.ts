@@ -1921,7 +1921,8 @@ function mapAgentEventForTurn(event: AgentEvent, runId: string): GatewayEvent[] 
     case "model_request_started":
       return [{ type: "model_request_started", model: event.model, provider: event.provider }];
     case "model_event":
-      return mapModelEvent(event.event, runId);
+      return mapModelEvent(event.event, runId).map(frame => event.blockId
+        ? { ...frame, blockId: event.blockId } : frame);
     case "tool_calls_detected":
       return event.calls.map((call) => ({
         type: "tool_call_started",

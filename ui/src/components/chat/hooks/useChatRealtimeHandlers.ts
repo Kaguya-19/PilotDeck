@@ -10,6 +10,7 @@ import type {
 import type { Project, ProjectSession, SessionProvider } from '../../../types/app';
 import {
   getUnpersistedRealtimeTurnMessages,
+  normalizeCompactionMessage,
   isRealtimeMessageRepresentedOnServer,
   type SessionStore,
   type NormalizedMessage,
@@ -82,6 +83,12 @@ function getMessageRunId(message: { runId?: unknown }): string | undefined {
     : undefined;
 }
 
+// assembleModelMessage assigns <response ID>:<channel>:<ordinal>. The two
+// channels of one response may alternate, including within a single chunk.
+function streamResponseId(blockId?: string): string | undefined {
+  return blockId?.match(/^(.*):(?:thinking|text):\d+$/)?.[1];
+}
+
 function getSessionStatusActiveRunId(message: LatestChatMessage): string | undefined {
   if (typeof message.activeRunId === 'string' && message.activeRunId.trim()) {
     return message.activeRunId.trim();
@@ -101,6 +108,8 @@ function parseAssistantStreamTimestamp(value?: string): number | null {
 }
 
 function isCompatibleAssistantStreamRun(incoming: NormalizedMessage, existing: NormalizedMessage): boolean {
+  if (incoming.blockId || existing.blockId) return incoming.blockId === existing.blockId
+    && getMessageRunId(incoming) === getMessageRunId(existing);
   if (incoming.runId != null && existing.runId != null) return incoming.runId === existing.runId;
   const isActiveStream = existing.kind === 'stream_delta' && String(existing.id || '').startsWith('__streaming_');
   if (!isActiveStream) return false;
@@ -147,11 +156,18 @@ type ActiveTurnReplayState = {
   serverMessages?: NormalizedMessage[];
 };
 
+function getKnownCompactions(message: NormalizedMessage, state: ActiveTurnReplayState): NormalizedMessage[] {
+  if (message.kind !== 'compact_boundary' || !message.compactionId) return [];
+  return [...(state.realtimeMessages || []), ...(state.serverMessages || [])].filter(existing =>
+    existing.compactionId === message.compactionId && getMessageRunId(existing) === getMessageRunId(message));
+}
+
 type VolatileReplayBlock = {
   kind: 'stream_delta' | 'thinking';
   messages: LatestChatMessage[];
   text: string;
   runId?: string;
+  blockId?: string;
 };
 
 function isRenderedVolatileBlockCandidate(
@@ -164,6 +180,10 @@ function isRenderedVolatileBlockCandidate(
   const messageRunId = getMessageRunId(message);
   if (block.runId && messageRunId && block.runId !== messageRunId) {
     return false;
+  }
+  if (block.blockId || message.blockId) {
+    return block.blockId === message.blockId
+      && normalizeAssistantStreamText(message.content).startsWith(blockText);
   }
 
   if (block.kind === 'stream_delta') {
@@ -214,19 +234,35 @@ export function getActiveTurnReplayMessagesToApply(
 
   const output: LatestChatMessage[] = [];
   let block: VolatileReplayBlock | null = null;
+  const blockKey = (message: { runId?: unknown; blockId?: string; kind?: string }) =>
+    JSON.stringify([getMessageRunId(message), message.blockId, message.kind]);
+  const identifiedBlocks = new Map<string, VolatileReplayBlock>();
+  // Interleaved channels are not adjacent in the replay. Compare the complete
+  // identified block with history, then retain/skip all of its original frames.
+  for (const message of activeTurnMessages) {
+    if (!message.blockId || (message.kind !== 'thinking' && message.kind !== 'stream_delta')) continue;
+    const key = blockKey(message);
+    const aggregate = identifiedBlocks.get(key) ?? {
+      kind: message.kind, messages: [], text: '', runId: getMessageRunId(message), blockId: message.blockId,
+    };
+    aggregate.text += typeof message.content === 'string' ? message.content : '';
+    identifiedBlocks.set(key, aggregate);
+  }
 
   const flushBlock = () => {
     if (!block) return;
-    if (!options.skipVolatile && !hasRenderedVolatileReplayBlock(block, state)) {
+    const aggregate = block.blockId ? identifiedBlocks.get(blockKey(block)) : undefined;
+    if (!options.skipVolatile && !hasRenderedVolatileReplayBlock(aggregate ?? block, state)) {
       output.push(...block.messages);
     }
     block = null;
   };
 
-  for (const message of activeTurnMessages) {
+  for (const rawMessage of activeTurnMessages) {
+    const message = normalizeCompactionMessage(rawMessage as NormalizedMessage);
     const kind = String(message?.kind || '');
     if (kind === 'thinking' || kind === 'stream_delta') {
-      if (block && block.kind !== kind) {
+      if (block && (block.kind !== kind || block.blockId !== message.blockId)) {
         flushBlock();
       }
       if (!block) {
@@ -235,6 +271,7 @@ export function getActiveTurnReplayMessagesToApply(
           messages: [],
           text: '',
           runId: getMessageRunId(message),
+          blockId: message.blockId,
         };
       }
       block.messages.push(message);
@@ -253,7 +290,11 @@ export function getActiveTurnReplayMessagesToApply(
     }
 
     flushBlock();
-    if (!hasRenderedNonVolatileReplayMessage(message, state)) {
+    const knownCompacts = getKnownCompactions(message, state);
+    if (knownCompacts.length > 0) {
+      if (message.compactState !== 'running'
+        && !knownCompacts.some(existing => normalizeCompactionMessage(existing).compactState === 'completed')) output.push(message);
+    } else if (!hasRenderedNonVolatileReplayMessage(message, state)) {
       output.push(message);
     }
   }
@@ -421,7 +462,7 @@ export function useChatRealtimeHandlers({
     /*  Legacy messages (no `kind` field) — handle and return           */
     /* ---------------------------------------------------------------- */
 
-    const msg: LatestChatMessage = latestMessage;
+    let msg: LatestChatMessage = latestMessage;
     const clearAccumulators = () => {
       thinkingBySessionRef.current.clear();
     };
@@ -592,11 +633,18 @@ export function useChatRealtimeHandlers({
           const status = msg.status;
           if (status) {
             if (!isCurrentSession) return;
+            const compactProgress = status.compactProgress || status.compact_progress || null;
+            if (compactProgress?.compaction_id && statusActiveRunId) {
+              // A reconnect may provide only current status, without the start
+              // event. Restore the same entity; completed history wins over it.
+              handleMessage({ kind: 'status', sessionId: statusSessionId, runId: statusActiveRunId,
+                provider, timestamp: new Date().toISOString(), compactProgress }, statusSessionId);
+            }
             const statusInfo = {
-              text: status.text || 'Working...',
+              text: compactProgress?.compaction_id ? 'Working...' : status.text || 'Working...',
               tokens: status.tokens || 0,
               can_interrupt: status.can_interrupt !== undefined ? status.can_interrupt : true,
-              compactProgress: status.compactProgress || status.compact_progress || null,
+              compactProgress: compactProgress?.compaction_id ? null : compactProgress,
             };
             setClaudeStatus(statusInfo);
             setPilotDeckStatus(statusInfo);
@@ -656,6 +704,13 @@ export function useChatRealtimeHandlers({
       warnDroppedFrame(msg);
       return;
     }
+    msg = normalizeCompactionMessage({ ...msg, sessionId: sid } as NormalizedMessage);
+    // A replay must be idempotent before any stream-finalization side effects.
+    // Completion may enrich a running row, but an already-known boundary
+    // cannot end a newer answer that happens to be streaming now.
+    const knownCompacts = getKnownCompactions(msg as NormalizedMessage, sessionStore.getSessionSlot?.(sid) || {});
+    if (knownCompacts.length > 0 && (msg.compactState === 'running'
+      || knownCompacts.some(message => normalizeCompactionMessage(message).compactState === 'completed'))) return;
     const msgRunId = typeof msg.runId === 'string' && msg.runId.trim() ? msg.runId.trim() : undefined;
     const streamKey = msgRunId ? `${sid}_${msgRunId}` : sid;
 
@@ -749,12 +804,33 @@ export function useChatRealtimeHandlers({
       return;
     }
 
+    // Close a channel on its next block, or both channels on a new response.
+    // A thinking delta must not cut the text channel of the same response.
+    if (msg.blockId && (msg.kind === 'stream_delta' || msg.kind === 'thinking')) {
+      const slot = sessionStore.getSessionSlot?.(sid);
+      const activeText = slot?.realtimeMessages.find(message => message.id === `__streaming_${streamKey}`);
+      const activeThinking = slot?.realtimeMessages.find(message => message.id === `__streaming_thinking_${streamKey}`);
+      const responseId = streamResponseId(msg.blockId);
+      const isNewResponse = (blockId?: string) => Boolean(responseId
+        && streamResponseId(blockId) && streamResponseId(blockId) !== responseId);
+      if (activeText && (msg.kind === 'stream_delta'
+        ? activeText.blockId !== msg.blockId : isNewResponse(activeText.blockId))) {
+        sessionStore.finalizeStreaming(sid, msgRunId);
+      }
+      if (activeThinking && (msg.kind === 'thinking'
+        ? activeThinking.blockId !== msg.blockId : isNewResponse(activeThinking.blockId))) {
+        sessionStore.finalizeStreamingThinking(sid, msgRunId);
+        thinkingBySessionRef.current.delete(sid);
+      }
+    }
+
     // --- Streaming: direct accumulation (no smoother animation) ---
     if (msg.kind === 'stream_delta') {
       const text = msg.content || '';
       if (!text) return;
-      // Content starting means thinking is done
-      if (thinkingBySessionRef.current.has(sid)) {
+      // Legacy frames have no channel identity. Identified responses keep
+      // thinking available until their boundary, since it may resume later.
+      if (!streamResponseId(msg.blockId) && thinkingBySessionRef.current.has(sid)) {
         thinkingBySessionRef.current.delete(sid);
         sessionStore.finalizeStreamingThinking(sid, msgRunId);
       }
@@ -762,7 +838,7 @@ export function useChatRealtimeHandlers({
       const streamId = `__streaming_${streamKey}`;
       const existing = slot?.realtimeMessages.find((m: any) => m.id === streamId);
       const currentText = existing?.content || '';
-      sessionStore.updateStreaming(sid, currentText + text, provider, msgRunId, msg.model);
+      sessionStore.updateStreaming(sid, currentText + text, provider, msgRunId, msg.model, msg.blockId);
       return;
     }
 
@@ -777,7 +853,7 @@ export function useChatRealtimeHandlers({
       const streamId = `__streaming_thinking_${streamKey}`;
       const existing = slot?.realtimeMessages.find((m: any) => m.id === streamId);
       const currentText = existing?.content || '';
-      sessionStore.updateStreamingThinking(sid, currentText + text, provider, msgRunId);
+      sessionStore.updateStreamingThinking(sid, currentText + text, provider, msgRunId, msg.blockId);
       return;
     }
 
@@ -794,9 +870,9 @@ export function useChatRealtimeHandlers({
 
     // Only route certain message kinds to the store append logic.
     const flushKinds = new Set([
-      'tool_use', 'tool_result', 'text', 'complete', 'error', 'permission_request',
+      'tool_use', 'tool_result', 'text', 'complete', 'error', 'permission_request', 'compact_boundary',
     ]);
-    if (flushKinds.has(msg.kind as string) && (msg.kind !== 'error' || isTerminalError)) {
+    if (knownCompacts.length === 0 && flushKinds.has(msg.kind as string) && (msg.kind !== 'error' || isTerminalError)) {
       // Finalize thinking if still active (model moved past thinking)
       if (!isTerminalForSupersededRun && thinkingBySessionRef.current.has(sid)) {
         thinkingBySessionRef.current.delete(sid);
@@ -805,7 +881,7 @@ export function useChatRealtimeHandlers({
       // Finalize content stream on tool_use / complete / terminal error.
       // The gateway may not send stream_end, so tool_use is the
       // reliable signal that the text block has ended.
-      if (msg.kind === 'tool_use' || msg.kind === 'complete' || msg.kind === 'error') {
+      if (msg.kind === 'tool_use' || msg.kind === 'complete' || msg.kind === 'error' || msg.kind === 'compact_boundary') {
         sessionStore.finalizeStreaming(sid, msgRunId);
       }
       if (msg.kind === 'complete' || msg.kind === 'error') {

@@ -32,6 +32,7 @@ import { processSummaryToTrace, type ProcessAttachment } from './processGrouping
 import SubagentCard from './SubagentCard';
 import { useTypewriter } from './useTypewriter';
 import { ThinkingBlock } from './ThinkingBlock';
+import { useUploadedAttachmentPreviews } from '../chat/hooks/useUploadedAttachmentPreviews';
 import DocumentReferenceChip from './DocumentReferenceChip';
 import ReplyQuoteChip from './ReplyQuoteChip';
 import { AgentFileArtifactGroup, UserAttachmentCards } from './MessageFileCards';
@@ -173,13 +174,14 @@ function MessageRowV2({
     () => (Array.isArray(message.artifacts) ? message.artifacts : []),
     [message.artifacts],
   );
-  const messageAttachments = useMemo(
+  const rawMessageAttachments = useMemo(
     () =>
       Array.isArray(message.attachments)
         ? message.attachments.filter((attachment) => attachment && typeof attachment.name === 'string')
         : [],
     [message.attachments],
   );
+  const messageAttachments = useUploadedAttachmentPreviews(rawMessageAttachments);
   const documentReferenceAttachments = useMemo(
     () => messageAttachments
       .map(attachmentToDocumentReference)
@@ -196,6 +198,12 @@ function MessageRowV2({
       .map((reference) => reference.image.name)),
     [documentReferenceAttachments],
   );
+  const uploadedImagePreviews = useMemo(
+    () => messageAttachments.filter((attachment) => (
+      typeof attachment.previewData === 'string' && attachment.previewData.startsWith('data:image/')
+    )),
+    [messageAttachments],
+  );
   const messageImages = useMemo(
     () =>
       Array.isArray(message.images)
@@ -207,12 +215,27 @@ function MessageRowV2({
         : [],
     [message.images, referenceImageNames],
   );
+  // Canonical history supplies images after acceptance. Until then use the
+  // upload's display-only preview, retaining attachment identities for edits.
+  const visibleImages = useMemo(() => {
+    const remaining = [...uploadedImagePreviews];
+    const confirmed = messageImages.map((image) => {
+      const index = remaining.findIndex((attachment) => attachment.previewData === image.data);
+      if (index < 0) return image;
+      const [preview] = remaining.splice(index, 1);
+      return { ...image, name: image.name || preview.name };
+    });
+    return [...confirmed, ...remaining.map((attachment) => ({
+      data: attachment.previewData!, name: attachment.name, mimeType: attachment.mimeType,
+    }))];
+  }, [messageImages, uploadedImagePreviews]);
   const fileAttachments = useMemo(
     () => messageAttachments.filter((attachment) => (
       attachment.kind !== DOCUMENT_SELECTION_ATTACHMENT_KIND
       && attachment.kind !== CONTENT_REFERENCE_ATTACHMENT_KIND
+      && !uploadedImagePreviews.includes(attachment)
     )),
-    [messageAttachments],
+    [messageAttachments, uploadedImagePreviews],
   );
   const [userImageLightbox, setUserImageLightbox] = useState<number | null>(null);
   const [isEditing, setIsEditing] = useState(false);
@@ -228,7 +251,7 @@ function MessageRowV2({
   }, [editDraft, isEditing]);
   const hasForkUnsupportedContent =
     Boolean(message.forkUnsupportedContent) ||
-    messageImages.length > 0 ||
+    visibleImages.length > 0 ||
     messageAttachments.length > 0;
 
   if (message.isAgentActivitySummary) {
@@ -331,7 +354,7 @@ function MessageRowV2({
   // User: right-aligned bubble.
   if (isUser) {
     const messageTime = formatMessageTime(message.timestamp);
-    const lightboxImages: LightboxImage[] = messageImages.map((image) => ({
+    const lightboxImages: LightboxImage[] = visibleImages.map((image) => ({
       data: image.data,
       name: image.name,
       mimeType: image.mimeType,
@@ -401,9 +424,9 @@ function MessageRowV2({
                   />
                 </div>
               ) : null}
-              {messageImages.length > 0 ? (
+              {visibleImages.length > 0 ? (
                 <div className={formattedContent ? 'mb-2 grid grid-cols-1 gap-2' : 'grid grid-cols-1 gap-2'}>
-                  {messageImages.map((image, index) => (
+                  {visibleImages.map((image, index) => (
                     <button
                       type="button"
                       key={`${image.name || 'image'}-${index}`}
