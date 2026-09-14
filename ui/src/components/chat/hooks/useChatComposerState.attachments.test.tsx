@@ -2,6 +2,7 @@
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useChatComposerState } from './useChatComposerState';
+import { cachedUploadedPreview } from '../utils/uploadedAttachmentPreview';
 
 const mocks = vi.hoisted(() => ({
   authenticatedFetch: vi.fn(),
@@ -125,10 +126,11 @@ describe('useChatComposerState attachment submission', () => {
     }));
   });
 
-  it.each([false, true])('keeps an immediate display preview without adding model image payloads (queued=%s)', async (queued) => {
+  it.each([[false, 1, 11], [true, 1, 11], [true, 20, 4 * 1024 * 1024]] as const)(
+    'keeps previews local and queue frames small (queued=%s, files=%s, bytes=%s)', async (queued, count, bytes) => {
     mocks.uploadAttachmentBatch.mockImplementation(async ({ files }: { files: File[] }) => ({
-      uploadId: 'preview-upload', attachmentIds: ['preview-image'],
-      attachments: files.map(file => ({ attachmentId: 'preview-image', name: file.name,
+      uploadId: `preview-upload-${files[0].name}`, attachmentIds: files.map(file => file.name),
+      attachments: files.map(file => ({ attachmentId: file.name, name: file.name,
         relativePath: `.tmp/chat-uploads/preview-upload/${file.name}`, bytes: file.size, mimeType: file.type })),
     }));
     const addMessage = vi.fn();
@@ -147,22 +149,25 @@ describe('useChatComposerState attachment submission', () => {
     const { result } = renderHook(() => useChatComposerState(options));
     act(() => {
       result.current.setInput('describe this image');
-      result.current.addAttachmentFiles([new File(['image-bytes'], 'preview.png', { type: 'image/png' })]);
+      result.current.addAttachmentFiles(Array.from({ length: count }, (_, index) =>
+        new File([new Uint8Array(bytes)], `preview-${index}.png`, { type: 'image/png' })));
     });
-    await waitFor(() => expect(result.current.uploadingImages.size).toBe(1));
-    await waitFor(() => expect(result.current.hasPendingAttachments).toBe(false));
+    await waitFor(() => expect(result.current.uploadingImages.size).toBe(count));
+    await waitFor(() => expect(result.current.hasPendingAttachments).toBe(false), { timeout: 10_000 });
     await act(async () => { await result.current.handleSubmit({ preventDefault: vi.fn() } as never); });
     const dispatched = queued ? enqueuePreparedInput.mock.calls[0][0] : sendMessage.mock.calls[0][0];
     expect(dispatched.options.images ?? []).toEqual([]);
     expect(dispatched.options.attachments ?? []).toEqual([]);
-    expect(dispatched.options.uploadedAttachments).toEqual([{ uploadId: 'preview-upload', attachmentIds: ['preview-image'] }]);
+    expect(dispatched.options.uploadedAttachments.flatMap((ref: any) => ref.attachmentIds)).toHaveLength(count);
     const attachments = queued ? dispatched.options.displayAttachments : addMessage.mock.calls[0][0].attachments;
-    expect(attachments).toEqual([expect.objectContaining({
-      uploadId: 'preview-upload', attachmentId: 'preview-image',
-      previewData: 'data:image/png;base64,aW1hZ2UtYnl0ZXM=',
-    })]);
+    expect(attachments).toHaveLength(count);
+    expect(attachments[0]).toMatchObject({ uploadId: 'preview-upload-preview-0.png', attachmentId: 'preview-0.png' });
+    if (count === 1) expect(cachedUploadedPreview(attachments[0])).toMatch(/^data:image\/png;base64,/);
+    // 20 x 4 MiB would occupy >106 MiB as Base64 and disconnect the WS receiver.
+    expect(JSON.stringify(dispatched).length).toBeLessThan(32 * 1024);
+    expect(JSON.stringify(dispatched)).not.toContain('data:image/');
     if (queued) expect(addMessage).not.toHaveBeenCalled(); // A waiting input must not jump into the transcript.
-  });
+  }, 15_000);
 
   it('does not create an optimistic sidebar session when attachment upload fails', async () => {
     mocks.uploadAttachmentBatch.mockRejectedValue(new Error('upload failed'));

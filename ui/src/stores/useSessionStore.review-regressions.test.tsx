@@ -59,6 +59,33 @@ const start = msg('compact-start', 'status', 'compacting', {
 const done = msg('compact-done', 'compact_boundary', '', { compactionId: 'c1' });
 
 describe('reviewed stream reconciliation races', () => {
+  it.each([false, true])('accumulates interleaved channels without splitting Markdown (text first=%s)', async (textFirst) => {
+    const store = setup();
+    await refresh(store, [user]);
+    const frames = [
+      msg('think-1', 'thinking', 'Let me', { blockId: 'r1:thinking:0' }),
+      msg('text-1', 'stream_delta', '**Hello', { blockId: 'r1:text:0' }),
+      msg('think-2', 'thinking', ' check.', { blockId: 'r1:thinking:0' }),
+      msg('text-2', 'stream_delta', ' world**', { blockId: 'r1:text:0' }),
+    ];
+    if (textFirst) [frames[0], frames[1]] = [frames[1], frames[0]];
+    act(() => frames.forEach(frame => mocks.listener?.(frame)));
+    const contents = () => store.getMessages(sid).filter(m => m.blockId).map(m => m.content);
+    expect(contents().sort()).toEqual(['**Hello world**', 'Let me check.']);
+    act(() => { replay(frames); mocks.listener?.(msg('end', 'stream_end')); });
+    expect(contents().sort()).toEqual(['**Hello world**', 'Let me check.']);
+    const history = [user,
+      msg('thought', 'thinking', 'Let me check.', { blockId: 'r1:thinking:0' }),
+      msg('answer', 'text', '**Hello world**', { role: 'assistant', blockId: 'r1:text:0' }),
+    ];
+    await refresh(store, history);
+    expect(store.getMessages(sid).map(m => m.id)).toEqual(history.map(m => m.id));
+    const reloaded = setup();
+    await refresh(reloaded, history);
+    act(() => replay(frames));
+    expect(reloaded.getSessionSlot(sid)?.realtimeMessages.filter(m => m.blockId)).toEqual([]);
+  });
+
   it.each(['replay', 'direct', 'status-only'])('ignores an old compact start before stream side effects (%s)', async (delivery) => {
     const store = setup();
     await refresh(store, [user]);

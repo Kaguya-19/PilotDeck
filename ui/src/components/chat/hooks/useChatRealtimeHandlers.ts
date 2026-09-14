@@ -83,6 +83,12 @@ function getMessageRunId(message: { runId?: unknown }): string | undefined {
     : undefined;
 }
 
+// assembleModelMessage assigns <response ID>:<channel>:<ordinal>. The two
+// channels of one response may alternate, including within a single chunk.
+function streamResponseId(blockId?: string): string | undefined {
+  return blockId?.match(/^(.*):(?:thinking|text):\d+$/)?.[1];
+}
+
 function getSessionStatusActiveRunId(message: LatestChatMessage): string | undefined {
   if (typeof message.activeRunId === 'string' && message.activeRunId.trim()) {
     return message.activeRunId.trim();
@@ -228,10 +234,25 @@ export function getActiveTurnReplayMessagesToApply(
 
   const output: LatestChatMessage[] = [];
   let block: VolatileReplayBlock | null = null;
+  const blockKey = (message: { runId?: unknown; blockId?: string; kind?: string }) =>
+    JSON.stringify([getMessageRunId(message), message.blockId, message.kind]);
+  const identifiedBlocks = new Map<string, VolatileReplayBlock>();
+  // Interleaved channels are not adjacent in the replay. Compare the complete
+  // identified block with history, then retain/skip all of its original frames.
+  for (const message of activeTurnMessages) {
+    if (!message.blockId || (message.kind !== 'thinking' && message.kind !== 'stream_delta')) continue;
+    const key = blockKey(message);
+    const aggregate = identifiedBlocks.get(key) ?? {
+      kind: message.kind, messages: [], text: '', runId: getMessageRunId(message), blockId: message.blockId,
+    };
+    aggregate.text += typeof message.content === 'string' ? message.content : '';
+    identifiedBlocks.set(key, aggregate);
+  }
 
   const flushBlock = () => {
     if (!block) return;
-    if (!options.skipVolatile && !hasRenderedVolatileReplayBlock(block, state)) {
+    const aggregate = block.blockId ? identifiedBlocks.get(blockKey(block)) : undefined;
+    if (!options.skipVolatile && !hasRenderedVolatileReplayBlock(aggregate ?? block, state)) {
       output.push(...block.messages);
     }
     block = null;
@@ -783,14 +804,21 @@ export function useChatRealtimeHandlers({
       return;
     }
 
-    // The same turn can contain several model responses. A new block closes
-    // the old accumulator before reading its text, even without a tool call.
+    // Close a channel on its next block, or both channels on a new response.
+    // A thinking delta must not cut the text channel of the same response.
     if (msg.blockId && (msg.kind === 'stream_delta' || msg.kind === 'thinking')) {
       const slot = sessionStore.getSessionSlot?.(sid);
       const activeText = slot?.realtimeMessages.find(message => message.id === `__streaming_${streamKey}`);
       const activeThinking = slot?.realtimeMessages.find(message => message.id === `__streaming_thinking_${streamKey}`);
-      if (activeText && activeText.blockId !== msg.blockId) sessionStore.finalizeStreaming(sid, msgRunId);
-      if (activeThinking && activeThinking.blockId !== msg.blockId) {
+      const responseId = streamResponseId(msg.blockId);
+      const isNewResponse = (blockId?: string) => Boolean(responseId
+        && streamResponseId(blockId) && streamResponseId(blockId) !== responseId);
+      if (activeText && (msg.kind === 'stream_delta'
+        ? activeText.blockId !== msg.blockId : isNewResponse(activeText.blockId))) {
+        sessionStore.finalizeStreaming(sid, msgRunId);
+      }
+      if (activeThinking && (msg.kind === 'thinking'
+        ? activeThinking.blockId !== msg.blockId : isNewResponse(activeThinking.blockId))) {
         sessionStore.finalizeStreamingThinking(sid, msgRunId);
         thinkingBySessionRef.current.delete(sid);
       }
@@ -800,8 +828,9 @@ export function useChatRealtimeHandlers({
     if (msg.kind === 'stream_delta') {
       const text = msg.content || '';
       if (!text) return;
-      // Content starting means thinking is done
-      if (thinkingBySessionRef.current.has(sid)) {
+      // Legacy frames have no channel identity. Identified responses keep
+      // thinking available until their boundary, since it may resume later.
+      if (!streamResponseId(msg.blockId) && thinkingBySessionRef.current.has(sid)) {
         thinkingBySessionRef.current.delete(sid);
         sessionStore.finalizeStreamingThinking(sid, msgRunId);
       }

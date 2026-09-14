@@ -32,6 +32,7 @@ import { processSummaryToTrace, type ProcessAttachment } from './processGrouping
 import SubagentCard from './SubagentCard';
 import { useTypewriter } from './useTypewriter';
 import { ThinkingBlock } from './ThinkingBlock';
+import { useUploadedAttachmentPreviews } from '../chat/hooks/useUploadedAttachmentPreviews';
 import DocumentReferenceChip from './DocumentReferenceChip';
 import ReplyQuoteChip from './ReplyQuoteChip';
 import { AgentFileArtifactGroup, UserAttachmentCards } from './MessageFileCards';
@@ -173,13 +174,14 @@ function MessageRowV2({
     () => (Array.isArray(message.artifacts) ? message.artifacts : []),
     [message.artifacts],
   );
-  const messageAttachments = useMemo(
+  const rawMessageAttachments = useMemo(
     () =>
       Array.isArray(message.attachments)
         ? message.attachments.filter((attachment) => attachment && typeof attachment.name === 'string')
         : [],
     [message.attachments],
   );
+  const messageAttachments = useUploadedAttachmentPreviews(rawMessageAttachments);
   const documentReferenceAttachments = useMemo(
     () => messageAttachments
       .map(attachmentToDocumentReference)

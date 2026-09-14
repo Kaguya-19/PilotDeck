@@ -13,6 +13,8 @@ import {
   shouldKeepChatResponseReservedSpace,
 } from './chatResponseReservedSpace';
 import { getContextStatus } from './ComposerV2';
+import * as api from '../../utils/api';
+import { attachmentDisplayMetadata, rememberUploadedPreview } from '../chat/utils/uploadedAttachmentPreview';
 
 vi.mock('./SubagentDetailModal', () => ({
   default: ({ isRunning }: { isRunning?: boolean }) => (
@@ -1707,6 +1709,24 @@ it('shows a provisional send without writing a duplicate transcript message on a
 
 
 describe('uploaded image preview lifecycle', () => {
+  it.each([false, true])('renders metadata-only uploads during generation and once after history (cold cache=%s)', async cold => {
+    const preview = 'data:image/png;base64,cHJldmlldy1ieXRlcw==';
+    const attachment = { name: 'upload.png', uploadId: `render-${cold}`, attachmentId: 'image', mimeType: 'image/png', previewData: preview };
+    if (!cold) rememberUploadedPreview(attachment);
+    const fetch = vi.spyOn(api, 'authenticatedFetch').mockResolvedValue({ ok: true, json: async () => ({ data: preview }) } as Response);
+    try {
+      const user: ChatMessage = { id: 'user', type: 'user', content: 'describe', timestamp: new Date(), attachments: [attachmentDisplayMetadata(attachment)] };
+      const view = renderPane({ messages: [user], isAssistantWorking: true });
+      if (!cold) expect(screen.getByRole('img').getAttribute('src')).toBe(preview);
+      await waitFor(() => expect(screen.getByRole('img').getAttribute('src')).toBe(preview));
+      expect(fetch).toHaveBeenCalledTimes(cold ? 1 : 0);
+      if (cold) expect(fetch).toHaveBeenCalledWith('/api/uploads/render-true/attachments/image/preview', expect.objectContaining({ signal: expect.any(AbortSignal) }));
+      view.rerender(createPaneElement({ messages: [{ ...user, images: [{ name: '', data: preview }] }] }));
+      expect(screen.getAllByRole('img')).toHaveLength(1);
+      expect(screen.queryByText('upload.png')).toBeNull();
+    } finally { fetch.mockRestore(); }
+  });
+
   it('shows images immediately during generation and only once when history arrives, keeping ordinary files', () => {
     const preview = 'data:image/png;base64,aW1hZ2U=';
     const user: ChatMessage = { id: 'local-image', type: 'user', content: 'Describe these', timestamp: new Date(),

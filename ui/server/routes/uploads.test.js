@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { Readable } from 'node:stream';
 
 const gateway = vi.hoisted(() => ({
   listProjects: vi.fn(async () => ({ projects: [] })),
@@ -28,6 +29,33 @@ afterEach(async () => {
 });
 
 describe('upload routes', () => {
+  it('serves a verified uploaded image without placing it in a queue frame', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pilotdeck-preview-'));
+    temporaryRoots.push(root);
+    process.env.PILOT_HOME = await fs.realpath(root);
+    const { app, store } = await createUploadsApp();
+    const bytes = Buffer.from('image fixture');
+    const record = await store.create(process.env.PILOT_HOME, [{ clientFileId: 'image', name: 'photo.png', relativePath: 'photo.png', size: bytes.length, mimeType: 'image/png' }]);
+    await store.writePart(record.uploadId, 'image', Readable.from(bytes));
+    const completed = await store.complete(record.uploadId);
+    const attachment = completed.attachments[0];
+    const url = `/api/uploads/${record.uploadId}/attachments/${attachment.attachmentId}/preview`;
+    const response = await request(app, url);
+    expect(response.status).toBe(200);
+    expect(JSON.parse(response.text)).toEqual({ data: `data:image/png;base64,${bytes.toString('base64')}` });
+    expect((await request(app, `/api/uploads/${record.uploadId}/attachments/missing/preview`)).status).toBe(404);
+    await fs.writeFile(attachment.path, 'tampered');
+    expect((await request(app, url)).status).toBe(422);
+  });
+
+  it.each(['ATTACHMENT_EXPIRED', 'UPLOAD_NOT_COMPLETED'])('does not serve a preview when %s', async code => {
+    const { app, store } = await createUploadsApp();
+    vi.spyOn(store, 'get').mockResolvedValue(uploadRecord('completed'));
+    vi.spyOn(store, 'verifyAttachment').mockRejectedValue(Object.assign(new Error(code), { code }));
+    const response = await request(app, '/api/uploads/upload-1/attachments/image/preview');
+    expect(response.status).toBe(code === 'ATTACHMENT_EXPIRED' ? 410 : 409);
+  });
+
   it('does not miss a terminal event emitted while loading the SSE snapshot', async () => {
     const { app, store } = await createUploadsApp();
     const created = uploadRecord('created');

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { getSubmittedCommand, isModelIndependentCommand } from '../utils/composerCommand';
+import { attachmentDisplayMetadata, rememberUploadedPreview } from '../utils/uploadedAttachmentPreview';
 import type {
   ChangeEvent,
   ClipboardEvent,
@@ -1342,6 +1343,7 @@ export function useChatComposerState({
           uploadId,
           attachmentIds,
         }));
+        uploadedFiles.forEach(rememberUploadedPreview);
       }
 
       if (
@@ -1453,7 +1455,7 @@ export function useChatComposerState({
             userVisibleInput,
             images: uploadedImages,
             attachments: turnAttachments,
-            displayAttachments: [...uploadedFiles, ...turnAttachments],
+            displayAttachments: [...uploadedFiles, ...turnAttachments].map(attachmentDisplayMetadata),
             uploadedAttachments: uploadedAttachmentRefs,
             modelSelection: submittedModelSelection,
           },

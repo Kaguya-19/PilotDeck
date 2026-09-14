@@ -1,6 +1,7 @@
 import express from 'express';
 import multer from 'multer';
 import path from 'node:path';
+import { readFile } from 'node:fs/promises';
 import { UploadStore } from '../../../src/gateway/dialog/UploadStore.js';
 import { getPilotDeckGateway } from '../pilotdeck-bridge.js';
 import { resolvePilotHome } from '../utils/pilotPaths.js';
@@ -123,6 +124,21 @@ router.get('/:uploadId/events', async (req, res) => {
 router.get('/:uploadId', async (req, res) => {
   try { return res.json(publicRecord(await store.get(req.params.uploadId))); }
   catch (error) { return sendError(res, error, req.id); }
+});
+
+// Read from the controlled upload store, never a client-supplied file path.
+// This router shares the authentication middleware of the upload endpoints.
+router.get('/:uploadId/attachments/:attachmentId/preview', async (req, res) => {
+  try {
+    const record = await store.get(req.params.uploadId);
+    const [attachment] = await store.verifyAttachment(record.uploadId, record.projectKey, [req.params.attachmentId]);
+    if (!/^image\/[a-zA-Z0-9.+-]+$/.test(attachment.mimeType || '')) {
+      return res.status(415).json({ error: { code: 'ATTACHMENT_NOT_IMAGE', message: 'Attachment is not an image.' } });
+    }
+    const bytes = await readFile(attachment.path);
+    res.setHeader('Cache-Control', 'private, no-store');
+    return res.json({ data: `data:${attachment.mimeType};base64,${bytes.toString('base64')}` });
+  } catch (error) { return sendError(res, error, req.id); }
 });
 
 router.delete('/:uploadId', async (req, res) => {
