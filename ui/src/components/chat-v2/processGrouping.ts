@@ -973,6 +973,12 @@ export function getLiveProcessDetailMessages(messages: ChatMessage[]): ChatMessa
     .flatMap((group) => group.detailMessages);
 }
 
+/** Only flatten a real single call; never discard thinking, activity or interactive details. */
+export function isSingleToolProcess(messages: ChatMessage[]): boolean {
+  return messages.length === 1 && Boolean(messages[0].isToolUse)
+    && !messages[0].isSubagentContainer && !messages[0].isInteractivePrompt;
+}
+
 export function splitLiveProcessGroupDetailMessages(group: LiveProcessGroup): {
   beforeStatusMessages: ChatMessage[];
   statusDetailMessages: ChatMessage[];

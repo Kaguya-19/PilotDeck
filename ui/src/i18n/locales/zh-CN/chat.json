@@ -678,7 +678,6 @@
     "copy": "复制",
     "details": "工具详情",
     "output": "输出",
-    "raw": "原始参数与结果",
     "success": "成功",
     "failed": "失败",
     "exitCode": "退出码 {{code}}",
@@ -695,7 +694,8 @@
       "edit": "正在编辑",
       "read": "正在读取",
       "search": "正在搜索",
-      "tool": "正在使用"
+      "tool": "正在使用",
+      "skill": "正在读取技能"
     },
     "pending": {
       "command": "命令",
@@ -703,7 +703,8 @@
       "edit": "编辑",
       "read": "读取",
       "search": "搜索",
-      "tool": "工具"
+      "tool": "工具",
+      "skill": "读取技能"
     },
     "done": {
       "command": "已运行",
@@ -711,7 +712,8 @@
       "edit": "已编辑",
       "read": "已读取",
       "search": "已搜索",
-      "tool": "已使用"
+      "tool": "已使用",
+      "skill": "已读取技能"
     }
   }
 }

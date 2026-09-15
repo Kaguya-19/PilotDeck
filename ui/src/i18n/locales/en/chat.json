@@ -696,7 +696,6 @@
     "copy": "Copy",
     "details": "Tool details",
     "output": "Output",
-    "raw": "Raw parameters and result",
     "success": "Success",
     "failed": "Failed",
     "exitCode": "Exit {{code}}",
@@ -713,7 +712,8 @@
       "edit": "Editing",
       "read": "Reading",
       "search": "Searching",
-      "tool": "Using"
+      "tool": "Using",
+      "skill": "Reading skill"
     },
     "pending": {
       "command": "Command",
@@ -721,7 +721,8 @@
       "edit": "Edit",
       "read": "Read",
       "search": "Search",
-      "tool": "Tool"
+      "tool": "Tool",
+      "skill": "Read skill"
     },
     "done": {
       "command": "Ran",
@@ -729,7 +730,8 @@
       "edit": "Edited",
       "read": "Read",
       "search": "Searched",
-      "tool": "Used"
+      "tool": "Used",
+      "skill": "Read skill"
     }
   }
 }

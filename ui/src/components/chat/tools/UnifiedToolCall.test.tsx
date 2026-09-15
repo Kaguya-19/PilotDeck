@@ -62,3 +62,19 @@ it('shows added and removed lines without marking context as added', () => {
   expect(screen.getByText('new').parentElement?.className).toContain('bg-green');
   expect(screen.getByText('unchanged').parentElement?.className).not.toMatch(/bg-red|bg-green/);
 });
+
+it('never adds a second raw-result disclosure for structured shell results', () => {
+  render(view({ ...message, toolResult: { content: 'INTERNAL WRAPPER', toolUseResult: { stdout: 'hello', stderr: '', exitCode: 0 } } }));
+  fireEvent.click(screen.getByRole('button', { name: 'Ran Build app' }));
+  expect(screen.getByText('hello')).toBeTruthy();
+  expect(screen.queryByText('INTERNAL WRAPPER')).toBeNull();
+  expect(screen.queryByText('Raw parameters and result')).toBeNull();
+});
+
+it('names skill reads in Chinese and retains the requested skill name', async () => {
+  const chinese = await createTestI18n('zh-CN');
+  render(<I18nextProvider i18n={chinese}><UnifiedToolCall message={{ ...message, toolName: 'read_skill', toolInput: { skillName: 'weather' }, toolResult: { content: 'Weather instructions' } }} createDiff={calculateDiff} /></I18nextProvider>);
+  fireEvent.click(screen.getByRole('button', { name: '已读取技能 weather' }));
+  expect(screen.queryByText('read_skill')).toBeNull();
+  expect(screen.getByText('Weather instructions')).toBeTruthy();
+});

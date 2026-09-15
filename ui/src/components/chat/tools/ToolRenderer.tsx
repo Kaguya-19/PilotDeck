@@ -22,8 +22,6 @@ interface ToolRendererProps {
   createDiff?: (oldStr: string, newStr: string) => DiffLine[];
   selectedProject?: Project | null;
   autoExpandTools?: boolean;
-  showRawParameters?: boolean;
-  rawToolInput?: string;
   expansionKey?: string;
   isToolSectionExpanded?: (sectionKey: string, defaultExpanded?: boolean) => boolean;
   onToolSectionExpandedChange?: (sectionKey: string, expanded: boolean) => void;
@@ -139,8 +137,6 @@ const ToolRendererInner: React.FC<ToolRendererProps> = ({
   createDiff,
   selectedProject,
   autoExpandTools = false,
-  showRawParameters = false,
-  rawToolInput,
   expansionKey,
   isToolSectionExpanded,
   onToolSectionExpandedChange,
@@ -360,8 +356,6 @@ const ToolRendererInner: React.FC<ToolRendererProps> = ({
           ? (nextExpanded) => onToolSectionExpandedChange(expansionKey, nextExpanded)
           : undefined}
         onTitleClick={handleTitleClick}
-        showRawParameters={mode === 'input' && showRawParameters}
-        rawContent={rawToolInput}
         toolCategory={getToolCategory(canonicalToolName)}
       >
         {contentComponent}

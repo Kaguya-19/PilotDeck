@@ -223,7 +223,6 @@
     },
     "darkMode": "Dark Mode",
     "autoExpandTools": "Auto-expand tools",
-    "showRawParameters": "Show raw parameters",
     "showThinking": "Show thinking",
     "inlineThinking": "Inline thinking (typewriter animation)",
     "autoScrollToBottom": "Auto-scroll to bottom",

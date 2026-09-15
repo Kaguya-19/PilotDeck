@@ -15,13 +15,13 @@ export function usesUnifiedToolCall(message: ChatMessage): boolean {
   return !message.isSubagentContainer && !['TodoWrite', 'TodoRead', 'todo_write', 'todo_read', 'TaskCreate', 'TaskUpdate', 'TaskList', 'TaskGet', 'Task', 'Agent', 'AskUserQuestion', 'exit_plan_mode', 'ExitPlanMode', 'ExitPlanModeV2'].includes(getCanonicalToolName(message.toolName || ''));
 }
 
-export function UnifiedToolCall({ message, createDiff, onFileOpen, selectedProject, defaultOpen = false, open, onOpenChange, showRawParameters, externalError = false, running = false }: {
+export function UnifiedToolCall({ message, createDiff, onFileOpen, selectedProject, defaultOpen = false, open, onOpenChange, externalError = false, running = false }: {
   message: ChatMessage;
   createDiff: (oldText: string, newText: string) => DiffLine[];
   onFileOpen?: (path: string, diffInfo?: unknown) => void;
   selectedProject?: Project | null;
   defaultOpen?: boolean; open?: boolean; onOpenChange?: (value: boolean) => void;
-  showRawParameters?: boolean; externalError?: boolean; running?: boolean;
+  externalError?: boolean; running?: boolean;
 }) {
   const { t } = useTranslation('chat');
   const { t: commonT } = useTranslation('common');
@@ -35,17 +35,19 @@ export function UnifiedToolCall({ message, createDiff, onFileOpen, selectedProje
   const isShell = name === 'Bash';
   const isEdit = ['Edit', 'Write', 'ApplyPatch'].includes(name);
   const isRead = name === 'Read';
+  const isSkill = name === 'read_skill';
   const isSearch = ['Grep', 'Glob', 'web_search'].includes(name);
   const isWeb = /browser|web_fetch/.test(name);
   const pending = result == null;
   const active = pending && running;
   const file = displayText(input.file_path || input.path);
   const target = isShell ? displayText(input.description || input.command)
+    : isSkill ? displayText(input.skillName || input.skill_name || input.name)
     : isEdit || isRead ? file.split('/').pop() || file
     : displayText(input.query || input.pattern || input.url || input.description || message.toolName);
-  const action = isShell ? 'command' : isEdit ? (name === 'Write' ? 'write' : 'edit') : isRead ? 'read' : isSearch ? 'search' : 'tool';
+  const action = isShell ? 'command' : isEdit ? (name === 'Write' ? 'write' : 'edit') : isRead ? 'read' : isSkill ? 'skill' : isSearch ? 'search' : 'tool';
   const label = t(`toolDisplay.${active ? 'running' : pending || result?.isError ? 'pending' : 'done'}.${action}`);
-  const Icon = active ? Loader2 : isShell ? Terminal : isEdit ? Pencil : isRead ? FileText : isSearch ? Search : isWeb ? Globe : Wrench;
+  const Icon = active ? Loader2 : isShell ? Terminal : isEdit ? Pencil : isRead || isSkill ? FileText : isSearch ? Search : isWeb ? Globe : Wrench;
   const rawResult = resultText(result?.content);
   const displayError = rawResult.includes('<tool_use_error>') ? rawResult.replace(/<\/?tool_use_error>/g, '').replace(/^InputValidationError:\s*/i, '').trim() : rawResult;
   const output = result?.isError ? displayError : isShell ? shell.output : rawResult;
@@ -55,7 +57,7 @@ export function UnifiedToolCall({ message, createDiff, onFileOpen, selectedProje
   const diff = useMemo(() => isEdit && name !== 'Write' && typeof oldContent === 'string' && typeof newContent === 'string'
     ? createDiff(oldContent, newContent) : [], [isEdit, name, oldContent, newContent, createDiff]);
   const hasDiff = isEdit && typeof newContent === 'string' && (name === 'Write' || typeof oldContent === 'string');
-  const inputDetails = config.input.type === 'collapsible' && config.input.contentType !== 'diff';
+  const inputDetails = !isSkill && config.input.type === 'collapsible' && config.input.contentType !== 'diff';
   const resultDetails = !config.result?.hidden && !config.result?.hideOnSuccess && config.result?.type === 'collapsible' && !['text', 'success-message', 'file-list'].includes(config.result.contentType || '');
   const files = objectValue(result?.toolUseResult);
   const hasFileList = [files.files, files.filenames].some(value => Array.isArray(value) && value.length > 0);
@@ -81,16 +83,15 @@ export function UnifiedToolCall({ message, createDiff, onFileOpen, selectedProje
           <ToolDiffViewer oldContent={oldContent} newContent={newContent} filePath={file} createDiff={createDiff} onFileClick={onFileOpen ? () => onFileOpen(file, name === 'Write' ? undefined : { old_string: oldContent, new_string: newContent }) : undefined} badge={name === 'Write' ? 'Write' : 'Diff'} />
           <div className="flex justify-end gap-2 text-xs text-neutral-500 dark:text-neutral-400">{footer}</div>
           {result?.isError && !externalError && <ToolDetails title={t('toolDisplay.output')} copyContent={rawResult}><pre className="whitespace-pre-wrap break-words font-mono">{displayError}</pre></ToolDetails>}
-        </> : <ToolDetails title={isShell ? 'Shell' : isRead && file ? <button type="button" className="hover:text-violet-600 hover:underline" title={file} onClick={() => onFileOpen?.(file)}>{file}</button> : message.toolName || 'Tool'} copyContent={isShell ? `$ ${displayText(input.command)}\n\n${output}` : output || displayText(message.toolInput)} footer={footer}>
+        </> : <ToolDetails title={isShell ? 'Shell' : isSkill ? `${label} ${target}` : isRead && file ? <button type="button" className="hover:text-violet-600 hover:underline" title={file} onClick={() => onFileOpen?.(file)}>{file}</button> : message.toolName || 'Tool'} copyContent={isShell ? `$ ${displayText(input.command)}\n\n${output}` : output || displayText(message.toolInput)} footer={footer}>
           {isShell ? <pre className="mb-3 whitespace-pre-wrap break-words font-mono"><span className="select-none text-neutral-400">$ </span>{displayText(input.command)}</pre>
             : inputDetails ? <ToolRenderer toolName={message.toolName || ''} toolInput={message.toolInput} toolResult={result} mode="input" contentOnly createDiff={createDiff} onFileOpen={onFileOpen} selectedProject={selectedProject} />
-            : <pre className="mb-3 whitespace-pre-wrap break-words font-mono">{isRead ? file : displayText(Object.keys(input).length ? input : message.toolInput)}</pre>}
+            : <pre className="mb-3 whitespace-pre-wrap break-words font-mono">{isRead ? file : isSkill ? target : displayText(Object.keys(input).length ? input : message.toolInput)}</pre>}
           {!externalError && (result ? <>
             {!result.isError && (resultDetails || hasFileList) ? <ToolRenderer toolName={message.toolName || ''} toolInput={message.toolInput} toolResult={result} mode="result" contentOnly onFileOpen={onFileOpen} selectedProject={selectedProject} />
               : <pre className="whitespace-pre-wrap break-words font-mono">{output || t('toolDisplay.noOutput')}</pre>}
           </> : <span className="text-neutral-400">{t(active ? 'toolDisplay.executing' : 'toolDisplay.noResult')}</span>)}
         </ToolDetails>}
-        {(showRawParameters || (isShell && shell.raw !== shell.output)) && <details data-auto-expand="false" className="text-xs text-neutral-500 dark:text-neutral-400"><summary className="cursor-pointer py-1">{t('toolDisplay.raw')}</summary><ToolDetails title={t('toolDisplay.raw')} copyContent={displayText(message.toolInput) + '\n\n' + rawResult}><pre className="whitespace-pre-wrap break-words font-mono">{displayText(message.toolInput)}{'\n\n'}{rawResult}</pre></ToolDetails></details>}
       </div>}
     </div>
   );

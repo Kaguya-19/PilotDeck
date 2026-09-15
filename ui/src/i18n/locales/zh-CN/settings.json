@@ -223,7 +223,6 @@
     },
     "darkMode": "深色模式",
     "autoExpandTools": "显示调用工具",
-    "showRawParameters": "显示原始参数",
     "showThinking": "显示思考过程",
     "inlineThinking": "内联思考（打字机动画）",
     "autoScrollToBottom": "自动滚动到底部",

@@ -43,7 +43,6 @@ type MessageComponentProps = {
   onShowSettings?: () => void;
   onGrantSessionToolPermission?: (suggestion: PilotDeckPermissionSuggestion) => SessionPermissionGrantResult | null | undefined;
   autoExpandTools?: boolean;
-  showRawParameters?: boolean;
   showThinking?: boolean;
   isToolSectionExpanded?: (sectionKey: string, defaultExpanded?: boolean) => boolean;
   onToolSectionExpandedChange?: (sectionKey: string, expanded: boolean) => void;
@@ -151,7 +150,7 @@ function attachmentToDocumentReference(attachment: ChatAttachment): ContentRefer
   } satisfies DocumentSelectionReference);
 }
 
-const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, onShowSettings, onGrantSessionToolPermission, autoExpandTools, showRawParameters, showThinking, isToolSectionExpanded, onToolSectionExpandedChange, selectedProject, provider, hideHeader = false, isSessionRunning = false }: MessageComponentProps) => {
+const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, onShowSettings, onGrantSessionToolPermission, autoExpandTools, showThinking, isToolSectionExpanded, onToolSectionExpandedChange, selectedProject, provider, hideHeader = false, isSessionRunning = false }: MessageComponentProps) => {
   const { t } = useTranslation('chat');
   const isGrouped = prevMessage && prevMessage.type === message.type &&
     ((prevMessage.type === 'assistant') ||
@@ -458,7 +457,6 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, o
                   defaultOpen={autoExpandTools}
                   open={isToolSectionExpanded?.(toolSectionKey('input'), autoExpandTools ?? false)}
                   onOpenChange={onToolSectionExpandedChange ? (value) => onToolSectionExpandedChange(toolSectionKey('input'), value) : undefined}
-                  showRawParameters={showRawParameters}
                   externalError={externalToolError}
                   running={isSessionRunning || message.state === 'running' || message.isStreaming}
                 />}
@@ -473,8 +471,6 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, o
                     createDiff={createDiff}
                     selectedProject={selectedProject}
                     autoExpandTools={autoExpandTools}
-                    showRawParameters={showRawParameters}
-                    rawToolInput={typeof message.toolInput === 'string' ? message.toolInput : undefined}
                     expansionKey={toolSectionKey('input')}
                     isToolSectionExpanded={isToolSectionExpanded}
                     onToolSectionExpandedChange={onToolSectionExpandedChange}
