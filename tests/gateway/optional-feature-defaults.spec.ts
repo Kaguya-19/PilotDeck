@@ -49,6 +49,14 @@ tools: { webSearch: { enabled: true, provider: tavily } }
 router: { scenarios: { default: test/model } }
 tools: { webSearch: { provider: tavily } }
 `, true],
+  ['legacy empty search block with environment credentials', `
+router: { scenarios: { default: test/model } }
+tools: { webSearch: {} }
+`, true],
+  ['legacy region-only search block with environment credentials', `
+router: { scenarios: { default: test/model } }
+tools: { webSearch: { region: cn } }
+`, true],
 ] as const) {
   test(`${name}: catalog, router execution and search availability agree`, async (t) => {
     const home = await mkdtemp(join(tmpdir(), 'pilotdeck-feature-defaults-'));
