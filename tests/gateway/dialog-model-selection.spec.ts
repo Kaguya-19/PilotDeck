@@ -8,7 +8,7 @@ import { createLocalGateway } from '../../src/cli/createLocalGateway.js';
 import { createModelRuntime, type CanonicalModelEvent, type CanonicalModelRequest } from '../../src/model/index.js';
 import { createAgentProjectSessionStorage, readTranscript, replayTranscriptEntries } from '../../src/session/index.js';
 import { readWebSessionMessages } from '../../src/web/server/readSessionMessages.js';
-import type { GatewayEvent, GatewaySubmitTurnInput } from '../../src/gateway/protocol/types.js';
+import type { GatewayEvent, GatewaySubmitTurnInput, SessionModelSelection } from '../../src/gateway/protocol/types.js';
 
 const A = { mode: 'model' as const, provider: 'alpha', model: 'first' };
 const B = { mode: 'model' as const, provider: 'zeta', model: 'configured', reasoning: 0.8, speed: 1 };
@@ -91,6 +91,16 @@ async function fixture(t: test.TestContext, responseText = 'ok') {
     get gateway() { return local.gateway; },
     fail() { failZeta = true; },
     restart() { local.dispose(); local = createLocalGateway(options); },
+    async seedSaved(selection: SessionModelSelection) {
+      const storage = createAgentProjectSessionStorage({ projectRoot: home, pilotHome: home, sessionId: 'web:model-choice' });
+      await storage.transcript.recordSessionMetadata('web:model-choice', 'model-selection', { modelSelection: selection });
+    },
+    async configureThinking(thinking: string) {
+      await writeFile(join(home, 'pilotdeck.yaml'), CONFIG.replace(
+        'thinking: { state: enabled, efforts: [low, medium, high, xhigh, max] }',
+        `thinking: ${thinking}`,
+      ));
+    },
     async submit(modelSelection?: GatewaySubmitTurnInput['modelSelection'], modelOverride?: GatewaySubmitTurnInput['modelOverride'], message = 'hello') {
       const events: GatewayEvent[] = [];
       for await (const event of local.gateway.submitTurn({
@@ -256,4 +266,87 @@ test('legacy temperatures are dropped from saved preferences, accepted turns and
   const accepted = events.find(event=>event.type==='input_accepted');
   assert.deepEqual(accepted?.type==='input_accepted' ? accepted.modelSelection : undefined,B);
   assert.ok(f.requests.length > 0 && f.requests.every(request=>!('temperature' in request)));
+});
+
+for (const reasoning of [0, 0.2]) {
+  test(`restored legacy reasoning=${reasoning} falls back to Default without an explicit client selection`, async (t) => {
+    const f = await fixture(t);
+    await f.seedSaved({ ...B, reasoning });
+    f.restart();
+    const { reasoning: _reasoning, ...expected } = B;
+    const restored = await f.gateway.sessionModelGet!({ projectKey: f.home, sessionKey: 'web:model-choice' });
+    assert.deepEqual(restored.saved, expected);
+    assert.equal(restored.effective.reasoning, undefined);
+    const events = await f.submit();
+    assert.deepEqual(events.filter(event => event.type === 'error'), []);
+    assert.ok(events.some(event => event.type === 'turn_completed' && event.finishReason === 'completed'));
+    assert.equal(f.requests.length, 1);
+    assert.equal(f.requests[0]!.provider, B.provider);
+    assert.equal(f.requests[0]!.model, B.model);
+    assert.equal(f.requests[0]!.speed, B.speed);
+    assert.equal(f.requests[0]!.thinking?.mode, undefined);
+  });
+}
+
+for (const thinking of [
+  '{ state: enabled, efforts: [low] }',
+  '{ state: enabled, efforts: [] }',
+  '{ state: default }',
+  '{ state: disabled }',
+]) {
+  test(`saved High resets to Default after thinking configuration changes to ${thinking}`, async (t) => {
+    const f = await fixture(t);
+    await f.submit(B);
+    await f.configureThinking(thinking);
+    f.restart();
+    f.requests.length = 0;
+    const events = await f.submit();
+    assert.deepEqual(events.filter(event => event.type === 'error'), []);
+    assert.ok(events.some(event => event.type === 'turn_completed' && event.finishReason === 'completed'));
+    assert.equal(f.requests.length, 1);
+    assert.equal(f.requests[0]!.model, B.model);
+    assert.equal(f.requests[0]!.speed, B.speed);
+    assert.equal(f.requests[0]!.thinking?.mode, undefined);
+    assert.deepEqual(await f.saved(), { mode: B.mode, provider: B.provider, model: B.model, speed: B.speed });
+  });
+}
+
+test('new invalid reasoning is still rejected through selection, override and session model set', async (t) => {
+  const f = await fixture(t);
+  await f.submit(A);
+  await f.configureThinking('{ state: enabled, efforts: [low] }');
+  f.restart();
+  f.requests.length = 0;
+  for (const reasoning of [0, 0.2, 0.8]) {
+    const invalid = { ...B, reasoning };
+    for (const events of [await f.submit(invalid), await f.submit(undefined, invalid)]) {
+      assert.ok(events.some(event => event.type === 'error' && /reasoning=.*is not supported/.test(event.message)));
+      assert.equal(events.some(event => event.type === 'input_accepted'), false);
+    }
+    await assert.rejects(f.gateway.sessionModelSet!({ projectKey: f.home, sessionKey: 'web:model-choice', selection: invalid }), /reasoning=.*is not supported/);
+  }
+  assert.equal(f.requests.length, 0);
+  assert.deepEqual(await f.saved(), A);
+});
+
+test('an already-open session drops a removed effort without restarting the gateway', async (t) => {
+  const f = await fixture(t);
+  await f.submit(B);
+  await f.configureThinking('{ state: enabled, efforts: [low] }');
+  const events = await f.submit();
+  assert.deepEqual(events.filter(event => event.type === 'error'), []);
+  assert.equal(f.requests.length, 2);
+  assert.equal(f.requests[1]!.thinking?.mode, undefined);
+  assert.equal(f.requests[1]!.speed, B.speed);
+});
+
+test('restoring stale reasoning does not hide an unavailable saved model or invalid speed', async (t) => {
+  const f = await fixture(t);
+  for (const saved of [{ ...B, model: 'missing', reasoning: 0 }, { ...B, speed: 2, reasoning: 0 }]) {
+    await f.seedSaved(saved);
+    const events = await f.submit();
+    assert.ok(events.some(event => event.type === 'error' && /Model is unavailable|speed must be/.test(event.message)));
+    assert.equal(events.some(event => event.type === 'input_accepted'), false);
+  }
+  assert.equal(f.requests.length, 0);
 });

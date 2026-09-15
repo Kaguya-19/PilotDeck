@@ -25,6 +25,9 @@ subset shows only Default. Default omits effort; it is not an alias for medium.
 Disabling thinking omits any selected effort and requests off using the selected format.
 Unsupported settings report a configuration/provider error, without silently changing effort.
 Historical selections that are no longer configured reset to Default in the composer.
+The server also drops obsolete reasoning values when restoring saved session selections,
+including legacy Off/Minimal values, so CLI/API clients can resume without sending a new
+selection. Newly submitted invalid efforts still fail validation.
 
 ## Parameter formats
 

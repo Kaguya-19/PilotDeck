@@ -88,7 +88,7 @@ export function reasoningMode(value: number | undefined): ThinkingMode | undefin
   return REASONING_VALUES.get(value);
 }
 
-/** Keep only supported model preferences when restoring or accepting older clients. */
+/** Drop retired preference fields without relaxing validation of incoming values. */
 export function normalizeSessionModelSelection(selection: SessionModelSelection): SessionModelSelection {
   if (selection.mode === "auto") return { mode: "auto" };
   if (selection.mode !== "model") return selection;
@@ -97,4 +97,21 @@ export function normalizeSessionModelSelection(selection: SessionModelSelection)
     ...(selection.reasoning !== undefined ? { reasoning: selection.reasoning } : {}),
     ...(selection.speed !== undefined ? { speed: selection.speed } : {}),
   };
+}
+
+/** Historical effort choices can expire after upgrades or model configuration changes. */
+export function restoreSessionModelSelection(
+  projectKey: string,
+  selection: SessionModelSelection,
+  env: NodeJS.ProcessEnv = process.env,
+): SessionModelSelection {
+  const restored = normalizeSessionModelSelection(selection);
+  if (restored.mode !== "model" || restored.reasoning === undefined) return restored;
+  const item = listModelCatalog({ projectKey }, env).items.find(
+    candidate => candidate.provider === restored.provider && candidate.model === restored.model,
+  );
+  if (!item?.capabilities.reasoning?.values?.includes(restored.reasoning)) {
+    delete restored.reasoning;
+  }
+  return restored;
 }

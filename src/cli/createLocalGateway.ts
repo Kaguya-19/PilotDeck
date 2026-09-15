@@ -1,5 +1,4 @@
 import type { ExplicitModelSelection } from "../gateway/protocol/types.js";
-import { normalizeSessionModelSelection } from "../gateway/dialog/modelCatalog.js";
 import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync as mkdirSyncFs, renameSync } from "node:fs";
 import { dirname, resolve, join as joinPath } from "node:path";
@@ -104,7 +103,7 @@ import { ExtensionWatchManager, type ExtensionWatchEvent } from "./ExtensionWatc
 import { createTelemetryCollector, type TelemetryClient } from "../telemetry/index.js";
 import { UploadStore } from "../gateway/dialog/UploadStore.js";
 import { DialogGatewayError } from "../gateway/dialog/errors.js";
-import { listModelCatalog, validateExplicitModelSelection, validateModelSelection } from "../gateway/dialog/modelCatalog.js";
+import { listModelCatalog, normalizeSessionModelSelection, restoreSessionModelSelection, validateExplicitModelSelection, validateModelSelection } from "../gateway/dialog/modelCatalog.js";
 import { createDialogProjectRegistry } from "../gateway/dialog/projectRegistry.js";
 import type { SessionModelSelection } from "../gateway/protocol/types.js";
 import { listCommands } from "../gateway/dialog/commands.js";
@@ -349,7 +348,7 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
     if (!sessionKey?.trim()) throw new DialogGatewayError("INVALID_SESSION_KEY", "sessionKey is required.");
     const storage = createAgentProjectSessionStorage({ projectRoot: projectKey, pilotHome, sessionId: sessionKey, now });
     const replay = replayTranscriptEntries((await readTranscript(storage.transcriptPath)).entries);
-    return replay.metadata.modelSelection ? normalizeSessionModelSelection(replay.metadata.modelSelection) : undefined;
+    return replay.metadata.modelSelection ? restoreSessionModelSelection(projectKey, replay.metadata.modelSelection, env) : undefined;
   };
   const modelResult = async (projectKey: string, sessionKey: string, saved?: SessionModelSelection) => {
     const snapshot = loadPilotConfig({ projectRoot: projectKey, env }).config;
