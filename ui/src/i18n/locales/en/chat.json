@@ -689,5 +689,47 @@
     "updated": "Updated this turn",
     "collapse": "Collapse",
     "showAll": "View all {{count}} files"
+  },
+  "toolDisplay": {
+    "collapse": "Limit height",
+    "full": "Expand fully",
+    "copy": "Copy",
+    "details": "Tool details",
+    "output": "Output",
+    "raw": "Raw parameters and result",
+    "success": "Success",
+    "failed": "Failed",
+    "exitCode": "Exit {{code}}",
+    "executing": "Running…",
+    "actionRequired": "Action required",
+    "noResult": "No result recorded",
+    "noOutput": "No output",
+    "fileContent": "File content",
+    "changes": "Changes",
+    "noChanges": "No changes",
+    "running": {
+      "command": "Running",
+      "write": "Writing",
+      "edit": "Editing",
+      "read": "Reading",
+      "search": "Searching",
+      "tool": "Using"
+    },
+    "pending": {
+      "command": "Command",
+      "write": "Write",
+      "edit": "Edit",
+      "read": "Read",
+      "search": "Search",
+      "tool": "Tool"
+    },
+    "done": {
+      "command": "Ran",
+      "write": "Wrote",
+      "edit": "Edited",
+      "read": "Read",
+      "search": "Searched",
+      "tool": "Used"
+    }
   }
 }

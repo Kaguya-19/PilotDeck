@@ -327,7 +327,7 @@ function MessageRowV2({
 
   if (delegate) {
     return withProcessRows(
-      <div className="ui-v2-legacy-row">
+      <div className="ui-v2-legacy-row min-w-0 w-full">
         <MessageComponent
           message={message}
           prevMessage={prevMessage}
@@ -343,6 +343,7 @@ function MessageRowV2({
           selectedProject={selectedProject ?? null}
           provider={provider}
           hideHeader
+          isSessionRunning={isSessionRunning}
         />
       </div>,
     );

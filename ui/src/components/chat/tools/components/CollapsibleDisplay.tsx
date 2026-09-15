@@ -19,18 +19,6 @@ interface CollapsibleDisplayProps {
   autoExpandable?: boolean;
 }
 
-const borderColorMap: Record<string, string> = {
-  edit: 'border-l-amber-500 dark:border-l-amber-400',
-  search: 'border-l-gray-400 dark:border-l-gray-500',
-  bash: 'border-l-green-500 dark:border-l-green-400',
-  todo: 'border-l-violet-500 dark:border-l-violet-400',
-  task: 'border-l-violet-500 dark:border-l-violet-400',
-  agent: 'border-l-purple-500 dark:border-l-purple-400',
-  plan: 'border-l-indigo-500 dark:border-l-indigo-400',
-  question: 'border-l-blue-500 dark:border-l-blue-400',
-  default: 'border-l-gray-300 dark:border-l-gray-600',
-};
-
 export const CollapsibleDisplay: React.FC<CollapsibleDisplayProps> = ({
   toolName,
   title,
@@ -47,11 +35,9 @@ export const CollapsibleDisplay: React.FC<CollapsibleDisplayProps> = ({
   autoExpandable = true
 }) => {
   const { t } = useTranslation('common');
-  // Fall back to default styling for unknown/new categories so className never includes "undefined".
-  const borderColor = borderColorMap[toolCategory || 'default'] || borderColorMap.default;
 
   return (
-    <div className={`border-l-2 ${borderColor} my-1 py-0.5 pl-3 ${className}`}>
+    <div className={`my-1 min-w-0 py-0.5 ${className}`}>
       <CollapsibleSection
         title={title}
         toolName={toolName}

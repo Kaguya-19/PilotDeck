@@ -858,20 +858,21 @@ describe('MessagesPaneV2 render behavior', () => {
 
     const { container } = renderPane({ messages, isAssistantWorking: true, runMode: 'plan' });
 
-    const summary = screen.getByText(/Ran 1 command.*1 error/);
+    const summary = screen.getByText(/Ran 1 command/);
     const button = summary.closest('button');
     expect(button).not.toBeNull();
     fireEvent.click(button as HTMLButtonElement);
 
+    const toolButton = container.querySelector('.tool-call button[aria-expanded]') as HTMLButtonElement;
+    expect(toolButton.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(toolButton);
     expect(screen.getByText(/find \. -maxdepth 1 -type f/)).toBeTruthy();
     expect(screen.queryByText('common:uiText.parameters')).toBeNull();
     expect(container.querySelector('.border-l-red-500')).toBeNull();
     expect(screen.queryByRole('button', { name: /permissions\.grant|Grant Bash for this chat/ })).toBeNull();
 
-    const errorSummary = screen.getByText('Tool error').closest('summary');
-    expect(errorSummary).not.toBeNull();
-    const details = errorSummary?.closest('details') as HTMLDetailsElement | null;
-    expect(details?.open).toBe(false);
+    expect(screen.getByText(/Plan mode denies side-effecting tool bash/)).toBeTruthy();
+    expect(summary.textContent).not.toMatch(/error/i);
   });
 
   it('preserves an expanded live process row while streamed tool groups grow', () => {
@@ -1035,11 +1036,10 @@ describe('MessagesPaneV2 render behavior', () => {
     expect(processButton).not.toBeNull();
     fireEvent.click(processButton as HTMLButtonElement);
 
-    const parametersSummary = screen.getByText('common:uiText.parameters').closest('summary');
-    const parametersDetails = parametersSummary?.closest('details') as HTMLDetailsElement | null;
-    expect(parametersDetails?.open).toBe(false);
-    fireEvent.click(parametersSummary as HTMLElement);
-    await waitFor(() => expect(parametersDetails?.open).toBe(true));
+    const parametersSummary = container.querySelector('.tool-call button[aria-expanded]') as HTMLButtonElement;
+    expect(parametersSummary.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(parametersSummary);
+    await waitFor(() => expect(parametersSummary.getAttribute('aria-expanded')).toBe('true'));
 
     const persistedMessages: ChatMessage[] = [
       {
@@ -1071,8 +1071,9 @@ describe('MessagesPaneV2 render behavior', () => {
 
     const completedProcessButton = screen.getByText('Ran 1 command').closest('button');
     expect(completedProcessButton?.getAttribute('aria-expanded')).toBe('true');
-    const persistedParameters = screen.getByText('common:uiText.parameters').closest('details') as HTMLDetailsElement | null;
-    expect(persistedParameters?.open).toBe(true);
+    const persistedParameters = container.querySelector('.tool-call button[aria-expanded]');
+    expect(persistedParameters?.getAttribute('aria-expanded')).toBe('true');
+    expect(screen.getByText(/print\(1\)/)).toBeTruthy();
   });
 
   it('does not search hidden completed process detail content', async () => {
@@ -1402,7 +1403,7 @@ describe('MessagesPaneV2 render behavior', () => {
     expect(screen.queryByText('Reading file')).toBeNull();
   });
 
-  it('folds ordinary failed tools into a compact process row with error count', () => {
+  it('folds ordinary failed tools into a neutral process row without error counts', () => {
     const now = new Date().toISOString();
     const failedResult = {
       content: '<tool_use_error>InputValidationError: missing file_path</tool_use_error>',
@@ -1454,7 +1455,7 @@ describe('MessagesPaneV2 render behavior', () => {
     expect(screen.queryByText('Tool error')).toBeNull();
     expect(screen.queryByText('FailedTool.tsx')).toBeNull();
 
-    const summary = screen.getByText(/Edited 1 file.*Searched 1 time.*2 errors/);
+    const summary = screen.getByText(/Edited 1 file.*Searched 1 time/);
     const button = summary.closest('button');
     expect(button).not.toBeNull();
     expect(button?.className).toContain('inline-flex');
@@ -1466,7 +1467,10 @@ describe('MessagesPaneV2 render behavior', () => {
     fireEvent.click(button as HTMLButtonElement);
 
     expect(screen.getByText('FailedTool.tsx')).toBeTruthy();
-    expect(screen.getAllByText('Tool error').length).toBeGreaterThan(0);
+    expect(summary.textContent).not.toMatch(/error/i);
+    const failedTool = container.querySelector('.tool-call button[aria-expanded]') as HTMLButtonElement;
+    fireEvent.click(failedTool);
+    expect(container.querySelector('.tool-details')).not.toBeNull();
     expect(container.querySelector('.border-l-red-500')).toBeNull();
   });
 

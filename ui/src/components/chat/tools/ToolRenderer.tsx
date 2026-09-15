@@ -17,6 +17,7 @@ interface ToolRendererProps {
   toolResult?: any;
   toolId?: string;
   mode: 'input' | 'result';
+  contentOnly?: boolean;
   onFileOpen?: (filePath: string, diffInfo?: any) => void;
   createDiff?: (oldStr: string, newStr: string) => DiffLine[];
   selectedProject?: Project | null;
@@ -133,6 +134,7 @@ const ToolRendererInner: React.FC<ToolRendererProps> = ({
   toolResult,
   toolId,
   mode,
+  contentOnly = false,
   onFileOpen,
   createDiff,
   selectedProject,
@@ -336,6 +338,8 @@ const ToolRendererInner: React.FC<ToolRendererProps> = ({
         break;
       }
     }
+
+    if (contentOnly) return contentComponent;
 
     // For edit tools, make the title (filename) clickable to open the file
     const handleTitleClick = (canonicalToolName === 'Edit' || canonicalToolName === 'Write' || canonicalToolName === 'ApplyPatch') && contentProps.filePath && onFileOpen

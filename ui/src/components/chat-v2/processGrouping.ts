@@ -596,7 +596,7 @@ function createSyntheticProcessSummary(
     startedAt: startedAt ? String(startedAt) : '',
     endedAt: endedAt ? String(endedAt) : '',
     durationMs: getDurationMs(startedAt, endedAt),
-    state: counts.toolErrorCount > 0 ? 'failed' : 'completed',
+    state: 'completed',
     toolCallCount: counts.toolCallCount,
     toolErrorCount: counts.toolErrorCount,
     ragSearchCount: counts.searchCount,
@@ -1208,12 +1208,6 @@ export function formatCompletedProcessTitle(
       defaultValue: `Used ${counts.otherToolCount} ${counts.otherToolCount === 1 ? 'tool' : 'tools'}`,
     }));
   }
-  if (counts.toolErrorCount > 0) {
-    labels.push(t('process.live.errors', {
-      count: counts.toolErrorCount,
-      defaultValue: `${counts.toolErrorCount} ${counts.toolErrorCount === 1 ? 'error' : 'errors'}`,
-    }));
-  }
 
   return labels.join(' ');
 }
@@ -1334,12 +1328,6 @@ export function processSummaryToTrace(
       ? {
           key: 'searches',
           label: t('process.metrics.searches', { count: searches, defaultValue: '{{count}} searches' }),
-        }
-      : null,
-    errors > 0
-      ? {
-          key: 'errors',
-          label: t('process.metrics.errors', { count: errors, defaultValue: '{{count}} errors' }),
         }
       : null,
   ].filter((metric): metric is ProcessTraceMetric => Boolean(metric));
