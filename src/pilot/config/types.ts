@@ -154,7 +154,7 @@ export type PilotWebSearchCustomProviderConfig = {
  * runtime; `apiKey` and `endpoint` apply to the selected provider.
  */
 export type PilotWebSearchConfig = {
-  /** Defaults to true when omitted. False removes web_search from the tool registry. */
+  /** Missing webSearch section is off; legacy sections without this flag remain enabled. */
   enabled?: boolean;
   provider?: PilotWebSearchProvider;
   apiKey?: string;

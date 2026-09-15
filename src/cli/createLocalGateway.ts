@@ -1,4 +1,5 @@
 import type { ExplicitModelSelection } from "../gateway/protocol/types.js";
+import { isOptionalFeatureEnabled } from "../pilot/config/optionalFeature.js";
 import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync as mkdirSyncFs, renameSync } from "node:fs";
 import { dirname, resolve, join as joinPath } from "node:path";
@@ -900,9 +901,9 @@ class ProjectRuntimeRegistry {
         lister: () => pluginRuntime.getAllSkills(),
       },
       // Pass the YAML-configured web-search provider through to the built-in
-      // `web_search` tool. When absent, the tool may infer GLM/Tavily from
-      // provider-specific environment variables.
-      ...(webSearchConfig?.enabled === false
+      // `web_search` tool. An absent section keeps search out of the registry,
+      // even when provider credentials are available in the environment.
+      ...(!isOptionalFeatureEnabled(webSearchConfig)
         ? { webSearch: false as const }
         : webSearchConfig
           ? {
@@ -1630,33 +1631,18 @@ function ensureRouterConfig(
   defaultSelection: PilotAgentModelSelection,
 ): RouterConfig {
   const defaultRef = { id: defaultSelection.id, provider: defaultSelection.provider, model: defaultSelection.model };
-  if (router?.enabled === false) {
+  if (!router || !isOptionalFeatureEnabled(router)) {
     return { enabled: false };
   }
-  if (router) {
-    // Scenarios is optional at the parse boundary (see schema.ts) — the UI
-    // can persist a partial `router:` block, e.g. user toggled `enabled`
-    // and seeded `tokenSaver.*` without ever opening the Scenarios editor.
-    // Fill `scenarios.default` from `agent.model` so RouterRuntime always
-    // sees a valid map.
-    return {
-      enabled: true,
-      ...router,
-      scenarios: router.scenarios ?? { default: defaultRef },
-      fallback: router.fallback ?? { default: [defaultRef] },
-      tokenSaver: router.tokenSaver ?? buildDefaultTokenSaver(defaultRef),
-      autoOrchestrate: router.autoOrchestrate ?? buildDefaultAutoOrchestrate(),
-      stats: { enabled: true, baselineModel: defaultRef, ...(router.stats ?? {}) },
-    };
-  }
+  // Fill missing settings only for an explicitly configured router.
   return {
     enabled: true,
-    scenarios: { default: defaultRef },
-    fallback: { default: [defaultRef] },
-    zeroUsageRetry: { enabled: true, maxAttempts: 2 },
-    tokenSaver: buildDefaultTokenSaver(defaultRef),
-    autoOrchestrate: buildDefaultAutoOrchestrate(),
-    stats: { enabled: true, baselineModel: defaultRef },
+    ...router,
+    scenarios: router.scenarios ?? { default: defaultRef },
+    fallback: router.fallback ?? { default: [defaultRef] },
+    tokenSaver: router.tokenSaver ?? buildDefaultTokenSaver(defaultRef),
+    autoOrchestrate: router.autoOrchestrate ?? buildDefaultAutoOrchestrate(),
+    stats: { enabled: true, baselineModel: defaultRef, ...(router.stats ?? {}) },
   };
 }
 
