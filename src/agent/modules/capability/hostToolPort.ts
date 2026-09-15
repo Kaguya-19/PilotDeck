@@ -12,6 +12,7 @@ import type {
   HostCapabilityModuleMethod,
   ModuleCallRequest,
   ModuleResponse,
+  ToolAuthorizationPort,
   ToolPort,
 } from "../protocol.js";
 
@@ -37,11 +38,95 @@ export type HostCapabilityToolPortOptions = {
   onAbort?: (reason: string) => void;
 };
 
+/**
+ * Compose permission authorization separately from capability execution.
+ * The wrapped ToolPort remains responsible only for executing authorized
+ * calls, while this adapter preserves ordering and denial result semantics.
+ */
+export function createPermissionAwareToolPort(
+  port: ToolPort,
+  options: {
+    tools?: PilotDeckToolDefinition[];
+    permission?: PermissionDecisionPort;
+    authorization?: ToolAuthorizationPort;
+  } = {},
+): ToolPort {
+  if (!options.permission && !options.authorization) return port;
+  const toolsByName = new Map((options.tools ?? port.list()).map((tool) => [tool.name, tool]));
+  return {
+    list: () => port.list.call(port),
+    async executeAll(calls, context, execution) {
+      const authorize = async (call: PilotDeckToolCall): Promise<PilotDeckToolCall | PilotDeckToolResult> => {
+        if (options.authorization) {
+          const outcome = await options.authorization.authorize(call, context);
+          return "call" in outcome ? outcome.call : outcome.result;
+        }
+        const tool = toolsByName.get(call.name);
+        if (!tool) return call;
+        const decision = await options.permission!.decide(tool, call.input, context, call.id);
+        if (decision.type !== "allow") return permissionDecisionResult(call, decision, context);
+        return { ...call, input: decision.updatedInput ?? call.input };
+      };
+      const slots = new Array<PilotDeckToolResult | undefined>(calls.length);
+      const parallel: Array<{ index: number; call: PilotDeckToolCall }> = [];
+      const sequential: Array<{ index: number; call: PilotDeckToolCall }> = [];
+      calls.forEach((call, index) => {
+        const tool = toolsByName.get(call.name);
+        (tool?.isConcurrencySafe(call.input) ? parallel : sequential).push({ index, call });
+      });
+      const executeGroup = async (group: Array<{ index: number; call: PilotDeckToolCall }>, parallelize: boolean): Promise<void> => {
+        const authorizeEntry = async ({ index, call }: { index: number; call: PilotDeckToolCall }) => ({ index, outcome: await authorize(call) });
+        const authorized = parallelize
+          ? await Promise.all(group.map(authorizeEntry))
+          : await group.reduce(async (previous, entry) => [...await previous, await authorizeEntry(entry)], Promise.resolve([] as Array<Awaited<ReturnType<typeof authorizeEntry>>>));
+        const executable = authorized.flatMap(({ index, outcome }) => "type" in outcome ? [] : [{ index, call: outcome }]);
+        for (const { index, outcome } of authorized) {
+          if ("type" in outcome) slots[index] = outcome;
+        }
+        if (executable.length === 0) return;
+        const results = await port.executeAll.call(port, executable.map(({ call }) => call), context, execution);
+        if (results.length !== executable.length) throw new Error("Tool port returned an incomplete authorized result.");
+        for (const [resultIndex, { index }] of executable.entries()) slots[index] = results[resultIndex];
+      };
+      await executeGroup(parallel, true);
+      await executeGroup(sequential, false);
+      return slots as PilotDeckToolResult[];
+    },
+  };
+}
+
+/** Build a permission policy port without coupling it to tool execution. */
+export function createPermissionToolAuthorizationPort(
+  options: { tools?: PilotDeckToolDefinition[]; permission: PermissionDecisionPort },
+): ToolAuthorizationPort {
+  const toolsByName = new Map((options.tools ?? []).map((tool) => [tool.name, tool]));
+  return {
+    async authorize(call, context) {
+      const tool = toolsByName.get(call.name);
+      if (!tool) return { call };
+      const decision = await options.permission.decide(tool, call.input, context, call.id);
+      return decision.type === "allow"
+        ? { call: { ...call, input: decision.updatedInput ?? call.input } }
+        : { result: permissionDecisionResult(call, decision, context) };
+    },
+  };
+}
+
 /** ToolPort consumer backed by a host-owned capability module. */
 export function createHostCapabilityToolPort(
   callModule: HostCapabilityModuleClient,
   options: HostCapabilityToolPortOptions = {},
 ): ToolPort {
+  // Native callers may still supply a combined options bag. Keep that
+  // compatibility path at the outer adapter; the raw host capability port
+  // below has no permission dependency.
+  if (options.permission) {
+    const { permission, ...executionOptions } = options;
+    return createPermissionAwareToolPort(
+      createHostCapabilityToolPort(callModule, executionOptions),
+      { tools: options.tools, authorization: createPermissionToolAuthorizationPort({ tools: options.tools, permission }) },
+    );
+  }
   const uuid = options.uuid ?? (() => Math.random().toString(36).slice(2));
   return {
     list: () => options.tools ?? [],
@@ -51,34 +136,9 @@ export function createHostCapabilityToolPort(
       execution: AgentExecutionContext,
     ): Promise<PilotDeckToolResult[]> {
       const toolsByName = new Map((options.tools ?? []).map((tool) => [tool.name, tool]));
-      const authorize = async (call: PilotDeckToolCall): Promise<
-        { call: PilotDeckToolCall } | { result: PilotDeckToolResult }
-      > => {
-        const tool = toolsByName.get(call.name);
-        if (!tool || !options.permission) return { call };
-
-        const decision = await options.permission.decide(tool, call.input, context, call.id);
-        if (decision.type !== "allow") {
-          return { result: permissionDecisionResult(call, decision, context) };
-        }
-        return {
-          call: {
-            ...call,
-            input: decision.updatedInput ?? call.input,
-          },
-        };
-      };
 
       if (options.methods?.includes("execute_batch") && calls.length > 0) {
         const resultSlots = new Array<PilotDeckToolResult | undefined>(calls.length);
-        const authorizedCalls = await Promise.all(calls.map(async (call, index) => ({ index, authorization: await authorize(call) })));
-        const executable = authorizedCalls.flatMap(({ index, authorization }) =>
-          "call" in authorization ? [{ index, call: authorization.call }] : [],
-        );
-        for (const { index, authorization } of authorizedCalls) {
-          if ("result" in authorization) resultSlots[index] = authorization.result;
-        }
-        if (executable.length === 0) return resultSlots as PilotDeckToolResult[];
         const response = await callModule({
           runId: execution.runId,
           operationId: execution.operationId ?? options.binding?.operationId ?? execution.turnId,
@@ -87,21 +147,21 @@ export function createHostCapabilityToolPort(
           module: "capability",
           payload: {
             operation: "execute_batch",
-            calls: executable.map(({ call }) => ({ name: call.name, arguments: call.input, toolCallId: call.id })),
+            calls: calls.map((call) => ({ name: call.name, arguments: call.input, toolCallId: call.id })),
             context: serializeToolContext(context),
             execution: serializeExecutionContext(execution),
           },
         });
         const results = response.payload?.results;
         if (!response.ok) {
-          for (const { call, index } of executable) resultSlots[index] = moduleFailureResult(call, response);
+          for (const [index, call] of calls.entries()) resultSlots[index] = moduleFailureResult(call, response);
           return resultSlots as PilotDeckToolResult[];
         }
-        if (!Array.isArray(results) || results.length !== executable.length) {
-          throw new Error("Capability batch response must contain one result for every executable call.");
+        if (!Array.isArray(results) || results.length !== calls.length) {
+          throw new Error("Capability batch response must contain one result for every tool call.");
         }
-        for (const [index, entry] of executable.entries()) {
-          resultSlots[entry.index] = validateBatchToolResult(results[index], entry.call, index);
+        for (const [index, call] of calls.entries()) {
+          resultSlots[index] = validateBatchToolResult(results[index], call, index);
         }
         return resultSlots as PilotDeckToolResult[];
       }
@@ -117,9 +177,6 @@ export function createHostCapabilityToolPort(
       }
 
       const execute = async (call: PilotDeckToolCall): Promise<PilotDeckToolResult> => {
-        const authorization = await authorize(call);
-        if ("result" in authorization) return authorization.result;
-        const executableCall = authorization.call;
         if (execution.abortSignal?.aborted) throw new Error("Tool execution cancelled.");
         const response = await callModule({
           runId: execution.runId,
@@ -128,9 +185,9 @@ export function createHostCapabilityToolPort(
           requestId: `tool-${uuid()}`,
           module: "capability",
           payload: {
-            name: executableCall.name,
-            arguments: executableCall.input,
-            toolCallId: executableCall.id,
+            name: call.name,
+            arguments: call.input,
+            toolCallId: call.id,
             context: serializeToolContext(context),
             execution: serializeExecutionContext(execution),
           },
@@ -169,7 +226,7 @@ export function createHostCapabilityToolPort(
         if (response.ok && payload && typeof payload === "object" && "type" in payload) {
           return payload as unknown as PilotDeckToolResult;
         }
-        return moduleFailureResult(executableCall, response);
+        return moduleFailureResult(call, response);
       };
 
       await Promise.all(concurrent.map(async ({ index, call }) => {

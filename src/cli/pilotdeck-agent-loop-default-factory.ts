@@ -25,7 +25,7 @@ import {
   readHostPermissionModuleMethods,
 } from "../agent/modules/protocol.js";
 import { AgentLoop } from "../agent/loop/AgentLoop.js";
-import { createAgentTurnCapabilities } from "../agent/loop/AgentTurnCapabilities.js";
+import { createSidecarAgentTurnCapabilities } from "../agent/loop/AgentTurnCapabilities.js";
 import type { AgentRuntimeConfig } from "../agent/runtime/AgentRuntimeConfig.js";
 import { parseAgentRunMode } from "../agent/protocol/input.js";
 import {
@@ -177,7 +177,6 @@ export const createSidecarExecution: SidecarExecutionFactory = async ({ request,
     onAbort: abortExecution,
   });
   const dependencies = {
-    router: {} as never,
     ports: {
       ...sidecarPorts,
       tools: planTodo ? createPlanTodoAwareToolPort(sidecarPorts.tools, planTodo) : sidecarPorts.tools,
@@ -191,7 +190,7 @@ export const createSidecarExecution: SidecarExecutionFactory = async ({ request,
   };
   const loop = new AgentLoop(
     config,
-    createAgentTurnCapabilities(config, dependencies),
+    createSidecarAgentTurnCapabilities(config, dependencies),
     parseAgentLoopSeedStateProjection(payload.seedState),
   );
   return {

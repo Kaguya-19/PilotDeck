@@ -12,6 +12,21 @@
 [04 DSH 风格模块化 Roadmap](04-dsh-modularization-roadmap.zh.md) 的排期功能；04 保留为
 决策、对拍和已完成切片的审计历史。
 
+### 2026-09-15 Sidecar 组合解耦
+
+sidecar 已改用 `SidecarAgentTurnCapabilityComposition`：其 public composition 不接收 Router 或
+`AgentRuntimeDependencies`。主模型只要求 `ModelExecutionPort`；没有显式
+`AuxiliaryModelPort` 时，不再隐式回退到 Router `stream`。Router fallback 仅保留在 native
+compatibility composition。
+
+host 工具边界拆为独立的 `ToolAuthorizationPort` 与 raw `ToolExecutionPort`：授权 policy 可以替换，
+capability execution 不再拥有 permission decision。默认 adapter 保持原来的批量、并发、参数 rewrite 和
+拒绝结果语义。sidecar transport 将 model/capability/permission/context/lifecycle/event 作为显式 per-turn
+handler composition；Module Protocol v2 的 module 名称、字段和 durable owner 均未改变。
+
+Context consumer 进一步按 prepare/tool-result/recovery/capture/compaction 拆为独立 ports；sidecar
+handler 只调用相应 port，context runtime aggregate 与 `budgetEvaluator` 都不跨 protocol 边界。
+
 ### 2026-09-14 模型栈可插拔解耦
 
 参考 DSH 的 `llm`、`llm-retry`、`token-meter` 与 bundle 分层，AgentLoop-facing model view

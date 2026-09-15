@@ -14,7 +14,8 @@ import type {
   PilotDeckToolDefinition,
   PilotDeckToolRuntimeContext,
 } from "../../../tool/index.js";
-import type { PilotDeckPlanTodoStateHandle, PilotDeckTodoItem, PilotDeckTodoUpdate } from "../../../tool/protocol/types.js";
+import type { PilotDeckPlanTodoStateHandle } from "../../../tool/protocol/types.js";
+import { createHostPlanTodoModuleHandler } from "../capability/hostPlanTodoModuleHandler.js";
 import { HostToolCheckpoint } from "../checkpoint/hostToolCheckpoint.js";
 import { parseAgentLoopSeedStateProjection, serializeAgentLoopSeedStateProjection } from "../checkpoint/seedStateProjection.js";
 import { HostPermissionModeState } from "../permission/hostPermissionModeState.js";
@@ -221,6 +222,17 @@ type CachedModuleResponse = {
   response: ModuleResponse;
 };
 
+/** One host-owned Module Protocol handler. Handlers are composed per turn. */
+type SidecarModuleHandler = (call: ModuleCallRequest) => Promise<Record<string, unknown>>;
+type SidecarModuleHandlers = Readonly<{
+  model: SidecarModuleHandler;
+  capability: SidecarModuleHandler;
+  permission: SidecarModuleHandler;
+  context: SidecarModuleHandler;
+  lifecycle: SidecarModuleHandler;
+  event: SidecarModuleHandler;
+}>;
+
 /** A new sidecar instance has no authority to replay a prior process's stream. */
 class SidecarInstanceRestartedError extends Error {
   constructor() {
@@ -255,6 +267,8 @@ class SidecarTurnProtocol {
   private reconnectFailureObserved = false;
   private resultUnknownSource: "sidecar_final" | "transport_interruption" | undefined;
   private readonly hostToolCheckpoint: HostToolCheckpoint;
+  private readonly handlers: SidecarModuleHandlers;
+  private readonly planTodoHandler: (call: ModuleCallRequest) => Promise<Record<string, unknown>>;
 
   constructor(private readonly options: {
     config: AgentRuntimeConfig;
@@ -274,6 +288,19 @@ class SidecarTurnProtocol {
     this.runId = options.input.execution?.runId ?? `run-${options.uuid()}`;
     this.operationId = options.input.execution?.operationId ?? options.input.turnId;
     this.requestId = `request-${options.uuid()}`;
+    this.planTodoHandler = createHostPlanTodoModuleHandler({
+      sessionId: options.input.sessionId,
+      turnId: options.input.turnId,
+      resolve: () => options.capabilities.planMode.planTodoManager?.forSession(options.input.sessionId),
+    });
+    this.handlers = Object.freeze({
+      model: (call) => this.dispatchModel(call),
+      capability: (call) => this.dispatchCapability(call),
+      permission: (call) => this.dispatchPermission(call),
+      context: (call) => this.dispatchContext(call),
+      lifecycle: (call) => this.dispatchLifecycle(call),
+      event: (call) => this.dispatchEvent(call),
+    });
   }
 
   async *execute(connection: AgentLoopSidecarConnection): AsyncGenerator<AgentEvent, SidecarTerminal, unknown> {
@@ -824,15 +851,9 @@ class SidecarTurnProtocol {
   }
 
   private async dispatchModule(call: ModuleCallRequest): Promise<Record<string, unknown>> {
-    switch (call.module) {
-      case "model": return this.dispatchModel(call);
-      case "capability": return this.dispatchCapability(call);
-      case "permission": return this.dispatchPermission(call);
-      case "context": return this.dispatchContext(call);
-      case "lifecycle": return this.dispatchLifecycle(call);
-      case "event": return this.dispatchEvent(call);
-      default: throw new Error(`Unsupported sidecar host module: ${call.module}`);
-    }
+    const handler = this.handlers[call.module as keyof SidecarModuleHandlers];
+    if (!handler) throw new Error(`Unsupported sidecar host module: ${call.module}`);
+    return handler(call);
   }
 
   private async dispatchModel(call: ModuleCallRequest): Promise<Record<string, unknown>> {
@@ -857,8 +878,8 @@ class SidecarTurnProtocol {
 
   private async dispatchCapability(call: ModuleCallRequest): Promise<Record<string, unknown>> {
     const operation = stringField(call.payload, "operation");
+    if (operation === "plan_todo") return this.planTodoHandler(call);
     const planTodo = this.options.capabilities.planMode.planTodoManager?.forSession(this.options.input.sessionId);
-    if (operation === "plan_todo") return this.dispatchPlanTodo(call, planTodo);
     const context = toolRuntimeContext(
       call.payload.context,
       this.options.config,
@@ -892,41 +913,6 @@ class SidecarTurnProtocol {
     throw new Error(`Unsupported sidecar capability operation: ${operation}`);
   }
 
-  private async dispatchPlanTodo(
-    call: ModuleCallRequest,
-    planTodo: PilotDeckPlanTodoStateHandle | undefined,
-  ): Promise<Record<string, unknown>> {
-    if (!planTodo) throw new Error("Host did not provide a plan/todo capability.");
-    const sessionId = stringField(call.payload, "sessionId");
-    const turnId = stringField(call.payload, "turnId");
-    if (sessionId !== this.options.input.sessionId || turnId !== this.options.input.turnId) {
-      throw new Error("Plan/todo capability identity does not match the active host turn.");
-    }
-    const method = stringField(call.payload, "method");
-    if (method === "read") return { snapshot: planTodo.getSnapshot() };
-    if (method === "mark_plan_approved") {
-      await planTodo.markPlanApproved(stringField(call.payload, "plan"), { turnId });
-    } else if (method === "record_todo_write") {
-      await planTodo.recordTodoWrite(
-        stringField(call.payload, "markdown"),
-        todoItems(call.payload.todos),
-        { turnId, ...(optionalStringField(call.payload, "reason") ? { reason: optionalStringField(call.payload, "reason") } : {}) },
-      );
-    } else if (method === "write_todos") {
-      await planTodo.writeTodos(todoUpdates(call.payload.todos), {
-        turnId,
-        ...(typeof call.payload.markdown === "string" ? { markdown: call.payload.markdown } : {}),
-        ...(call.payload.merge === true ? { merge: true } : {}),
-        ...(optionalStringField(call.payload, "reason") ? { reason: optionalStringField(call.payload, "reason") } : {}),
-      });
-    } else if (method === "mark_tool_progress") {
-      await planTodo.markToolProgressChanged(stringField(call.payload, "toolName"), { turnId });
-    } else {
-      throw new Error(`Unsupported sidecar plan/todo method: ${method}`);
-    }
-    return { snapshot: planTodo.getSnapshot() };
-  }
-
   private async dispatchPermission(call: ModuleCallRequest): Promise<Record<string, unknown>> {
     if (stringField(call.payload, "operation") !== "decide") {
       throw new Error("Unsupported sidecar permission operation.");
@@ -952,8 +938,6 @@ class SidecarTurnProtocol {
   }
 
   private async dispatchContext(call: ModuleCallRequest): Promise<Record<string, unknown>> {
-    const context = this.options.capabilities.context;
-    if (!context) throw new Error("Host did not provide a context capability.");
     const operation = stringField(call.payload, "operation");
     const input = withContextIdentity(asRecord(call.payload.input), this.options.input, this.options.config);
     // Before routing, the sidecar has no model-specific window to serialize.
@@ -966,14 +950,20 @@ class SidecarTurnProtocol {
     ) {
       input.maxContextTokens = this.options.config.maxContextTokens;
     }
-    if (operation === "prepare_for_model") return { result: await context.prepareForModel(input as never) };
-    if (operation === "apply_tool_results" && context.applyToolResults) return { result: await context.applyToolResults(input as never) };
-    if (operation === "recover_from_model_error" && context.recoverFromModelError) return { result: await context.recoverFromModelError(input as never) };
-    if (operation === "capture_turn" && context.captureTurn) {
-      await context.captureTurn(input as never);
+    if (operation === "prepare_for_model") return { result: await this.options.capabilities.contextPreparation.prepareForModel(input as never) };
+    if (operation === "apply_tool_results" && this.options.capabilities.contextToolResults) {
+      return { result: await this.options.capabilities.contextToolResults.applyToolResults(input as never) };
+    }
+    if (operation === "recover_from_model_error" && this.options.capabilities.contextRecovery) {
+      return { result: await this.options.capabilities.contextRecovery.recoverFromModelError(input as never) };
+    }
+    if (operation === "capture_turn" && this.options.capabilities.contextCapture) {
+      await this.options.capabilities.contextCapture.captureTurn(input as never);
       return { result: null };
     }
-    if (operation === "try_auto_compact" && context.tryAutoCompact) return { result: await context.tryAutoCompact(input as never) };
+    if (operation === "try_auto_compact" && this.options.capabilities.contextCompaction) {
+      return { result: await this.options.capabilities.contextCompaction.tryAutoCompact(input as never) };
+    }
     throw new Error(`Host context capability does not support ${operation}.`);
   }
 
@@ -1103,15 +1093,13 @@ function moduleResponse(
 }
 
 function hostModuleCapabilities(capabilities: AgentTurnCapabilities): Record<string, unknown> {
-  const context = capabilities.context;
-  const contextMethods = context
-    && !isNoopAgentTurnContextPort(context)
+  const contextMethods = !isNoopAgentTurnContextPort(capabilities.context)
     ? [
         "prepare_for_model",
-        ...(context.applyToolResults ? ["apply_tool_results"] : []),
-        ...(context.recoverFromModelError ? ["recover_from_model_error"] : []),
-        ...(context.captureTurn ? ["capture_turn"] : []),
-        ...(context.tryAutoCompact ? ["try_auto_compact"] : []),
+        ...(capabilities.contextToolResults ? ["apply_tool_results"] : []),
+        ...(capabilities.contextRecovery ? ["recover_from_model_error"] : []),
+        ...(capabilities.contextCapture ? ["capture_turn"] : []),
+        ...(capabilities.contextCompaction ? ["try_auto_compact"] : []),
       ]
     : [];
   return {
@@ -1207,19 +1195,10 @@ function toolRuntimeContext(
   const remote = asRecord(value);
   const planDirectoryPath = capabilities.planMode.planFileManager?.getPlanDirectoryPath();
   const fileState = checkpoint.toolContextState();
-  const auxiliaryModel = capabilities.model.auxiliary
-    ?? (capabilities.model.routing?.stream
-      ? {
-          stream: (request: CanonicalModelRequest, signal?: AbortSignal) =>
-            capabilities.model.routing!.stream!(request, {
-              sessionId: input.sessionId,
-              turnId: input.turnId,
-              projectPath: config.cwd,
-              abortSignal: signal,
-              isMainAgent: false,
-            }),
-        }
-      : undefined);
+  // Sidecar composition accepts an explicitly injected auxiliary provider only.
+  // Router-backed fallback remains available exclusively through native legacy
+  // composition, so this process can run without any Router implementation.
+  const auxiliaryModel = capabilities.model.auxiliary;
   return {
     sessionId: input.sessionId,
     turnId: input.turnId,
@@ -1499,51 +1478,6 @@ function optionalStringField(value: Record<string, unknown> | undefined, field: 
     throw new Error(`Sidecar payload field ${field} must be a string when provided.`);
   }
   return candidate;
-}
-
-function todoItems(value: unknown): PilotDeckTodoItem[] {
-  if (!Array.isArray(value)) throw new Error("Sidecar payload field todos must be an array.");
-  return value.map((item, index) => {
-    const record = asRecord(item);
-    const content = optionalStringField(record, "content");
-    const status = record?.status;
-    if (content === undefined || !isTodoStatus(status)) {
-      throw new Error(`Sidecar todo item at index ${index} must contain string content and a valid status.`);
-    }
-    const id = optionalStringField(record, "id");
-    const priority = optionalStringField(record, "priority");
-    return {
-      content,
-      status,
-      ...(id === undefined ? {} : { id }),
-      ...(priority === undefined ? {} : { priority }),
-    };
-  });
-}
-
-function todoUpdates(value: unknown): PilotDeckTodoUpdate[] {
-  if (!Array.isArray(value)) throw new Error("Sidecar payload field todos must be an array.");
-  return value.map((item, index) => {
-    const record = asRecord(item);
-    if (!record) throw new Error(`Sidecar todo update at index ${index} must be an object.`);
-    const id = optionalStringField(record, "id");
-    const content = optionalStringField(record, "content");
-    const priority = optionalStringField(record, "priority");
-    const status = record.status;
-    if (status !== undefined && !isTodoStatus(status)) {
-      throw new Error(`Sidecar todo update at index ${index} has an invalid status.`);
-    }
-    return {
-      ...(id === undefined ? {} : { id }),
-      ...(content === undefined ? {} : { content }),
-      ...(status === undefined ? {} : { status }),
-      ...(priority === undefined ? {} : { priority }),
-    };
-  });
-}
-
-function isTodoStatus(value: unknown): value is PilotDeckTodoItem["status"] {
-  return value === "pending" || value === "in_progress" || value === "completed" || value === "cancelled";
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {

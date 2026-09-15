@@ -17,7 +17,7 @@ import type { RouterRuntime } from "../../router/index.js";
 import type { AgentEvent, AgentEventEmitter } from "../protocol/events.js";
 import type { ModelProtocol } from "../../model/index.js";
 import type { PermissionDecisionPort } from "../../permission/index.js";
-import type { ModelInvokerPort, ToolPort } from "../modules/protocol.js";
+import type { ModelInvokerPort, ToolAuthorizationPort, ToolPort } from "../modules/protocol.js";
 import type { AgentRuntimeScope } from "../scope/AgentRuntimeScope.js";
 import type { SubagentProvider } from "../sub/SubagentProvider.js";
 import type { SubagentProviderRegistry } from "../sub/SubagentProviderRegistry.js";
@@ -31,6 +31,8 @@ import type { GoalPort } from "../../goal/protocol/types.js";
 export type AgentRuntimePorts = {
   model?: ModelInvokerPort;
   tools?: ToolPort;
+  /** Optional explicit authorization policy for host/sidecar tool composition. */
+  authorization?: ToolAuthorizationPort;
   metadata?: import("../loop/AgentTurnCapabilities.js").ModelMetadataPort;
   /** Optional routing policy view used by AgentLoop after model execution is selected. */
   routing?: Pick<AgentRouterRuntime, "materializeRequest" | "invalidateSticky"> & {

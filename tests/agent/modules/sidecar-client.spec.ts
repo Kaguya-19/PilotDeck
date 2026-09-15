@@ -1482,12 +1482,22 @@ test("sidecar host capability calls reconstruct plan/todo and host execution ser
       subagentTimeoutMs: 456,
     },
     dependencies: {
-      router: {
-        stream: async function* (_request: unknown, context: Record<string, unknown>) {
-          routedModelContexts.push(context);
+      router: {} as never,
+      ports: {
+        model: noopModel(),
+        tools,
+        auxiliaryModel: {
+          async *stream(_request, signal) {
+            routedModelContexts.push({
+              sessionId: "plan-todo-host-session",
+              turnId: "plan-todo-host-turn",
+              projectPath: "/workspace",
+              abortSignal: signal,
+              isMainAgent: false,
+            });
+          },
         },
-      } as never,
-      ports: { model: noopModel(), tools },
+      },
       tools: { registry: { list: () => [] } as never, scheduler: { executeAll: async () => [] } as never },
       planTodoManager: { forSession: () => handle },
       auditRecorder: auditRecorder as never,

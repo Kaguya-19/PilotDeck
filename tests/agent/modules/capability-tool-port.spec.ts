@@ -3,6 +3,8 @@ import test from "node:test";
 
 import {
   createHostCapabilityToolPort,
+  createPermissionAwareToolPort,
+  createPermissionToolAuthorizationPort,
   createToolSchedulerPort,
 } from "../../../src/agent/modules/capability/index.js";
 import type { PilotDeckToolDefinition, PilotDeckToolRuntimeContext } from "../../../src/tool/index.js";
@@ -149,6 +151,25 @@ test("host capability consumer gates side effects through the host permission po
     const recovery = result.metadata?.recovery as { failureClass?: string } | undefined;
     assert.equal(recovery?.failureClass, "ask_user");
   }
+});
+
+test("authorization policy is independently composable around raw capability execution", async () => {
+  const capabilityCalls: string[] = [];
+  const raw = createHostCapabilityToolPort(async (request) => {
+    capabilityCalls.push(String(request.payload.name));
+    return {
+      kind: "response", messageId: "response", inReplyTo: "call", ok: true,
+      payload: { type: "success", toolCallId: String(request.payload.toolCallId), toolName: String(request.payload.name), content: [], startedAt: "now", completedAt: "now" },
+    };
+  }, { tools: [{ ...tool("write"), isReadOnly: () => false }] });
+  const authorization = createPermissionToolAuthorizationPort({
+    tools: [{ ...tool("write"), isReadOnly: () => false }],
+    permission: { async decide() { return { type: "deny", reason: { type: "runtime", message: "blocked" }, message: "blocked" }; } },
+  });
+  const port = createPermissionAwareToolPort(raw, { authorization });
+  const [result] = await port.executeAll([{ id: "call-1", name: "write", input: {} }], runtimeContext, executionContext);
+  assert.deepEqual(capabilityCalls, []);
+  assert.equal(result?.type, "error");
 });
 
 test("host capability consumer keeps permission within the native concurrency phase", async () => {

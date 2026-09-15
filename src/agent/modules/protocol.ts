@@ -415,3 +415,19 @@ export type ToolPort = {
     execution: ModelExecutionContext,
   ): Promise<import("../../tool/index.js").PilotDeckToolResult[]>;
 };
+
+/** Result of authorizing one tool call before any capability side effect. */
+export type ToolAuthorizationOutcome =
+  | { call: import("../../tool/index.js").PilotDeckToolCall }
+  | { result: import("../../tool/index.js").PilotDeckToolResult };
+
+/**
+ * Host policy boundary for tool admission. Execution providers do not own
+ * permission decisions; a composition can replace either side independently.
+ */
+export type ToolAuthorizationPort = {
+  authorize(
+    call: import("../../tool/index.js").PilotDeckToolCall,
+    context: import("../../tool/index.js").PilotDeckToolRuntimeContext,
+  ): Promise<ToolAuthorizationOutcome>;
+};

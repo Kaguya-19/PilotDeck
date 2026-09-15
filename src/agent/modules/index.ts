@@ -41,6 +41,8 @@ export {
   type ModuleRetryability,
   type PreparedModelInvocation,
   type ToolPort,
+  type ToolAuthorizationPort,
+  type ToolAuthorizationOutcome,
 } from "./protocol.js";
 export { validateModuleMessage } from "./protocol.js";
 export {
@@ -89,8 +91,10 @@ export {
 export { createRouterModelInvokerPort, createToolSchedulerPort } from "./adapters.js";
 export {
   createHostCapabilityToolPort,
+  createPermissionAwareToolPort,
   createDurableToolPort,
   createHostPlanTodoPort,
+  createHostPlanTodoModuleHandler,
   createPlanTodoAwareToolPort,
   type HostCapabilityModuleClient,
   type HostCapabilityToolPortOptions,

@@ -1,6 +1,10 @@
 import type { PilotDeckToolDefinition } from "../../../tool/index.js";
 import type { PermissionDecisionPort } from "../../../permission/index.js";
-import { createHostCapabilityToolPort } from "../capability/hostToolPort.js";
+import {
+  createHostCapabilityToolPort,
+  createPermissionAwareToolPort,
+  createPermissionToolAuthorizationPort,
+} from "../capability/hostToolPort.js";
 import { createHostModelInvokerPort } from "../llm/hostModelInvokerPort.js";
 import type {
   HostCapabilityModuleMethod,
@@ -9,6 +13,7 @@ import type {
   ModuleCallRequest,
   ModuleResponse,
   ToolPort,
+  ToolAuthorizationPort,
 } from "../protocol.js";
 
 export type SidecarModuleCall = Omit<ModuleCallRequest, "kind" | "messageId" | "method"> & {
@@ -31,23 +36,30 @@ export function createSidecarPorts(
   options: {
     tools?: PilotDeckToolDefinition[];
     permission?: PermissionDecisionPort;
+    authorization?: ToolAuthorizationPort;
     binding?: SidecarModuleBinding;
     uuid?: () => string;
     modelMethods?: readonly HostModelModuleMethod[];
     capabilityMethods?: readonly HostCapabilityModuleMethod[];
     onAbort?: (reason: string) => void;
   } = {},
-): { model: ModelInvokerPort; tools: ToolPort } {
+): { model: ModelInvokerPort; tools: ToolPort; authorization?: ToolAuthorizationPort } {
   const uuid = options.uuid ?? (() => Math.random().toString(36).slice(2));
+  const capability = createHostCapabilityToolPort(callModule, {
+    tools: options.tools,
+    binding: options.binding,
+    uuid,
+    methods: options.capabilityMethods,
+    onAbort: options.onAbort,
+  });
+  const authorization = options.authorization
+    ?? (options.permission ? createPermissionToolAuthorizationPort({ tools: options.tools, permission: options.permission }) : undefined);
   return {
     model: createHostModelInvokerPort(callModule, { uuid, methods: options.modelMethods }),
-    tools: createHostCapabilityToolPort(callModule, {
+    tools: createPermissionAwareToolPort(capability, {
       tools: options.tools,
-      permission: options.permission,
-      binding: options.binding,
-      uuid,
-      methods: options.capabilityMethods,
-      onAbort: options.onAbort,
+      authorization,
     }),
+    ...(authorization ? { authorization } : {}),
   };
 }

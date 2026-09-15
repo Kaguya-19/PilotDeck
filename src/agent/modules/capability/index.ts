@@ -1,5 +1,7 @@
 export {
   createHostCapabilityToolPort,
+  createPermissionAwareToolPort,
+  createPermissionToolAuthorizationPort,
   type HostCapabilityModuleClient,
   type HostCapabilityToolPortOptions,
 } from "./hostToolPort.js";
@@ -11,4 +13,5 @@ export {
   type HostPlanTodoPortOptions,
 } from "./hostPlanTodoPort.js";
 export { createToolSchedulerPort } from "./toolSchedulerAdapter.js";
+export { createHostPlanTodoModuleHandler } from "./hostPlanTodoModuleHandler.js";
 export { createDurableToolPort } from "./durableToolPort.js";

@@ -113,6 +113,23 @@ AgentTurnRoutingPort / ModelMetadataPort / ModelBudgetPort / AuxiliaryModelPort
 Router facade --------------------------^（legacy/default adapter，可选）
 ```
 
+### Sidecar 专属组合边界
+
+sidecar 使用 `SidecarAgentTurnCapabilityComposition`，只接受显式 consumer ports，不接受
+`AgentRuntimeDependencies.router` 或完整 native dependency bag。其最小组合是
+`ModelExecutionPort + ToolExecutionPort`；routing、metadata、budget、auxiliary、context、permission、
+plan、subagent 和 lifecycle 都是独立可选 port。未提供 `AuxiliaryModelPort` 时 sidecar 不会回退到
+Router `stream`。
+
+Context 同样拆为 `ContextPreparationPort`、`ContextToolResultPort`、`ContextRecoveryPort`、
+`ContextCapturePort` 和 `ContextCompactionPort`；host 只广告实际支持的 operation，预算 projection 仍由
+host 重建，不经 wire 传递 evaluator。旧 `AgentTurnContextPort` 仅保留兼容聚合 view。
+
+工具路径分为 `ToolAuthorizationPort -> ToolExecutionPort`：前者由 host policy 决定 allow/deny/
+input rewrite，后者只调用 capability。`ToolPort` 与 `PilotDeckToolRuntimeContext` 暂保留给 native
+和既有工具实现的 compatibility adapter；sidecar protocol 仍传 canonical projection，不传 router、
+session、persistence 或完整 runtime object。
+
 `ModelExecutionPort` 是 AgentLoop 的核心 consumer contract。直接构造 capabilities 时 Router 不是必需 owner，但完整
 `AgentRuntimeDependencies`/session/Gateway composition 仍保留 Router 依赖。显式 execution provider 可以绕过 Router，空
 Router 不能提供模型执行。`ModelInvokerPort`、旧 aggregate 字段和 `PreparedModelInvocation.opaque` 仅在兼容

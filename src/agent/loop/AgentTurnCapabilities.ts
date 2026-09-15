@@ -7,6 +7,7 @@ import type {
   AgentContextCaptureTurnInput,
 } from "../../context/ContextRuntime.js";
 import { NullContextRuntime } from "../../context/NullContextRuntime.js";
+import type { AgentContextRuntime } from "../../context/ContextRuntime.js";
 import type { TokenAccountingRuntime } from "../../context/index.js";
 import type { AutoCompactResult, CompactionAutoCompactInput } from "../../context/compaction/CompactionPort.js";
 import type { LifecycleRuntime } from "../../lifecycle/index.js";
@@ -28,7 +29,7 @@ import type {
 import type { PlanFileManager } from "../../tool/builtin/planFile.js";
 import type { PlanTodoPort } from "../../plan-todo/runtime/PlanTodoPort.js";
 import type { GoalPort } from "../../goal/protocol/types.js";
-import type { ModelInvokerPort, ToolPort } from "../modules/protocol.js";
+import type { ModelInvokerPort, ToolAuthorizationPort, ToolPort } from "../modules/protocol.js";
 import type { CanonicalModelEvent, CanonicalModelRequest } from "../../model/index.js";
 import type { AgentLoopOperationLedger } from "../modules/transport/operationLedger.js";
 import { createRouterModelInvokerPort, createToolSchedulerPort } from "../modules/adapters.js";
@@ -46,6 +47,32 @@ export type AgentTurnRoutingPort = Pick<
 /** Narrow composition input for direct AgentLoop construction. */
 export type AgentTurnCapabilityComposition = Omit<Partial<AgentRuntimeDependencies>, "tools"> & {
   tools?: Partial<AgentRuntimeDependencies["tools"]>;
+};
+
+/**
+ * Sidecar-only composition input. It deliberately has no router or legacy
+ * dependency bag; the transport supplies consumer ports directly.
+ */
+export type SidecarAgentTurnCapabilityComposition = {
+  ports: NonNullable<AgentRuntimeDependencies["ports"]> & {
+    model: ModelExecutionPort;
+    tools: ToolPort;
+  };
+  permission?: PermissionPort;
+  context?: AgentContextRuntime;
+  lifecycle?: LifecycleRuntime;
+  eventEmitter?: AgentEventEmitter;
+  now?: () => Date;
+  uuid?: () => string;
+  sidecarOperationLedger?: AgentLoopOperationLedger;
+  auditRecorder?: PilotDeckToolAuditRecorder;
+  elicitation?: PilotDeckElicitationChannel;
+  fileHistory?: PilotDeckToolFileHistorySink;
+  fileUpdateNotifier?: PilotDeckFileUpdateNotifier;
+  planFileManager?: PlanFileManager;
+  planTodoManager?: PlanTodoPort;
+  goalManager?: GoalPort;
+  oneShotSubagentPort?: OneShotSubagentPort;
 };
 
 /** Primary model execution contract consumed by the loop. */
@@ -85,6 +112,12 @@ export type AgentTurnContextPort = Pick<
   "prepareForModel" | "recoverFromModelError" | "applyToolResults" | "captureTurn" | "tryAutoCompact"
 >;
 
+export type ContextPreparationPort = Pick<AgentTurnContextPort, "prepareForModel">;
+export type ContextRecoveryPort = Required<Pick<AgentTurnContextPort, "recoverFromModelError">>;
+export type ContextToolResultPort = Required<Pick<AgentTurnContextPort, "applyToolResults">>;
+export type ContextCapturePort = Required<Pick<AgentTurnContextPort, "captureTurn">>;
+export type ContextCompactionPort = Required<Pick<AgentTurnContextPort, "tryAutoCompact">>;
+
 export type LifecycleDispatchPort = Pick<LifecycleRuntime, "dispatch">;
 
 export type AgentTurnModelCapabilities = {
@@ -93,6 +126,8 @@ export type AgentTurnModelCapabilities = {
   metadata: ModelMetadataPort;
   budget?: ModelBudgetPort;
   auxiliary?: AuxiliaryModelPort;
+  /** Native compatibility only; sidecar never enables this fallback. */
+  legacyAuxiliaryFallback?: boolean;
   /** @deprecated Use execution. */
   invoker: ModelExecutionPort;
   /** @deprecated Use budget. */
@@ -114,6 +149,8 @@ export type ToolExecutionPort = ToolPort & {
   fileHistory?: PilotDeckToolFileHistorySink;
   fileUpdateNotifier?: PilotDeckFileUpdateNotifier;
 };
+
+export type { ToolAuthorizationPort } from "../modules/protocol.js";
 
 export type PermissionPort = PermissionDecisionPort;
 
@@ -152,11 +189,18 @@ export type AgentTurnCapabilities = Readonly<{
   readonly [AGENT_TURN_CAPABILITIES]: true;
   readonly model: Readonly<AgentTurnModelCapabilities>;
   readonly toolExecution: Readonly<ToolExecutionPort>;
+  /** Policy port is composed around execution by the sidecar host. */
+  readonly toolAuthorization?: ToolAuthorizationPort;
   readonly permission?: PermissionPort;
   readonly interaction: InteractionPort;
   readonly planMode: PlanModePort;
   readonly subagent: SubagentPort;
   readonly goal?: GoalPort;
+  readonly contextPreparation: ContextPreparationPort;
+  readonly contextRecovery?: ContextRecoveryPort;
+  readonly contextToolResults?: ContextToolResultPort;
+  readonly contextCapture?: ContextCapturePort;
+  readonly contextCompaction?: ContextCompactionPort;
   readonly context: AgentTurnContextPort;
   /** @deprecated Use toolExecution, permission, interaction, planMode, subagent, and goal. */
   readonly tools: Readonly<AgentTurnToolCapabilities>;
@@ -209,6 +253,21 @@ export function createAgentTurnCapabilities(
   const context = dependencies.context
     ? createAgentTurnContextPort(dependencies.context)
     : createNoopAgentTurnContextPort();
+  const contextPreparation = Object.freeze({
+    prepareForModel: (input: AgentContextPrepareInput) => context.prepareForModel(input),
+  });
+  const contextRecovery = context.recoverFromModelError
+    ? Object.freeze({ recoverFromModelError: (input: AgentContextRecoveryInput) => context.recoverFromModelError!(input) })
+    : undefined;
+  const contextToolResults = context.applyToolResults
+    ? Object.freeze({ applyToolResults: (input: AgentContextToolResultInput) => context.applyToolResults!(input) })
+    : undefined;
+  const contextCapture = context.captureTurn
+    ? Object.freeze({ captureTurn: (input: AgentContextCaptureTurnInput) => context.captureTurn!(input) })
+    : undefined;
+  const contextCompaction = context.tryAutoCompact
+    ? Object.freeze({ tryAutoCompact: (input: CompactionAutoCompactInput) => context.tryAutoCompact!(input) })
+    : undefined;
   const toolExecutionView = createToolExecutionPort(toolExecution, {
     auditRecorder: dependencies.auditRecorder,
     fileHistory: dependencies.fileHistory,
@@ -240,6 +299,7 @@ export function createAgentTurnCapabilities(
       metadata,
       budget,
       auxiliary,
+      legacyAuxiliaryFallback: Boolean(dependencies.router && !dependencies.ports?.auxiliaryModel),
       invoker: model,
       tokenAccounting: budget,
       getModelMaxContextTokens: metadata.getModelMaxContextTokens,
@@ -249,11 +309,17 @@ export function createAgentTurnCapabilities(
       getModelSupportsPromptCache: metadata.getModelSupportsPromptCache,
     }),
     toolExecution: toolExecutionView,
+    toolAuthorization: dependencies.ports?.authorization,
     permission: dependencies.permission,
     interaction,
     planMode,
     subagent,
     goal: dependencies.goalManager,
+    contextPreparation,
+    contextRecovery,
+    contextToolResults,
+    contextCapture,
+    contextCompaction,
     context,
     tools: legacyTools,
     transport: Object.freeze({ operationLedger: dependencies.sidecarOperationLedger }),
@@ -265,6 +331,14 @@ export function createAgentTurnCapabilities(
     events: Object.freeze({ emit: dependencies.eventEmitter, drain: dependencies.drainEvents }),
     clock: Object.freeze({ now: dependencies.now, uuid: dependencies.uuid }),
   });
+}
+
+/** Build the sidecar consumer view without constructing or accepting a Router. */
+export function createSidecarAgentTurnCapabilities(
+  config: AgentRuntimeConfig,
+  dependencies: SidecarAgentTurnCapabilityComposition,
+): AgentTurnCapabilities {
+  return createAgentTurnCapabilities(config, dependencies as AgentTurnCapabilityComposition);
 }
 
 function createToolExecutionPort(

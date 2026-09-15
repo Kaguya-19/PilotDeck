@@ -264,10 +264,10 @@ export class AgentLoop {
       }
     };
     const captureTurn = async (errored: boolean): Promise<void> => {
-      const hook = this.capabilities.context?.captureTurn;
+      const hook = this.capabilities.contextCapture?.captureTurn;
       if (!hook) return;
       try {
-        await hook.call(this.capabilities.context, {
+        await hook({
           sessionId: input.sessionId,
           turnId: input.turnId,
           messages,
@@ -468,7 +468,7 @@ export class AgentLoop {
       }
 
       let pendingContextBudget: TokenBudgetSnapshot | undefined;
-      const ctx = this.capabilities.context;
+      const ctx = this.capabilities.contextCompaction;
       const preRoutingMaxContextTokens = this.preRoutingMaxContextTokens();
       if (ctx?.tryAutoCompact) {
         try {
@@ -1873,10 +1873,10 @@ export class AgentLoop {
       const [toolResultMsg, ...supplementalMsgs] = projected;
       const supplementalInputs = bindSupplementalMessagesToToolCalls(pairedResults, supplementalMsgs);
       let appendedMessages: CanonicalMessage[] = projected;
-      const ctxApply = this.capabilities.context?.applyToolResults;
+      const ctxApply = this.capabilities.contextToolResults?.applyToolResults;
       if (ctxApply) {
         try {
-          const applied = await ctxApply.call(this.capabilities.context, {
+          const applied = await ctxApply({
             sessionId: input.sessionId,
             turnId: input.turnId,
             toolResultMessage: toolResultMsg,
@@ -2072,8 +2072,8 @@ export class AgentLoop {
     messages: CanonicalMessage[],
     hasAttemptedCompact: boolean,
   ): Promise<ContextRecoveryDecision | undefined> {
-    const ctx = this.capabilities.context;
-    if (!ctx?.recoverFromModelError) {
+    const ctx = this.capabilities.contextRecovery;
+    if (!ctx) {
       return undefined;
     }
     try {
@@ -2095,7 +2095,7 @@ export class AgentLoop {
     input: AgentLoopInput,
     options: { emitInstructionEvents?: boolean } = {},
   ): Promise<CanonicalModelRequest> {
-    const contextRuntime = this.capabilities.context;
+    const contextRuntime = this.capabilities.contextPreparation;
     const planTodo = this.capabilities.planMode.planTodoManager?.forSession(input.sessionId);
     const canPrompt = input.canPrompt ?? this.config.permissionContext.canPrompt;
     const promptBlockedToolNames = canPrompt
@@ -2464,7 +2464,7 @@ export class AgentLoop {
       ...(planDirectoryPath ? { planDirectoryPath } : {}),
     };
     const auxiliaryModel = this.capabilities.model.auxiliary
-      ?? (this.capabilities.model.routing?.stream
+      ?? (this.capabilities.model.legacyAuxiliaryFallback && this.capabilities.model.routing?.stream
         ? {
             stream: (request: CanonicalModelRequest, signal?: AbortSignal) =>
               this.capabilities.model.routing!.stream!(request, {
