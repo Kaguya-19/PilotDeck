@@ -1,5 +1,7 @@
 {
   "copyBlock": {
+    "plainText": "Plain text",
+    "wrap": "Wrap code",
     "code": "Copy code",
     "table": "Copy table",
     "tableMarkdown": "Copy table as Markdown",
