@@ -704,6 +704,12 @@ export default function ComposerV2({
   const selectedModel = modelCatalog.find(
     (item) => item.id === selectedModelId,
   );
+  const selectedReasoning = modelSelection?.mode === "model" ? modelSelection.reasoning : undefined;
+  const selectedReasoningLabel = selectedModel?.capabilities.reasoning
+    ? capabilityValues(selectedModel.capabilities.reasoning).some(value => sameCapabilityValue(selectedReasoning, value))
+      ? reasoningLabels.get(selectedReasoning!)
+      : t("input.models.reasoningLevels.default", { defaultValue: "Default" })
+    : null;
   const selectedModelLabel =
     modelSelection?.mode === "auto"
       ? (t("input.models.auto", { defaultValue: "Auto" }) as string)
@@ -1534,7 +1540,12 @@ export default function ComposerV2({
                       aria-haspopup="dialog"
                       aria-expanded={isModelMenuOpen}
                     >
-                      <span className="truncate">{selectedModelLabel}</span>
+                      <span className="min-w-0 truncate">{selectedModelLabel}</span>
+                      {selectedReasoningLabel && (
+                        <span className="shrink-0 font-normal text-neutral-400 dark:text-neutral-500">
+                          {selectedReasoningLabel}
+                        </span>
+                      )}
                       <ChevronDown
                         className={cn(
                           "pd-composer-control-chevron h-3.5 w-3.5 shrink-0 transition-transform",
