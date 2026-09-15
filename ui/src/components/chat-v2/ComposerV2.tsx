@@ -713,7 +713,7 @@ export default function ComposerV2({
   const selectedReasoningLabel = selectedModel?.capabilities.reasoning
     ? capabilityValues(selectedModel.capabilities.reasoning).some(value => sameCapabilityValue(selectedReasoning, value))
       ? reasoningLabels.get(selectedReasoning!)
-      : t("input.models.reasoningLevels.default", { defaultValue: "Default" })
+      : null
     : null;
   const selectedModelLabel =
     modelSelection?.mode === "auto"
