@@ -3,9 +3,11 @@ import { cleanup, fireEvent, render, screen, within } from '@testing-library/rea
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { I18nextProvider } from 'react-i18next';
 import { createTestI18n } from '../../../i18n/testInstance';
+import { copyTextToClipboard } from '../../../utils/clipboard';
 import { UnifiedToolCall } from './UnifiedToolCall';
 import { calculateDiff } from '../utils/messageTransforms';
 import type { ChatMessage } from '../types/types';
+vi.mock('../../../utils/clipboard', () => ({ copyTextToClipboard: vi.fn(async () => true) }));
 let i18n: Awaited<ReturnType<typeof createTestI18n>>;
 beforeAll(async () => { i18n = await createTestI18n(); });
 afterEach(cleanup);
@@ -77,4 +79,13 @@ it('names skill reads in Chinese and retains the requested skill name', async ()
   fireEvent.click(screen.getByRole('button', { name: '已读取技能 weather' }));
   expect(screen.queryByText('read_skill')).toBeNull();
   expect(screen.getByText('Weather instructions')).toBeTruthy();
+});
+
+
+it.each(['pnpm build', 'printf "hello\\n"\npnpm build'])('copies the original shell command without prompt or output: %s', (command) => {
+  vi.mocked(copyTextToClipboard).mockClear();
+  render(view({ ...message, toolInput: { command, description: 'Build app' }, toolResult: { content: 'Build complete.' } }));
+  fireEvent.click(screen.getByRole('button', { name: 'Ran Build app' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Copy command' }));
+  expect(copyTextToClipboard).toHaveBeenCalledExactlyOnceWith(command);
 });

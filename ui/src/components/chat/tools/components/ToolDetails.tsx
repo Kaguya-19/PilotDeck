@@ -3,8 +3,8 @@ import { Check, Copy } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { copyTextToClipboard } from '../../../../utils/clipboard';
 
-export function ToolDetails({ title, copyContent, children, footer }: {
-  title: ReactNode; copyContent?: string; children: ReactNode; footer?: ReactNode;
+export function ToolDetails({ title, copyContent, copyLabel, children, footer }: {
+  title: ReactNode; copyContent?: string; copyLabel?: string; children: ReactNode; footer?: ReactNode;
 }) {
   const { t } = useTranslation('chat');
   const [copied, setCopied] = useState(false);
@@ -28,7 +28,7 @@ export function ToolDetails({ title, copyContent, children, footer }: {
         <div className="min-w-0 truncate">{title}</div>
         <div className="flex shrink-0 items-center gap-3">
           {(overflows || full) && <button type="button" onClick={() => setFull(!full)} aria-expanded={full} className="hover:text-violet-600 dark:hover:text-violet-400">{t(full ? 'toolDisplay.collapse' : 'toolDisplay.full')}</button>}
-          {copyContent != null && <button type="button" aria-label={t('toolDisplay.copy')} title={t('toolDisplay.copy')} className="rounded p-1 hover:text-violet-600 focus-visible:outline-violet-500 dark:hover:text-violet-400" onClick={async () => { if (await copyTextToClipboard(copyContent)) setCopied(true); }}>
+          {copyContent != null && <button type="button" aria-label={copyLabel || t('toolDisplay.copy')} title={copyLabel || t('toolDisplay.copy')} className="rounded p-1 hover:text-violet-600 focus-visible:outline-violet-500 dark:hover:text-violet-400" onClick={async () => { if (await copyTextToClipboard(copyContent)) setCopied(true); }}>
             {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
           </button>}
         </div>

@@ -1772,3 +1772,54 @@ it('shows a single read directly and renders its image only once', () => {
   expect(toolButton.getAttribute('aria-expanded')).toBe('true');
   expect(screen.getAllByRole('img', { name: 'preview.png' })).toHaveLength(1);
 });
+
+function toolRegressionMessages(): ChatMessage[] {
+  const timestamp = '2026-09-15T09:00:00.000Z';
+  return [
+    { id: 'reg-user', type: 'user', content: 'Inspect files', timestamp },
+    { id: 'reg-read', type: 'assistant', content: '', timestamp, isToolUse: true,
+      toolName: 'Read', toolId: 'reg-read', toolInput: { file_path: 'first.ts' },
+      toolResult: { content: 'first file content' } },
+  ];
+}
+
+it.each([true, false])('retains compaction next to a single tool (live=%s)', (live) => {
+  const messages: ChatMessage[] = [
+    ...toolRegressionMessages(),
+    { id: 'reg-compact', type: 'system', content: '', timestamp: '2026-09-15T09:00:01.000Z',
+      isCompactBoundary: true, compactionId: 'reg-compact', compactState: live ? 'running' : 'completed' },
+  ];
+  if (!live) messages.push({ id: 'compact-answer', type: 'assistant', content: 'Continuing after compaction', timestamp: '2026-09-15T09:00:02.000Z' });
+  renderPane({ messages, isAssistantWorking: live });
+  if (!live) fireEvent.click(screen.getByRole('button', { name: /^Processed / }));
+  expect(screen.getByText(live ? 'Compacting context...' : /Compacted context/)).toBeTruthy();
+});
+
+it.each([false, true])('preserves an inherited group toggle independently through completion (close parent=%s)', (closeParent) => {
+  const base = toolRegressionMessages();
+  const view = renderPane({ messages: base, isAssistantWorking: true });
+  fireEvent.click(screen.getByRole('button', { name: /first\.ts$/ }));
+  const grouped: ChatMessage[] = [...base, {
+    ...base[1], id: 'reg-read-2', toolId: 'reg-read-2', toolInput: { file_path: 'second.ts' },
+    toolResult: { content: 'second file content' },
+  }];
+  view.rerender(createPaneElement({ messages: grouped, isAssistantWorking: true }));
+  const groupToggle = screen.getByRole('button', { name: /Explored 2 files/ });
+  expect(groupToggle.getAttribute('aria-expanded')).toBe('true');
+  fireEvent.click(screen.getByRole('button', { name: /first\.ts$/, expanded: true }));
+  expect(groupToggle.getAttribute('aria-expanded')).toBe('true');
+  expect(screen.getByRole('button', { name: /second\.ts$/ })).toBeTruthy();
+  // A later child update must not reopen a manually closed parent.
+  if (closeParent) fireEvent.click(groupToggle);
+  view.rerender(createPaneElement({ messages: [...grouped], isAssistantWorking: true }));
+  expect(screen.getByRole('button', { name: /Explored 2 files/ }).getAttribute('aria-expanded')).toBe(String(!closeParent));
+  view.rerender(createPaneElement({ messages: [...grouped, {
+    id: 'reg-answer', type: 'assistant', content: 'Inspection complete', timestamp: '2026-09-15T09:00:02.000Z',
+  }] }));
+  fireEvent.click(screen.getByRole('button', { name: /^Processed / }));
+  expect(screen.getByRole('button', { name: /Explored 2 files/ }).getAttribute('aria-expanded')).toBe(String(!closeParent));
+  if (!closeParent) {
+    expect(screen.getByRole('button', { name: /first\.ts$/ }).getAttribute('aria-expanded')).toBe('false');
+    expect(screen.getByRole('button', { name: /second\.ts$/ })).toBeTruthy();
+  }
+});

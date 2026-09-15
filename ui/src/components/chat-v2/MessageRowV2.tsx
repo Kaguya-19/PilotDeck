@@ -749,10 +749,6 @@ function ProcessSummaryRow({
     ? isProcessExpanded?.(resolvedProcessKey, false)
     : undefined;
 
-  if (renderDetailMessage && isSingleToolProcess(detailMessages)) {
-    return renderDetailMessage(detailMessages[0], 0);
-  }
-
   return (
     <ProcessTrace
       label={trace.label}
@@ -800,7 +796,7 @@ function ProcessAttachmentRow({
   );
 
   // The tool row itself owns image previews when there is no enclosing group.
-  if (isSingleToolProcess(attachment.processDetailMessages)) {
+  if (isSingleToolProcess(attachment.processMessages)) {
     return renderDetail(attachment.processDetailMessages[0], 0);
   }
 

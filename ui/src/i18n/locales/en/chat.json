@@ -691,6 +691,7 @@
     "showAll": "View all {{count}} files"
   },
   "toolDisplay": {
+    "copyCommand": "Copy command",
     "collapse": "Limit height",
     "full": "Expand fully",
     "copy": "Copy",

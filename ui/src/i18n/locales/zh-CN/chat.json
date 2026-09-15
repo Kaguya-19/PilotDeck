@@ -673,6 +673,7 @@
     "showAll": "查看全部 {{count}} 个文件"
   },
   "toolDisplay": {
+    "copyCommand": "复制命令",
     "collapse": "收起完整内容",
     "full": "展开完整内容",
     "copy": "复制",

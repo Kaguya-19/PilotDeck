@@ -537,6 +537,25 @@ function MessagesPaneV2({
       : [],
     [isAssistantWorking, renderableMessages, runMode],
   );
+  // Initialize the enclosing group's state once. A single call has no group
+  // toggle yet, so inherit its expansion when the enclosing row first appears.
+  // After that, parent and child toggles (and the completed trace) are independent.
+  useLayoutEffect(() => {
+    setExpandedProcessRows(current => {
+      let next = current;
+      for (const group of liveProcessGroups) {
+        if (isSingleToolProcess(group.messages) || next.has(group.id)) continue;
+        const expanded = group.detailMessages.some(message => {
+          const key = `${String(message.turnId || message.runId || 'legacy-turn')}:${String(message.toolId || message.toolCallId || message.id || message.toolName || 'tool')}:input`;
+          return Boolean(message.isToolUse && isToolSectionExpanded(key, autoExpandTools));
+        });
+        if (next === current) next = new Map(current);
+        next.set(group.id, expanded);
+      }
+      return next;
+    });
+  }, [liveProcessGroups, isToolSectionExpanded, autoExpandTools]);
+
   const liveProcessGroupsByAnchor = useMemo(() => {
     const groupsByAnchor = new Map<number, LiveProcessGroup[]>();
     for (const group of liveProcessGroups) {
@@ -947,15 +966,10 @@ function MessagesPaneV2({
     const isLatestGroup = liveProcessGroups[liveProcessGroups.length - 1]?.id === group.id;
     const step = getLiveProcessGroupStep(group, t, group.isRunning && isLatestGroup ? liveStatusStep : null);
     const { beforeStatusMessages, statusDetailMessages } = splitLiveProcessGroupDetailMessages(group);
-    if (isSingleToolProcess(group.detailMessages)) {
+    if (isSingleToolProcess(group.messages)) {
       return <Fragment key={group.id}>{renderLiveProcessDetailMessages(group.detailMessages, group.id)}</Fragment>;
     }
-    // Keep an opened single call visible if subsequent calls turn it into a group.
-    const hasExpandedTool = group.detailMessages.some(message => {
-      const key = `${String(message.turnId || message.runId || 'legacy-turn')}:${String(message.toolId || message.toolCallId || message.id || message.toolName || 'tool')}:input`;
-      return isToolSectionExpanded(key);
-    });
-    const expanded = isProcessExpanded(group.id, hasExpandedTool);
+    const expanded = isProcessExpanded(group.id);
     return (
       <Fragment key={group.id || `${group.afterOriginalIndex}-${index}`}>
         {expanded && beforeStatusMessages.length > 0 ? (
@@ -978,7 +992,6 @@ function MessagesPaneV2({
   }, [
     handleProcessExpandedChange,
     isProcessExpanded,
-    isToolSectionExpanded,
     liveProcessGroups,
     liveStatusStep,
     renderLiveProcessDetailMessages,

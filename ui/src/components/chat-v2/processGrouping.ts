@@ -17,6 +17,8 @@ export type ProcessAttachmentImage = {
 export type ProcessAttachment = {
   id: string;
   processSummary: ChatMessage;
+  /** Complete event sequence, including events without expandable details. */
+  processMessages: ChatMessage[];
   processDetailMessages: ChatMessage[];
   startIndex: number;
   endIndex: number;
@@ -853,6 +855,7 @@ export function buildRenderableMessageItems(
       const attachment: ProcessAttachment = {
         id: segment.id,
         processSummary: summary,
+        processMessages: segment.messages,
         processDetailMessages: segment.detailMessages,
         startIndex: segment.startIndex,
         endIndex: segment.endIndex,
@@ -976,6 +979,7 @@ export function getLiveProcessDetailMessages(messages: ChatMessage[]): ChatMessa
 /** Only flatten a real single call; never discard thinking, activity or interactive details. */
 export function isSingleToolProcess(messages: ChatMessage[]): boolean {
   return messages.length === 1 && Boolean(messages[0].isToolUse)
+    && isExpandableProcessMessage(messages[0])
     && !messages[0].isSubagentContainer && !messages[0].isInteractivePrompt;
 }
 
