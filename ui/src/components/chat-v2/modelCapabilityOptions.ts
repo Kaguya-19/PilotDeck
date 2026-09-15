@@ -13,8 +13,8 @@ export const REASONING_LABELS = new Map<number, string>([
   [0.4, "Low"],
   [0.6, "Medium"],
   [0.8, "High"],
-  [0.9, "Extra high"],
-  [1, "Maximum"],
+  [0.9, "Xhigh"],
+  [1, "Max"],
 ]);
 
 export const SPEED_LABELS = new Map<number, string>([

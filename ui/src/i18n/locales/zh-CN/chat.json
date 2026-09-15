@@ -363,6 +363,14 @@
         "max": "最高",
         "default": "默认"
       },
+      "reasoningMenuLevels": {
+        "default": "默认(Default)",
+        "low": "低(Low)",
+        "medium": "中(Medium)",
+        "high": "高(High)",
+        "xhigh": "极高(Xhigh)",
+        "max": "最高(Max)"
+      },
       "speedLevels": {
         "standard": "标准",
         "fast": "快速"

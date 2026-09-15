@@ -42,7 +42,7 @@ export const thinkingModes: ThinkingModeOption[] = [
   },
   {
     id: 'xhigh',
-    name: 'Extra High',
+    name: 'Xhigh',
     description: 'Maximum effort for supported models',
     icon: Atom,
     color: 'text-red-600',

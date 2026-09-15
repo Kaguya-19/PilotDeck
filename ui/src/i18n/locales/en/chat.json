@@ -376,9 +376,17 @@
         "low": "Low",
         "medium": "Medium",
         "high": "High",
-        "xhigh": "Extra high",
-        "max": "Maximum",
+        "xhigh": "Xhigh",
+        "max": "Max",
         "default": "Default"
+      },
+      "reasoningMenuLevels": {
+        "default": "Default",
+        "low": "Low",
+        "medium": "Medium",
+        "high": "High",
+        "xhigh": "Xhigh",
+        "max": "Max"
       },
       "speedLevels": {
         "standard": "Standard",

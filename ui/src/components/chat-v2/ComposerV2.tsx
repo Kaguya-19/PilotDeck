@@ -434,10 +434,8 @@ function CapabilityOptionList({
             key={value}
             type="button"
             aria-pressed={selected}
-            onMouseDown={(event) => {
-              event.preventDefault();
-              onSelect(value);
-            }}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => onSelect(value)}
             className={cn(
               "grid h-[22px] grid-cols-[1fr_14px] items-center rounded-md border border-transparent px-[7px] text-left text-[11px] text-[#595b67] transition-colors hover:border-[#e4e0fb] hover:bg-[#f7f6ff] hover:text-[#4742a9] dark:text-neutral-300 dark:hover:border-violet-800 dark:hover:bg-violet-950/40 dark:hover:text-violet-200",
               selected
@@ -550,8 +548,15 @@ export default function ComposerV2({
     [0.4, t("input.models.reasoningLevels.low", { defaultValue: "Low" }) as string],
     [0.6, t("input.models.reasoningLevels.medium", { defaultValue: "Medium" }) as string],
     [0.8, t("input.models.reasoningLevels.high", { defaultValue: "High" }) as string],
-    [0.9, t("input.models.reasoningLevels.xhigh", { defaultValue: "Extra high" }) as string],
-    [1, t("input.models.reasoningLevels.max", { defaultValue: "Maximum" }) as string],
+    [0.9, t("input.models.reasoningLevels.xhigh", { defaultValue: "Xhigh" }) as string],
+    [1, t("input.models.reasoningLevels.max", { defaultValue: "Max" }) as string],
+  ]), [t]);
+  const reasoningMenuLabels = useMemo(() => new Map<number, string>([
+    [0.4, t("input.models.reasoningMenuLevels.low", { defaultValue: "Low" }) as string],
+    [0.6, t("input.models.reasoningMenuLevels.medium", { defaultValue: "Medium" }) as string],
+    [0.8, t("input.models.reasoningMenuLevels.high", { defaultValue: "High" }) as string],
+    [0.9, t("input.models.reasoningMenuLevels.xhigh", { defaultValue: "Xhigh" }) as string],
+    [1, t("input.models.reasoningMenuLevels.max", { defaultValue: "Max" }) as string],
   ]), [t]);
   const speedLabels = useMemo(() => new Map<number, string>([
     [0, t("input.models.speedLevels.standard", { defaultValue: "Standard" }) as string],
@@ -781,6 +786,13 @@ export default function ComposerV2({
         ...patch,
       }),
     );
+  };
+
+  const selectReasoning = (item: ChatModelCatalogItem, reasoning?: number) => {
+    updateModelParams(item, { reasoning });
+    setIsModelMenuOpen(false);
+    setAdvancedModelId(null);
+    modelMenu.triggerRef.current?.focus();
   };
 
   return (
@@ -1737,21 +1749,17 @@ export default function ComposerV2({
                                 </h2>
                                 <button type="button" aria-pressed={advancedParams.reasoning === undefined}
                                   className="mb-1 w-full rounded-md px-[7px] py-1 text-left text-[11px] hover:bg-violet-50 dark:hover:bg-violet-950/40"
-                                  onClick={() => updateModelParams(advancedModel, { reasoning: undefined })}>
-                                  {t('input.models.reasoningLevels.default', { defaultValue: 'Default' })}
+                                  onClick={() => selectReasoning(advancedModel)}>
+                                  {t('input.models.reasoningMenuLevels.default', { defaultValue: 'Default' })}
                                   {advancedParams.reasoning === undefined && <Check className="float-right h-3 w-3" />}
                                 </button>
                                 <CapabilityOptionList
                                   values={capabilityValues(
                                     advancedModel.capabilities.reasoning,
                                   )}
-                                  labels={reasoningLabels}
+                                  labels={reasoningMenuLabels}
                                   currentValue={advancedParams.reasoning}
-                                  onSelect={(reasoning) =>
-                                    updateModelParams(advancedModel, {
-                                      reasoning,
-                                    })
-                                  }
+                                  onSelect={(reasoning) => selectReasoning(advancedModel, reasoning)}
                                 />
                               </div>
                             ) : null}
