@@ -5,7 +5,7 @@ import {
 } from "../agent/modules/sidecar.js";
 import {
   createHostPlanTodoPort,
-  createPlanTodoAwareToolPort,
+  createPlanTodoResultObserver,
 } from "../agent/modules/capability/index.js";
 import { parseAgentLoopSeedStateProjection } from "../agent/modules/checkpoint/index.js";
 import { createHostContextRuntime } from "../agent/modules/context/index.js";
@@ -128,65 +128,33 @@ export const createSidecarExecution: SidecarExecutionFactory = async ({ request,
     requiresUserInteraction: () => descriptor.requiresUserInteraction,
     execute: async () => ({ content: [{ type: "text", text: "Capability is executed by the host module." }] }),
   } satisfies PilotDeckToolDefinition));
-  const context = contextMethods.includes("prepare_for_model")
-    ? createHostContextRuntime(callModule, {
-        runId: request.runId,
-        operationId: request.operationId,
-        idempotencyKey: request.idempotencyKey,
-      }, contextMethods)
-    : undefined;
-  const permissionPort = permissionMethods.includes("decide")
-    ? createHostPermissionDecisionPort(callModule, {
-        runId: request.runId,
-        operationId: request.operationId,
-        idempotencyKey: request.idempotencyKey,
-      })
-    : undefined;
-  const lifecycle = lifecycleMethods.includes("dispatch")
-    ? createHostLifecycleRuntime(callModule, {
-        runId: request.runId,
-        operationId: request.operationId,
-        idempotencyKey: request.idempotencyKey,
-      })
-    : undefined;
-  const eventBridge = eventMethods.includes("emit")
-    ? createHostAgentEventBridge(callModule, {
-        runId: request.runId,
-        operationId: request.operationId,
-        idempotencyKey: request.idempotencyKey,
-      })
-    : undefined;
-  const planTodo = capabilityMethods.includes("plan_todo")
-    ? createHostPlanTodoPort(callModule, {
-        runId: request.runId,
-        operationId: request.operationId,
-        idempotencyKey: request.idempotencyKey,
-      })
-    : undefined;
+  const moduleBinding = sidecarModuleBinding(request);
+  const context = createSidecarContextComposition(callModule, moduleBinding, contextMethods);
+  const permissionPort = createSidecarPermissionComposition(callModule, moduleBinding, permissionMethods);
+  const lifecycle = createSidecarLifecycleComposition(callModule, moduleBinding, lifecycleMethods);
+  const eventBridge = createSidecarEventComposition(callModule, moduleBinding, eventMethods);
+  const planTodo = createSidecarPlanTodoComposition(callModule, moduleBinding, capabilityMethods);
   if (planTodo) await planTodo.initialize(sessionId, turnId);
-  const sidecarPorts = createSidecarPorts(callModule, {
+  const sidecarPorts = createSidecarCapabilityComposition(callModule, {
     tools,
     permission: permissionPort,
-    binding: {
-      runId: request.runId,
-      operationId: request.operationId,
-      ...(request.idempotencyKey ? { idempotencyKey: request.idempotencyKey } : {}),
-    },
+    binding: moduleBinding,
     modelMethods,
     capabilityMethods,
     onAbort: abortExecution,
   });
   const dependencies = {
     ports: {
-      ...sidecarPorts,
-      tools: planTodo ? createPlanTodoAwareToolPort(sidecarPorts.tools, planTodo) : sidecarPorts.tools,
+      model: sidecarPorts.model,
+      toolExecution: sidecarPorts.toolExecution,
+      ...(sidecarPorts.toolAuthorization ? { toolAuthorization: sidecarPorts.toolAuthorization } : {}),
     },
-    tools: { registry: { list: () => [] } as never, scheduler: { executeAll: async () => [] } as never },
     ...(context ? { context } : {}),
     ...(permissionPort ? { permission: permissionPort } : {}),
     ...(lifecycle ? { lifecycle } : {}),
     ...(eventBridge ? { eventEmitter: eventBridge.emitter } : {}),
     ...(planTodo ? { planTodoManager: planTodo } : {}),
+    ...(planTodo ? { toolResultObserver: createPlanTodoResultObserver({ planTodo, sessionId, turnId }) } : {}),
   };
   const loop = new AgentLoop(
     config,
@@ -224,6 +192,82 @@ export const createSidecarExecution: SidecarExecutionFactory = async ({ request,
     ...(eventBridge ? { flush: eventBridge.flush } : {}),
   } as SidecarExecution;
 };
+
+type SidecarModuleBindingInput = {
+  runId: string;
+  operationId: string;
+  idempotencyKey?: string;
+};
+
+function sidecarModuleBinding(request: {
+  runId: string;
+  operationId: string;
+  idempotencyKey?: string;
+}): SidecarModuleBindingInput {
+  return {
+    runId: request.runId,
+    operationId: request.operationId,
+    ...(request.idempotencyKey ? { idempotencyKey: request.idempotencyKey } : {}),
+  };
+}
+
+/** Each helper owns one host-module adapter; the default factory only assembles them. */
+function createSidecarContextComposition(
+  callModule: Parameters<typeof createHostContextRuntime>[0],
+  binding: SidecarModuleBindingInput,
+  methods: ReturnType<typeof readHostContextModuleMethods>,
+) {
+  return methods.includes("prepare_for_model")
+    ? createHostContextRuntime(callModule, binding, methods)
+    : undefined;
+}
+
+function createSidecarPermissionComposition(
+  callModule: Parameters<typeof createHostPermissionDecisionPort>[0],
+  binding: SidecarModuleBindingInput,
+  methods: ReturnType<typeof readHostPermissionModuleMethods>,
+) {
+  return methods.includes("decide")
+    ? createHostPermissionDecisionPort(callModule, binding)
+    : undefined;
+}
+
+function createSidecarLifecycleComposition(
+  callModule: Parameters<typeof createHostLifecycleRuntime>[0],
+  binding: SidecarModuleBindingInput,
+  methods: ReturnType<typeof readHostLifecycleModuleMethods>,
+) {
+  return methods.includes("dispatch")
+    ? createHostLifecycleRuntime(callModule, binding)
+    : undefined;
+}
+
+function createSidecarEventComposition(
+  callModule: Parameters<typeof createHostAgentEventBridge>[0],
+  binding: SidecarModuleBindingInput,
+  methods: ReturnType<typeof readHostEventModuleMethods>,
+) {
+  return methods.includes("emit")
+    ? createHostAgentEventBridge(callModule, binding)
+    : undefined;
+}
+
+function createSidecarPlanTodoComposition(
+  callModule: Parameters<typeof createHostPlanTodoPort>[0],
+  binding: SidecarModuleBindingInput,
+  methods: ReturnType<typeof readHostCapabilityModuleMethods>,
+) {
+  return methods.includes("plan_todo")
+    ? createHostPlanTodoPort(callModule, binding)
+    : undefined;
+}
+
+function createSidecarCapabilityComposition(
+  callModule: Parameters<typeof createSidecarPorts>[0],
+  options: Parameters<typeof createSidecarPorts>[1],
+) {
+  return createSidecarPorts(callModule, options);
+}
 
 type ToolDescriptor = {
   name: string;

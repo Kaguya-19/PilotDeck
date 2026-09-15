@@ -35,10 +35,17 @@ import {
 } from "./AgentSessionScopeBundle.js";
 import { createNativeOneShotSubagentPort } from "../sub/OneShotSubagentPort.js";
 import {
-  createAgentTurnCapabilities,
+  createAgentTurnContextPort,
+  createLifecycleDispatchPort,
   type AgentTurnCapabilities,
 } from "../loop/AgentTurnCapabilities.js";
+import { createAgentTurnCapabilities } from "../loop/nativeAgentTurnCapabilitiesAdapter.js";
 import { SessionAgentLoopOperationLedger } from "../modules/transport/sessionOperationLedger.js";
+import {
+  createSidecarModuleComposition,
+  type SidecarModuleComposition,
+  type SidecarTransportContext,
+} from "../modules/transport/sidecarHostModulePorts.js";
 
 /**
  * Inputs used to compose the native resources consumed by one AgentSession.
@@ -74,7 +81,9 @@ export type AgentSessionRuntimeResources = {
   context: AgentRuntimeDependencies["context"];
   dependencies: AgentRuntimeDependencies;
   capabilities: AgentTurnCapabilities;
+  sidecarModules: SidecarModuleComposition;
   eventRecorder: AgentSessionEventRecorder;
+  sidecarTransportContext: SidecarTransportContext;
   dispose(): Promise<void>;
 };
 
@@ -134,6 +143,9 @@ export class AgentSessionRuntimeBundle {
         transcript,
         restoredEntries: this.options.restoredEntries,
       });
+      const sidecarTransportContext: SidecarTransportContext = Object.freeze({
+        operationLedger: sidecarOperationLedger,
+      });
       const auditRecorder = createDurablePermissionAuditRecorder(
         unwrapDurablePermissionAuditRecorder(this.options.dependencies.auditRecorder),
         eventRecorder,
@@ -176,6 +188,8 @@ export class AgentSessionRuntimeBundle {
         this.options.dependencies.tools.registry,
         sessionScope.scheduler,
       );
+      const durableModelPort = createDurableModelInvokerPort(modelPort, eventRecorder);
+      const durableToolPort = createDurableToolPort(toolPort, eventRecorder);
       const dependencies: AgentRuntimeDependencies = {
         ...this.options.dependencies,
         scope,
@@ -197,8 +211,8 @@ export class AgentSessionRuntimeBundle {
         },
         ports: {
           ...this.options.dependencies.ports,
-          model: createDurableModelInvokerPort(modelPort, eventRecorder),
-          tools: createDurableToolPort(toolPort, eventRecorder),
+          model: durableModelPort,
+          tools: durableToolPort,
         },
         eventEmitter: emitter,
         drainEvents: this.options.dependencies.drainEvents ?? eventBuf?.drain,
@@ -210,6 +224,28 @@ export class AgentSessionRuntimeBundle {
         dependencies,
       });
       const capabilities = createAgentTurnCapabilities(this.options.config, dependencies);
+      const sidecarModules = createSidecarModuleComposition({
+        model: durableModelPort,
+        toolExecution: durableToolPort,
+        permission: sessionScope.permission,
+        ...(context ? { context: createAgentTurnContextPort(context) } : {}),
+        ...(scopedLifecycle ? { lifecycle: createLifecycleDispatchPort(scopedLifecycle) } : {}),
+        eventEmitter: emitter,
+        auxiliaryModel: this.options.dependencies.ports?.auxiliaryModel,
+        interaction: { elicitation: scopedElicitation },
+        planMode: {
+          planFileManager: this.options.dependencies.planFileManager,
+          planTodoManager: this.options.dependencies.planTodoManager,
+        },
+        subagent: { oneShot: dependencies.oneShotSubagentPort },
+        goal: this.options.dependencies.goalManager,
+        toolRuntimeServices: {
+          auditRecorder,
+          fileHistory: this.options.dependencies.fileHistory,
+          fileUpdateNotifier: this.options.dependencies.fileUpdateNotifier,
+        },
+        clock: { now: this.options.dependencies.now },
+      });
       let disposePromise: Promise<void> | undefined;
       const dispose = (): Promise<void> => {
         disposePromise ??= disposeAgentSessionRuntimeResources({
@@ -229,7 +265,9 @@ export class AgentSessionRuntimeBundle {
         context,
         dependencies,
         capabilities,
+        sidecarModules,
         eventRecorder,
+        sidecarTransportContext,
         dispose,
       };
     } catch (error) {

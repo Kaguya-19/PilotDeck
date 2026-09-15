@@ -53,6 +53,21 @@ export class HostPermissionModeState {
   }
 }
 
+/**
+ * Sidecar capability-result observer owned by host composition. Keeping this
+ * adapter outside transport prevents Module Protocol dispatch from owning
+ * permission-mode lifecycle state.
+ */
+export function createHostPermissionModeResultObserver(
+  state: HostPermissionModeState,
+): { onCapabilityResults(results: readonly PilotDeckToolResult[]): void } {
+  return {
+    onCapabilityResults(results) {
+      state.applyCapabilityResults(results);
+    },
+  };
+}
+
 function requestedPermissionMode(value: unknown): PermissionMode | undefined {
   if (!value || typeof value !== "object") return undefined;
   const requestedMode = (value as Record<string, unknown>).requestedMode;

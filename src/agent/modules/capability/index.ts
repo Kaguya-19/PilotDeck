@@ -8,9 +8,11 @@ export {
 export {
   createHostPlanTodoPort,
   createPlanTodoAwareToolPort,
+  createPlanTodoResultObserver,
   type HostPlanTodoModuleClient,
   type HostPlanTodoPort,
   type HostPlanTodoPortOptions,
+  type PlanTodoResultObserver,
 } from "./hostPlanTodoPort.js";
 export { createToolSchedulerPort } from "./toolSchedulerAdapter.js";
 export { createHostPlanTodoModuleHandler } from "./hostPlanTodoModuleHandler.js";

@@ -112,11 +112,13 @@ function buildAgentSession(
   try {
     const runtimeResources = new AgentSessionRuntimeBundle(options).compose(onRollback);
     resources = runtimeResources;
-    const { capabilities, context, dependencies, eventRecorder, projections, scope, storage, transcript } = runtimeResources;
+    const { capabilities, context, dependencies, eventRecorder, projections, scope, storage, transcript, sidecarModules, sidecarTransportContext } = runtimeResources;
     const loop = options.agentLoopFactory?.({
       config: options.config,
       capabilities,
+      sidecarModules,
       seedState: options.seedState,
+      sidecarTransportContext,
     }) ?? options.__agentLoopFactory?.({
       config: options.config,
       dependencies,

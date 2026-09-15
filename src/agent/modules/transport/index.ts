@@ -9,7 +9,42 @@ export {
   type SidecarModuleBinding,
   type SidecarModuleCall,
   type SidecarModuleCallClient,
+  type SidecarExecutionPorts,
 } from "./sidecarPorts.js";
+export {
+  createSidecarToolContextBuilder,
+  createSidecarToolRuntimeServices,
+  createSidecarPermissionRequestContextServices,
+  type SidecarToolContextPorts,
+} from "./sidecarToolContext.js";
+export {
+  createSidecarHostModulePorts,
+  createSidecarModuleComposition,
+  type SidecarModelModulePort,
+  type SidecarCapabilityModulePort,
+  type SidecarPermissionModulePort,
+  type SidecarPlanTodoModulePort,
+  type ToolCatalogPort,
+  type ToolRuntimeContextFactoryPort,
+  type SidecarToolRuntimeServicesPort,
+  type PermissionRequestContextPort,
+  type PermissionRequestContextServicesPort,
+  type SidecarContextModulePort,
+  type SidecarLifecycleModulePort,
+  type SidecarEventModulePort,
+  type SidecarModuleComposition,
+  type SidecarHostModulePorts,
+  type SidecarTransportContext,
+  type SidecarTransportTurn,
+} from "./sidecarHostModulePorts.js";
+export { createSidecarDefaultModuleDispatcher, type SidecarModuleManifest } from "./sidecarDefaultModuleDispatcher.js";
+export {
+  createDefaultSidecarTurnComposition,
+  createSidecarModuleHandlerRegistry,
+  resolveSidecarTurnCompositionHandlers,
+  type SidecarTurnComposition,
+  type SidecarTurnCompositionFactory,
+} from "./sidecarTurnComposition.js";
 export {
   AgentLoopSidecarServer,
   moduleOutcomeFromAgentResult,
@@ -22,10 +57,21 @@ export {
   type AgentLoopSidecarConnection,
   type AgentLoopSidecarConnectionFactory,
   type AgentLoopSidecarConnectionFactoryInput,
+  type SidecarConnectionFactoryInput,
   type AgentLoopSidecarResultUnknownInput,
   type AgentLoopSidecarResultUnknownReconciler,
   type AgentLoopSidecarResultUnknownResolution,
   type AgentLoopSidecarRuntimeFactoryOptions,
+  type SidecarCapabilityResultObserver,
+  type SidecarModuleHandler,
+  type SidecarModuleHandlerRegistry,
+  type SidecarModuleHandlerFactory,
+  type SidecarModelHandlerFactoryInput,
+  type SidecarCapabilityHandlerFactoryInput,
+  type SidecarPermissionHandlerFactoryInput,
+  type SidecarContextHandlerFactoryInput,
+  type SidecarLifecycleHandlerFactoryInput,
+  type SidecarEventHandlerFactoryInput,
 } from "./agentLoopSidecarClient.js";
 export type {
   AgentLoopSidecarTransportObservation,

@@ -41,7 +41,8 @@ export type HostCapabilityToolPortOptions = {
 /**
  * Compose permission authorization separately from capability execution.
  * The wrapped ToolPort remains responsible only for executing authorized
- * calls, while this adapter preserves ordering and denial result semantics.
+ * calls. Authorization never re-groups calls: this preserves an advertised
+ * execute_batch boundary and leaves scheduling to the execution provider.
  */
 export function createPermissionAwareToolPort(
   port: ToolPort,
@@ -49,6 +50,8 @@ export function createPermissionAwareToolPort(
     tools?: PilotDeckToolDefinition[];
     permission?: PermissionDecisionPort;
     authorization?: ToolAuthorizationPort;
+    /** Keep authorized calls in one raw batch when the provider advertises it. */
+    preserveBatch?: boolean;
   } = {},
 ): ToolPort {
   if (!options.permission && !options.authorization) return port;
@@ -68,13 +71,10 @@ export function createPermissionAwareToolPort(
         return { ...call, input: decision.updatedInput ?? call.input };
       };
       const slots = new Array<PilotDeckToolResult | undefined>(calls.length);
-      const parallel: Array<{ index: number; call: PilotDeckToolCall }> = [];
-      const sequential: Array<{ index: number; call: PilotDeckToolCall }> = [];
-      calls.forEach((call, index) => {
-        const tool = toolsByName.get(call.name);
-        (tool?.isConcurrencySafe(call.input) ? parallel : sequential).push({ index, call });
-      });
-      const executeGroup = async (group: Array<{ index: number; call: PilotDeckToolCall }>, parallelize: boolean): Promise<void> => {
+      const executeGroup = async (
+        group: Array<{ index: number; call: PilotDeckToolCall }>,
+        parallelize: boolean,
+      ): Promise<void> => {
         const authorizeEntry = async ({ index, call }: { index: number; call: PilotDeckToolCall }) => ({ index, outcome: await authorize(call) });
         const authorized = parallelize
           ? await Promise.all(group.map(authorizeEntry))
@@ -88,8 +88,18 @@ export function createPermissionAwareToolPort(
         if (results.length !== executable.length) throw new Error("Tool port returned an incomplete authorized result.");
         for (const [resultIndex, { index }] of executable.entries()) slots[index] = results[resultIndex];
       };
-      await executeGroup(parallel, true);
-      await executeGroup(sequential, false);
+      if (options.preserveBatch) {
+        await executeGroup(calls.map((call, index) => ({ index, call })), false);
+      } else {
+        const parallel: Array<{ index: number; call: PilotDeckToolCall }> = [];
+        const sequential: Array<{ index: number; call: PilotDeckToolCall }> = [];
+        calls.forEach((call, index) => {
+          const tool = toolsByName.get(call.name);
+          (tool?.isConcurrencySafe(call.input) ? parallel : sequential).push({ index, call });
+        });
+        await executeGroup(parallel, true);
+        await executeGroup(sequential, false);
+      }
       return slots as PilotDeckToolResult[];
     },
   };

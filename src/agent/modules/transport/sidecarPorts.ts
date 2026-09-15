@@ -16,6 +16,12 @@ import type {
   ToolAuthorizationPort,
 } from "../protocol.js";
 
+export type SidecarExecutionPorts = Readonly<{
+  model: ModelInvokerPort;
+  toolExecution: ToolPort;
+  toolAuthorization?: ToolAuthorizationPort;
+}>;
+
 export type SidecarModuleCall = Omit<ModuleCallRequest, "kind" | "messageId" | "method"> & {
   idempotencyKey?: string;
   /** Internal aggregation hint; it is not serialized into Module Protocol. */
@@ -43,7 +49,7 @@ export function createSidecarPorts(
     capabilityMethods?: readonly HostCapabilityModuleMethod[];
     onAbort?: (reason: string) => void;
   } = {},
-): { model: ModelInvokerPort; tools: ToolPort; authorization?: ToolAuthorizationPort } {
+): SidecarExecutionPorts {
   const uuid = options.uuid ?? (() => Math.random().toString(36).slice(2));
   const capability = createHostCapabilityToolPort(callModule, {
     tools: options.tools,
@@ -56,10 +62,11 @@ export function createSidecarPorts(
     ?? (options.permission ? createPermissionToolAuthorizationPort({ tools: options.tools, permission: options.permission }) : undefined);
   return {
     model: createHostModelInvokerPort(callModule, { uuid, methods: options.modelMethods }),
-    tools: createPermissionAwareToolPort(capability, {
-      tools: options.tools,
-      authorization,
-    }),
-    ...(authorization ? { authorization } : {}),
+    toolExecution: createPermissionAwareToolPort(capability, {
+    tools: options.tools,
+    authorization,
+    preserveBatch: options.capabilityMethods?.includes("execute_batch") ?? false,
+  }),
+    ...(authorization ? { toolAuthorization: authorization } : {}),
   };
 }

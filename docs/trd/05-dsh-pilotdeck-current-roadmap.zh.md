@@ -27,6 +27,30 @@ handler composition；Module Protocol v2 的 module 名称、字段和 durable o
 Context consumer 进一步按 prepare/tool-result/recovery/capture/compaction 拆为独立 ports；sidecar
 handler 只调用相应 port，context runtime aggregate 与 `budgetEvaluator` 都不跨 protocol 边界。
 
+### 2026-09-15 Sidecar 完整 composition 收口
+
+sidecar 现以独立 `SidecarAgentLoopPorts` 构建冻结 capabilities，不再将 sidecar input cast 为
+`AgentRuntimeDependencies` 或调用 native `createAgentTurnCapabilities()`；default factory 也不再注入
+假的 registry/scheduler。`AgentLoop.fromDependencies()` 仅保留为 native compatibility facade，循环本体
+不再引用宽 native dependency type。
+
+工具授权 adapter 只产生 allow/deny/input rewrite；host 广告 `execute_batch` 时，批准调用单次交给 raw execution
+port，避免把一个 host batch 按并发属性拆成多个 batch；非 batch provider 保留原有调度。`SidecarTurnProtocol` 只处理 transport
+事实，Plan/Todo handler、permission-mode result observer 和可替换 module handler registry 都在 host
+composition 层组装。宽 `PilotDeckToolRuntimeContext` 已移至独立 tool-context builder；该 builder 消费
+turn identity、checkpoint 与窄 ports，不暴露 router、session 或 persistence object。
+
+### 2026-09-15 Sidecar 纯 view 收口
+
+`AgentTurnCapabilities.ts` 现只定义冻结的 consumer view 与 sidecar builder；宽 native bag、Router decision、
+scheduler 和 legacy `opaque` 处理移入 `nativeAgentTurnCapabilitiesAdapter.ts`。`AgentLoop` 不再 import Router
+类型或解析 `PreparedModelInvocation.opaque`；Router 仍可通过 native compatibility adapter 提供 routing 和
+turn-bound auxiliary-model port。sidecar tool context 改为显式最小 `SidecarToolContextPorts`，不再取得 aggregate。
+
+`sidecarTurnComposition` 是 host per-turn 领域 composition owner：负责 PermissionMode lifecycle、Plan/Todo
+handler、result observer 与 handler registry；transport 只消费该 contract。Plan/Todo refresh 改为独立
+`ToolResultObserver`，不再包装 execution port。协议字段、批量工具边界、durable owner 和 terminal 语义保持不变。
+
 ### 2026-09-14 模型栈可插拔解耦
 
 参考 DSH 的 `llm`、`llm-retry`、`token-meter` 与 bundle 分层，AgentLoop-facing model view
@@ -1102,6 +1126,22 @@ Session 与 Gateway 不成为 model policy owner；第三方 provider adapter �
 兼容字段退出条件：新生产代码不得新增 deprecated optional capability bag、旧 `model.invoker`/`model.routing`/
 `model.tokenAccounting` 或 aggregate snapshot 的读取；这些字段只能留在 composition/adapter 兼容层。删除前必须通过
 native、sidecar、session、subagent、Gateway 及模型 override/compact/retry 回归，并确认所有 consumer 已切换到窄 port。
+
+### R4.1：sidecar transport consumer view（已完成）
+
+sidecar protocol、connection factory 与 module handler factory 已从 `AgentTurnCapabilities` aggregate 切换到
+`SidecarModuleComposition`。connection provider 仅接收 `SidecarTransportTurn + seedState + SidecarTransportContext`；
+module handler factory 按 model/capability/permission/context/lifecycle/event 分别接收单一 port 和裁剪后的 turn view。
+Plan/Todo 已是独立可选 module，继续通过既有 `capability.plan_todo` wire operation 路由。capability、permission、context
+分别只取得自己的 turn-bound context service，不互相读取 execution/provider 对象。默认领域 dispatcher 在 runner 的 host
+composition 创建并生成冻结 manifest/handler registry；protocol 仅接收这些冻结事实以及 checkpoint，负责 module lookup、identity、
+replay 与 terminal settlement。`AgentTurnCapabilities.transport` 只保留 native compatibility fallback，新的
+session -> sidecar runtime 路径优先传递显式 `sidecarModules` 与 transport context。
+
+`sidecarTurnComposition` 继续是 PermissionMode、Plan/Todo handler、result observer 与可替换 handler registry 的唯一
+turn composition owner。Module Protocol v2、replay/resume、host checkpoint、Plan/Todo durable owner 和 terminal semantics
+均未改变。验收为 Node 22 build、sidecar client/turn-composition focused suites 通过，以及 Gateway parity 不产生新的
+semantic difference 或 cleanup BLOCKED。
 `PreparedModelInvocation.opaque` 最后再删，且需证明 legacy Router adapter 不再需要跨 generation 的 request snapshot。
 
 当前证据：Node 22 `pnpm build` 通过；model/ports focused suites **20/20**；Loop parity **32/32**、Gateway parity

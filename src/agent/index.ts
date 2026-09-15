@@ -1,6 +1,5 @@
 export { AgentLoop, type AgentLoopInput, type AgentLoopRunResult, type AgentLoopSeedState } from "./loop/AgentLoop.js";
 export {
-  createAgentTurnCapabilities,
   createSidecarAgentTurnCapabilities,
   isAgentTurnCapabilities,
   isNoopAgentTurnContextPort,
@@ -13,8 +12,8 @@ export {
   type ContextCompactionPort,
   type AgentTurnModelCapabilities,
   type AgentTurnRoutingPort,
-  type AgentTurnCapabilityComposition,
   type SidecarAgentTurnCapabilityComposition,
+  type SidecarAgentLoopPorts,
   type ModelExecutionPort,
   type ModelMetadataPort,
   type ModelBudgetPort,
@@ -26,17 +25,63 @@ export {
   type SubagentPort,
   type AgentTurnToolCapabilities,
   type LifecycleDispatchPort,
+  type ToolResultObserver,
 } from "./loop/AgentTurnCapabilities.js";
+export {
+  createAgentTurnCapabilities,
+  type AgentTurnCapabilityComposition,
+} from "./loop/nativeAgentTurnCapabilitiesAdapter.js";
 export {
   createAgentLoopSidecarRuntimeFactory,
   type AgentLoopSidecarConnection,
   type AgentLoopSidecarConnectionFactory,
   type AgentLoopSidecarConnectionFactoryInput,
+  type SidecarConnectionFactoryInput,
   type AgentLoopSidecarResultUnknownInput,
   type AgentLoopSidecarResultUnknownReconciler,
   type AgentLoopSidecarResultUnknownResolution,
   type AgentLoopSidecarRuntimeFactoryOptions,
+  type SidecarCapabilityResultObserver,
+  type SidecarModuleHandler,
+  type SidecarModuleHandlerRegistry,
+  type SidecarModuleHandlerFactory,
+  type SidecarModelHandlerFactoryInput,
+  type SidecarCapabilityHandlerFactoryInput,
+  type SidecarPermissionHandlerFactoryInput,
+  type SidecarContextHandlerFactoryInput,
+  type SidecarLifecycleHandlerFactoryInput,
+  type SidecarEventHandlerFactoryInput,
 } from "./modules/transport/agentLoopSidecarClient.js";
+export {
+  createDefaultSidecarTurnComposition,
+  createSidecarModuleHandlerRegistry,
+  type SidecarTurnComposition,
+  type SidecarTurnCompositionFactory,
+} from "./modules/transport/sidecarTurnComposition.js";
+export {
+  createSidecarHostModulePorts,
+  createSidecarModuleComposition,
+  type SidecarModelModulePort,
+  type SidecarCapabilityModulePort,
+  type SidecarPermissionModulePort,
+  type SidecarPlanTodoModulePort,
+  type ToolCatalogPort,
+  type ToolRuntimeContextFactoryPort,
+  type SidecarToolRuntimeServicesPort,
+  type PermissionRequestContextPort,
+  type PermissionRequestContextServicesPort,
+  type SidecarContextModulePort,
+  type SidecarLifecycleModulePort,
+  type SidecarEventModulePort,
+  type SidecarModuleComposition,
+  type SidecarHostModulePorts,
+  type SidecarTransportContext,
+  type SidecarTransportTurn,
+} from "./modules/transport/sidecarHostModulePorts.js";
+export {
+  createSidecarDefaultModuleDispatcher,
+  type SidecarModuleManifest,
+} from "./modules/transport/sidecarDefaultModuleDispatcher.js";
 export type {
   AgentLoopSidecarTransportObservation,
   AgentLoopSidecarTransportObserver,
@@ -44,6 +89,7 @@ export type {
 export {
   createHostPlanTodoPort,
   createPlanTodoAwareToolPort,
+  createPlanTodoResultObserver,
   type HostPlanTodoModuleClient,
   type HostPlanTodoPort,
   type HostPlanTodoPortOptions,

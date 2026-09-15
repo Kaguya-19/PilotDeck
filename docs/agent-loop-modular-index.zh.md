@@ -105,7 +105,7 @@ descriptors、permission context、seed state 和 execution identity。
 provider client / SDK
         -> provider adapter（native 或 host）
         -> ModelExecutionPort
-        -> createAgentTurnCapabilities()
+        -> SidecarAgentTurnCapabilityComposition
         -> AgentLoop
 
 AgentTurnRoutingPort / ModelMetadataPort / ModelBudgetPort / AuxiliaryModelPort
@@ -115,20 +115,46 @@ Router facade --------------------------^（legacy/default adapter，可选）
 
 ### Sidecar 专属组合边界
 
-sidecar 使用 `SidecarAgentTurnCapabilityComposition`，只接受显式 consumer ports，不接受
-`AgentRuntimeDependencies.router` 或完整 native dependency bag。其最小组合是
+sidecar 使用 `SidecarAgentTurnCapabilityComposition` 与 `SidecarAgentLoopPorts`，只接受显式 consumer
+ports，不接受 `AgentRuntimeDependencies`、Router、registry 或 scheduler。其最小组合是
 `ModelExecutionPort + ToolExecutionPort`；routing、metadata、budget、auxiliary、context、permission、
-plan、subagent 和 lifecycle 都是独立可选 port。未提供 `AuxiliaryModelPort` 时 sidecar 不会回退到
-Router `stream`。
+plan、subagent 和 lifecycle 都是独立可选 port。默认 factory 不再构造假的 native tool bag；未提供
+`AuxiliaryModelPort` 时 sidecar 不会回退到 Router `stream`。
+
+`AgentTurnCapabilities.ts` 是纯 consumer view；native 的宽 dependency bag、Router 与 scheduler adapter
+只在 `nativeAgentTurnCapabilitiesAdapter.ts` 中保留为 deprecated compatibility facade。AgentLoop 不读取
+`PreparedModelInvocation.opaque`，也不引用 Router 类型；legacy Router decision/materialization 仅由该
+native adapter 适配为通用 routing port。
 
 Context 同样拆为 `ContextPreparationPort`、`ContextToolResultPort`、`ContextRecoveryPort`、
 `ContextCapturePort` 和 `ContextCompactionPort`；host 只广告实际支持的 operation，预算 projection 仍由
 host 重建，不经 wire 传递 evaluator。旧 `AgentTurnContextPort` 仅保留兼容聚合 view。
 
 工具路径分为 `ToolAuthorizationPort -> ToolExecutionPort`：前者由 host policy 决定 allow/deny/
-input rewrite，后者只调用 capability。`ToolPort` 与 `PilotDeckToolRuntimeContext` 暂保留给 native
-和既有工具实现的 compatibility adapter；sidecar protocol 仍传 canonical projection，不传 router、
-session、persistence 或完整 runtime object。
+input rewrite，后者只调用 capability。host 广告 `execute_batch` 时，authorization 不重排或拆分批准后的
+调用，保持单一 batch 边界；非 batch provider 保留既有 execution 并发调度。`PilotDeckToolRuntimeContext` 由独立的 sidecar
+tool-context adapter 从窄 ports、checkpoint 和 turn identity 组装；transport 不直接拥有 Plan/Todo、
+goal、subagent、permission 或 auxiliary-model 聚合逻辑。
+
+sidecar transport 只拥有连接、replay、identity 与 terminal settlement。`SidecarConnectionFactoryInput` 只包含
+`SidecarTransportTurn`、seed projection 与 `SidecarTransportContext`，不能取得任何 model/tool/permission/context port。
+`SidecarModuleComposition` 按 model、capability、permission、planTodo、context、lifecycle、event 分开注入；每个 custom handler
+factory 仅收到自身 module port 和裁剪后的 turn view。`SidecarTransportContext` 单独传递 session-owned operation ledger 与被动 telemetry，
+不再把这些 transport state 藏进 capability aggregate。`sidecarTurnComposition` 负责每 turn
+的 PermissionMode、Plan/Todo handler、capability-result observer 和可替换 module handler registry；默认
+observer 使用 `HostPermissionModeState` 保持现有 plan-mode 生命周期，但 transport runner/protocol 均不持有
+该状态。工具完成后通过独立 `ToolResultObserver` 通知 Plan/Todo projection refresh，不再由 Plan/Todo wrapper
+包裹 `ToolExecutionPort`。
+
+`sidecarToolContext` 的 raw services 只在 host composition 内保存；它按 turn 绑定为 capability 的
+`ToolRuntimeContextFactoryPort`、permission 的 `PermissionRequestContextPort` 与 context 的 identity port。
+因此 capability、permission、context 都不读取彼此的 execution/provider 对象；Plan/Todo 也作为独立可选 module
+保留原有 `capability.plan_todo` wire operation。
+
+新的 sidecar module handler factory 是按 module 的 `model/capability/permission/context/lifecycle/event` 字段；module
+registry 与 manifest 冻结后交给 protocol；protocol 仅处理 transport、identity、replay、checkpoint 与 terminal settlement，
+不接收 `SidecarModuleComposition`。默认 dispatcher 由 host composition 创建。旧 `AgentLoopSidecarConnectionFactoryInput` 仅为命名兼容 alias，生产 transport 应使用
+`SidecarConnectionFactoryInput`，不应读取 native capability facade。
 
 `ModelExecutionPort` 是 AgentLoop 的核心 consumer contract。直接构造 capabilities 时 Router 不是必需 owner，但完整
 `AgentRuntimeDependencies`/session/Gateway composition 仍保留 Router 依赖。显式 execution provider 可以绕过 Router，空

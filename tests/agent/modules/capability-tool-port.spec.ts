@@ -243,6 +243,53 @@ test("host capability consumer delegates an advertised batch to the host once", 
   assert.deepEqual(results.map((result) => result.toolCallId), ["call-1", "call-2"]);
 });
 
+test("authorization preserves one advertised batch across mixed tool concurrency", async () => {
+  const requests: Array<Record<string, unknown>> = [];
+  const parallel = tool("parallel");
+  const serial = { ...tool("serial"), isConcurrencySafe: () => false };
+  const raw = createHostCapabilityToolPort(async (request) => {
+    requests.push(request as unknown as Record<string, unknown>);
+    const calls = request.payload.calls as Array<Record<string, unknown>>;
+    return {
+      kind: "response",
+      messageId: "response-batch",
+      inReplyTo: "call",
+      ok: true,
+      payload: {
+        results: calls.map((call) => ({
+          type: "success",
+          toolCallId: call.toolCallId,
+          toolName: call.name,
+          content: [],
+          startedAt: "now",
+          completedAt: "now",
+        })),
+      },
+    };
+  }, { tools: [parallel, serial], methods: ["execute_batch"] });
+  const port = createPermissionAwareToolPort(raw, {
+    preserveBatch: true,
+    authorization: {
+      async authorize(call) {
+        return call.name === "serial"
+          ? { result: { type: "error", toolCallId: call.id, toolName: call.name, error: { code: "permission_denied", message: "blocked" }, content: [], startedAt: "now", completedAt: "now" } }
+          : { call };
+      },
+    },
+  });
+
+  const results = await port.executeAll(
+    [{ id: "call-1", name: "parallel", input: {} }, { id: "call-2", name: "serial", input: {} }],
+    runtimeContext,
+    executionContext,
+  );
+
+  assert.equal(requests.length, 1);
+  assert.equal((requests[0]?.payload as Record<string, unknown>).operation, "execute_batch");
+  assert.deepEqual(((requests[0]?.payload as Record<string, unknown>).calls as Array<Record<string, unknown>>).map((call) => call.toolCallId), ["call-1"]);
+  assert.deepEqual(results.map((result) => result.toolCallId), ["call-1", "call-2"]);
+});
+
 test("host capability consumer uses the sidecar binding when AgentLoop omits operation identity", async () => {
   let received: Record<string, unknown> | undefined;
   const port = createHostCapabilityToolPort(async (request) => {

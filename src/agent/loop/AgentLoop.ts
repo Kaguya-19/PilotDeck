@@ -33,7 +33,6 @@ import { agentError } from "../protocol/errors.js";
 import type { AgentEvent } from "../protocol/events.js";
 import type { AgentPermissionDenial, AgentTurnResult } from "../protocol/result.js";
 import type { AgentRuntimeConfig } from "../runtime/AgentRuntimeConfig.js";
-import type { AgentRuntimeDependencies } from "../runtime/AgentRuntimeDependencies.js";
 import type { LifecycleDispatchResult } from "../../lifecycle/index.js";
 import type { PilotDeckHookEvent } from "../../extension/hooks/protocol/events.js";
 import { buildCachePlan } from "../../context/cache/CachePlan.js";
@@ -59,12 +58,14 @@ import { requiresPromptCapability } from "../../tool/userInteractionConstraints.
 import type { AgentRunMode } from "../protocol/input.js";
 import type { AgentExecutionContext, ModelInvokerPort, PreparedModelInvocation, ToolPort } from "../modules/protocol.js";
 import {
-  createAgentTurnCapabilities,
   isAgentTurnCapabilities,
   type AgentTurnContextPort,
   type AgentTurnCapabilities,
 } from "./AgentTurnCapabilities.js";
-import type { RouterDecision } from "../../router/index.js";
+import {
+  createAgentTurnCapabilities,
+  type AgentTurnCapabilityComposition,
+} from "./nativeAgentTurnCapabilitiesAdapter.js";
 import {
   ASK_MODE_DESCRIPTION_SUFFIX,
   isAskModeAllowedTool,
@@ -181,12 +182,12 @@ export class AgentLoop {
   private readonly toolPort: ToolPort;
 
   /**
-   * Direct compatibility adapter for callers that have not yet moved their
-   * composition boundary to AgentTurnCapabilities.
+   * @deprecated Compose AgentTurnCapabilities outside AgentLoop. Native
+   * callers retain this adapter for one compatibility cycle.
    */
   static fromDependencies(
     config: AgentRuntimeConfig,
-    dependencies: AgentRuntimeDependencies,
+    dependencies: AgentTurnCapabilityComposition,
     seedState?: AgentLoopSeedState,
   ): AgentLoop {
     return new AgentLoop(config, createAgentTurnCapabilities(config, dependencies), seedState);
@@ -564,18 +565,7 @@ export class AgentLoop {
           : undefined,
       };
       let prepared = await this.modelPort.prepare({ request, context: modelContext });
-      let decision = prepared.opaque as RouterDecision | undefined;
-      if (!decision) {
-        decision = {
-          provider: prepared.provider,
-          model: prepared.model,
-          scenarioType: "explicit",
-          isSubagent: Boolean(this.config.isSubagent),
-          orchestrating: false,
-          resolvedFrom: "explicit",
-          mutations: {},
-        };
-      }
+      let decision = { provider: prepared.provider, model: prepared.model };
       let routedProvider = prepared.provider;
       let routedModel = prepared.model;
       const routedLimits = this.getModelTokenLimits(routedProvider, routedModel);
@@ -612,15 +602,7 @@ export class AgentLoop {
               routedProvider = prepared.provider;
               routedModel = prepared.model;
               routedMaxOutputTokens = prepared.maxOutputTokens ?? this.getModelTokenLimits(routedProvider, routedModel)?.maxOutputTokens;
-              decision = prepared.opaque as RouterDecision | undefined ?? {
-                provider: routedProvider,
-                model: routedModel,
-                scenarioType: "explicit",
-                isSubagent: Boolean(this.config.isSubagent),
-                orchestrating: false,
-                resolvedFrom: "explicit",
-                mutations: {},
-              };
+              decision = { provider: routedProvider, model: routedModel };
               await this.persistCompactSnapshot(input, recompact);
               yield {
                 type: "turn_continued",
@@ -2197,7 +2179,7 @@ export class AgentLoop {
   private createBudgetEvaluator(
     input: AgentLoopInput,
     options: {
-      decision?: import("../../router/index.js").RouterDecision;
+      decision?: { provider: string; model: string };
       baseRequest?: CanonicalModelRequest;
       prepared?: PreparedModelInvocation;
       maxContextTokens?: number;
@@ -2222,9 +2204,8 @@ export class AgentLoop {
           cacheBreakpoints: candidateRequest.cacheBreakpoints,
           cachePlan: candidateRequest.cachePlan,
         };
-        const preparedDecision = options.prepared.opaque as RouterDecision | undefined;
-        candidateRequest = preparedDecision && this.capabilities.model.routing?.materializeRequest
-          ? this.capabilities.model.routing.materializeRequest(preparedDecision, materializedRequest)
+        candidateRequest = this.capabilities.model.routing?.materializeRequest
+          ? this.capabilities.model.routing.materializeRequest(options.prepared, materializedRequest)
           : {
               ...materializedRequest,
               provider: options.prepared.provider,
@@ -2463,19 +2444,11 @@ export class AgentLoop {
       canPrompt,
       ...(planDirectoryPath ? { planDirectoryPath } : {}),
     };
-    const auxiliaryModel = this.capabilities.model.auxiliary
-      ?? (this.capabilities.model.legacyAuxiliaryFallback && this.capabilities.model.routing?.stream
-        ? {
-            stream: (request: CanonicalModelRequest, signal?: AbortSignal) =>
-              this.capabilities.model.routing!.stream!(request, {
-                sessionId: input.sessionId,
-                turnId: input.turnId,
-                projectPath: this.config.cwd,
-                abortSignal: signal,
-                isMainAgent: false,
-              }),
-          }
-        : undefined);
+    const auxiliaryModel = this.capabilities.model.auxiliary?.forTurn?.({
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      projectPath: this.config.cwd,
+    }) ?? this.capabilities.model.auxiliary;
     return {
       sessionId: input.sessionId,
       turnId: input.turnId,
@@ -2614,7 +2587,13 @@ export class AgentLoop {
 
     yield* this.drainToolEventBufferForSubagentStatus(input, activeSubagents);
     if (error) throw error;
-    return results ?? [];
+    const completed = results ?? [];
+    await this.capabilities.toolResultObserver?.onToolResults({
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      results: completed,
+    });
+    return completed;
   }
 
   private *drainToolEventBufferForSubagentStatus(

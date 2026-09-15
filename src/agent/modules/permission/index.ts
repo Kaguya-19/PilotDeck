@@ -8,4 +8,7 @@ export {
   createDurablePermissionAuditRecorder,
   type DurablePermissionAuditOptions,
 } from "./durablePermissionAudit.js";
-export { HostPermissionModeState } from "./hostPermissionModeState.js";
+export {
+  HostPermissionModeState,
+  createHostPermissionModeResultObserver,
+} from "./hostPermissionModeState.js";

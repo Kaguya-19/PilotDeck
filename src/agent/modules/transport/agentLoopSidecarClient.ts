@@ -1,24 +1,14 @@
 import { randomUUID } from "node:crypto";
 
-import type { CanonicalModelEvent, CanonicalModelRequest, CanonicalMessage } from "../../../model/index.js";
-import type { LifecycleDispatchResult } from "../../../lifecycle/index.js";
-import { isPilotDeckHookEvent } from "../../../extension/hooks/protocol/events.js";
-import type {
-  PermissionContext,
-  PermissionDecision,
-  PermissionMode,
-  PermissionRuleSet,
-} from "../../../permission/index.js";
-import type {
-  PilotDeckToolCall,
-  PilotDeckToolDefinition,
-  PilotDeckToolRuntimeContext,
-} from "../../../tool/index.js";
-import type { PilotDeckPlanTodoStateHandle } from "../../../tool/protocol/types.js";
-import { createHostPlanTodoModuleHandler } from "../capability/hostPlanTodoModuleHandler.js";
+import type { CanonicalMessage } from "../../../model/index.js";
 import { HostToolCheckpoint } from "../checkpoint/hostToolCheckpoint.js";
 import { parseAgentLoopSeedStateProjection, serializeAgentLoopSeedStateProjection } from "../checkpoint/seedStateProjection.js";
-import { HostPermissionModeState } from "../permission/hostPermissionModeState.js";
+import {
+  createDefaultSidecarTurnComposition,
+  resolveSidecarTurnCompositionHandlers,
+  type SidecarTurnComposition,
+  type SidecarTurnCompositionFactory,
+} from "./sidecarTurnComposition.js";
 import type {
   AgentLoopSidecarTransportObservation,
   AgentLoopSidecarTransportObserver,
@@ -32,8 +22,6 @@ import type {
   AgentLoopOperationUnknownTerminal,
 } from "./operationLedger.js";
 import type {
-  AgentExecutionContext,
-  ModelExecutionContext,
   ModuleCapabilities,
   ModuleBinding,
   ModuleCallRequest,
@@ -43,21 +31,30 @@ import type {
   ModuleMessage,
   ModuleOutcome,
   ModuleResponse,
-  PreparedModelInvocation,
 } from "../protocol.js";
 import { MODULE_PROTOCOL_VERSION, validateModuleMessage } from "../protocol.js";
 import type { AgentLoopRuntimeFactory } from "../../loop/AgentLoopRuntimeFactory.js";
-import {
-  isNoopAgentTurnContextPort,
-  type AgentTurnCapabilities,
-} from "../../loop/AgentTurnCapabilities.js";
 import type { AgentLoopInput, AgentLoopRunResult, AgentLoopSeedState } from "../../loop/AgentLoop.js";
 import type { AgentEvent } from "../../protocol/events.js";
 import { agentError } from "../../protocol/errors.js";
 import type { AgentTurnResult } from "../../protocol/result.js";
 import type { AgentRuntimeConfig } from "../../runtime/AgentRuntimeConfig.js";
 import type { AgentLoopRunner } from "../../turn/TurnRunner.js";
-import { buildTurnEnvironment } from "../../turn/TurnEnvironment.js";
+import { createSidecarDefaultModuleDispatcher } from "./sidecarDefaultModuleDispatcher.js";
+import {
+  createSidecarHostModulePorts,
+  createSidecarModuleComposition,
+  type SidecarCapabilityModulePort,
+  type SidecarContextModulePort,
+  type SidecarEventModulePort,
+  type SidecarHostModulePorts,
+  type SidecarLifecycleModulePort,
+  type SidecarModelModulePort,
+  type SidecarModuleComposition,
+  type SidecarPermissionModulePort,
+  type SidecarTransportContext,
+  type SidecarTransportTurn,
+} from "./sidecarHostModulePorts.js";
 
 /**
  * One bidirectional connection to an AgentLoop sidecar. The application owns
@@ -78,15 +75,18 @@ export type AgentLoopSidecarConnection = {
   close?(reason?: unknown): void | Promise<void>;
 };
 
-export type AgentLoopSidecarConnectionFactoryInput = {
-  config: AgentRuntimeConfig;
-  capabilities: AgentTurnCapabilities;
+/** New sidecar connection contract. It deliberately exposes no aggregate. */
+export type SidecarConnectionFactoryInput = {
+  turn: SidecarTransportTurn;
   seedState?: AgentLoopSeedState;
-  input: AgentLoopInput;
+  transport: SidecarTransportContext;
 };
 
+/** @deprecated Connection providers should use SidecarConnectionFactoryInput. */
+export type AgentLoopSidecarConnectionFactoryInput = SidecarConnectionFactoryInput;
+
 export type AgentLoopSidecarConnectionFactory = (
-  input: AgentLoopSidecarConnectionFactoryInput,
+  input: SidecarConnectionFactoryInput,
 ) => AgentLoopSidecarConnection | Promise<AgentLoopSidecarConnection>;
 
 /**
@@ -114,8 +114,89 @@ export type AgentLoopSidecarRuntimeFactoryOptions = {
   operationLedger?: AgentLoopOperationLedger;
   /** Passive deployment telemetry. It cannot affect transport or turn semantics. */
   transportObserver?: AgentLoopSidecarTransportObserver;
+  /** Preferred explicit transport/session-owned context. */
+  transportContext?: SidecarTransportContext;
+  /** Optional host-specific module handlers composed for each sidecar turn. */
+  moduleHandlers?: SidecarModuleHandlerFactory;
+  /** Optional host observer for capability results. */
+  capabilityResultObserver?: SidecarCapabilityResultObserver;
+  /** Optional host composition for turn-scoped policy and module callbacks. */
+  turnComposition?: SidecarTurnCompositionFactory;
   uuid?: () => string;
 };
+
+/** Host composition hook for results returned by a capability provider. */
+export type SidecarCapabilityResultObserver = Readonly<{
+  onCapabilityResults(results: readonly import("../../../tool/index.js").PilotDeckToolResult[]): void | Promise<void>;
+}>;
+
+/** One externally composed host module handler. */
+export type SidecarModuleHandler = (call: ModuleCallRequest) => Promise<Record<string, unknown>>;
+
+/**
+ * Optional host handler overrides. The protocol supplies defaults for every
+ * core module, while Plan/Todo and result observation are composed externally.
+ */
+export type SidecarModuleHandlerRegistry = Readonly<Partial<{
+  model: SidecarModuleHandler;
+  capability: SidecarModuleHandler;
+  permission: SidecarModuleHandler;
+  context: SidecarModuleHandler;
+  lifecycle: SidecarModuleHandler;
+  event: SidecarModuleHandler;
+}>>;
+
+export type SidecarModuleHandlerFactory = Readonly<{
+  model?: (input: SidecarModelHandlerFactoryInput) => SidecarModuleHandler;
+  capability?: (input: SidecarCapabilityHandlerFactoryInput) => SidecarModuleHandler;
+  permission?: (input: SidecarPermissionHandlerFactoryInput) => SidecarModuleHandler;
+  context?: (input: SidecarContextHandlerFactoryInput) => SidecarModuleHandler;
+  lifecycle?: (input: SidecarLifecycleHandlerFactoryInput) => SidecarModuleHandler;
+  event?: (input: SidecarEventHandlerFactoryInput) => SidecarModuleHandler;
+}>;
+
+type SidecarModuleTurnIdentity = Readonly<{
+  sessionId: string;
+  turnId: string;
+  runId: string;
+  operationId: string;
+  operationDeadline?: string;
+  abortSignal?: AbortSignal;
+}>;
+
+export type SidecarModelHandlerFactoryInput = Readonly<{
+  port: SidecarModelModulePort;
+  turn: SidecarModuleTurnIdentity & Readonly<{ projectPath: string }>;
+}>;
+export type SidecarCapabilityHandlerFactoryInput = Readonly<{
+  port: SidecarCapabilityModulePort;
+  turn: SidecarModuleTurnIdentity;
+}>;
+export type SidecarPermissionHandlerFactoryInput = Readonly<{
+  port: SidecarPermissionModulePort;
+  turn: Pick<SidecarModuleTurnIdentity, "sessionId" | "turnId" | "abortSignal">;
+}>;
+export type SidecarContextHandlerFactoryInput = Readonly<{
+  port: SidecarContextModulePort;
+  turn: Pick<SidecarModuleTurnIdentity, "sessionId" | "turnId" | "abortSignal"> & Readonly<{
+    cwd: string;
+    permissionMode: string;
+    runMode: string;
+    maxContextTokens?: number;
+  }>;
+}>;
+export type SidecarLifecycleHandlerFactoryInput = Readonly<{
+  port: SidecarLifecycleModulePort;
+  turn: Pick<SidecarModuleTurnIdentity, "sessionId" | "turnId" | "abortSignal"> & Readonly<{
+    cwd: string;
+    permissionMode: string;
+    environment: NodeJS.ProcessEnv | undefined;
+  }>;
+}>;
+export type SidecarEventHandlerFactoryInput = Readonly<{
+  port: SidecarEventModulePort;
+  turn: Pick<SidecarModuleTurnIdentity, "sessionId" | "turnId">;
+}>;
 
 /**
  * Build the public, capability-only external AgentLoop factory for a
@@ -125,14 +206,25 @@ export type AgentLoopSidecarRuntimeFactoryOptions = {
 export function createAgentLoopSidecarRuntimeFactory(
   options: AgentLoopSidecarRuntimeFactoryOptions,
 ): AgentLoopRuntimeFactory {
-  return ({ config, capabilities, seedState }) => new AgentLoopSidecarRunner({
+  return ({ config, capabilities, sidecarModules, seedState, sidecarTransportContext }) => new AgentLoopSidecarRunner({
     config,
-    capabilities,
+    modules: sidecarModules
+      ?? createSidecarModuleComposition(createSidecarHostModulePorts(capabilities)),
     seedState,
     connect: options.connect,
     reconcileResultUnknown: options.reconcileResultUnknown,
-    operationLedger: options.operationLedger ?? capabilities.transport.operationLedger,
-    transportObserver: options.transportObserver,
+    operationLedger: options.transportContext?.operationLedger
+      ?? sidecarTransportContext?.operationLedger
+      ?? options.operationLedger
+      // @deprecated Native compatibility fallback. New sidecar composition
+      // supplies transportContext explicitly from its session owner.
+      ?? capabilities.transport.operationLedger,
+    transportObserver: options.transportContext?.transportObserver
+      ?? sidecarTransportContext?.transportObserver
+      ?? options.transportObserver,
+    moduleHandlers: options.moduleHandlers,
+    capabilityResultObserver: options.capabilityResultObserver,
+    turnComposition: options.turnComposition,
     uuid: options.uuid ?? randomUUID,
   });
 }
@@ -140,20 +232,35 @@ export function createAgentLoopSidecarRuntimeFactory(
 class AgentLoopSidecarRunner implements AgentLoopRunner {
   private seedState: AgentLoopSeedState | undefined;
   private active = false;
-  private readonly permissionMode: HostPermissionModeState;
+  private readonly turnComposition: SidecarTurnComposition;
+  private readonly modules: SidecarModuleComposition;
 
   constructor(private readonly options: {
     config: AgentRuntimeConfig;
-    capabilities: AgentTurnCapabilities;
+    modules: SidecarModuleComposition;
     seedState?: AgentLoopSeedState;
     connect: AgentLoopSidecarConnectionFactory;
     reconcileResultUnknown?: AgentLoopSidecarResultUnknownReconciler;
     operationLedger?: AgentLoopOperationLedger;
     transportObserver?: AgentLoopSidecarTransportObserver;
+    moduleHandlers?: SidecarModuleHandlerFactory;
+    capabilityResultObserver?: SidecarCapabilityResultObserver;
+    turnComposition?: SidecarTurnCompositionFactory;
     uuid: () => string;
   }) {
     this.seedState = cloneSeedState(options.seedState);
-    this.permissionMode = new HostPermissionModeState(options.config);
+    this.modules = options.modules;
+    this.turnComposition = options.turnComposition?.({
+      config: options.config,
+      modules: this.modules,
+      moduleHandlers: options.moduleHandlers,
+      capabilityResultObserver: options.capabilityResultObserver,
+    }) ?? createDefaultSidecarTurnComposition({
+      config: options.config,
+      modules: this.modules,
+      moduleHandlers: options.moduleHandlers,
+      capabilityResultObserver: options.capabilityResultObserver,
+    });
   }
 
   snapshotFileState(): AgentLoopSeedState {
@@ -169,28 +276,45 @@ class AgentLoopSidecarRunner implements AgentLoopRunner {
       // Native AgentLoop applies submit overrides before it evaluates this
       // turn. The host keeps the resulting live policy for later turns too.
       this.applyRunModeOverride(input);
-      this.permissionMode.applyTurnInput(input);
+      const turnComposition = this.turnComposition.forTurn(input);
       if (input.abortSignal?.aborted) return abortedResult(input);
       // The connection provider and host module dispatcher must observe one
       // immutable checkpoint for this turn. A transport receives its own
       // clone so it cannot alter the host-owned seed used by capability calls.
       const turnSeedState = this.snapshotFileState();
-      connection = await this.options.connect({
+      const hostToolCheckpoint = new HostToolCheckpoint(turnSeedState, input.allowedReadFiles);
+      const dispatcher = createSidecarDefaultModuleDispatcher({
         config: this.options.config,
-        capabilities: this.options.capabilities,
-        seedState: cloneSeedState(turnSeedState),
+        modules: this.modules,
         input,
+        checkpoint: hostToolCheckpoint,
+        capabilityResultObserver: turnComposition.capabilityResultObserver,
+        planTodoHandler: turnComposition.planTodoHandler,
+      });
+      const moduleHandlers = turnComposition.moduleHandlers
+        ?? resolveSidecarTurnCompositionHandlers({
+          config: this.options.config,
+          modules: this.modules,
+          turn: input,
+        }, this.options.moduleHandlers);
+      connection = await this.options.connect({
+        turn: sidecarTransportTurn(input),
+        seedState: cloneSeedState(turnSeedState),
+        transport: Object.freeze({
+          operationLedger: this.options.operationLedger,
+          transportObserver: this.options.transportObserver,
+        }),
       });
       protocol = new SidecarTurnProtocol({
         config: this.options.config,
-        capabilities: this.options.capabilities,
-        permissionMode: this.permissionMode,
         input,
-        seedState: cloneSeedState(turnSeedState),
+        checkpoint: hostToolCheckpoint,
+        manifest: dispatcher.manifest,
         uuid: this.options.uuid,
         reconcileResultUnknown: this.options.reconcileResultUnknown,
         operationLedger: this.options.operationLedger,
         transportObserver: this.options.transportObserver,
+        moduleHandlers: Object.freeze({ ...dispatcher.handlers, ...moduleHandlers }),
       });
       const result = yield* protocol.execute(connection);
       this.seedState = result.seedState;
@@ -223,15 +347,14 @@ type CachedModuleResponse = {
 };
 
 /** One host-owned Module Protocol handler. Handlers are composed per turn. */
-type SidecarModuleHandler = (call: ModuleCallRequest) => Promise<Record<string, unknown>>;
-type SidecarModuleHandlers = Readonly<{
+type SidecarModuleHandlers = Readonly<Partial<{
   model: SidecarModuleHandler;
   capability: SidecarModuleHandler;
   permission: SidecarModuleHandler;
   context: SidecarModuleHandler;
   lifecycle: SidecarModuleHandler;
   event: SidecarModuleHandler;
-}>;
+}>>;
 
 /** A new sidecar instance has no authority to replay a prior process's stream. */
 class SidecarInstanceRestartedError extends Error {
@@ -248,7 +371,6 @@ class SidecarTurnProtocol {
   private readonly runId: string;
   private readonly operationId: string;
   private readonly requestId: string;
-  private readonly modelPreparations = new Map<string, PreparedModelInvocation>();
   /** Per-turn delivery cache. It is never persisted or shared across runs. */
   private readonly completedModuleResponses = new Map<string, CachedModuleResponse>();
   private streamId: string | undefined;
@@ -267,40 +389,29 @@ class SidecarTurnProtocol {
   private reconnectFailureObserved = false;
   private resultUnknownSource: "sidecar_final" | "transport_interruption" | undefined;
   private readonly hostToolCheckpoint: HostToolCheckpoint;
+  private readonly manifest: ReturnType<typeof createSidecarDefaultModuleDispatcher>["manifest"];
   private readonly handlers: SidecarModuleHandlers;
-  private readonly planTodoHandler: (call: ModuleCallRequest) => Promise<Record<string, unknown>>;
 
   constructor(private readonly options: {
     config: AgentRuntimeConfig;
-    capabilities: AgentTurnCapabilities;
-    permissionMode: HostPermissionModeState;
     input: AgentLoopInput;
-    seedState?: AgentLoopSeedState;
+    checkpoint: HostToolCheckpoint;
+    manifest: ReturnType<typeof createSidecarDefaultModuleDispatcher>["manifest"];
     uuid: () => string;
     reconcileResultUnknown?: AgentLoopSidecarResultUnknownReconciler;
     operationLedger?: AgentLoopOperationLedger;
     transportObserver?: AgentLoopSidecarTransportObserver;
+    moduleHandlers: SidecarModuleHandlerRegistry;
   }) {
-    this.hostToolCheckpoint = new HostToolCheckpoint(options.seedState, options.input.allowedReadFiles);
+    this.hostToolCheckpoint = options.checkpoint;
     this.helloMessageId = `hello-${options.uuid()}`;
     this.capabilitiesMessageId = `capabilities-${options.uuid()}`;
     this.executeMessageId = `execute-${options.uuid()}`;
     this.runId = options.input.execution?.runId ?? `run-${options.uuid()}`;
     this.operationId = options.input.execution?.operationId ?? options.input.turnId;
     this.requestId = `request-${options.uuid()}`;
-    this.planTodoHandler = createHostPlanTodoModuleHandler({
-      sessionId: options.input.sessionId,
-      turnId: options.input.turnId,
-      resolve: () => options.capabilities.planMode.planTodoManager?.forSession(options.input.sessionId),
-    });
-    this.handlers = Object.freeze({
-      model: (call) => this.dispatchModel(call),
-      capability: (call) => this.dispatchCapability(call),
-      permission: (call) => this.dispatchPermission(call),
-      context: (call) => this.dispatchContext(call),
-      lifecycle: (call) => this.dispatchLifecycle(call),
-      event: (call) => this.dispatchEvent(call),
-    });
+    this.handlers = options.moduleHandlers;
+    this.manifest = options.manifest;
   }
 
   async *execute(connection: AgentLoopSidecarConnection): AsyncGenerator<AgentEvent, SidecarTerminal, unknown> {
@@ -468,8 +579,8 @@ class SidecarTurnProtocol {
   }
 
   private executeRequest(): ModuleExecuteRequest {
-    const { config, capabilities, input, seedState } = this.options;
-    const permissionContext = effectivePermissionContext(config, input);
+    const { config, input } = this.options;
+    const seedState = this.hostToolCheckpoint.snapshot();
     return {
       kind: "request",
       messageId: this.executeMessageId,
@@ -486,9 +597,9 @@ class SidecarTurnProtocol {
         messages: input.messages,
         ...(input.basePermissionMode !== undefined ? { basePermissionMode: input.basePermissionMode } : {}),
         ...(input.allowPlanModeTools !== undefined ? { allowPlanModeTools: input.allowPlanModeTools } : {}),
-        tools: capabilities.toolExecution.list().map(serializeToolDescriptor),
-        permissionContext,
-        hostModules: hostModuleCapabilities(capabilities),
+        tools: this.manifest.tools,
+        permissionContext: this.manifest.permissionContext,
+        hostModules: this.manifest.hostModules,
         ...(seedState ? { seedState: serializeAgentLoopSeedStateProjection(seedState) } : {}),
       },
     };
@@ -856,154 +967,6 @@ class SidecarTurnProtocol {
     return handler(call);
   }
 
-  private async dispatchModel(call: ModuleCallRequest): Promise<Record<string, unknown>> {
-    const operation = stringField(call.payload, "operation");
-    const preparationId = stringField(call.payload, "preparationId");
-    const context = modelExecutionContext(call, this.options.input, this.options.config, this.options.input.abortSignal);
-    if (operation === "prepare") {
-      const request = canonicalModelRequest(call.payload.request);
-      const prepared = await this.options.capabilities.model.execution.prepare({ request, context });
-      this.modelPreparations.set(preparationId, prepared);
-      return { prepared: serializablePreparedInvocation(prepared) };
-    }
-    if (operation === "stream") {
-      const prepared = this.modelPreparations.get(preparationId);
-      if (!prepared) throw new Error(`Unknown sidecar model preparation: ${preparationId}`);
-      const events: CanonicalModelEvent[] = [];
-      for await (const event of this.options.capabilities.model.execution.stream({ prepared, context })) events.push(event);
-      return { events };
-    }
-    throw new Error(`Unsupported sidecar model operation: ${operation}`);
-  }
-
-  private async dispatchCapability(call: ModuleCallRequest): Promise<Record<string, unknown>> {
-    const operation = stringField(call.payload, "operation");
-    if (operation === "plan_todo") return this.planTodoHandler(call);
-    const planTodo = this.options.capabilities.planMode.planTodoManager?.forSession(this.options.input.sessionId);
-    const context = toolRuntimeContext(
-      call.payload.context,
-      this.options.config,
-      this.options.input,
-      this.options.capabilities,
-      this.hostToolCheckpoint,
-      planTodo,
-      true,
-    );
-    const execution = toolExecutionContext(call, this.options.input);
-    if (operation === "execute_batch") {
-      const calls = Array.isArray(call.payload.calls)
-        ? call.payload.calls.map(parseToolCall)
-        : (() => { throw new Error("Capability batch call must contain calls."); })();
-      const results = await this.options.capabilities.toolExecution.executeAll(calls, context, execution);
-      if (results.length !== calls.length) throw new Error("Capability port returned an incomplete batch result.");
-      this.options.permissionMode.applyCapabilityResults(results);
-      return { results };
-    }
-    if (operation === "execute") {
-      const callInput = parseToolCall({
-        toolCallId: call.payload.toolCallId,
-        name: call.payload.name,
-        arguments: call.payload.arguments,
-      });
-      const [result] = await this.options.capabilities.toolExecution.executeAll([callInput], context, execution);
-      if (!result) throw new Error("Capability port returned no result.");
-      this.options.permissionMode.applyCapabilityResults([result]);
-      return result as unknown as Record<string, unknown>;
-    }
-    throw new Error(`Unsupported sidecar capability operation: ${operation}`);
-  }
-
-  private async dispatchPermission(call: ModuleCallRequest): Promise<Record<string, unknown>> {
-    if (stringField(call.payload, "operation") !== "decide") {
-      throw new Error("Unsupported sidecar permission operation.");
-    }
-    const permission = this.options.capabilities.permission;
-    if (!permission) throw new Error("Host did not provide a permission capability.");
-    const toolName = stringField(asRecord(call.payload.tool), "name");
-    const tool = this.options.capabilities.toolExecution.list().find((candidate) => candidate.name === toolName);
-    if (!tool) throw new Error(`Permission request references unavailable tool: ${toolName}`);
-    const decision = await permission.decide(
-      tool,
-      call.payload.input,
-      toolRuntimeContext(
-        call.payload.context,
-        this.options.config,
-        this.options.input,
-        this.options.capabilities,
-        this.hostToolCheckpoint,
-      ),
-      stringField(call.payload, "toolCallId"),
-    );
-    return { decision };
-  }
-
-  private async dispatchContext(call: ModuleCallRequest): Promise<Record<string, unknown>> {
-    const operation = stringField(call.payload, "operation");
-    const input = withContextIdentity(asRecord(call.payload.input), this.options.input, this.options.config);
-    // Before routing, the sidecar has no model-specific window to serialize.
-    // The host owns the configured default; a later routed value remains an
-    // explicit, narrower per-call override.
-    if (
-      operation === "try_auto_compact"
-      && input.maxContextTokens === undefined
-      && this.options.config.maxContextTokens !== undefined
-    ) {
-      input.maxContextTokens = this.options.config.maxContextTokens;
-    }
-    if (operation === "prepare_for_model") return { result: await this.options.capabilities.contextPreparation.prepareForModel(input as never) };
-    if (operation === "apply_tool_results" && this.options.capabilities.contextToolResults) {
-      return { result: await this.options.capabilities.contextToolResults.applyToolResults(input as never) };
-    }
-    if (operation === "recover_from_model_error" && this.options.capabilities.contextRecovery) {
-      return { result: await this.options.capabilities.contextRecovery.recoverFromModelError(input as never) };
-    }
-    if (operation === "capture_turn" && this.options.capabilities.contextCapture) {
-      await this.options.capabilities.contextCapture.captureTurn(input as never);
-      return { result: null };
-    }
-    if (operation === "try_auto_compact" && this.options.capabilities.contextCompaction) {
-      return { result: await this.options.capabilities.contextCompaction.tryAutoCompact(input as never) };
-    }
-    throw new Error(`Host context capability does not support ${operation}.`);
-  }
-
-  private async dispatchLifecycle(call: ModuleCallRequest): Promise<Record<string, unknown>> {
-    const lifecycle = this.options.capabilities.hooks.lifecycle;
-    if (!lifecycle) throw new Error("Host did not provide a lifecycle capability.");
-    if (stringField(call.payload, "operation") !== "dispatch") {
-      throw new Error("Unsupported sidecar lifecycle operation.");
-    }
-    const event = stringField(call.payload, "event");
-    if (!isPilotDeckHookEvent(event)) throw new Error(`Unsupported sidecar lifecycle event: ${event}`);
-    const payload = call.payload.payload === undefined
-      ? undefined
-      : asRecord(call.payload.payload) ?? (() => { throw new Error("Lifecycle payload must be an object."); })();
-    const input = this.options.input;
-    const config = this.options.config;
-    const result = await lifecycle.dispatch({
-      event,
-      baseInput: {
-        sessionId: input.sessionId,
-        transcriptPath: "",
-        cwd: config.cwd,
-        permissionMode: config.permissionMode,
-      },
-      ...(payload ? { payload } : {}),
-      matchQuery: event,
-      ...(input.abortSignal ? { signal: input.abortSignal } : {}),
-      env: buildTurnEnvironment(config.env, config.cwd, input.sessionId, input.turnId),
-    });
-    return { result: serializeLifecycleDispatchResult(result) };
-  }
-
-  private async dispatchEvent(call: ModuleCallRequest): Promise<Record<string, unknown>> {
-    if (stringField(call.payload, "operation") !== "emit") {
-      throw new Error("Unsupported sidecar event operation.");
-    }
-    const event = readHostEmittedEvent(call.payload.event, this.options.input);
-    this.options.capabilities.events.emit?.(event);
-    return { result: null };
-  }
 }
 
 function isModuleCall(message: ModuleMessage): message is ModuleCallRequest {
@@ -1092,32 +1055,6 @@ function moduleResponse(
   };
 }
 
-function hostModuleCapabilities(capabilities: AgentTurnCapabilities): Record<string, unknown> {
-  const contextMethods = !isNoopAgentTurnContextPort(capabilities.context)
-    ? [
-        "prepare_for_model",
-        ...(capabilities.contextToolResults ? ["apply_tool_results"] : []),
-        ...(capabilities.contextRecovery ? ["recover_from_model_error"] : []),
-        ...(capabilities.contextCapture ? ["capture_turn"] : []),
-        ...(capabilities.contextCompaction ? ["try_auto_compact"] : []),
-      ]
-    : [];
-  return {
-    model: { methods: ["prepare", "stream"] },
-    capability: {
-      methods: [
-        "execute",
-        "execute_batch",
-        ...(capabilities.planMode.planTodoManager ? ["plan_todo"] : []),
-      ],
-    },
-    ...(contextMethods.length > 0 ? { context: { methods: contextMethods } } : {}),
-    ...(capabilities.permission ? { permission: { methods: ["decide"] } } : {}),
-    ...(capabilities.hooks.lifecycle ? { lifecycle: { methods: ["dispatch"] } } : {}),
-    ...(capabilities.events.emit ? { event: { methods: ["emit"] } } : {}),
-  };
-}
-
 function serializeAgentConfig(config: AgentRuntimeConfig): Record<string, unknown> {
   return {
     provider: config.provider,
@@ -1133,178 +1070,6 @@ function serializeAgentConfig(config: AgentRuntimeConfig): Record<string, unknow
   };
 }
 
-function serializeToolDescriptor(tool: PilotDeckToolDefinition): Record<string, unknown> {
-  return {
-    name: tool.name,
-    description: tool.description,
-    kind: tool.kind,
-    inputSchema: tool.inputSchema,
-    readOnly: safely(() => tool.isReadOnly({}), false),
-    concurrencySafe: safely(() => tool.isConcurrencySafe({}), false),
-    requiresUserInteraction: safely(() => tool.requiresUserInteraction?.({}) ?? false, false),
-    ...(tool.requiredRuntimeCapabilities ? { requiredRuntimeCapabilities: [...tool.requiredRuntimeCapabilities] } : {}),
-  };
-}
-
-function effectivePermissionContext(config: AgentRuntimeConfig, input: AgentLoopInput): PermissionContext {
-  const rules: PermissionRuleSet = {
-    allow: input.permissionRules?.allow ?? config.permissionContext.rules.allow,
-    deny: input.permissionRules?.deny ?? config.permissionContext.rules.deny,
-    ask: input.permissionRules?.ask ?? config.permissionContext.rules.ask,
-  };
-  return {
-    ...config.permissionContext,
-    // Native AgentLoop always evaluates permission policy in the actual tool
-    // workspace. Keep host module callbacks on that same canonical cwd.
-    cwd: config.cwd,
-    mode: config.permissionMode,
-    canPrompt: input.canPrompt ?? config.permissionContext.canPrompt,
-    rules,
-  };
-}
-
-function modelExecutionContext(
-  call: ModuleCallRequest,
-  input: AgentLoopInput,
-  config: AgentRuntimeConfig,
-  abortSignal?: AbortSignal,
-): ModelExecutionContext {
-  const remote = asRecord(call.payload.context);
-  return {
-    sessionId: input.sessionId,
-    turnId: input.turnId,
-    runId: call.runId,
-    operationId: call.operationId,
-    ...(call.idempotencyKey ? { idempotencyKey: call.idempotencyKey } : {}),
-    ...(input.execution?.operationDeadline ? { operationDeadline: input.execution.operationDeadline } : {}),
-    ...(abortSignal ? { abortSignal } : {}),
-    ...(modelOverride(remote?.modelOverride) ? { modelOverride: modelOverride(remote?.modelOverride) } : {}),
-    ...(asRecord(remote?.metadata) ? { metadata: asRecord(remote?.metadata) } : {}),
-  };
-}
-
-function toolRuntimeContext(
-  value: unknown,
-  config: AgentRuntimeConfig,
-  input: AgentLoopInput,
-  capabilities: AgentTurnCapabilities,
-  checkpoint: HostToolCheckpoint,
-  planTodo?: PilotDeckPlanTodoStateHandle,
-  includeOneShotSubagent = false,
-): PilotDeckToolRuntimeContext {
-  const remote = asRecord(value);
-  const planDirectoryPath = capabilities.planMode.planFileManager?.getPlanDirectoryPath();
-  const fileState = checkpoint.toolContextState();
-  // Sidecar composition accepts an explicitly injected auxiliary provider only.
-  // Router-backed fallback remains available exclusively through native legacy
-  // composition, so this process can run without any Router implementation.
-  const auxiliaryModel = capabilities.model.auxiliary;
-  return {
-    sessionId: input.sessionId,
-    turnId: input.turnId,
-    messageId: input.turnId,
-    cwd: config.cwd,
-    ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
-    ...(config.subagentTimeoutMs ? { subagentTimeoutMs: config.subagentTimeoutMs } : {}),
-    ...(typeof remote?.currentToolCallId === "string" ? { currentToolCallId: remote.currentToolCallId } : {}),
-    ...(config.toolAliases ? { toolAliases: config.toolAliases } : {}),
-    permissionMode: config.permissionMode,
-    permissionContext: {
-      ...effectivePermissionContext(config, input),
-      ...(planDirectoryPath ? { planDirectoryPath } : {}),
-    },
-    runMode: config.runMode ?? "agent",
-    ...(capabilities.toolExecution.auditRecorder ? { auditRecorder: capabilities.toolExecution.auditRecorder } : {}),
-    ...(capabilities.clock.now ? { now: capabilities.clock.now } : {}),
-    env: buildTurnEnvironment(config.env, config.cwd, input.sessionId, input.turnId),
-    ...(config.maxResultBytes ? { maxResultBytes: config.maxResultBytes } : {}),
-    ...(auxiliaryModel ? { model: auxiliaryModel } : {}),
-    ...(capabilities.interaction.elicitation ? { elicitation: capabilities.interaction.elicitation } : {}),
-    ...(capabilities.toolExecution.fileHistory ? { fileHistory: capabilities.toolExecution.fileHistory } : {}),
-    ...(config.subagentDepth !== undefined ? { subagentDepth: config.subagentDepth } : {}),
-    ...(includeOneShotSubagent && capabilities.subagent.oneShot
-      ? {
-          subagent: capabilities.subagent.oneShot.createForkApi({
-            sessionId: input.sessionId,
-            turnId: input.turnId,
-            parentReadFileState: fileState.readFileState,
-            parentWriteSnapshots: fileState.writeSnapshots,
-          }),
-        }
-      : {}),
-    ...(config.modelMultimodal ? { modelMultimodal: config.modelMultimodal } : {}),
-    ...(config.maxOutputTokens ? { maxOutputTokens: config.maxOutputTokens } : {}),
-    readFileState: fileState.readFileState,
-    allowedReadFiles: fileState.allowedReadFiles,
-    writeSnapshots: fileState.writeSnapshots,
-    ...(capabilities.toolExecution.fileUpdateNotifier ? { fileUpdateNotifier: capabilities.toolExecution.fileUpdateNotifier } : {}),
-    ...(planTodo ? { planTodo } : {}),
-    ...(capabilities.goal ? { goal: capabilities.goal.forSession(input.sessionId) } : {}),
-    ...(planDirectoryPath
-      ? {
-          planDirectory: {
-            path: planDirectoryPath,
-            resolve: (filePath: string) => capabilities.planMode.planFileManager?.resolvePlanFilePath(filePath, config.cwd),
-            read: (filePath: string) => capabilities.planMode.planFileManager?.readPlanFile(filePath, config.cwd),
-          },
-        }
-      : {}),
-  };
-}
-
-function toolExecutionContext(call: ModuleCallRequest, input: AgentLoopInput): AgentExecutionContext {
-  return {
-    sessionId: input.sessionId,
-    turnId: input.turnId,
-    runId: call.runId,
-    operationId: call.operationId,
-    ...(call.idempotencyKey ? { idempotencyKey: call.idempotencyKey } : {}),
-    ...(input.execution?.operationDeadline ? { operationDeadline: input.execution.operationDeadline } : {}),
-    ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
-  };
-}
-
-function withContextIdentity(
-  source: Record<string, unknown> | undefined,
-  input: AgentLoopInput,
-  config: AgentRuntimeConfig,
-): Record<string, unknown> {
-  return {
-    ...(source ?? {}),
-    sessionId: input.sessionId,
-    turnId: input.turnId,
-    cwd: config.cwd,
-    permissionMode: config.permissionMode,
-    runMode: config.runMode ?? "agent",
-    ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
-  };
-}
-
-function parseToolCall(value: unknown): PilotDeckToolCall {
-  const record = asRecord(value);
-  const id = stringField(record, "toolCallId");
-  const name = stringField(record, "name");
-  return { id, name, input: record?.arguments ?? {} };
-}
-
-function canonicalModelRequest(value: unknown): CanonicalModelRequest {
-  const request = asRecord(value);
-  if (!request || typeof request.provider !== "string" || typeof request.model !== "string" || !Array.isArray(request.messages)) {
-    throw new Error("Sidecar model call contains an invalid canonical request.");
-  }
-  return request as unknown as CanonicalModelRequest;
-}
-
-function serializablePreparedInvocation(prepared: PreparedModelInvocation): Record<string, unknown> {
-  return {
-    request: prepared.request,
-    provider: prepared.provider,
-    model: prepared.model,
-    ...(prepared.maxContextTokens ? { maxContextTokens: prepared.maxContextTokens } : {}),
-    ...(prepared.maxOutputTokens ? { maxOutputTokens: prepared.maxOutputTokens } : {}),
-  };
-}
-
 function readAgentEvent(event: ModuleEvent, input: AgentLoopInput): AgentEvent {
   const value = asRecord(event.payload);
   if (!value || typeof value.type !== "string") throw new Error("Sidecar event payload is not an AgentEvent.");
@@ -1314,16 +1079,6 @@ function readAgentEvent(event: ModuleEvent, input: AgentLoopInput): AgentEvent {
   return value as unknown as AgentEvent;
 }
 
-function readHostEmittedEvent(value: unknown, input: AgentLoopInput): AgentEvent {
-  const event = asRecord(value);
-  if (!event || typeof event.type !== "string" || event.sessionId !== input.sessionId) {
-    throw new Error("Sidecar host event does not match the active session.");
-  }
-  if ("turnId" in event && event.turnId !== input.turnId) {
-    throw new Error("Sidecar host event does not match the active turn.");
-  }
-  return event as unknown as AgentEvent;
-}
 
 function readTerminal(event: ModuleEvent, input: AgentLoopInput): SidecarTerminal {
   const payload = asRecord(event.payload);
@@ -1456,6 +1211,17 @@ function cloneSeedState(seedState: AgentLoopSeedState | undefined): AgentLoopSee
   return seedState ? parseAgentLoopSeedStateProjection(serializeAgentLoopSeedStateProjection(seedState)) : undefined;
 }
 
+function sidecarTransportTurn(input: AgentLoopInput): SidecarTransportTurn {
+  return Object.freeze({
+    sessionId: input.sessionId,
+    turnId: input.turnId,
+    runId: input.execution?.runId ?? `run-${input.turnId}`,
+    operationId: input.execution?.operationId ?? input.turnId,
+    ...(input.execution?.idempotencyKey ? { idempotencyKey: input.execution.idempotencyKey } : {}),
+    ...(input.execution?.operationDeadline ? { operationDeadline: input.execution.operationDeadline } : {}),
+  });
+}
+
 function modelOverride(value: unknown): { provider: string; model: string } | undefined {
   const record = asRecord(value);
   return record && typeof record.provider === "string" && typeof record.model === "string"
@@ -1486,17 +1252,6 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
-function serializeLifecycleDispatchResult(result: LifecycleDispatchResult): Record<string, unknown> {
-  return {
-    effects: result.effects,
-    messages: result.messages,
-    events: result.events,
-    blockingErrors: result.blockingErrors,
-    nonBlockingErrors: result.nonBlockingErrors,
-    ...(result.pendingAsyncHooks ? { pendingAsyncHooks: result.pendingAsyncHooks } : {}),
-  };
-}
-
 function serializeTransportError(error: unknown): Record<string, unknown> {
   if (error instanceof Error) {
     const code = (error as Error & { code?: unknown }).code;
@@ -1506,12 +1261,4 @@ function serializeTransportError(error: unknown): Record<string, unknown> {
     };
   }
   return { message: String(error) };
-}
-
-function safely(value: () => boolean, fallback: boolean): boolean {
-  try {
-    return value();
-  } catch {
-    return fallback;
-  }
 }

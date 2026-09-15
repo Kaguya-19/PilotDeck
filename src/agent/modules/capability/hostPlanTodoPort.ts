@@ -10,6 +10,7 @@ import {
   planTodoBlockingMessageFor,
 } from "../../../plan-todo/runtime/planTodoStateHelpers.js";
 import type { ToolPort } from "../protocol.js";
+import type { ToolResultObserver } from "../../loop/AgentTurnCapabilities.js";
 import type { AgentExecutionContext, ModuleCallRequest, ModuleResponse } from "../protocol.js";
 
 type PlanTodoModuleCall = Omit<ModuleCallRequest, "kind" | "messageId" | "method"> & {
@@ -36,6 +37,8 @@ export type HostPlanTodoPort = PlanTodoPort & {
   initialize(sessionId: string, turnId: string): Promise<void>;
   refresh(sessionId: string, turnId: string): Promise<void>;
 };
+
+export type PlanTodoResultObserver = ToolResultObserver;
 
 export function createHostPlanTodoPort(
   callModule: HostPlanTodoModuleClient,
@@ -132,6 +135,21 @@ export function createPlanTodoAwareToolPort(
       const results = await delegate.executeAll(calls, context, execution);
       await planTodo.refresh(context.sessionId, context.turnId);
       return results;
+    },
+  };
+}
+
+/** Host composition observer for plan/todo projection refresh. */
+export function createPlanTodoResultObserver(
+  options: {
+    planTodo: Pick<HostPlanTodoPort, "refresh">;
+    sessionId: string;
+    turnId: string;
+  },
+): PlanTodoResultObserver {
+  return {
+    async onToolResults() {
+      await options.planTodo.refresh(options.sessionId, options.turnId);
     },
   };
 }

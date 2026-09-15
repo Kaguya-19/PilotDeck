@@ -2,10 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { AgentLoop } from "../../../src/agent/loop/AgentLoop.js";
-import {
-  createAgentTurnCapabilities,
-  createSidecarAgentTurnCapabilities,
-} from "../../../src/agent/loop/AgentTurnCapabilities.js";
+import { createSidecarAgentTurnCapabilities } from "../../../src/agent/loop/AgentTurnCapabilities.js";
+import { createAgentTurnCapabilities } from "../../../src/agent/loop/nativeAgentTurnCapabilitiesAdapter.js";
 import type { AgentRuntimeConfig } from "../../../src/agent/runtime/AgentRuntimeConfig.js";
 import type { AgentRuntimeDependencies } from "../../../src/agent/runtime/AgentRuntimeDependencies.js";
 import type { ModelInvokerPort, ToolPort } from "../../../src/agent/modules/index.js";
@@ -191,15 +189,15 @@ test("sidecar capabilities compose explicit ports without a router or native aux
     async *stream() { yield { type: "message_end", finishReason: "stop" } as const; },
   };
   const tools: ToolPort = { list: () => [], executeAll: async () => [] };
-  const routing = {
-    stream: () => { throw new Error("sidecar must not call router fallback"); },
-  };
+  const routing = {};
   const capabilities = createSidecarAgentTurnCapabilities(config, {
-    ports: { model, tools, routing },
+    ports: { model, toolExecution: tools, routing },
   });
   assert.equal(capabilities.model.execution, model);
   assert.equal(capabilities.model.legacyAuxiliaryFallback, false);
   assert.equal(capabilities.model.auxiliary, undefined);
+  assert.equal("dispose" in capabilities.context, false);
+  assert.deepEqual(capabilities.toolExecution.list(), tools.list());
 });
 
 test("AgentLoop tool execution port preserves injected method binding", async () => {

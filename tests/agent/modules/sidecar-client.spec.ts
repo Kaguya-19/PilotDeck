@@ -105,6 +105,33 @@ test("capability-only sidecar factory completes a durable host tool turn and res
   assert.equal(restoredFileState.readFileState?.get("/workspace/input.txt")?.kind, "text");
 });
 
+test("sidecar connection factory receives only transport turn facts", async () => {
+  const seen: Array<Record<string, unknown>> = [];
+  const session = createAgentSession({
+    sessionId: "transport-only-session",
+    config: config(),
+    dependencies: {
+      router: {} as never,
+      ports: { model: noopModel(), tools: noopTools() },
+      tools: { registry: { list: () => [] } as never, scheduler: { executeAll: async () => [] } as never },
+    },
+    agentLoopFactory: createAgentLoopSidecarRuntimeFactory({
+      connect: (input) => {
+        seen.push(input as unknown as Record<string, unknown>);
+        assert.equal("ports" in input, false);
+        assert.equal("config" in input, false);
+        assert.equal(input.turn.sessionId, "transport-only-session");
+        return loopbackConnection();
+      },
+      uuid: deterministicIds(),
+    }),
+  });
+  for await (const _event of session.submit({ type: "text", text: "hello" }, { turnId: "transport-only-turn" })) {
+    // Drain protocol events.
+  }
+  assert.equal(seen.length, 1);
+});
+
 test("sidecar known terminal keeps host tool checkpoint state and current attachment authorization", async () => {
   const toolContexts: PilotDeckToolRuntimeContext[] = [];
   const forkSnapshots: Array<{ readFiles: string[]; writeFiles: string[] }> = [];
@@ -660,8 +687,8 @@ test("sidecar host canonicalizes forged context policy to its live config", asyn
     },
     agentLoopFactory: createAgentLoopSidecarRuntimeFactory({
       connect: (input) => {
-        connectedRunModes.push(input.config.runMode);
-        return forgedPolicyContextConnection(input.input.sessionId, input.input.turnId);
+        connectedRunModes.push(runtimeConfig.runMode);
+        return forgedPolicyContextConnection(input.turn.sessionId, input.turn.turnId);
       },
       uuid: deterministicIds(),
     }),

@@ -20,7 +20,7 @@ import {
   AgentSessionRuntimeBundle,
   type AgentSessionRuntimeResources,
 } from "../session/AgentSessionRuntimeBundle.js";
-import { createAgentTurnCapabilities } from "../loop/AgentTurnCapabilities.js";
+import { createAgentTurnCapabilities } from "../loop/nativeAgentTurnCapabilitiesAdapter.js";
 import type { AgentTranscriptWriter } from "../../session/transcript/TranscriptWriter.js";
 import type { CanonicalAssistantTextSummary } from "./types.js";
 import type {
