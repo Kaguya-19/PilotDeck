@@ -88,7 +88,7 @@ describe('useChatComposerState attachment submission', () => {
     });
     const sendMessage = vi.fn(() => true);
     const enqueuePreparedInput = vi.fn(async () => ({ ok: true }));
-    const initialChoice = { mode: 'model' as const, provider: 'zeta', model: 'configured', reasoning: 0.8, temperature: 0.3, speed: 1 };
+    const initialChoice = { mode: 'model' as const, provider: 'zeta', model: 'configured', reasoning: 0.8, speed: 1 };
     const selectedProject = { name: 'demo', displayName: 'Demo', fullPath: '/tmp/demo' };
     const selectedSession = queued ? { id: 'web:queue' } : null;
     const { result, rerender } = renderHook(({ modelSelection }) => useChatComposerState({

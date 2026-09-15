@@ -5,7 +5,6 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type {
   ChangeEvent,
   ClipboardEvent,
-  CSSProperties,
   FormEvent,
   KeyboardEvent,
   MouseEvent,
@@ -435,10 +434,8 @@ function CapabilityOptionList({
             key={value}
             type="button"
             aria-pressed={selected}
-            onMouseDown={(event) => {
-              event.preventDefault();
-              onSelect(value);
-            }}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => onSelect(value)}
             className={cn(
               "grid h-[22px] grid-cols-[1fr_14px] items-center rounded-md border border-transparent px-[7px] text-left text-[11px] text-[#595b67] transition-colors hover:border-[#e4e0fb] hover:bg-[#f7f6ff] hover:text-[#4742a9] dark:text-neutral-300 dark:hover:border-violet-800 dark:hover:bg-violet-950/40 dark:hover:text-violet-200",
               selected
@@ -548,13 +545,18 @@ export default function ComposerV2({
 }: ComposerV2Props) {
   const { t } = useTranslation("chat");
   const reasoningLabels = useMemo(() => new Map<number, string>([
-    [0, t("input.models.reasoningLevels.off", { defaultValue: "Off" }) as string],
-    [0.2, t("input.models.reasoningLevels.light", { defaultValue: "Light" }) as string],
     [0.4, t("input.models.reasoningLevels.low", { defaultValue: "Low" }) as string],
     [0.6, t("input.models.reasoningLevels.medium", { defaultValue: "Medium" }) as string],
     [0.8, t("input.models.reasoningLevels.high", { defaultValue: "High" }) as string],
-    [0.9, t("input.models.reasoningLevels.xhigh", { defaultValue: "Extra high" }) as string],
-    [1, t("input.models.reasoningLevels.max", { defaultValue: "Maximum" }) as string],
+    [0.9, t("input.models.reasoningLevels.xhigh", { defaultValue: "Xhigh" }) as string],
+    [1, t("input.models.reasoningLevels.max", { defaultValue: "Max" }) as string],
+  ]), [t]);
+  const reasoningMenuLabels = useMemo(() => new Map<number, string>([
+    [0.4, t("input.models.reasoningMenuLevels.low", { defaultValue: "Low" }) as string],
+    [0.6, t("input.models.reasoningMenuLevels.medium", { defaultValue: "Medium" }) as string],
+    [0.8, t("input.models.reasoningMenuLevels.high", { defaultValue: "High" }) as string],
+    [0.9, t("input.models.reasoningMenuLevels.xhigh", { defaultValue: "Xhigh" }) as string],
+    [1, t("input.models.reasoningMenuLevels.max", { defaultValue: "Max" }) as string],
   ]), [t]);
   const speedLabels = useMemo(() => new Map<number, string>([
     [0, t("input.models.speedLevels.standard", { defaultValue: "Standard" }) as string],
@@ -707,6 +709,12 @@ export default function ComposerV2({
   const selectedModel = modelCatalog.find(
     (item) => item.id === selectedModelId,
   );
+  const selectedReasoning = modelSelection?.mode === "model" ? modelSelection.reasoning : undefined;
+  const selectedReasoningLabel = selectedModel?.capabilities.reasoning
+    ? capabilityValues(selectedModel.capabilities.reasoning).some(value => sameCapabilityValue(selectedReasoning, value))
+      ? reasoningLabels.get(selectedReasoning!)
+      : t("input.models.reasoningLevels.default", { defaultValue: "Default" })
+    : null;
   const selectedModelLabel =
     modelSelection?.mode === "auto"
       ? (t("input.models.auto", { defaultValue: "Auto" }) as string)
@@ -769,7 +777,6 @@ export default function ComposerV2({
     item: ChatModelCatalogItem,
     patch: {
       reasoning?: number;
-      temperature?: number;
       speed?: number;
     },
   ) => {
@@ -779,6 +786,13 @@ export default function ComposerV2({
         ...patch,
       }),
     );
+  };
+
+  const selectReasoning = (item: ChatModelCatalogItem, reasoning?: number) => {
+    updateModelParams(item, { reasoning });
+    setIsModelMenuOpen(false);
+    setAdvancedModelId(null);
+    modelMenu.triggerRef.current?.focus();
   };
 
   return (
@@ -1538,7 +1552,12 @@ export default function ComposerV2({
                       aria-haspopup="dialog"
                       aria-expanded={isModelMenuOpen}
                     >
-                      <span className="truncate">{selectedModelLabel}</span>
+                      <span className="min-w-0 truncate">{selectedModelLabel}</span>
+                      {selectedReasoningLabel && (
+                        <span className="shrink-0 font-normal text-neutral-400 dark:text-neutral-500">
+                          {selectedReasoningLabel}
+                        </span>
+                      )}
                       <ChevronDown
                         className={cn(
                           "pd-composer-control-chevron h-3.5 w-3.5 shrink-0 transition-transform",
@@ -1613,7 +1632,6 @@ export default function ComposerV2({
                                     const isSelected = item.id === selectedModelId;
                                     const hasAdvanced = Boolean(
                                       item.capabilities.reasoning ||
-                                      item.capabilities.temperature ||
                                       item.capabilities.speed,
                                     );
                                     return (
@@ -1729,17 +1747,19 @@ export default function ComposerV2({
                                     defaultValue: "Reasoning",
                                   })}
                                 </h2>
+                                <button type="button" aria-pressed={advancedParams.reasoning === undefined}
+                                  className="mb-1 w-full rounded-md px-[7px] py-1 text-left text-[11px] hover:bg-violet-50 dark:hover:bg-violet-950/40"
+                                  onClick={() => selectReasoning(advancedModel)}>
+                                  {t('input.models.reasoningMenuLevels.default', { defaultValue: 'Default' })}
+                                  {advancedParams.reasoning === undefined && <Check className="float-right h-3 w-3" />}
+                                </button>
                                 <CapabilityOptionList
                                   values={capabilityValues(
                                     advancedModel.capabilities.reasoning,
                                   )}
-                                  labels={reasoningLabels}
+                                  labels={reasoningMenuLabels}
                                   currentValue={advancedParams.reasoning}
-                                  onSelect={(reasoning) =>
-                                    updateModelParams(advancedModel, {
-                                      reasoning,
-                                    })
-                                  }
+                                  onSelect={(reasoning) => selectReasoning(advancedModel, reasoning)}
                                 />
                               </div>
                             ) : null}
@@ -1768,96 +1788,6 @@ export default function ComposerV2({
                                 />
                               </div>
                             ) : null}
-                            {advancedModel.capabilities.temperature
-                              ? (() => {
-                                  const capability =
-                                    advancedModel.capabilities.temperature;
-                                  const values = capabilityValues(capability);
-                                  const currentValue =
-                                    advancedParams.temperature ?? values[0];
-                                  const rangeMin = capability.min ?? 0;
-                                  const rangeMax = capability.max ?? 1;
-                                  const temperaturePercent =
-                                    currentValue !== undefined &&
-                                    rangeMax > rangeMin
-                                      ? Math.min(
-                                          100,
-                                          Math.max(
-                                            0,
-                                            ((currentValue - rangeMin) /
-                                              (rangeMax - rangeMin)) *
-                                              100,
-                                          ),
-                                        )
-                                      : 0;
-                                  const hasPreviousSection = Boolean(
-                                    advancedModel.capabilities.reasoning ||
-                                      advancedModel.capabilities.speed,
-                                  );
-
-                                  return (
-                                    <div
-                                      className={cn(
-                                        hasPreviousSection
-                                          ? "mt-2 border-t border-[#e7e4f1] pt-2 dark:border-neutral-800"
-                                          : "",
-                                      )}
-                                    >
-                                      <h2 className="mb-2 text-[12px] font-bold text-[#454650] dark:text-neutral-100">
-                                        {t("input.models.temperature", {
-                                          defaultValue: "Temperature",
-                                        })}
-                                      </h2>
-                                      {capability.type === "enum" ? (
-                                        <CapabilityOptionList
-                                          values={values}
-                                          labels={new Map()}
-                                          currentValue={currentValue}
-                                          onSelect={(temperature) =>
-                                            updateModelParams(advancedModel, {
-                                              temperature,
-                                            })
-                                          }
-                                        />
-                                      ) : currentValue !== undefined ? (
-                                        <div className="grid grid-cols-[minmax(0,1fr)_28px] items-center gap-[7px] px-[7px] pb-[3px] pt-0.5">
-                                          <input
-                                            type="range"
-                                            min={capability.min}
-                                            max={capability.max}
-                                            step={capability.step}
-                                            value={currentValue}
-                                            aria-label={
-                                              t("input.models.temperature", {
-                                                defaultValue: "Temperature",
-                                              }) as string
-                                            }
-                                            onMouseDown={(event) =>
-                                              event.stopPropagation()
-                                            }
-                                            onChange={(event) =>
-                                              updateModelParams(advancedModel, {
-                                                temperature: Number(
-                                                  event.target.value,
-                                                ),
-                                              })
-                                            }
-                                            style={
-                                              {
-                                                "--temperature": `${temperaturePercent}%`,
-                                              } as CSSProperties
-                                            }
-                                            className="temperature-range m-0 h-4 w-full min-w-0 appearance-none bg-transparent [--temperature:30%] [&::-moz-range-progress]:h-1 [&::-moz-range-progress]:rounded-full [&::-moz-range-progress]:bg-[#665ee8] [&::-moz-range-track]:h-1 [&::-moz-range-track]:rounded-full [&::-moz-range-track]:bg-[#dedbea] [&::-webkit-slider-runnable-track]:h-1 [&::-webkit-slider-runnable-track]:rounded-full [&::-webkit-slider-runnable-track]:bg-[linear-gradient(to_right,#665ee8_0%,#665ee8_var(--temperature),#dedbea_var(--temperature),#dedbea_100%)]"
-                                          />
-                                          <output className="text-right text-[9.5px] font-semibold tabular-nums text-[#686b7b]">
-                                            {currentValue.toFixed(1)}
-                                          </output>
-                                        </div>
-                                      ) : null}
-                                    </div>
-                                  );
-                                })()
-                              : null}
                           </aside>
                         ) : null}
                       </div>, document.body

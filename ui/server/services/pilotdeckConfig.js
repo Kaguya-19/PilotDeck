@@ -1,3 +1,4 @@
+import { parseThinkingSettings } from '../../../src/model/thinking/settings.js';
 import fs from 'fs';
 import fsPromises from 'fs/promises';
 import os from 'os';
@@ -279,6 +280,10 @@ function validateProvider(id, provider, errors) {
       }
       if (model !== null && model !== undefined && !isRecord(model)) {
         errors.push(`model.providers.${id}.models.${modelId} must be an object`);
+      }
+      if (isRecord(model)) {
+        try { parseThinkingSettings(model.thinking, protocol); }
+        catch (error) { errors.push(`model.providers.${id}.models.${modelId}: ${error.message}`); }
       }
     }
   }

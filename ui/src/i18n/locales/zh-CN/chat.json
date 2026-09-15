@@ -353,7 +353,6 @@
       "advanced": "高级设置",
       "reasoning": "推理强度",
       "speed": "速度",
-      "temperature": "温度",
       "reasoningLevels": {
         "off": "关闭",
         "light": "轻度",
@@ -361,7 +360,16 @@
         "medium": "中",
         "high": "高",
         "xhigh": "极高",
-        "max": "最高"
+        "max": "最高",
+        "default": "默认"
+      },
+      "reasoningMenuLevels": {
+        "default": "默认(Default)",
+        "low": "低(Low)",
+        "medium": "中(Medium)",
+        "high": "高(High)",
+        "xhigh": "极高(Xhigh)",
+        "max": "最高(Max)"
       },
       "speedLevels": {
         "standard": "标准",
