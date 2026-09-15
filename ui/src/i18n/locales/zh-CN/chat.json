@@ -1,5 +1,7 @@
 {
   "copyBlock": {
+    "plainText": "纯文本",
+    "wrap": "代码自动换行",
     "code": "复制代码",
     "table": "复制表格",
     "tableMarkdown": "复制表格 Markdown",

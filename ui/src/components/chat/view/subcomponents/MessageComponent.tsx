@@ -878,13 +878,9 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, o
                             </svg>
                             <span className="font-medium">{t('json.response')}</span>
                           </div>
-                          <div className="overflow-hidden rounded-lg border border-gray-600/30 bg-gray-800 dark:border-gray-700 dark:bg-gray-900">
-                            <pre className="overflow-x-auto p-4">
-                              <code className="block whitespace-pre font-mono text-sm text-gray-100 dark:text-gray-200">
-                                {formatted}
-                              </code>
-                            </pre>
-                          </div>
+                          <Markdown className="prose prose-sm max-w-none dark:prose-invert">
+                            {'```json\n' + formatted + '\n```'}
+                          </Markdown>
                         </div>
                       );
                     } catch {
