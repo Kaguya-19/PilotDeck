@@ -5,7 +5,6 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type {
   ChangeEvent,
   ClipboardEvent,
-  CSSProperties,
   FormEvent,
   KeyboardEvent,
   MouseEvent,
@@ -767,7 +766,6 @@ export default function ComposerV2({
     item: ChatModelCatalogItem,
     patch: {
       reasoning?: number;
-      temperature?: number;
       speed?: number;
     },
   ) => {
@@ -1611,7 +1609,6 @@ export default function ComposerV2({
                                     const isSelected = item.id === selectedModelId;
                                     const hasAdvanced = Boolean(
                                       item.capabilities.reasoning ||
-                                      item.capabilities.temperature ||
                                       item.capabilities.speed,
                                     );
                                     return (
@@ -1772,96 +1769,6 @@ export default function ComposerV2({
                                 />
                               </div>
                             ) : null}
-                            {advancedModel.capabilities.temperature
-                              ? (() => {
-                                  const capability =
-                                    advancedModel.capabilities.temperature;
-                                  const values = capabilityValues(capability);
-                                  const currentValue =
-                                    advancedParams.temperature ?? values[0];
-                                  const rangeMin = capability.min ?? 0;
-                                  const rangeMax = capability.max ?? 1;
-                                  const temperaturePercent =
-                                    currentValue !== undefined &&
-                                    rangeMax > rangeMin
-                                      ? Math.min(
-                                          100,
-                                          Math.max(
-                                            0,
-                                            ((currentValue - rangeMin) /
-                                              (rangeMax - rangeMin)) *
-                                              100,
-                                          ),
-                                        )
-                                      : 0;
-                                  const hasPreviousSection = Boolean(
-                                    advancedModel.capabilities.reasoning ||
-                                      advancedModel.capabilities.speed,
-                                  );
-
-                                  return (
-                                    <div
-                                      className={cn(
-                                        hasPreviousSection
-                                          ? "mt-2 border-t border-[#e7e4f1] pt-2 dark:border-neutral-800"
-                                          : "",
-                                      )}
-                                    >
-                                      <h2 className="mb-2 text-[12px] font-bold text-[#454650] dark:text-neutral-100">
-                                        {t("input.models.temperature", {
-                                          defaultValue: "Temperature",
-                                        })}
-                                      </h2>
-                                      {capability.type === "enum" ? (
-                                        <CapabilityOptionList
-                                          values={values}
-                                          labels={new Map()}
-                                          currentValue={currentValue}
-                                          onSelect={(temperature) =>
-                                            updateModelParams(advancedModel, {
-                                              temperature,
-                                            })
-                                          }
-                                        />
-                                      ) : currentValue !== undefined ? (
-                                        <div className="grid grid-cols-[minmax(0,1fr)_28px] items-center gap-[7px] px-[7px] pb-[3px] pt-0.5">
-                                          <input
-                                            type="range"
-                                            min={capability.min}
-                                            max={capability.max}
-                                            step={capability.step}
-                                            value={currentValue}
-                                            aria-label={
-                                              t("input.models.temperature", {
-                                                defaultValue: "Temperature",
-                                              }) as string
-                                            }
-                                            onMouseDown={(event) =>
-                                              event.stopPropagation()
-                                            }
-                                            onChange={(event) =>
-                                              updateModelParams(advancedModel, {
-                                                temperature: Number(
-                                                  event.target.value,
-                                                ),
-                                              })
-                                            }
-                                            style={
-                                              {
-                                                "--temperature": `${temperaturePercent}%`,
-                                              } as CSSProperties
-                                            }
-                                            className="temperature-range m-0 h-4 w-full min-w-0 appearance-none bg-transparent [--temperature:30%] [&::-moz-range-progress]:h-1 [&::-moz-range-progress]:rounded-full [&::-moz-range-progress]:bg-[#665ee8] [&::-moz-range-track]:h-1 [&::-moz-range-track]:rounded-full [&::-moz-range-track]:bg-[#dedbea] [&::-webkit-slider-runnable-track]:h-1 [&::-webkit-slider-runnable-track]:rounded-full [&::-webkit-slider-runnable-track]:bg-[linear-gradient(to_right,#665ee8_0%,#665ee8_var(--temperature),#dedbea_var(--temperature),#dedbea_100%)]"
-                                          />
-                                          <output className="text-right text-[9.5px] font-semibold tabular-nums text-[#686b7b]">
-                                            {currentValue.toFixed(1)}
-                                          </output>
-                                        </div>
-                                      ) : null}
-                                    </div>
-                                  );
-                                })()
-                              : null}
                           </aside>
                         ) : null}
                       </div>, document.body

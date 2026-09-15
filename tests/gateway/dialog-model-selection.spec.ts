@@ -11,7 +11,7 @@ import { readWebSessionMessages } from '../../src/web/server/readSessionMessages
 import type { GatewayEvent, GatewaySubmitTurnInput } from '../../src/gateway/protocol/types.js';
 
 const A = { mode: 'model' as const, provider: 'alpha', model: 'first' };
-const B = { mode: 'model' as const, provider: 'zeta', model: 'configured', reasoning: 0.8, temperature: 0.3, speed: 1 };
+const B = { mode: 'model' as const, provider: 'zeta', model: 'configured', reasoning: 0.8, speed: 1 };
 const CONFIG = `
 schemaVersion: 1
 agent:
@@ -157,7 +157,6 @@ test('first-turn choice and parameters are durable at acceptance and survive gat
   }
   assert.equal(f.requests.length, 1);
   assert.equal(f.requests[0]!.provider, B.provider);
-  assert.equal(f.requests[0]!.temperature, B.temperature);
   assert.equal(f.requests[0]!.speed, B.speed);
   assert.equal(f.requests[0]!.thinking?.mode, 'high');
   const storage = createAgentProjectSessionStorage({ projectRoot: f.home, pilotHome: f.home, sessionId: 'web:model-choice' });
@@ -233,7 +232,6 @@ test('a new explicit snapshot overrides an old session preference after restart'
   await f.submit(B);
   assert.equal(f.requests.at(-1)!.provider, B.provider);
   assert.equal(f.requests.at(-1)!.model, B.model);
-  assert.equal(f.requests.at(-1)!.temperature, B.temperature);
 });
 
 
@@ -245,4 +243,17 @@ test('response model survives transcript replay and differs from the next submit
   f.restart();
   const history = await readWebSessionMessages({ projectKey: f.home, sessionKey: 'web:model-choice' }, { projectRoot: f.home, pilotHome: f.home });
   assert.deepEqual(history.messages.filter((message) => message.role === 'assistant' && message.kind === 'text').map((message) => message.model), [A.model, B.model]);
+});
+
+test('legacy temperatures are dropped from saved preferences, accepted turns and requests', async (t) => {
+  const f = await fixture(t);
+  const legacy = {...B,temperature:.3};
+  const result = await f.gateway.sessionModelSet!({projectKey:f.home,sessionKey:'web:legacy-temp',selection:legacy});
+  assert.deepEqual(result.saved,B);
+  assert.ok(!('temperature' in result.effective));
+  const events = await f.submit(legacy);
+  assert.deepEqual(events.filter(event=>event.type==='error'),[]);
+  const accepted = events.find(event=>event.type==='input_accepted');
+  assert.deepEqual(accepted?.type==='input_accepted' ? accepted.modelSelection : undefined,B);
+  assert.ok(f.requests.length > 0 && f.requests.every(request=>!('temperature' in request)));
 });

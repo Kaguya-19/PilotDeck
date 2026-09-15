@@ -37,7 +37,6 @@ export function listModelCatalog(input: ModelCatalogListInput, env: NodeJS.Proce
         available: Boolean(provider.apiKey),
         capabilities: {
           ...(model.thinking?.state === "enabled" ? { reasoning: { type: "enum" as const, values: reasoning } } : {}),
-          temperature: { type: "range", min: 0, max: 1, step: 0.1 },
           ...(speed ? { speed: { type: "enum" as const, values: [0, 1] } } : {}),
         },
       });
@@ -73,9 +72,6 @@ export function validateExplicitModelSelection(projectKey: string, selection: Ex
   const catalog = listModelCatalog({ projectKey }, env);
   const item = catalog.items.find((candidate) => candidate.provider === selection.provider && candidate.model === selection.model);
   if (!item || !item.available) throw new DialogGatewayError("INVALID_MODEL_OVERRIDE", `Model is unavailable: ${selection.provider}/${selection.model}`);
-  if (selection.temperature !== undefined && (!Number.isFinite(selection.temperature) || selection.temperature < 0 || selection.temperature > 1)) {
-    throw new DialogGatewayError("UNSUPPORTED_MODEL_PARAMETER", "temperature must be between 0 and 1.");
-  }
   if (selection.speed !== undefined && (!Number.isFinite(selection.speed) || selection.speed < 0 || selection.speed > 1)) {
     throw new DialogGatewayError("UNSUPPORTED_MODEL_PARAMETER", "speed must be between 0 and 1.");
   }
@@ -90,4 +86,15 @@ export function validateExplicitModelSelection(projectKey: string, selection: Ex
 export function reasoningMode(value: number | undefined): ThinkingMode | undefined {
   if (value === undefined) return undefined;
   return REASONING_VALUES.get(value);
+}
+
+/** Keep only supported model preferences when restoring or accepting older clients. */
+export function normalizeSessionModelSelection(selection: SessionModelSelection): SessionModelSelection {
+  if (selection.mode === "auto") return { mode: "auto" };
+  if (selection.mode !== "model") return selection;
+  return {
+    mode: "model", provider: selection.provider, model: selection.model,
+    ...(selection.reasoning !== undefined ? { reasoning: selection.reasoning } : {}),
+    ...(selection.speed !== undefined ? { speed: selection.speed } : {}),
+  };
 }

@@ -370,7 +370,6 @@
       "advanced": "Advanced settings",
       "reasoning": "Reasoning",
       "speed": "Speed",
-      "temperature": "Temperature",
       "reasoningLevels": {
         "off": "Off",
         "light": "Light",

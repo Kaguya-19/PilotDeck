@@ -237,7 +237,6 @@ export type CanonicalModelRequest = {
   tools?: CanonicalToolSchema[];
   toolChoice?: CanonicalToolChoice;
   maxOutputTokens?: number;
-  temperature?: number;
   speed?: number;
   thinking?: CanonicalThinkingConfig;
   stream?: boolean;

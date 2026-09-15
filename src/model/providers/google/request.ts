@@ -33,7 +33,6 @@ export function buildGoogleRequest(
   const tools = request.tools?.map(toGoogleFunctionDeclaration) ?? [];
   const config: GenerateContentConfig = {
     maxOutputTokens: request.maxOutputTokens ?? model.capabilities.maxOutputTokens,
-    temperature: request.temperature,
     systemInstruction: request.systemPrompt ? { text: request.systemPrompt } : undefined,
     automaticFunctionCalling: { disable: true },
     tools: tools.length > 0 ? [{ functionDeclarations: tools } satisfies Tool] : undefined,

@@ -353,7 +353,6 @@
       "advanced": "高级设置",
       "reasoning": "推理强度",
       "speed": "速度",
-      "temperature": "温度",
       "reasoningLevels": {
         "off": "关闭",
         "light": "轻度",

@@ -1,3 +1,4 @@
+import { sanitizeProviderBody } from "../request/sanitizeProviderBody.js";
 import { parseThinkingSettings } from "../thinking/settings.js";
 import { ANTHROPIC_DEFAULT_CAPABILITIES } from "../providers/anthropic/defaults.js";
 import { OPENAI_DEFAULT_CAPABILITIES } from "../providers/openai/defaults.js";
@@ -115,7 +116,7 @@ function parseProvider(providerId: string, rawProvider: unknown, env?: Credentia
     ),
     timeoutMs: readOptionalPositiveNumber(provider.timeoutMs, "timeoutMs"),
     headers: readStringRecord(provider.headers, "headers"),
-    extraBody: isRecord(provider.extraBody) ? (provider.extraBody as Record<string, unknown>) : undefined,
+    extraBody: isRecord(provider.extraBody) ? sanitizeProviderBody(provider.extraBody as Record<string, unknown>) : undefined,
     speedMapping: parseSpeedMapping(provider.speedMapping, providerId, protocol, catalogProvider !== undefined),
     retry: parseRetryConfig(provider.retry),
     models,

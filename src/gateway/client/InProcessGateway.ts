@@ -1,3 +1,4 @@
+import { normalizeSessionModelSelection } from "../dialog/modelCatalog.js";
 import { randomUUID } from "node:crypto";
 import { mkdir, realpath, stat, writeFile } from "node:fs/promises";
 import { extname, isAbsolute, relative, resolve, sep } from "node:path";
@@ -339,6 +340,11 @@ export class InProcessGateway implements Gateway {
   }
 
   async *submitTurn(input: GatewaySubmitTurnInput): AsyncIterable<GatewayEvent> {
+    input = {
+      ...input,
+      ...(input.modelSelection ? { modelSelection: normalizeSessionModelSelection(input.modelSelection) } : {}),
+      ...(input.modelOverride ? { modelOverride: normalizeSessionModelSelection(input.modelOverride) as typeof input.modelOverride } : {}),
+    };
     const invalidPermission = validateGatewayPermissionModes(input);
     if (invalidPermission) {
       yield {
@@ -581,7 +587,6 @@ export class InProcessGateway implements Gateway {
             model: modelSelection.selection.model,
             source: modelSelection.source,
             reasoning: modelSelection.selection.reasoning,
-            temperature: modelSelection.selection.temperature,
             speed: modelSelection.selection.speed,
             runId,
           };
@@ -610,7 +615,6 @@ export class InProcessGateway implements Gateway {
               modelOverride: {
                 provider: modelSelection.selection.provider,
                 model: modelSelection.selection.model,
-                temperature: modelSelection.selection.temperature,
                 speed: modelSelection.selection.speed,
                 ...(modelSelection.selection.reasoning !== undefined ? {
                   thinking: {

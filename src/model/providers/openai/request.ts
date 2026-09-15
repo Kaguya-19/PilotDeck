@@ -24,7 +24,6 @@ export type OpenAIRequestBody = {
   max_tokens: number;
   tools?: OpenAITool[];
   tool_choice?: unknown;
-  temperature?: number;
   service_tier?: "priority";
   stream?: boolean;
   metadata?: Record<string, unknown>;
@@ -85,7 +84,6 @@ export function buildOpenAIRequest(
     max_tokens: request.maxOutputTokens ?? model.capabilities.maxOutputTokens,
     tools: request.tools?.map((tool) => toOpenAITool(tool, googleOpenAICompatible)),
     tool_choice: toOpenAIToolChoice(request.toolChoice),
-    temperature: thinkingPlan.omitTemperature ? undefined : request.temperature,
     service_tier: request.speed !== undefined && model.capabilities.supportsSpeed === true
       && hasSpeedMapping(provider?.speedMapping, "openai_service_tier")
       ? mapSpeedToOpenAIServiceTier(request.speed)

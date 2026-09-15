@@ -1,3 +1,5 @@
+import type { ExplicitModelSelection } from "../gateway/protocol/types.js";
+import { normalizeSessionModelSelection } from "../gateway/dialog/modelCatalog.js";
 import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync as mkdirSyncFs, renameSync } from "node:fs";
 import { dirname, resolve, join as joinPath } from "node:path";
@@ -347,7 +349,7 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
     if (!sessionKey?.trim()) throw new DialogGatewayError("INVALID_SESSION_KEY", "sessionKey is required.");
     const storage = createAgentProjectSessionStorage({ projectRoot: projectKey, pilotHome, sessionId: sessionKey, now });
     const replay = replayTranscriptEntries((await readTranscript(storage.transcriptPath)).entries);
-    return replay.metadata.modelSelection ?? undefined;
+    return replay.metadata.modelSelection ? normalizeSessionModelSelection(replay.metadata.modelSelection) : undefined;
   };
   const modelResult = async (projectKey: string, sessionKey: string, saved?: SessionModelSelection) => {
     const snapshot = loadPilotConfig({ projectRoot: projectKey, env }).config;
@@ -361,7 +363,6 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
         model: explicit.model,
         source: "session" as const,
         reasoning: explicit.reasoning,
-        temperature: explicit.temperature,
         speed: explicit.speed,
       } : {
         provider: snapshot.agent.model.provider,
@@ -394,6 +395,7 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
       if (router.hasActiveTurn(input.sessionKey)) throw new DialogGatewayError("SESSION_BUSY", "Cannot change the model during an active turn.");
       if (!input.selection || typeof input.selection !== "object") throw new DialogGatewayError("INVALID_MODEL_OVERRIDE", "selection is required.");
       validateModelSelection(projectKey, input.selection, env);
+      input = { ...input, selection: normalizeSessionModelSelection(input.selection) };
       const storage = createAgentProjectSessionStorage({ projectRoot: projectKey, pilotHome, sessionId: input.sessionKey, now });
       await storage.transcript.recordSessionMetadata(input.sessionKey, "model-selection", {
         modelSelection: input.selection,
@@ -421,12 +423,12 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
       if (input.modelSelection !== undefined) {
         validateModelSelection(projectKey, input.modelSelection, env);
         return input.modelSelection.mode === "model"
-          ? { selection: input.modelSelection, source: "turn" as const }
+          ? { selection: normalizeSessionModelSelection(input.modelSelection) as ExplicitModelSelection, source: "turn" as const }
           : { source: "router" as const };
       }
       if (input.modelOverride) {
         validateExplicitModelSelection(projectKey, input.modelOverride, env);
-        return { selection: input.modelOverride, source: "turn" as const };
+        return { selection: normalizeSessionModelSelection(input.modelOverride) as ExplicitModelSelection, source: "turn" as const };
       }
       const saved = await readSavedModel(projectKey, input.sessionKey);
       if (saved) validateModelSelection(projectKey, saved, env);

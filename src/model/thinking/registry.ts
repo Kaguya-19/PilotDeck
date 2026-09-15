@@ -12,7 +12,6 @@ export type ThinkingPlan = {
   useAnthropicOutputEffort?: boolean;
   useOpenAIReasoning?: boolean;
   thinkingLevel?: ThinkingEffort;
-  omitTemperature?: boolean;
   unsupportedReason?: string;
 };
 
@@ -63,7 +62,7 @@ export function resolveThinkingPlan(
     // Older extended-thinking models require a token budget, which we do not generate.
     const budgetOnly = /claude-(?:3|haiku-3|haiku-4|(?:sonnet|opus)-4(?:[.-][0-5](?:\D|$)|-20|$))/.test(model.id);
     if (budgetOnly) return effort ? fail('This model requires a thinking budget; only Default is supported.') : { mode, enabled: false };
-    return { ...plan, thinkingType: 'adaptive', effort, useAnthropicOutputEffort: true, omitTemperature: true };
+    return { ...plan, thinkingType: 'adaptive', effort, useAnthropicOutputEffort: true };
   }
   if (format === 'google') {
     if (off) return fail('Turning off thinking is not supported by this effort-only Gemini adapter. Uncheck both thinking options to use the server default.');
@@ -76,13 +75,13 @@ export function resolveThinkingPlan(
   if (settings?.format === 'provider' && ((provider.id === 'moonshot' && /^kimi-k3/.test(model.id)) ||
       (provider.id === 'zhipu' && /^glm-?5\.3/.test(model.id)))) {
     if (off) return fail('This model cannot disable thinking. Uncheck both options to use the server default.');
-    return { ...plan, bodyPatch: effortPatch, omitTemperature: provider.id === 'moonshot' };
+    return { ...plan, bodyPatch: effortPatch };
   }
 
   if (format === 'qwen-cloud') return { ...plan, bodyPatch: { enable_thinking: !off, ...effortPatch } };
   if (format === 'qwen-local') return { ...plan, bodyPatch: { chat_template_kwargs: { enable_thinking: !off }, ...effortPatch } };
   if (format === 'openrouter') return { ...plan, bodyPatch: { reasoning: off ? { enabled: false } : { enabled: true, ...(effort ? { effort } : {}) } } };
-  return { ...plan, bodyPatch: { thinking: { type: off ? 'disabled' : 'enabled' }, ...effortPatch }, omitTemperature: provider.id === 'moonshot' };
+  return { ...plan, bodyPatch: { thinking: { type: off ? 'disabled' : 'enabled' }, ...effortPatch } };
 }
 
 export function throwIfUnsupportedThinkingPlan(plan: ThinkingPlan, request: CanonicalModelRequest): void {

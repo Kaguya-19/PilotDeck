@@ -42,7 +42,6 @@ export type ChatModelCatalogItem = {
   available: boolean;
   capabilities: {
     reasoning?: ModelNumericCapability;
-    temperature?: ModelNumericCapability;
     speed?: ModelNumericCapability;
   };
 };
@@ -54,7 +53,6 @@ export type ChatModelSelection =
       provider: string;
       model: string;
       reasoning?: number;
-      temperature?: number;
       speed?: number;
     };
 

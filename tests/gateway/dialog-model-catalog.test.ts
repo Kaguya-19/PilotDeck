@@ -52,6 +52,7 @@ model:
   const googleSpeedModel = result.items.find((item) => item.provider === "google");
 
   assert.equal(defaultModel?.capabilities.reasoning, undefined);
+  assert.ok(result.items.every(item => !("temperature" in item.capabilities)));
   assert.deepEqual(result.items.find(item => item.model === 'enabled-default')?.capabilities.reasoning?.values, []);
   assert.deepEqual(result.items.find(item => item.model === 'configured')?.capabilities.reasoning?.values, [.4, .6, .9]);
   assert.equal(result.items.find(item => item.model === 'disabled')?.capabilities.reasoning, undefined);

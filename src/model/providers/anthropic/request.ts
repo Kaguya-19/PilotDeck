@@ -20,7 +20,6 @@ export type AnthropicRequestBody = {
   system?: string | unknown[];
   tools?: AnthropicTool[];
   tool_choice?: Record<string, unknown>;
-  temperature?: number;
   speed?: "fast";
   thinking?: {
     type: "disabled" | "adaptive";
@@ -115,7 +114,6 @@ export function buildAnthropicRequest(
       : undefined,
     tools: tools.length > 0 ? tools : undefined,
     tool_choice: toolChoice,
-    temperature: thinkingPlan.omitTemperature ? undefined : request.temperature,
     speed: request.speed !== undefined && model.capabilities.supportsSpeed === true
       && hasSpeedMapping(provider?.speedMapping, "anthropic_speed")
       ? mapSpeedToAnthropicSpeed(request.speed)
