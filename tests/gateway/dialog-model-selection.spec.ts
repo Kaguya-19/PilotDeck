@@ -42,6 +42,7 @@ model:
       speedMapping: openai_service_tier
       models:
         configured:
+          thinking: { state: enabled, efforts: [low, medium, high, xhigh, max] }
           capabilities:
             supportsSpeed: true
 router:

@@ -23,8 +23,7 @@ export type AnthropicRequestBody = {
   temperature?: number;
   speed?: "fast";
   thinking?: {
-    type: "enabled" | "adaptive";
-    budget_tokens?: number;
+    type: "disabled" | "adaptive";
   };
   output_config?: {
     effort?: string;
@@ -116,19 +115,12 @@ export function buildAnthropicRequest(
       : undefined,
     tools: tools.length > 0 ? tools : undefined,
     tool_choice: toolChoice,
-    temperature: request.temperature,
+    temperature: thinkingPlan.omitTemperature ? undefined : request.temperature,
     speed: request.speed !== undefined && model.capabilities.supportsSpeed === true
       && hasSpeedMapping(provider?.speedMapping, "anthropic_speed")
       ? mapSpeedToAnthropicSpeed(request.speed)
       : undefined,
-    thinking: thinkingPlan.enabled && thinkingPlan.thinkingType
-      ? {
-          type: thinkingPlan.thinkingType === "adaptive" ? "adaptive" : "enabled",
-          ...(thinkingPlan.thinkingType === "enabled" && thinkingPlan.budgetTokens !== undefined
-            ? { budget_tokens: thinkingPlan.budgetTokens }
-            : {}),
-        }
-      : undefined,
+    thinking: thinkingPlan.thinkingType ? { type: thinkingPlan.thinkingType } : undefined,
     output_config: thinkingPlan.useAnthropicOutputEffort && thinkingPlan.effort
       ? { effort: thinkingPlan.effort }
       : undefined,

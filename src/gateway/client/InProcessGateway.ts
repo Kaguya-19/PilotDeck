@@ -1537,9 +1537,9 @@ function validateGatewayPermissionModes(input: GatewaySubmitTurnInput): string |
   return undefined;
 }
 
-function reasoningValueToMode(value: number): "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" {
-  const modes = new Map<number, "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max">([
-    [0, "off"], [0.2, "minimal"], [0.4, "low"], [0.6, "medium"], [0.8, "high"], [0.9, "xhigh"], [1, "max"],
+function reasoningValueToMode(value: number): "low" | "medium" | "high" | "xhigh" | "max" {
+  const modes = new Map<number, "low" | "medium" | "high" | "xhigh" | "max">([
+    [0.4, "low"], [0.6, "medium"], [0.8, "high"], [0.9, "xhigh"], [1, "max"],
   ]);
   const mode = modes.get(value);
   if (!mode) throw new DialogGatewayError("UNSUPPORTED_MODEL_PARAMETER", `Unsupported reasoning value: ${value}`);

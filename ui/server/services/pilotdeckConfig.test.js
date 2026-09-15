@@ -926,3 +926,22 @@ describe('validatePilotDeckConfig web search settings', () => {
         }
     });
 });
+
+describe('model thinking settings', () => {
+    const config = thinking => ({
+        agent: { model: 'custom/test' },
+        model: { providers: { custom: { protocol: 'openai', url: 'https://example.test/v1', apiKey: 'test-key', models: { test: { thinking } } } } },
+    });
+    it('accepts the three states and manually configured effort subsets', () => {
+        for (const state of ['default', 'enabled', 'disabled']) {
+            expect(validatePilotDeckConfig(config({ state, efforts: ['low', 'medium', 'xhigh'], format: 'qwen-local' })).valid).toBe(true);
+        }
+    });
+    it('rejects invalid effort and incompatible formats before saving', () => {
+        for (const thinking of [{state:'both'}, {efforts:['ultra']}, {format:'anthropic'}]) {
+            const result = validatePilotDeckConfig(config(thinking));
+            expect(result.valid).toBe(false);
+            expect(result.errors.join(' ')).toContain('thinking');
+        }
+    });
+});

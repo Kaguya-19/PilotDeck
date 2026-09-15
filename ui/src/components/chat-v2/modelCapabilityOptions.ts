@@ -11,8 +11,6 @@ export type ModelParameterValues = {
 };
 
 export const REASONING_LABELS = new Map<number, string>([
-  [0, "Off"],
-  [0.2, "Light"],
   [0.4, "Low"],
   [0.6, "Medium"],
   [0.8, "High"],
@@ -215,7 +213,7 @@ export function parseNumericCapability(value: unknown): ModelNumericCapability |
   if (min !== undefined) parsed.min = min;
   if (max !== undefined) parsed.max = max;
   if (step !== undefined) parsed.step = step;
-  if (values && values.length > 0) parsed.values = values;
+  if (values) parsed.values = values;
   return parsed;
 }
 

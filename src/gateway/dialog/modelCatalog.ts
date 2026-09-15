@@ -1,5 +1,4 @@
 import { loadPilotConfig } from "../../pilot/config/loadPilotConfig.js";
-import { resolveThinkingPlan } from "../../model/thinking/registry.js";
 import type { ThinkingMode } from "../../model/thinking/registry.js";
 import type {
   ExplicitModelSelection,
@@ -11,7 +10,7 @@ import type {
 import { DialogGatewayError } from "./errors.js";
 
 const REASONING_VALUES = new Map<number, ThinkingMode>([
-  [0, "off"], [0.2, "minimal"], [0.4, "low"], [0.6, "medium"],
+  [0.4, "low"], [0.6, "medium"],
   [0.8, "high"], [0.9, "xhigh"], [1, "max"],
 ]);
 
@@ -24,9 +23,9 @@ export function listModelCatalog(input: ModelCatalogListInput, env: NodeJS.Proce
     for (const [modelId, model] of Object.entries(provider.models)) {
       const displayName = model.displayName ?? model.id;
       if (query && !`${providerId} ${modelId} ${displayName}`.toLocaleLowerCase().includes(query)) continue;
-      const reasoning = model.capabilities.supportsThinking
+      const reasoning = model.thinking?.state === "enabled"
         ? [...REASONING_VALUES.entries()]
-          .filter(([, mode]) => !resolveThinkingPlan({ mode, enabled: mode !== "off" }, provider, model).unsupportedReason)
+          .filter(([, mode]) => model.thinking?.efforts.some(effort => effort === mode))
           .map(([value]) => value)
         : [];
       const speed = model.capabilities.supportsSpeed === true && provider.speedMapping !== undefined;
@@ -37,7 +36,7 @@ export function listModelCatalog(input: ModelCatalogListInput, env: NodeJS.Proce
         displayName,
         available: Boolean(provider.apiKey),
         capabilities: {
-          ...(reasoning.length > 0 ? { reasoning: { type: "enum" as const, values: reasoning } } : {}),
+          ...(model.thinking?.state === "enabled" ? { reasoning: { type: "enum" as const, values: reasoning } } : {}),
           temperature: { type: "range", min: 0, max: 1, step: 0.1 },
           ...(speed ? { speed: { type: "enum" as const, values: [0, 1] } } : {}),
         },

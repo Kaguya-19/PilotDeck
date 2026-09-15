@@ -378,7 +378,8 @@
         "medium": "Medium",
         "high": "High",
         "xhigh": "Extra high",
-        "max": "Maximum"
+        "max": "Maximum",
+        "default": "Default"
       },
       "speedLevels": {
         "standard": "Standard",

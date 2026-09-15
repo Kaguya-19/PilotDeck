@@ -361,7 +361,8 @@
         "medium": "中",
         "high": "高",
         "xhigh": "极高",
-        "max": "最高"
+        "max": "最高",
+        "default": "默认"
       },
       "speedLevels": {
         "standard": "标准",

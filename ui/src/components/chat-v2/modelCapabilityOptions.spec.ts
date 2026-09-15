@@ -109,3 +109,13 @@ describe("modelCapabilityOptions", () => {
     });
   });
 });
+
+it('keeps an enabled model with no configured efforts as a Default-only capability', () => {
+  const parsed = parseCatalogItem({ ...catalogItem, capabilities: { reasoning: { type: 'enum', values: [] } } });
+  expect(parsed?.capabilities.reasoning).toEqual({ type: 'enum', values: [] });
+});
+it('clears the effort when selecting Default and keeps the remaining model parameters', () => {
+  const prior = {mode:'model' as const,provider:'openai',model:'gpt-4o',reasoning:.8,temperature:.3,speed:1};
+  const selection = buildExplicitSelection(catalogItem, {...preserveParamsForModel(catalogItem,prior),reasoning:undefined});
+  expect(selection).toEqual({mode:'model',provider:'openai',model:'gpt-4o',temperature:.3,speed:1});
+});

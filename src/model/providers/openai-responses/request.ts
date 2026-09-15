@@ -38,8 +38,6 @@ export type OpenAIResponsesRequestBody = {
   reasoning?: {
     effort?: string;
   };
-  enable_thinking?: boolean;
-  thinking_budget?: number;
 };
 
 type OpenAIResponsesInputItem =

@@ -113,30 +113,9 @@ export function buildOpenAIRequest(
   }
 
   if (thinkingPlan.useOpenAIReasoning && thinkingPlan.effort) {
-    body.reasoning = { effort: thinkingPlan.effort };
+    body.reasoning_effort = thinkingPlan.effort;
   } else if (thinkingPlan.bodyPatch) {
     Object.assign(body, thinkingPlan.bodyPatch);
-  } else if (thinkingPlan.useOpenAICompatibleThinking) {
-    if (thinkingPlan.thinkingType) {
-      body.thinking = { type: thinkingPlan.thinkingType };
-    } else if (thinkingPlan.enabled) {
-      body.thinking = { type: "enabled" };
-    }
-    if (thinkingPlan.effort) {
-      body.reasoning_effort = thinkingPlan.effort;
-    }
-  } else if (thinkingPlan.splitReasoning) {
-    body.reasoning_split = true;
-  } else if (request.thinking?.enabled) {
-    (body as Record<string, unknown>).enable_thinking = true;
-    const budget = request.thinking.budgetTokens;
-    if (googleOpenAICompatible) {
-      if (typeof budget === "number" && Number.isFinite(budget) && budget >= 0) {
-        (body as Record<string, unknown>).thinking_budget = budget;
-      }
-    } else if (budget) {
-      (body as Record<string, unknown>).thinking_budget = budget;
-    }
   }
 
   return body;

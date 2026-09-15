@@ -23,6 +23,7 @@ type ThinkingModelContext = {
   protocol?: string;
   modelId?: string;
   supportsThinking?: boolean;
+  thinking?: { state?: string; efforts?: string[] };
 };
 
 export type ModelNumericCapability = {
@@ -92,6 +93,7 @@ function readThinkingModelContext(config: unknown): ThinkingModelContext | null 
     providerUrl: typeof provider?.url === 'string' ? provider.url : undefined,
     protocol: typeof provider?.protocol === 'string' ? provider.protocol : undefined,
     modelId,
+    thinking: modelDefinition?.thinking as ThinkingModelContext['thinking'],
     supportsThinking: typeof capabilities?.supportsThinking === 'boolean' ? capabilities.supportsThinking : undefined,
   };
 }

@@ -72,7 +72,8 @@ export type PilotAgentConfig = {
   maxContextTokens?: number;
   /** Override the selected model catalog's output-token cap. */
   maxOutputTokens?: number;
-  thinking?: { enabled: boolean; budgetTokens?: number };
+  /** @deprecated Model thinking settings now control reasoning. */
+  thinking?: { enabled: boolean };
   subagents?: {
     default?: PilotAgentModelSelection;
     timeoutMs?: number;

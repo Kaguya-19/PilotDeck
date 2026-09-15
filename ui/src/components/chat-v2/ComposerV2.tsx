@@ -548,8 +548,6 @@ export default function ComposerV2({
 }: ComposerV2Props) {
   const { t } = useTranslation("chat");
   const reasoningLabels = useMemo(() => new Map<number, string>([
-    [0, t("input.models.reasoningLevels.off", { defaultValue: "Off" }) as string],
-    [0.2, t("input.models.reasoningLevels.light", { defaultValue: "Light" }) as string],
     [0.4, t("input.models.reasoningLevels.low", { defaultValue: "Low" }) as string],
     [0.6, t("input.models.reasoningLevels.medium", { defaultValue: "Medium" }) as string],
     [0.8, t("input.models.reasoningLevels.high", { defaultValue: "High" }) as string],
@@ -1729,6 +1727,12 @@ export default function ComposerV2({
                                     defaultValue: "Reasoning",
                                   })}
                                 </h2>
+                                <button type="button" aria-pressed={advancedParams.reasoning === undefined}
+                                  className="mb-1 w-full rounded-md px-[7px] py-1 text-left text-[11px] hover:bg-violet-50 dark:hover:bg-violet-950/40"
+                                  onClick={() => updateModelParams(advancedModel, { reasoning: undefined })}>
+                                  {t('input.models.reasoningLevels.default', { defaultValue: 'Default' })}
+                                  {advancedParams.reasoning === undefined && <Check className="float-right h-3 w-3" />}
+                                </button>
                                 <CapabilityOptionList
                                   values={capabilityValues(
                                     advancedModel.capabilities.reasoning,
