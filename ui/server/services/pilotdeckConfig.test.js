@@ -1,18 +1,21 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { parse as parseYaml } from 'yaml';
 import {
     applyConfigToProcessEnv,
     buildDefaultPilotDeckConfig,
     buildMemoryLlmOptions,
     buildRuntimeEnv,
+    configRevision,
     normalizePilotDeckConfig,
     readPilotDeckConfigFile,
     resolveConfiguredProviderApiKey,
     resolveModel,
     sanitizeProviderCredentials,
     serializePilotDeckConfigResponse,
+    updatePilotDeckConfig,
     validatePilotDeckConfig,
     writePilotDeckConfig,
 } from './pilotdeckConfig.js';
@@ -86,14 +89,101 @@ describe('readPilotDeckConfigFile fallback behavior', () => {
         expect(record.config.model.providers).toEqual({});
     });
 
-    it('serializes a safe revision token with the masked disk snapshot', () => {
-        useTempConfig('schemaVersion: 1\nadapters:\n  feishu:\n    appSecret: super-secret\n');
+    it('changes the revision for secret-only disk edits while keeping the response masked', () => {
+        const configPath = useTempConfig('schemaVersion: 1\nadapters:\n  feishu:\n    appSecret: super-secret-a\n');
 
-        const response = serializePilotDeckConfigResponse(readPilotDeckConfigFile());
+        const first = serializePilotDeckConfigResponse(readPilotDeckConfigFile());
+        writeFileSync(configPath, 'schemaVersion: 1\nadapters:\n  feishu:\n    appSecret: super-secret-b\n');
+        const second = serializePilotDeckConfigResponse(readPilotDeckConfigFile());
 
-        expect(response.revision).toMatch(/^[a-f0-9]{64}$/);
-        expect(response.raw).toContain('appSecret: "********"');
-        expect(response.raw).not.toContain('super-secret');
+        expect(first.revision).toMatch(/^[a-f0-9]{64}$/);
+        expect(first.raw).toBe(second.raw);
+        expect(first.revision).not.toBe(second.revision);
+        expect(second.raw).toContain('appSecret: "********"');
+        expect(second.raw).not.toContain('super-secret');
+    });
+
+    it('preserves manual indentation and comments during a targeted background update', async () => {
+        const raw = [
+            '# hand-maintained config',
+            'model:',
+            '    providers:',
+            '        custom:',
+            '            protocol: openai',
+            '            apiKey: REDACTED',
+            '            models:',
+            '                demo: {}',
+            '',
+        ].join('\n');
+        const configPath = useTempConfig(raw);
+
+        await updatePilotDeckConfig((config) => {
+            config.adapters = { ...(config.adapters ?? {}), weixin: { enabled: true } };
+        }, { paths: [['adapters']], settleMs: 0 });
+
+        const saved = readFileSync(configPath, 'utf8');
+        expect(saved).toContain('# hand-maintained config');
+        expect(saved).toContain('            apiKey: REDACTED');
+        expect(saved).toContain('                demo: {}');
+        expect(readPilotDeckConfigFile().parseError).toBeNull();
+    });
+
+    it('does not overwrite invalid YAML during a background update', async () => {
+        const raw = 'schemaVersion: 1\nmodel:\n    providers: [\n';
+        const configPath = useTempConfig(raw);
+
+        await expect(updatePilotDeckConfig((config) => {
+            config.adapters = { weixin: { enabled: true } };
+        }, { paths: [['adapters']], settleMs: 0 })).rejects.toMatchObject({
+            code: 'INVALID_CONFIG_YAML',
+        });
+
+        expect(readFileSync(configPath, 'utf8')).toBe(raw);
+    });
+
+    it('waits for an external multi-step save and patches the completed document', async () => {
+        const initial = 'schemaVersion: 1\ncustomEnv:\n    VALUE: initial\n';
+        const completed = 'schemaVersion: 1\ncustomEnv:\n    VALUE: external\n';
+        const configPath = useTempConfig(initial);
+
+        const saving = updatePilotDeckConfig((config) => {
+            config.adapters = { weixin: { enabled: true } };
+        }, { paths: [['adapters']], settleMs: 30, maxAttempts: 3 });
+        setTimeout(() => writeFileSync(configPath, 'schemaVersion: 1\ncustomEnv: [\n', 'utf8'), 5);
+        setTimeout(() => writeFileSync(configPath, completed, 'utf8'), 15);
+
+        await saving;
+
+        const saved = readFileSync(configPath, 'utf8');
+        expect(saved).toContain('    VALUE: external');
+        expect(parseYaml(saved).adapters.weixin.enabled).toBe(true);
+    });
+
+    it('atomically replaces the config without leaving temporary files', async () => {
+        const configPath = useTempConfig('schemaVersion: 1\n');
+        const dir = dirname(configPath);
+
+        await writePilotDeckConfig({ schemaVersion: 1, customEnv: { UPDATED: 'yes' } });
+
+        expect(readPilotDeckConfigFile().config.customEnv.UPDATED).toBe('yes');
+        expect(readdirSync(dir).filter(name => name.endsWith('.tmp'))).toEqual([]);
+    });
+
+    it('rejects a write when the disk changed after it was read', async () => {
+        const configPath = useTempConfig('schemaVersion: 1\ncustomEnv:\n  VALUE: first\n');
+        const loaded = readPilotDeckConfigFile();
+        const externalRaw = 'schemaVersion: 1\ncustomEnv:\n  VALUE: external\n';
+        writeFileSync(configPath, externalRaw, 'utf8');
+
+        await expect(writePilotDeckConfig({
+            schemaVersion: 1,
+            customEnv: { VALUE: 'stale' },
+        }, {
+            expectedRevision: configRevision(loaded.raw),
+        })).rejects.toMatchObject({ code: 'CONFIG_CONFLICT' });
+
+        expect(readFileSync(configPath, 'utf8')).toBe(externalRaw);
+        expect(readdirSync(dirname(configPath)).filter(name => name.endsWith('.tmp'))).toEqual([]);
     });
 });
 
