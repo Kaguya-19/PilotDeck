@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { CanonicalMessage } from "../model/index.js";
 import {
   LEGACY_RUNTIME_CONTEXT_SURFACE,
@@ -12,6 +13,7 @@ import { createNativeCompactionPort } from "./compaction/NativeCompactionPort.js
 import { withCompactionOrchestrator } from "./compaction/CompactionOrchestrator.js";
 import { PromptCacheCoordinator } from "./cache/PromptCacheCoordinator.js";
 import type { PromptCacheCoordinatorPort } from "./cache/PromptCacheCoordinatorPort.js";
+import { stableSerialize } from "./cache/CachePlan.js";
 import type { MicroCompactionEngine } from "./compaction/MicroCompactionEngine.js";
 import type { SnipEngine } from "./compaction/SnipEngine.js";
 import { isRealUserRequestMessage } from "./compaction/toolPairIntegrity.js";
@@ -114,6 +116,11 @@ export class DefaultContextRuntime implements ContextRuntime {
   private readonly compaction?: CompactionPort;
   private readonly promptCacheCoordinator: PromptCacheCoordinatorPort;
   private readonly promptCacheSessions = new Set<string>();
+  private readonly promptTimeState = new Map<string, {
+    timestamp: number;
+    messages: string[];
+    dateUpdates: Array<{ index: number; date: string; message: CanonicalMessage }>;
+  }>();
   private readonly instructionDiscovery?: InstructionDiscovery;
   private readonly projectRoot?: string;
   private readonly maxContextTokens: number;
@@ -207,6 +214,63 @@ export class DefaultContextRuntime implements ContextRuntime {
     const effectiveTools = contributionSnapshot
       ? [...contributionSnapshot.tools]
       : input.tools;
+
+    // Track the unchanged prefix so pruning only relocates date notices after
+    // the first changed message, without retaining another copy of large media.
+    const messageFingerprints = projection.messages.map((message) => createHash("sha256")
+      .update(stableSerialize({ role: message.role, content: message.content }))
+      .digest("hex"));
+    const previousTime = this.promptTimeState.get(input.sessionId);
+    let unchangedPrefixLength = 0;
+    while (previousTime && unchangedPrefixLength < messageFingerprints.length
+      && messageFingerprints[unchangedPrefixLength] === previousTime.messages[unchangedPrefixLength]) {
+      unchangedPrefixLength += 1;
+    }
+    // Only a new full-compaction checkpoint refreshes the system date. Cache
+    // resets also cover micro-pruning and must not invalidate the system prefix.
+    // Inspect the checkpoint to cover manual compaction performed by callers.
+    const boundary = projection.messages[0];
+    const summary = projection.messages[1];
+    const newCheckpoint = previousTime !== undefined
+      && boundary?.role === "user"
+      && boundary.content.some((block) => block.type === "text" && block.text.startsWith("<compact-boundary"))
+      && summary?.role === "assistant"
+      && summary.content.some((block) => block.type === "text" && block.text.startsWith("[CONTEXT COMPACTION - REFERENCE ONLY]"))
+      && unchangedPrefixLength < 2;
+    const refreshTime = !input.previewOnly && newCheckpoint;
+    const currentTime = this.now();
+    const currentDate = currentTime.toISOString().slice(0, 10);
+    const promptTimestamp = !previousTime || refreshTime ? currentTime.getTime() : previousTime.timestamp;
+    // Keep each rollover at its original position so later requests extend the
+    // same cache prefix. These request-only messages share the prompt anchor's
+    // lifetime. Keep notices inside the unchanged prefix; replace affected
+    // notices with the current date at the new tail. This avoids stale indexes
+    // after pruning and never changes a prefix that pruning itself preserved.
+    const dateUpdates = refreshTime ? [] : (previousTime?.dateUpdates ?? [])
+      .filter((update) => update.index <= unchangedPrefixLength);
+    const lastDate = dateUpdates.at(-1)?.date ?? new Date(promptTimestamp).toISOString().slice(0, 10);
+    if (currentDate !== lastDate) {
+      dateUpdates.push({
+        index: projection.messages.length,
+        date: currentDate,
+        message: {
+          role: "user",
+          content: [{ type: "text", text:
+            `<date-update>\ncurrent_date: ${currentDate} (UTC)\n` +
+            "The date has changed. Use this date for today and relative dates, " +
+            "superseding earlier environment dates.\n</date-update>",
+          }],
+          metadata: { synthetic: true, purpose: "date_update" },
+        },
+      });
+    }
+    const requestMessages: CanonicalMessage[] = [];
+    let messageIndex = 0;
+    for (const update of dateUpdates) {
+      requestMessages.push(...projection.messages.slice(messageIndex, update.index), update.message);
+      messageIndex = update.index;
+    }
+    requestMessages.push(...projection.messages.slice(messageIndex));
     const prompt = this.promptAssembler.assemble({
       cwd: input.cwd,
       provider: input.provider,
@@ -219,7 +283,7 @@ export class DefaultContextRuntime implements ContextRuntime {
       appendSystemPrompt: input.appendSystemPrompt,
       includeExtensionsWithCustomSystemPrompt: this.includeExtensionsWithCustomSystemPrompt,
       includeUserContextInSystemPrompt: runtimeContextSurface === "system_prompt",
-      now: this.now,
+      now: () => new Date(promptTimestamp),
     });
     const hasCompleteContribution = contributionSnapshot?.sections.some((section) => section.complete) === true;
     const parts = hasCompleteContribution
@@ -268,7 +332,7 @@ export class DefaultContextRuntime implements ContextRuntime {
       }
       if (input.abortSignal?.aborted) {
         const runtimeContextMessages = this.buildRuntimeContextMessages(runtimeContexts, runtimeContextSurface);
-        const projectedMessages = insertBeforeLatestUserRequest(projection.messages, runtimeContextMessages);
+        const projectedMessages = insertBeforeLatestUserRequest(requestMessages, runtimeContextMessages);
         return {
           messages: projectedMessages,
           systemPrompt: parts.join("\n\n"),
@@ -317,7 +381,7 @@ export class DefaultContextRuntime implements ContextRuntime {
 
     const joined = parts.join("\n\n");
     const runtimeContextMessages = this.buildRuntimeContextMessages(runtimeContexts, runtimeContextSurface);
-    const projectedMessages = insertBeforeLatestUserRequest(projection.messages, runtimeContextMessages);
+    const projectedMessages = insertBeforeLatestUserRequest(requestMessages, runtimeContextMessages);
 
     const cachePlanInput = {
       provider: input.provider,
@@ -328,7 +392,14 @@ export class DefaultContextRuntime implements ContextRuntime {
       enabled: input.protocol === "anthropic" && input.supportsPromptCache === true,
     };
     this.trackPromptCacheSession(input.sessionId);
-    const cachePlan = this.promptCacheCoordinator.createPlan(input.sessionId, cachePlanInput);
+    const cachePlan = this.promptCacheCoordinator.createPlan(input.sessionId, cachePlanInput, {
+      commit: !input.previewOnly,
+    });
+
+    // Budget probes must not consume resets or commit hypothetical histories.
+    if (!input.previewOnly) {
+      this.promptTimeState.set(input.sessionId, { timestamp: promptTimestamp, messages: messageFingerprints, dateUpdates });
+    }
 
     return {
       messages: projectedMessages,

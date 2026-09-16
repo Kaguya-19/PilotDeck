@@ -105,6 +105,25 @@ test("parses transient retry policy values", () => {
   });
 });
 
+test("preserves human-readable task tier labels", () => {
+  const result = parseRouterConfig({
+    tokenSaver: {
+      judge: "openai/gpt-test",
+      defaultTier: "custom",
+      tiers: {
+        custom: {
+          model: "openai/gpt-test",
+          label: "资料整理",
+          description: "Organize source material into a concise summary",
+        },
+      },
+    },
+  }, modelConfig);
+
+  assert.equal(result.diagnostics.filter((item) => item.severity === "fatal").length, 0);
+  assert.equal(result.config?.tokenSaver?.tiers.custom?.label, "资料整理");
+});
+
 test("skips auto-orchestrate tier validation when token saver is disabled", () => {
   const result = parseRouterConfig({
     tokenSaver: { enabled: false },

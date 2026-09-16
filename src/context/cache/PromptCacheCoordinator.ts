@@ -11,15 +11,22 @@ export class PromptCacheCoordinator implements PromptCacheCoordinatorPort {
   private readonly bySession = new Map<string, CachePlanState>();
   private readonly resetSessions = new Set<string>();
 
-  createPlan(sessionId: string, input: CachePlanInput): CachePlan | undefined {
+  createPlan(
+    sessionId: string,
+    input: CachePlanInput,
+    options: { commit?: boolean } = {},
+  ): CachePlan | undefined {
     const fingerprint = buildCachePlan(input, 0)?.fingerprint;
     const previous = this.bySession.get(sessionId);
-    const forceReset = this.resetSessions.delete(sessionId);
+    const commit = options.commit !== false;
+    const forceReset = commit
+      ? this.resetSessions.delete(sessionId)
+      : this.resetSessions.has(sessionId);
     if (!fingerprint) return undefined;
 
     if (forceReset || fingerprint !== previous?.fingerprint) {
       const generation = (previous?.generation ?? 0) + 1;
-      this.bySession.set(sessionId, { fingerprint, generation });
+      if (commit) this.bySession.set(sessionId, { fingerprint, generation });
       return buildCachePlan(input, generation);
     }
     return buildCachePlan(input, previous.generation);

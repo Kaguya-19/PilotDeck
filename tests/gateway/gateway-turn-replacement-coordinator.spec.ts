@@ -72,10 +72,10 @@ test("GatewayTurnReplacementCoordinator keeps live coordination separate from du
     expectedTurnId: "turn-old",
     replacementTurnId: "turn-new",
   });
-  assert.deepEqual(calls, ["abort", "replace", "close"]);
+  assert.deepEqual(calls, ["abort", "close", "replace"]);
   assert.equal(coordinator.claimForSubmit("web:s_coordinated", "turn-new"), "claimed");
   await coordinator.commitAcceptedInput("web:s_coordinated", "turn-new");
-  assert.deepEqual(calls, ["abort", "replace", "close", "finalize:commit"]);
+  assert.deepEqual(calls, ["abort", "close", "replace", "finalize:commit"]);
 });
 
 test("InProcessGateway delegates replacement and transcript reservations to an injected coordinator", async () => {

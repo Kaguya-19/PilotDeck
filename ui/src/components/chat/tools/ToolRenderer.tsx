@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import React, { memo, useMemo, useCallback } from 'react';
 import type { Project } from '../../../types/app';
 import type { SubagentChildTool } from '../types/types';
@@ -16,12 +17,11 @@ interface ToolRendererProps {
   toolResult?: any;
   toolId?: string;
   mode: 'input' | 'result';
+  contentOnly?: boolean;
   onFileOpen?: (filePath: string, diffInfo?: any) => void;
   createDiff?: (oldStr: string, newStr: string) => DiffLine[];
   selectedProject?: Project | null;
   autoExpandTools?: boolean;
-  showRawParameters?: boolean;
-  rawToolInput?: string;
   expansionKey?: string;
   isToolSectionExpanded?: (sectionKey: string, defaultExpanded?: boolean) => boolean;
   onToolSectionExpandedChange?: (sectionKey: string, expanded: boolean) => void;
@@ -30,12 +30,23 @@ interface ToolRendererProps {
     childTools: SubagentChildTool[];
     currentToolIndex: number;
     isComplete: boolean;
+    isFailed?: boolean;
   };
 }
 
 type ToolRendererErrorBoundaryState = {
   error: Error | null;
 };
+
+function ToolRenderError({ toolName }: { toolName: string }) {
+  const { t } = useTranslation('common');
+  return (
+    <div className="my-1 rounded-lg border border-amber-200 bg-amber-50/70 px-3 py-2 text-xs text-amber-800 dark:border-amber-800/50 dark:bg-amber-950/20 dark:text-amber-200">
+      <div className="font-medium">{t('uiText.toolRenderFailed')}</div>
+      <div className="mt-0.5 opacity-80">{toolName}</div>
+    </div>
+  );
+}
 
 class ToolRendererErrorBoundary extends React.Component<
   { toolName: string; toolId?: string; children: React.ReactNode },
@@ -67,12 +78,7 @@ class ToolRendererErrorBoundary extends React.Component<
 
   render() {
     if (this.state.error) {
-      return (
-        <div className="my-1 rounded-lg border border-amber-200 bg-amber-50/70 px-3 py-2 text-xs text-amber-800 dark:border-amber-800/50 dark:bg-amber-950/20 dark:text-amber-200">
-          <div className="font-medium">Tool output could not be rendered.</div>
-          <div className="mt-0.5 opacity-80">{this.props.toolName}</div>
-        </div>
-      );
+      return <ToolRenderError toolName={this.props.toolName} />;
     }
 
     return this.props.children;
@@ -126,20 +132,20 @@ const ToolRendererInner: React.FC<ToolRendererProps> = ({
   toolResult,
   toolId,
   mode,
+  contentOnly = false,
   onFileOpen,
   createDiff,
   selectedProject,
   autoExpandTools = false,
-  showRawParameters = false,
-  rawToolInput,
   expansionKey,
   isToolSectionExpanded,
   onToolSectionExpandedChange,
   isSubagentContainer,
   subagentState
 }) => {
+  const { t } = useTranslation('common');
   const canonicalToolName = getCanonicalToolName(toolName);
-  const config = getToolConfig(toolName);
+  const config = getToolConfig(toolName, t);
   const displayConfig: any = mode === 'input' ? config.input : config.result;
 
   const parsedData = useMemo(() => {
@@ -329,6 +335,8 @@ const ToolRendererInner: React.FC<ToolRendererProps> = ({
       }
     }
 
+    if (contentOnly) return contentComponent;
+
     // For edit tools, make the title (filename) clickable to open the file
     const handleTitleClick = (canonicalToolName === 'Edit' || canonicalToolName === 'Write' || canonicalToolName === 'ApplyPatch') && contentProps.filePath && onFileOpen
       ? () => onFileOpen(contentProps.filePath, {
@@ -348,8 +356,6 @@ const ToolRendererInner: React.FC<ToolRendererProps> = ({
           ? (nextExpanded) => onToolSectionExpandedChange(expansionKey, nextExpanded)
           : undefined}
         onTitleClick={handleTitleClick}
-        showRawParameters={mode === 'input' && showRawParameters}
-        rawContent={rawToolInput}
         toolCategory={getToolCategory(canonicalToolName)}
       >
         {contentComponent}

@@ -3,9 +3,9 @@
  * Converts NormalizedMessage[] from the session store into ChatMessage[] for the UI.
  */
 
-import type { NormalizedMessage } from '../../../stores/useSessionStore';
+import { normalizeCompactionMessage, type NormalizedMessage } from '../../../stores/useSessionStore';
 import type { ChatMessage, SubagentChildTool } from '../types/types';
-import { decodeHtmlEntities, unescapeWithMathProtection, formatUsageLimitText } from '../utils/chatFormatting';
+import { formatUsageLimitText } from '../utils/chatFormatting';
 import { mergeUserAttachments, parseUserAttachmentNote } from '../utils/attachmentNotes';
 
 // Per-message conversion cache keyed by NormalizedMessage reference.
@@ -20,9 +20,8 @@ type ConvertSingleMessageOptions = {
 };
 
 function normalizeAssistantText(content: string): string {
-  let text = decodeHtmlEntities(content);
-  text = unescapeWithMathProtection(text);
-  return formatUsageLimitText(text);
+  // The transport has already decoded JSON. Preserve Markdown/code verbatim.
+  return formatUsageLimitText(content);
 }
 
 function isEmptyAssistantTextMessage(msg: NormalizedMessage): boolean {
@@ -80,6 +79,7 @@ function convertSingleMessage(
   options: ConvertSingleMessageOptions = {},
 ): ChatMessage | null {
   const turnIdentity = {
+    ...(msg.renderKey ? { renderKey: msg.renderKey } : {}),
     ...(msg.runId ? { runId: msg.runId } : {}),
     ...(msg.turnId || msg.runId ? { turnId: msg.turnId || msg.runId } : {}),
   };
@@ -108,7 +108,7 @@ function convertSingleMessage(
           id: msg.id,
           entryId: msg.entryId,
           type: 'user',
-          content: unescapeWithMathProtection(decodeHtmlEntities(content)),
+          content,
           timestamp: msg.timestamp,
           ...turnIdentity,
           ...(msg.forkUnsupportedContent ? {
@@ -125,6 +125,7 @@ function convertSingleMessage(
           id: msg.id,
           entryId: msg.entryId,
           type: 'assistant',
+          ...(msg.model ? { model: msg.model } : {}),
           content: text,
           timestamp: msg.timestamp,
           ...turnIdentity,
@@ -138,6 +139,7 @@ function convertSingleMessage(
           id: msg.id,
           entryId: msg.entryId,
           type: 'assistant',
+          ...(msg.model ? { model: msg.model } : {}),
           content: '',
           artifacts: msg.artifacts,
           timestamp: msg.timestamp,
@@ -192,7 +194,7 @@ function convertSingleMessage(
       const subagentLink = isSubagentContainer && msg.toolId
         ? subagentLinks?.get(msg.toolId)
         : undefined;
-      const msgSubagentId = (msg as Record<string, unknown>).subagentId as string | undefined;
+      const msgSubagentId = msg.subagentId;
 
       return {
         id: msg.id,
@@ -226,11 +228,12 @@ function convertSingleMessage(
         return {
           id: msg.id,
           type: 'assistant',
-          content: unescapeWithMathProtection(thinkingContent),
+          ...(msg.model ? { model: msg.model } : {}),
+          content: thinkingContent,
           timestamp: msg.timestamp,
           ...turnIdentity,
           isThinking: true,
-          isStreaming: msg.id.startsWith('__streaming_thinking_'),
+          isStreaming: msg.timeline ? msg.streamState === 'open' : msg.id.startsWith('__streaming_thinking_') || msg.id.startsWith('__subagent_thinking_'),
         };
       }
       return null;
@@ -287,6 +290,8 @@ function convertSingleMessage(
         ...turnIdentity,
         isCompactBoundary: true,
         compactionId: msg.compactionId,
+        compactState: normalizeCompactionMessage(msg).compactState,
+        renderKey: msg.compactionId ? `compact:${msg.sessionId}:${msg.turnId || msg.runId}:${msg.compactionId}` : msg.renderKey,
         compactTrigger: msg.trigger,
         preTokens: msg.preTokens,
         postTokens: msg.postTokens,
@@ -348,10 +353,11 @@ function convertSingleMessage(
         return {
           id: msg.id,
           type: 'assistant',
+          ...(msg.model ? { model: msg.model } : {}),
           content: msg.content,
           timestamp: msg.timestamp,
           ...turnIdentity,
-          isStreaming: true,
+          isStreaming: msg.timeline ? msg.streamState === 'open' : true,
         };
       }
       return null;

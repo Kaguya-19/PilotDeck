@@ -75,7 +75,6 @@ export function createNativeSessionTitleProvider(
             },
           ],
           maxOutputTokens: 4096,
-          temperature: 0,
           metadata: {
             purpose: "session_title_generation",
             sessionId,

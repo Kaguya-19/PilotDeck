@@ -99,6 +99,14 @@ test("capability-only sidecar factory completes a durable host tool turn and res
   assert.equal(events.filter((event) => event.type === "tool_result").length, 1);
   const terminal = events.find((event) => event.type === "turn_completed") as { result?: { type?: string } } | undefined;
   assert.equal(terminal?.result?.type, "success");
+  const messages = session.snapshot().messages;
+  const assistantTool = messages.find((message) => message.content.some((block) => block.type === "tool_call"));
+  const toolResult = messages.find((message) => message.content.some((block) => block.type === "tool_result"));
+  const assistantText = [...messages].reverse().find((message) => message.role === "assistant"
+    && message.content.some((block) => block.type === "text"));
+  assert.ok(assistantTool?.content.every((block) => block.timeline?.version === 1));
+  assert.ok(toolResult?.content.every((block) => block.timeline?.version === 1));
+  assert.ok(assistantText?.content.every((block) => block.timeline?.version === 1));
   const restoredFileState = session.snapshotForRuntimeReload().fileState;
   assert.ok(restoredFileState);
   assert.deepEqual(restoredFileState.allowedReadFiles, ["/workspace/input.txt"]);

@@ -52,6 +52,7 @@ import {
   validatePilotSdkSettingSources,
 } from "../pilot/index.js";
 import type { PilotAgentModelSelection, PilotConfigSnapshot } from "../pilot/config/types.js";
+import { isOptionalFeatureEnabled } from "../pilot/config/optionalFeature.js";
 import {
   DEFAULT_ALLOWED_TOOLS,
   DEFAULT_JUDGE_TIMEOUT_MS,
@@ -1730,7 +1731,7 @@ function ensureRouterConfig(
   defaultSelection: PilotAgentModelSelection,
 ): RouterConfig {
   const defaultRef = { id: defaultSelection.id, provider: defaultSelection.provider, model: defaultSelection.model };
-  if (router?.enabled === false) return { enabled: false };
+  if (!isOptionalFeatureEnabled(router)) return { enabled: false };
   if (router) {
     return {
       enabled: true,

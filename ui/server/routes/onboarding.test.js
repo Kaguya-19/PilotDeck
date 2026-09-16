@@ -10,6 +10,61 @@ afterEach(() => {
 });
 
 describe('onboarding routes', () => {
+  it.each([false, true])('saving onboarding preserves advanced features and channels enabled=%s', async (enabled) => {
+    const { buildDefaultPilotDeckConfig } = await vi.importActual('../services/pilotdeckConfig.js');
+    const config = buildDefaultPilotDeckConfig();
+    if (enabled) {
+      config.memory.enabled = true;
+      config.router.enabled = true;
+      config.tools.webSearch = { enabled: true, provider: 'tavily', apiKey: 'saved-search-key' };
+      config.alwaysOn.projects = { '/existing-project': { enabled: true } };
+      for (const adapter of Object.values(config.adapters)) adapter.enabled = true;
+    }
+    const writePilotDeckConfig = vi.fn(async (next) => ({ config: next }));
+    const { request } = await createOnboardingApp({ config, writePilotDeckConfig, probe: vi.fn().mockResolvedValue({ ok: true }) });
+    const payload = { providerId: 'ollama', apiKey: '', models: ['local'], retryPolicy: retryPolicy() };
+    const tested = await request('/api/v1/model-connection-tests', { method: 'POST', body: JSON.stringify(payload) });
+    const saved = await request('/api/v1/model-configuration', { method: 'PUT', body: JSON.stringify({
+      ...payload, testId: tested.body.testId, models: [{ modelId: 'local', textInput: true, imageInput: true }],
+    }) });
+    expect(saved.status).toBe(200);
+    const next = writePilotDeckConfig.mock.calls[0][0];
+    expect(next.agent.model).toBe('ollama/local');
+    for (const key of ['memory', 'router', 'tools', 'alwaysOn', 'adapters']) {
+      expect(next[key]).toEqual(config[key]);
+    }
+    expect(next.memory.enabled).toBe(enabled);
+    expect(next.tools.webSearch.enabled).toBe(enabled);
+    for (const adapter of Object.values(next.adapters)) expect(adapter.enabled).toBe(enabled);
+  });
+
+  it('returns preset providers in catalog order with logos', async () => {
+    const { request } = await createOnboardingApp();
+    const result = await request('/api/v1/providers');
+    expect(result.status).toBe(200);
+    expect(result.body.providers.map((item) => item.id)).toEqual([
+      'anthropic', 'openai', 'openai-responses', 'dashscope', 'deepseek', 'google',
+      'openrouter', 'ollama', 'minimax', 'moonshot', 'volc_ark', 'zhipu',
+    ]);
+    expect(result.body.providers[0]).toEqual({
+      id: 'anthropic',
+      displayName: 'Anthropic',
+      protocol: 'anthropic',
+      endpoint: 'https://api.anthropic.com',
+      logoUrl: '/onboarding/providers/anthropic.svg',
+      requiresApiKey: true,
+    });
+    expect(result.body.providers.find((item) => item.id === 'ollama')).toEqual({
+      id: 'ollama',
+      displayName: 'Ollama',
+      protocol: 'openai',
+      endpoint: 'http://localhost:11434/v1',
+      logoUrl: '/onboarding/providers/ollama.svg',
+      requiresApiKey: false,
+    });
+    expect(result.body.providers.find((item) => item.id === 'openai-responses').logoUrl).toBe('/onboarding/providers/openai.svg');
+  });
+
   it('maps prototype provider aliases and requires manual image completion', async () => {
     const probe = vi.fn()
       .mockResolvedValueOnce({ ok: true })
@@ -51,19 +106,32 @@ describe('onboarding routes', () => {
     expect(completed).toMatchObject({ status: 200, body: { status: 'passed', error: null, models: [{ modelId: 'model-a', imageInput: 'supported' }] } });
   });
 
-  it('matches equivalent provider endpoints after URL canonicalization', async () => {
+  it.each(['ollama', 'Ollama'])('matches equivalent endpoints for %s without rewriting its ID', async (providerId) => {
     const onboarding = await import('./onboarding.js');
     const record = {
-      provider: { providerId: 'ollama', protocol: 'openai', endpoint: 'http://localhost:11434/v1' },
+      provider: { providerId, protocol: 'openai', endpoint: 'http://localhost:11434/v1' },
       keyFingerprint: null,
     };
+    for (const url of ['', 'HTTP://LOCALHOST:11434/v1///']) {
+      expect(onboarding.connectionTestMatchesProvider(record, {
+        providerId, protocol: 'openai', url, apiKey: '',
+      })).toBe(true);
+    }
+  });
 
-    expect(onboarding.connectionTestMatchesProvider(record, {
-      providerId: 'ollama',
-      protocol: 'openai',
-      url: 'HTTP://LOCALHOST:11434/v1///',
-      apiKey: '',
-    })).toBe(true);
+  it('keeps a mixed-case keyless preset ID when probing and saving onboarding', async () => {
+    const writePilotDeckConfig = vi.fn(async (config) => ({ config }));
+    const { request } = await createOnboardingApp({ probe: vi.fn().mockResolvedValue({ ok: true }), writePilotDeckConfig });
+    const payload = { providerId: 'Ollama', apiKey: '', models: ['local'], retryPolicy: retryPolicy() };
+    const tested = await request('/api/v1/model-connection-tests', { method: 'POST', body: JSON.stringify(payload) });
+    expect(tested.body.status).toBe('passed');
+    const saved = await request('/api/v1/model-configuration', { method: 'PUT', body: JSON.stringify({
+      ...payload, testId: tested.body.testId, models: [{ modelId: 'local', textInput: true, imageInput: true }],
+    }) });
+    expect(saved.status).toBe(200);
+    expect(writePilotDeckConfig.mock.calls[0][0].agent.model).toBe('Ollama/local');
+    expect(Object.keys(writePilotDeckConfig.mock.calls[0][0].model.providers)).toContain('Ollama');
+    expect(writePilotDeckConfig.mock.calls[0][0].model.providers).not.toHaveProperty('ollama');
   });
 
   it('isolates test IDs by user and writes the tested model configuration', async () => {

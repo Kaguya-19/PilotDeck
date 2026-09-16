@@ -51,13 +51,13 @@ export default function SubagentDetailModal({
   };
 
   let content: ReactNode;
-  if (isLoading) {
+  if (isLoading && messages.length === 0) {
     content = (
       <div className="flex items-center justify-center py-20">
         <Loader2 className="h-6 w-6 animate-spin text-neutral-400" />
       </div>
     );
-  } else if (error) {
+  } else if (error && messages.length === 0) {
     content = (
       <div className="px-6 py-12 text-center text-sm text-red-500">
         {t('subagent.loadError', { error })}
@@ -72,6 +72,7 @@ export default function SubagentDetailModal({
   } else {
     content = (
       <SubagentDetailMessageFlow
+        key={subagentId}
         messages={messages}
         provider={provider}
         selectedProject={selectedProject}
@@ -103,7 +104,7 @@ export default function SubagentDetailModal({
             type="button"
             onClick={onClose}
             className="rounded p-1 text-neutral-400 transition-colors hover:bg-neutral-100 hover:text-neutral-600 dark:hover:bg-neutral-800 dark:hover:text-neutral-300"
-            aria-label="Close"
+            aria-label={t('common:uiText.close')}
           >
             <X className="h-4 w-4" strokeWidth={2} />
           </button>

@@ -1,6 +1,8 @@
 import { loadPilotConfig } from "../../pilot/config/loadPilotConfig.js";
 import {
   listModelCatalog,
+  normalizeSessionModelSelection,
+  restoreSessionModelSelection,
   validateExplicitModelSelection,
   validateModelSelection,
 } from "../../gateway/dialog/modelCatalog.js";
@@ -18,6 +20,14 @@ export class NativeSessionModelSelectionPolicy implements SessionModelSelectionP
 
   listCatalog(input: ModelCatalogListInput): ModelCatalogListResult {
     return listModelCatalog(input, this.env);
+  }
+
+  normalizeSelection(selection: SessionModelSelection): SessionModelSelection {
+    return normalizeSessionModelSelection(selection);
+  }
+
+  restoreSelection(projectKey: string, selection: SessionModelSelection): SessionModelSelection {
+    return restoreSessionModelSelection(projectKey, selection, this.env);
   }
 
   validateSelection(projectKey: string, selection: SessionModelSelection): void {

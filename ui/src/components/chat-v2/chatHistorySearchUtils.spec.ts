@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import i18n from 'i18next';
+import enCommon from '../../i18n/locales/en/common.json';
 import type { ChatMessage } from '../chat/types/types';
 import {
   buildSearchableMessages,
@@ -7,6 +9,10 @@ import {
   highlightSearchMatches,
   scrollSearchTargetIntoView,
 } from './chatHistorySearchUtils';
+
+beforeAll(async () => {
+  await i18n.init({ lng: 'en', resources: { en: { common: enCommon } } });
+});
 
 afterEach(() => {
   document.body.innerHTML = '';

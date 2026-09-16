@@ -35,6 +35,7 @@ import {
 } from "../permission/index.js";
 import type { PermissionRuleSet } from "../permission/index.js";
 import type { CanonicalContentBlock, CanonicalMessage, CanonicalMessageMetadata } from "../model/index.js";
+import type { TimelinePosition } from "../model/protocol/timeline.js";
 import type {
   PilotDeckToolDefinition,
   PilotDeckToolInputSchema,
@@ -314,6 +315,7 @@ function canonicalMessageMetadata(value: unknown): CanonicalMessageMetadata | un
   const source = asRecord(value);
   if (!source) return undefined;
   const metadata: CanonicalMessageMetadata = {};
+  if (typeof source.model === "string") metadata.model = source.model;
   if (typeof source.synthetic === "boolean") metadata.synthetic = source.synthetic;
   if (typeof source.transient === "boolean") metadata.transient = source.transient;
   if (typeof source.transientId === "string") metadata.transientId = source.transientId;
@@ -335,9 +337,34 @@ function canonicalMessageMetadata(value: unknown): CanonicalMessageMetadata | un
 function toCanonicalContentBlocks(value: unknown): CanonicalContentBlock[] {
   const block = asRecord(value);
   if (!block) return [];
-  if (block.type === "text" && typeof block.text === "string") return [{ type: "text", text: block.text }];
+  const timeline = canonicalTimelinePosition(block.timeline);
+  if (block.type === "text" && typeof block.text === "string") {
+    return [{
+      type: "text",
+      text: block.text,
+      ...(typeof block.blockId === "string" ? { blockId: block.blockId } : {}),
+      ...(timeline ? { timeline } : {}),
+    }];
+  }
+  if (block.type === "thinking" && typeof block.text === "string") {
+    return [{
+      type: "thinking",
+      text: block.text,
+      ...(typeof block.blockId === "string" ? { blockId: block.blockId } : {}),
+      ...(typeof block.signature === "string" ? { signature: block.signature } : {}),
+      ...(typeof block.reasoningContent === "string" ? { reasoningContent: block.reasoningContent } : {}),
+      ...(timeline ? { timeline } : {}),
+    }];
+  }
   if (block.type === "tool_call" && typeof block.id === "string" && typeof block.name === "string") {
-    return [{ type: "tool_call", id: block.id, name: block.name, input: block.input ?? {} }];
+    return [{
+      type: "tool_call",
+      id: block.id,
+      name: block.name,
+      input: block.input ?? {},
+      ...(block.raw !== undefined ? { raw: block.raw } : {}),
+      ...(timeline ? { timeline } : {}),
+    }];
   }
   if (block.type === "tool_result" && typeof block.toolCallId === "string") {
     const content: CanonicalContentBlock[] = Array.isArray(block.content)
@@ -351,6 +378,7 @@ function toCanonicalContentBlocks(value: unknown): CanonicalContentBlock[] {
       content: content as any,
       ...(block.isError === true ? { isError: true } : {}),
       ...(block.raw !== undefined ? { raw: block.raw } : {}),
+      ...(timeline ? { timeline } : {}),
     }];
   }
   if (block.type === "image" && block.source === "base64" && typeof block.data === "string" && typeof block.mimeType === "string") {
@@ -372,6 +400,28 @@ function toCanonicalContentBlocks(value: unknown): CanonicalContentBlock[] {
     }
   }
   return [];
+}
+
+function canonicalTimelinePosition(value: unknown): TimelinePosition | undefined {
+  const source = asRecord(value);
+  if (
+    source?.version !== 1
+    || typeof source.turnId !== "string"
+    || typeof source.id !== "string"
+    || !Number.isInteger(source.order)
+    || !Number.isInteger(source.revision)
+  ) {
+    return undefined;
+  }
+  return {
+    version: 1,
+    turnId: source.turnId,
+    id: source.id,
+    ...(typeof source.previousId === "string" ? { previousId: source.previousId } : {}),
+    order: source.order as number,
+    revision: source.revision as number,
+    ...(Number.isInteger(source.offset) ? { offset: source.offset as number } : {}),
+  };
 }
 
 function mergeMetadata(

@@ -25,6 +25,8 @@ export interface SessionModelSelectionPort {
 /** Model-catalog policy consumed by Gateway session-model composition. */
 export interface SessionModelSelectionPolicy {
   listCatalog(input: ModelCatalogListInput): ModelCatalogListResult;
+  normalizeSelection(selection: SessionModelSelection): SessionModelSelection;
+  restoreSelection(projectKey: string, selection: SessionModelSelection): SessionModelSelection;
   validateSelection(projectKey: string, selection: SessionModelSelection): void;
   validateExplicit(projectKey: string, selection: ExplicitModelSelection): void;
   resolveDefault(projectKey: string): {

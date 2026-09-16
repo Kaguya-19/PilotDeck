@@ -1,4 +1,5 @@
 import express from 'express';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -20,6 +21,14 @@ afterEach(() => {
 });
 
 describe('gateway WeCom routes', () => {
+  it('reports every message channel off when no adapters are configured', async () => {
+    const { request } = await createGatewayApp({});
+    const status = await request('/api/gateway/status');
+    for (const channel of ['feishu', 'weixin', 'wecom']) {
+      expect(status[channel].enabled).toBe(false);
+    }
+  });
+
   it('returns WeCom status from pilotdeck.yaml', async () => {
     const { request } = await createGatewayApp({
       adapters: {
@@ -183,6 +192,34 @@ describe('gateway WeCom routes', () => {
       },
     });
   });
+
+  it('broadcasts the latest config revision after a channel save', async () => {
+    const broadcasts = [];
+    const onBroadcast = (payload) => broadcasts.push(payload);
+    process.on('pilotdeck:config-broadcast', onBroadcast);
+    try {
+      const { request } = await createGatewayApp({});
+
+      const result = await request('/api/gateway/wecom/save', {
+        method: 'POST',
+        body: JSON.stringify({ botId: 'bot-broadcast', secret: 'secret-broadcast' }),
+      });
+
+      expect(result.ok).toBe(true);
+      expect(broadcasts).toHaveLength(1);
+      expect(broadcasts[0]).toMatchObject({
+        source: 'gateway-save',
+        exists: true,
+        validation: { valid: true },
+      });
+      expect(broadcasts[0].revision).toBe(
+        createHash('sha256').update(broadcasts[0].raw).digest('hex'),
+      );
+      expect(broadcasts[0].raw).toContain('wecom:');
+    } finally {
+      process.off('pilotdeck:config-broadcast', onBroadcast);
+    }
+  });
 });
 
 async function createGatewayApp(initialConfig) {
@@ -199,9 +236,6 @@ async function createGatewayApp(initialConfig) {
   }));
   vi.doMock('../services/pilotdeckConfigReloader.js', () => ({
     reloadPilotDeckConfig: vi.fn(async () => undefined),
-  }));
-  vi.doMock('../services/pilotdeckConfig.js', () => ({
-    readPilotDeckConfigFile: vi.fn(() => ({ config: {} })),
   }));
   vi.doMock('../pilotdeck-bridge.js', () => ({
     getPilotDeckGateway: vi.fn(async () => ({ reloadConfig: vi.fn(async () => undefined) })),

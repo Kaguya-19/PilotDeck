@@ -1,14 +1,18 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+    applyConfigToProcessEnv,
     buildDefaultPilotDeckConfig,
     buildMemoryLlmOptions,
     buildRuntimeEnv,
+    normalizePilotDeckConfig,
     readPilotDeckConfigFile,
+    resolveConfiguredProviderApiKey,
     resolveModel,
     sanitizeProviderCredentials,
+    serializePilotDeckConfigResponse,
     validatePilotDeckConfig,
     writePilotDeckConfig,
 } from './pilotdeckConfig.js';
@@ -16,6 +20,7 @@ import {
 const tempDirs = [];
 
 afterEach(() => {
+    vi.unstubAllEnvs();
     delete process.env.PILOTDECK_CONFIG_PATH;
     for (const dir of tempDirs.splice(0)) {
         rmSync(dir, { recursive: true, force: true });
@@ -64,7 +69,7 @@ describe('readPilotDeckConfigFile fallback behavior', () => {
         expect(record.parseError).toBeNull();
         expect(record.rawYaml).toMatchObject({ schemaVersion: 1, model: { providers: {} } });
         expect(record.config.model.providers).toEqual({});
-        expect(record.config.memory.enabled).toBe(true);
+        expect(record.config.memory.enabled).toBe(false);
     });
 
     it('keeps raw YAML and falls back to defaults when YAML is invalid', () => {
@@ -79,6 +84,57 @@ describe('readPilotDeckConfigFile fallback behavior', () => {
         expect(record.parseError).toEqual(expect.any(String));
         expect(record.config.schemaVersion).toBe(1);
         expect(record.config.model.providers).toEqual({});
+    });
+
+    it('serializes a safe revision token with the masked disk snapshot', () => {
+        useTempConfig('schemaVersion: 1\nadapters:\n  feishu:\n    appSecret: super-secret\n');
+
+        const response = serializePilotDeckConfigResponse(readPilotDeckConfigFile());
+
+        expect(response.revision).toMatch(/^[a-f0-9]{64}$/);
+        expect(response.raw).toContain('appSecret: "********"');
+        expect(response.raw).not.toContain('super-secret');
+    });
+});
+
+describe('optional feature defaults', () => {
+    it('keeps advanced features and message channels off for a new user', () => {
+        useTempConfig(null);
+        expect(readPilotDeckConfigFile().config).toMatchObject({
+            memory: { enabled: false },
+            router: { enabled: false },
+            tools: { webSearch: { enabled: false } },
+            alwaysOn: { projects: {} },
+            adapters: {
+                feishu: { enabled: false },
+                weixin: { enabled: false },
+                wecom: { enabled: false },
+            },
+        });
+    });
+
+    it.each([true, false])('preserves existing explicit feature settings enabled=%s', (enabled) => {
+        const configured = {
+            memory: { enabled, model: 'test/model' },
+            router: { enabled, scenarios: { default: 'test/model' } },
+            tools: { webSearch: { enabled, provider: 'tavily', apiKey: 'search-key' } },
+            alwaysOn: { projects: { '/test-project': { enabled } } },
+            adapters: { feishu: { enabled, appId: 'app' }, weixin: { enabled }, wecom: { enabled, token: 'bot' } },
+        };
+        const normalized = normalizePilotDeckConfig(configured);
+        expect(normalized).toMatchObject(configured);
+        expect(normalizePilotDeckConfig(normalized)).toEqual(normalized);
+    });
+
+    it('preserves legacy configured sections without an enabled flag', () => {
+        const normalized = normalizePilotDeckConfig({
+            memory: { model: 'test/model' },
+            router: { scenarios: { default: 'test/model' } },
+            tools: { webSearch: { provider: 'tavily', apiKey: 'search-key' } },
+        });
+        expect(normalized.memory.enabled).toBe(true);
+        expect(normalized.router.enabled).toBe(true);
+        expect(normalized.tools.webSearch.enabled).toBe(true);
     });
 });
 
@@ -106,6 +162,79 @@ describe('validatePilotDeckConfig gateway validation', () => {
         });
     });
 
+    it('resolves catalog environment API keys for runtime and memory settings', () => {
+        vi.stubEnv('ANTHROPIC_API_KEY', ' sk-from-env ');
+        const config = {
+            agent: { model: 'anthropic/claude' },
+            model: {
+                providers: {
+                    anthropic: {
+                        protocol: 'anthropic',
+                        url: '',
+                        models: { claude: {} },
+                    },
+                },
+            },
+            memory: { enabled: true, model: 'anthropic/claude' },
+        };
+
+        expect(buildRuntimeEnv(config)).toMatchObject({
+            PILOTDECK_API_KEY: 'sk-from-env',
+            PILOTDECK_MEMORY_API_KEY: 'sk-from-env',
+        });
+        expect(buildRuntimeEnv(config)).not.toHaveProperty('OPENAI_API_KEY');
+        expect(buildMemoryLlmOptions(config).apiKey).toBe('sk-from-env');
+    });
+
+    it('preserves provider environment keys across an explicit-key provider switch', () => {
+        const originalEnv = { ...process.env };
+        const openaiConfig = {
+            agent: { model: 'openai/gpt-test' },
+            model: {
+                providers: {
+                    openai: {
+                        protocol: 'openai',
+                        url: '',
+                        apiKey: 'openai-from-config',
+                        models: { 'gpt-test': {} },
+                    },
+                },
+            },
+            memory: { enabled: false },
+        };
+        const anthropicConfig = {
+            agent: { model: 'anthropic/claude' },
+            model: {
+                providers: {
+                    anthropic: {
+                        protocol: 'anthropic',
+                        url: '',
+                        models: { claude: {} },
+                    },
+                },
+            },
+            memory: { enabled: false },
+        };
+
+        try {
+            process.env.OPENAI_API_KEY = 'openai-from-env';
+            process.env.ANTHROPIC_API_KEY = 'anthropic-from-env';
+
+            applyConfigToProcessEnv(openaiConfig);
+            expect(process.env.OPENAI_API_KEY).toBe('openai-from-env');
+            expect(process.env.ANTHROPIC_API_KEY).toBe('anthropic-from-env');
+            expect(process.env.PILOTDECK_API_KEY).toBe('openai-from-config');
+
+            applyConfigToProcessEnv(anthropicConfig);
+            expect(process.env.PILOTDECK_API_KEY).toBe('anthropic-from-env');
+        } finally {
+            for (const key of Object.keys(process.env)) {
+                if (!(key in originalEnv)) delete process.env[key];
+            }
+            Object.assign(process.env, originalEnv);
+        }
+    });
+
     it('accepts an omitted URL for catalog providers', () => {
         for (const providerId of ['openai', 'minimax']) {
             const validation = validatePilotDeckConfig({
@@ -125,6 +254,83 @@ describe('validatePilotDeckConfig gateway validation', () => {
             expect(validation.valid).toBe(true);
             expect(validation.errors).toEqual([]);
         }
+    });
+
+    it('accepts an omitted API key when the catalog environment key is available', () => {
+        vi.stubEnv('ANTHROPIC_API_KEY', 'anthropic-from-env');
+        const validation = validatePilotDeckConfig({
+            agent: { model: 'ollama/qwen' },
+            model: {
+                providers: {
+                    ollama: {
+                        protocol: 'openai',
+                        url: 'http://localhost:11434/v1',
+                        models: { qwen: {} },
+                    },
+                    anthropic: {
+                        protocol: 'anthropic',
+                        url: 'https://api.anthropic.com',
+                        models: { claude: {} },
+                    },
+                },
+            },
+        });
+
+        expect(validation.valid).toBe(true);
+        expect(validation.errors).toEqual([]);
+    });
+
+    it('rejects an omitted API key when the catalog environment key is unavailable', () => {
+        vi.stubEnv('ANTHROPIC_API_KEY', '');
+        const validation = validatePilotDeckConfig({
+            agent: { model: 'anthropic/claude' },
+            model: {
+                providers: {
+                    anthropic: {
+                        protocol: 'anthropic',
+                        url: 'https://api.anthropic.com',
+                        models: { claude: {} },
+                    },
+                },
+            },
+        });
+
+        expect(validation.valid).toBe(false);
+        expect(validation.errors).toContain('model.providers.anthropic.apiKey is required');
+    });
+
+    it('does not apply a catalog environment key to a custom provider endpoint', () => {
+        vi.stubEnv('OPENAI_API_KEY', 'openai-from-env');
+        const provider = {
+            protocol: 'openai',
+            url: 'https://proxy.example/v1',
+            models: { 'gpt-test': {} },
+        };
+        const validation = validatePilotDeckConfig({
+            agent: { model: 'openai/gpt-test' },
+            model: { providers: { openai: provider } },
+        });
+
+        expect(resolveConfiguredProviderApiKey('openai', provider)).toBe('');
+        expect(validation.valid).toBe(false);
+        expect(validation.errors).toContain('model.providers.openai.apiKey is required');
+    });
+
+    it('accepts an explicit environment reference for a custom provider endpoint', () => {
+        vi.stubEnv('PROXY_API_KEY', 'proxy-from-env');
+        const provider = {
+            protocol: 'openai',
+            url: 'https://proxy.example/v1',
+            apiKey: '${PROXY_API_KEY}',
+            models: { 'gpt-test': {} },
+        };
+        const validation = validatePilotDeckConfig({
+            agent: { model: 'openai/gpt-test' },
+            model: { providers: { openai: provider } },
+        });
+
+        expect(resolveConfiguredProviderApiKey('openai', provider)).toBe('proxy-from-env');
+        expect(validation.valid).toBe(true);
     });
 
     it('migrates the legacy interactive spreadsheet mode to built-in preview', () => {
@@ -406,6 +612,177 @@ describe('validatePilotDeckConfig gateway validation', () => {
         expect(config.model.providers.ollama.url).toBe('http://localhost:11434/v1');
     });
 
+    it('rejects incomplete providers even when they are not the active agent model', () => {
+        const validation = validatePilotDeckConfig({
+            agent: { model: '_placeholder/_placeholder' },
+            model: {
+                providers: {
+                    _placeholder: {
+                        protocol: 'openai',
+                        url: 'https://example.invalid/v1',
+                        apiKey: 'PLACEHOLDER_RUN_ONBOARDING_TO_REPLACE',
+                        models: { _placeholder: {} },
+                    },
+                    provider1: {
+                        protocol: 'openai',
+                        url: '',
+                        apiKey: '',
+                        models: {},
+                    },
+                },
+            },
+        });
+
+        expect(validation.valid).toBe(false);
+        expect(validation.errors).toEqual(expect.arrayContaining([
+            'model.providers.provider1.url is required',
+            'model.providers.provider1.apiKey is required',
+        ]));
+    });
+
+    it('keeps the bootstrap provider when an unrelated setting is saved before onboarding', async () => {
+        useTempConfig(null);
+
+        const result = await writePilotDeckConfig({
+            agent: { model: '_placeholder/_placeholder' },
+            model: {
+                providers: {
+                    _placeholder: {
+                        protocol: 'openai',
+                        url: 'https://example.invalid/v1',
+                        apiKey: 'PLACEHOLDER_RUN_ONBOARDING_TO_REPLACE',
+                        models: { _placeholder: {} },
+                    },
+                },
+            },
+            tools: { webSearch: { enabled: false } },
+        });
+
+        expect(result.config.agent.model).toBe('_placeholder/_placeholder');
+        expect(result.config.model.providers).toHaveProperty('_placeholder');
+        expect(result.config.tools.webSearch.enabled).toBe(false);
+    });
+
+    it('keeps the bootstrap provider while a real provider is configured but not selected', async () => {
+        useTempConfig(null);
+
+        const result = await writePilotDeckConfig({
+            agent: { model: '_placeholder/_placeholder' },
+            model: {
+                providers: {
+                    _placeholder: {
+                        protocol: 'openai',
+                        url: 'https://example.invalid/v1',
+                        apiKey: 'PLACEHOLDER_RUN_ONBOARDING_TO_REPLACE',
+                        models: { _placeholder: {} },
+                    },
+                    ollama: {
+                        protocol: 'openai',
+                        url: 'http://localhost:11434/v1',
+                        models: { 'qwen3:0.6b': {} },
+                    },
+                },
+            },
+        });
+
+        expect(result.config.model.providers).toHaveProperty('_placeholder');
+        expect(result.config.model.providers).toHaveProperty('ollama');
+    });
+
+    it('removes an unreferenced empty provider draft left by older settings builds', async () => {
+        useTempConfig(null);
+
+        const previousConfig = {
+            agent: { model: 'ollama/qwen3:0.6b' },
+            model: {
+                providers: {
+                    ollama: {
+                        protocol: 'openai',
+                        url: 'http://localhost:11434/v1',
+                        models: { 'qwen3:0.6b': {} },
+                    },
+                    provider1: {
+                        protocol: 'openai',
+                        url: '',
+                        apiKey: '',
+                        models: {},
+                    },
+                },
+            },
+        };
+        const result = await writePilotDeckConfig(previousConfig, { previousConfig });
+
+        expect(result.config.model.providers).toHaveProperty('ollama');
+        expect(result.config.model.providers).not.toHaveProperty('provider1');
+    });
+
+    it('removes bootstrap providers and rewrites their references after selecting a real model', async () => {
+        useTempConfig(null);
+
+        const result = await writePilotDeckConfig({
+            agent: {
+                model: 'ollama/qwen3:0.6b',
+                subagents: { default: '_placeholder/_placeholder' },
+            },
+            memory: { model: '_placeholder/_placeholder' },
+            model: {
+                providers: {
+                    _placeholder: {
+                        protocol: 'openai',
+                        url: 'https://example.invalid/v1',
+                        apiKey: 'PLACEHOLDER_RUN_ONBOARDING_TO_REPLACE',
+                        models: { _placeholder: {} },
+                    },
+                    ollama: {
+                        protocol: 'openai',
+                        url: 'http://localhost:11434/v1',
+                        models: { 'qwen3:0.6b': {} },
+                    },
+                },
+            },
+            router: {
+                scenarios: {
+                    default: '_placeholder/_placeholder',
+                    vision: '_placeholder/_placeholder',
+                },
+                fallback: {
+                    default: ['_placeholder/_placeholder'],
+                    vision: ['_placeholder/_placeholder'],
+                },
+                stats: {
+                    baselineModel: '_placeholder/_placeholder',
+                    modelPricing: {
+                        '_placeholder/_placeholder': { input: 99, output: 99 },
+                        'ollama/qwen3:0.6b': { input: 0, output: 0 },
+                    },
+                },
+                tokenSaver: {
+                    judge: '_placeholder/_placeholder',
+                    defaultTier: 'fast',
+                    tiers: { fast: { model: '_placeholder/_placeholder' } },
+                },
+            },
+        });
+
+        expect(result.config.model.providers).not.toHaveProperty('_placeholder');
+        expect(result.config.agent.subagents.default).toBe('inherit');
+        expect(result.config.memory.model).toBe('inherit');
+        expect(result.config.router.scenarios).toEqual({
+            default: 'ollama/qwen3:0.6b',
+            vision: 'ollama/qwen3:0.6b',
+        });
+        expect(result.config.router.fallback).toEqual({
+            default: ['ollama/qwen3:0.6b'],
+            vision: ['ollama/qwen3:0.6b'],
+        });
+        expect(result.config.router.stats.baselineModel).toBe('ollama/qwen3:0.6b');
+        expect(result.config.router.stats.modelPricing).toEqual({
+            'ollama/qwen3:0.6b': { input: 0, output: 0 },
+        });
+        expect(result.config.router.tokenSaver.judge).toBe('ollama/qwen3:0.6b');
+        expect(result.config.router.tokenSaver.tiers.fast.model).toBe('ollama/qwen3:0.6b');
+    });
+
     it('resets a placeholder subagent default when writing config', async () => {
         const configPath = useTempConfig(null);
 
@@ -588,6 +965,25 @@ describe('validatePilotDeckConfig web search settings', () => {
             expect(validation.errors).not.toEqual(expect.arrayContaining([
                 expect.stringContaining('tools.webSearch.provider'),
             ]));
+        }
+    });
+});
+
+describe('model thinking settings', () => {
+    const config = thinking => ({
+        agent: { model: 'custom/test' },
+        model: { providers: { custom: { protocol: 'openai', url: 'https://example.test/v1', apiKey: 'test-key', models: { test: { thinking } } } } },
+    });
+    it('accepts the three states and manually configured effort subsets', () => {
+        for (const state of ['default', 'enabled', 'disabled']) {
+            expect(validatePilotDeckConfig(config({ state, efforts: ['low', 'medium', 'xhigh'], format: 'qwen-local' })).valid).toBe(true);
+        }
+    });
+    it('rejects invalid effort and incompatible formats before saving', () => {
+        for (const thinking of [{state:'both'}, {efforts:['ultra']}, {format:'anthropic'}]) {
+            const result = validatePilotDeckConfig(config(thinking));
+            expect(result.valid).toBe(false);
+            expect(result.errors.join(' ')).toContain('thinking');
         }
     });
 });

@@ -263,6 +263,16 @@ export interface Project {
   displayName: string;
   fullPath: string;
   path?: string;
+  /** Present on a successful registration to reject older list snapshots. */
+  projectListRevision?: number;
+  kind?: 'project' | 'general';
+  workspaceCwd?: string;
+  capabilities?: {
+    files?: boolean;
+    explore?: boolean;
+    projectFileMentions?: boolean;
+    [key: string]: unknown;
+  };
   sessions?: ProjectSession[];
   sessionMeta?: ProjectSessionMeta;
   taskmaster?: ProjectTaskmasterInfo;
@@ -281,6 +291,7 @@ export interface LoadingProgress {
 export interface ProjectsUpdatedMessage {
   type: 'projects_updated';
   projects: Project[];
+  projectListRevision?: number;
   changedFile?: string;
   [key: string]: unknown;
 }

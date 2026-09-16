@@ -261,6 +261,30 @@ test("gateway failure status keeps the attempted run id for live/history dedupli
   assert.equal(events.find((event) => event.type === "error")?.runId, "run-failure");
 });
 
+test("history rereads when its active epoch settles during the disk read", async () => {
+  let reads = 0;
+  const store = new GatewayTurnReplayStore({ terminalRetentionMs: 60_000 });
+  store.start("s", "r");
+  const gateway = new InProcessGateway({} as SessionRouter, {
+    turnReplayStore: store,
+    readSessionMessages: async () => {
+      reads += 1;
+      if (reads === 1) store.retainTerminal("s", "r");
+      return {
+        messages: [],
+        total: reads,
+        session: { sessionKey: "s", sessionId: "s", summary: "test", lastModified: 0 },
+      };
+    },
+  });
+
+  const snapshot = await gateway.readSessionMessages({ sessionKey: "s" });
+  assert.equal(reads, 2);
+  assert.equal(snapshot.total, 2);
+  assert.equal(snapshot.stream?.active, false);
+  store.dispose();
+});
+
 test("gateway status writes stay with a published session instead of the history fallback", async () => {
   const liveWrites: string[] = [];
   const fallbackWrites: string[] = [];

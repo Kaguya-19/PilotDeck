@@ -46,7 +46,7 @@ export type PermissionContext = {
   bypassAvailable: boolean;
   /** SDK-only adapter: allow safe workspace file edits without prompting. */
   acceptEdits?: boolean;
-  /** Absolute path of the project-local `.pilotdeck/plans` directory. */
+  /** Absolute path of the current writable plan directory. */
   planDirectoryPath?: string;
 };
 

@@ -1,3 +1,4 @@
+import { useConfirm } from '../ui/ConfirmDialog';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import CodeMirror from '@uiw/react-codemirror';
@@ -108,6 +109,7 @@ async function api<T>(url: string, body: unknown): Promise<T> {
 
 export default function SkillsV2({ selectedProject, projects, compact = false }: SkillsV2Props) {
   const { t } = useTranslation();
+  const confirm = useConfirm();
   const { isDarkMode } = useTheme() as { isDarkMode: boolean };
 
   const cwd = projectCwd(selectedProject);
@@ -244,7 +246,7 @@ export default function SkillsV2({ selectedProject, projects, compact = false }:
 
   const handleDelete = useCallback(async () => {
     if (!activeSkill || activeSkill.readonly) return;
-    if (!window.confirm(t('skillsTab.confirmDelete', { defaultValue: 'Delete this skill? This will remove the entire folder.', name: activeSkill.name }) as string)) {
+    if (!await confirm({ message: t('skillsTab.confirmDelete', { defaultValue: 'Delete this skill? This will remove the entire folder.', name: activeSkill.name }) as string, destructive: true, confirmLabel: t('confirmDialog.delete') })) {
       return;
     }
     try {
@@ -259,7 +261,7 @@ export default function SkillsV2({ selectedProject, projects, compact = false }:
     } catch (e) {
       flashToast({ kind: 'error', text: (e as Error).message });
     }
-  }, [activeSkill, effectiveProjectPath, refresh, flashToast, t]);
+  }, [activeSkill, effectiveProjectPath, refresh, flashToast, t, confirm]);
 
   const handleCreateUserOverride = useCallback(async () => {
     if (!activeSkill || activeSkill.scope !== 'builtin') return;
@@ -284,15 +286,15 @@ export default function SkillsV2({ selectedProject, projects, compact = false }:
     }
   }, [activeSkill, flashToast, refresh, t]);
 
-  const handleSelect = useCallback((skill: Skill) => {
+  const handleSelect = useCallback(async (skill: Skill) => {
     if (isDirty) {
-      if (!window.confirm(t('skillsTab.discardUnsaved', { defaultValue: 'Discard unsaved changes?' }) as string)) {
+      if (!await confirm({ message: t('skillsTab.discardUnsaved', { defaultValue: 'Discard unsaved changes?' }) as string, destructive: true, confirmLabel: t('confirmDialog.discard') })) {
         return;
       }
     }
     setActiveSlug(skill.slug);
     setActiveScope(skill.scope);
-  }, [isDirty, t]);
+  }, [isDirty, t, confirm]);
 
   // ------------------------------------------------------------------------
 
@@ -344,8 +346,8 @@ export default function SkillsV2({ selectedProject, projects, compact = false }:
           {compact && activeSkill ? (
             <button
               type="button"
-              onClick={() => {
-                if (isDirty && !window.confirm(t('skillsTab.discardUnsaved', { defaultValue: 'Discard unsaved changes?' }) as string)) return;
+              onClick={async () => {
+                if (isDirty && !await confirm({ message: t('skillsTab.discardUnsaved', { defaultValue: 'Discard unsaved changes?' }) as string, destructive: true, confirmLabel: t('confirmDialog.discard') })) return;
                 setActiveSlug(null);
                 setActiveScope(null);
               }}
@@ -501,9 +503,10 @@ function SkillsList({
   compact: boolean;
   t: ReturnType<typeof useTranslation>['t'];
 }) {
+  const confirm = useConfirm();
   const handleDeleteSkill = useCallback(async (skill: Skill) => {
     if (skill.readonly) return;
-    if (!window.confirm(t('skillsTab.confirmUninstall', { defaultValue: 'Uninstall "{{name}}"? This will remove the entire skill folder.', name: skill.name }) as string)) {
+    if (!await confirm({ message: t('skillsTab.confirmUninstall', { defaultValue: 'Uninstall "{{name}}"? This will remove the entire skill folder.', name: skill.name }) as string, destructive: true, confirmLabel: t('confirmDialog.delete') })) {
       return;
     }
     try {
@@ -520,7 +523,7 @@ function SkillsList({
     } catch (e) {
       flashToast({ kind: 'error', text: (e as Error).message });
     }
-  }, [effectiveProjectPath, selectedSkill, refresh, flashToast, setActiveSlug, setActiveScope, t]);
+  }, [effectiveProjectPath, selectedSkill, refresh, flashToast, setActiveSlug, setActiveScope, t, confirm]);
 
   const handleMoveSkill = useCallback(async (skill: Skill, target: MoveTarget) => {
     if (skill.readonly) return;
@@ -541,7 +544,7 @@ function SkillsList({
         setActiveScope(target.scope);
       }
       await refresh();
-      const label = target.scope === 'user' ? 'User' : target.projectPath.split('/').pop() || 'Project';
+      const label = target.scope === 'user' ? t('uiText.userScope') : target.projectPath.split('/').pop() || t('uiText.projectScope');
       flashToast({
         kind: 'success',
         text: t('skillsTab.moveSuccess', {
@@ -557,7 +560,7 @@ function SkillsList({
 
   const moveTargets = useMemo((): { label: string; target: MoveTarget }[] => {
     const targets: { label: string; target: MoveTarget }[] = [];
-    targets.push({ label: 'User (global)', target: { scope: 'user', projectPath: null } });
+    targets.push({ label: t('uiText.userGlobal'), target: { scope: 'user', projectPath: null } });
     for (const project of projects) {
       const path = project.fullPath || project.path || null;
       if (!path) continue;
@@ -568,7 +571,7 @@ function SkillsList({
       });
     }
     return targets;
-  }, [projects]);
+  }, [projects, t]);
 
   return (
     <div className={cn(

@@ -1,8 +1,10 @@
+import { useTranslation } from 'react-i18next';
 import { MessageSquare } from 'lucide-react';
 
 const loadingDotAnimationDelays = ['0s', '0.1s', '0.2s'];
 
 export default function AuthLoadingScreen() {
+  const { t } = useTranslation('common');
   return (
     <div className="flex min-h-screen items-center justify-center bg-background p-4">
       <div className="text-center">
@@ -24,7 +26,7 @@ export default function AuthLoadingScreen() {
           ))}
         </div>
 
-        <p className="mt-2 text-muted-foreground">Loading...</p>
+        <p className="mt-2 text-muted-foreground">{t('common:uiText.loading')}</p>
       </div>
     </div>
   );

@@ -24,6 +24,9 @@ export function webSearchConfigForProvider(
     ...(current.enabled === undefined ? {} : { enabled: current.enabled }),
     provider,
     ...(endpoint ? { endpoint } : {}),
+    ...(provider === "custom"
+      ? { customProvider: { auth: "bearer" as const, method: "POST" as const } }
+      : {}),
   };
 }
 
@@ -31,11 +34,14 @@ export function isWebSearchApiKeyRequired(
   config: WebSearchConfig,
 ): boolean {
   const provider =
-    config.provider === "tavily" || config.provider === "custom" || config.provider === "serper" || config.provider === "brave"
+    config.provider === "tavily"
+    || config.provider === "custom"
+    || config.provider === "serper"
+    || config.provider === "brave"
       ? config.provider
       : "glm";
   return (
-    provider !== "custom" ||
-    (config.customProvider?.auth ?? "bearer") !== "none"
+    provider !== "custom"
+    || (config.customProvider?.auth ?? "bearer") !== "none"
   );
 }

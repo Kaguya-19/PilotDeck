@@ -16,11 +16,13 @@ import {
   replaceLastWebSessionTurn,
 } from "../../src/web/server/replaceLastTurn.js";
 
-test("gateway waits for abort, rewrites, then evicts the cached session", async () => {
+test("gateway waits for abort and writer disposal before rewriting the transcript", async () => {
   const calls: string[] = [];
+  let finishClose!: () => void;
+  const closing = new Promise<void>(resolve => { finishClose = resolve; });
   const router = {
     abort: async () => { calls.push("abort"); },
-    close: async () => { calls.push("close"); },
+    close: async () => { calls.push("close"); await closing; },
     activeTurnRunId: () => "turn-old",
   } as unknown as SessionRouter;
   const gateway = new InProcessGateway(router, {
@@ -36,13 +38,17 @@ test("gateway waits for abort, rewrites, then evicts the cached session", async 
     finalizeLastTurnReplacement: async (input) => input,
   });
 
-  const result = await gateway.replaceLastTurn({
+  const replacement = gateway.replaceLastTurn({
     sessionKey: "web:s_order",
     expectedTurnId: "turn-old",
     replacementTurnId: "turn-new",
   });
 
-  assert.deepEqual(calls, ["abort", "rewrite", "close"]);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(calls, ["abort", "close"]);
+  finishClose();
+  const result = await replacement;
+  assert.deepEqual(calls, ["abort", "close", "rewrite"]);
   assert.equal(result.removedEntryCount, 3);
 });
 

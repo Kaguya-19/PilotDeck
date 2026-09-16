@@ -9,15 +9,12 @@ import type {
   CanonicalUsage,
 } from "../protocol/canonical.js";
 import type { CanonicalModelError } from "../protocol/errors.js";
-import {
-  extractTextToolCalls,
-  hasTextToolCallSyntax,
-  type PartialTextToolCallInfo,
-} from "./parseTextToolCalls.js";
 
 export type ModelMessageAssemblerState = {
+  responseId?: string;
   content: CanonicalContentBlock[];
   textBuffer: string;
+  model?: string;
   thinkingBuffer: string;
   thinkingReasoningContentBuffer: string;
   thinkingSignature?: string;
@@ -27,11 +24,6 @@ export type ModelMessageAssemblerState = {
   error?: CanonicalModelError;
   toolCalls: CanonicalToolCall[];
   hasRepairedToolCalls?: boolean;
-  hasPartialTextToolCall?: boolean;
-  partialTextToolCall?: PartialTextToolCallInfo;
-  hasTextFallbackToolCalls?: boolean;
-  textToolCallFormat?: PartialTextToolCallInfo["format"];
-  hasUnparsedTextToolCall?: boolean;
 };
 
 export type AssembledAssistantMessage = {
@@ -41,16 +33,12 @@ export type AssembledAssistantMessage = {
   toolCalls: CanonicalToolCall[];
   error?: CanonicalModelError;
   hasRepairedToolCalls?: boolean;
-  hasPartialTextToolCall?: boolean;
-  partialTextToolCall?: PartialTextToolCallInfo;
-  hasTextFallbackToolCalls?: boolean;
-  textToolCallFormat?: PartialTextToolCallInfo["format"];
-  hasUnparsedTextToolCall?: boolean;
   hasMessageEnd: boolean;
 };
 
-export function createModelMessageAssemblerState(): ModelMessageAssemblerState {
+export function createModelMessageAssemblerState(responseId?: string): ModelMessageAssemblerState {
   return {
+    ...(responseId ? { responseId } : {}),
     content: [],
     textBuffer: "",
     thinkingBuffer: "",
@@ -61,20 +49,29 @@ export function createModelMessageAssemblerState(): ModelMessageAssemblerState {
   };
 }
 
+/** The next delta and its eventual persisted block must carry the same ID. */
+export function getModelStreamBlockId(state: ModelMessageAssemblerState, kind: 'text' | 'thinking'): string | undefined {
+  return state.responseId ? `${state.responseId}:${kind}:${state.content.filter(block => block.type === kind).length}` : undefined;
+}
+
 export function applyModelEventToAssembler(
   state: ModelMessageAssemblerState,
   event: CanonicalModelEvent,
 ): void {
   switch (event.type) {
     case "request_started":
+      state.model = event.model;
+      return;
     case "message_start":
     case "tool_call_start":
     case "tool_call_delta":
       return;
     case "text_delta":
+      if (state.thinkingBuffer || state.thinkingReasoningContentBuffer || state.thinkingSignature !== undefined) flushTextBuffers(state);
       state.textBuffer += event.text;
       return;
     case "thinking_delta":
+      if (state.textBuffer) flushTextBuffers(state);
       state.thinkingBuffer += event.text;
       if (event.reasoningContent !== undefined) {
         state.thinkingReasoningContentBuffer += event.reasoningContent;
@@ -113,44 +110,15 @@ export function applyModelEventToAssembler(
 export function assembleAssistantMessage(state: ModelMessageAssemblerState): AssembledAssistantMessage {
   flushTextBuffers(state);
 
-  if (state.toolCalls.length === 0) {
-    const textIdx = state.content.findIndex(
-      (b): b is CanonicalTextBlock => b.type === "text" && hasTextToolCallSyntax(b.text),
-    );
-    if (textIdx >= 0) {
-      const textBlock = state.content[textIdx] as CanonicalTextBlock;
-      const parseResult = extractTextToolCalls(textBlock.text);
-      const { detectedFormat, parseError, partialToolCall } = parseResult;
-      state.textToolCallFormat = detectedFormat;
-      if (partialToolCall) {
-        state.hasPartialTextToolCall = true;
-        state.partialTextToolCall = partialToolCall;
-      }
-      if (parseError) {
-        state.hasUnparsedTextToolCall = true;
-      }
-      if (parseResult.toolCalls.length > 0) {
-        console.log(`[text-tool-call-fallback] Extracted ${parseResult.toolCalls.length} tool call(s) from assistant text (format: ${detectedFormat ?? "unknown"})`);
-        state.hasTextFallbackToolCalls = true;
-        if (parseResult.remainingText.length > 0) {
-          (state.content[textIdx] as CanonicalTextBlock).text = parseResult.remainingText;
-        } else {
-          state.content.splice(textIdx, 1);
-        }
-        for (const tc of parseResult.toolCalls) {
-          state.content.push({ type: "tool_call", ...tc });
-          state.toolCalls.push(tc);
-        }
-      }
-    }
-  }
-
+  // Only structured provider events create tool calls. Text remains literal,
+  // including examples of tool syntax and incomplete tags.
   normalizeToolCallIds(state);
 
   return {
     message: {
       role: "assistant",
       content: [...state.content],
+      ...(state.model ? { metadata: { model: state.model } } : {}),
     },
     finishReason: state.finishReason ?? (state.error ? "error" : "unknown"),
     hasMessageEnd: state.hasMessageEnd,
@@ -158,11 +126,6 @@ export function assembleAssistantMessage(state: ModelMessageAssemblerState): Ass
     toolCalls: [...state.toolCalls],
     error: state.error,
     hasRepairedToolCalls: state.hasRepairedToolCalls,
-    hasPartialTextToolCall: state.hasPartialTextToolCall,
-    partialTextToolCall: state.partialTextToolCall,
-    hasTextFallbackToolCalls: state.hasTextFallbackToolCalls,
-    textToolCallFormat: state.textToolCallFormat,
-    hasUnparsedTextToolCall: state.hasUnparsedTextToolCall,
   };
 }
 
@@ -204,6 +167,7 @@ function flushTextBuffers(state: ModelMessageAssemblerState): void {
     const block: CanonicalThinkingBlock = {
       type: "thinking",
       text: state.thinkingBuffer,
+      ...(state.responseId ? { blockId: getModelStreamBlockId(state, 'thinking') } : {}),
     };
     if (state.thinkingReasoningContentBuffer.length > 0) {
       block.reasoningContent = state.thinkingReasoningContentBuffer;
@@ -221,6 +185,7 @@ function flushTextBuffers(state: ModelMessageAssemblerState): void {
     state.content.push({
       type: "text",
       text: state.textBuffer,
+      ...(state.responseId ? { blockId: getModelStreamBlockId(state, 'text') } : {}),
     } satisfies CanonicalTextBlock);
     state.textBuffer = "";
   }

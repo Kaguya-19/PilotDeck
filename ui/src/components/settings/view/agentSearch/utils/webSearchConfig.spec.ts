@@ -60,10 +60,20 @@ describe("webSearchConfigForProvider", () => {
       endpoint: "https://api.search.brave.com/res/v1/web/search",
     });
   });
+
+  it("initializes a simplified custom provider", () => {
+    expect(webSearchConfigForProvider({}, "custom", glmEndpoint)).toEqual({
+      provider: "custom",
+      customProvider: {
+        auth: "bearer",
+        method: "POST",
+      },
+    });
+  });
 });
 
 describe("isWebSearchApiKeyRequired", () => {
-  it("allows a custom unauthenticated search service", () => {
+  it("allows unauthenticated custom search services", () => {
     expect(
       isWebSearchApiKeyRequired({
         provider: "custom",

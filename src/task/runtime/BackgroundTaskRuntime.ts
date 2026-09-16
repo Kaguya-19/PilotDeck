@@ -22,7 +22,6 @@
 
 import { randomUUID } from "node:crypto";
 import { TaskOutputStore } from "../storage/TaskOutputStore.js";
-import { resolveDefaultCommandShell } from "../../runtime/commandShell.js";
 import type {
   BackgroundTaskSnapshotStore,
   PersistedBackgroundTask,
@@ -214,7 +213,7 @@ export class BackgroundTaskRuntime implements BackgroundTaskPort {
     const waits: Array<Promise<void | "timeout" | "aborted">> = [entry.done];
     if (timeoutPromise) waits.push(timeoutPromise);
     if (abortPromise) waits.push(abortPromise);
-    const result = await Promise.race(waits);
+    const result = await keepEventLoopAlive(Promise.race(waits));
     if (abortHandler) {
       options.abortSignal?.removeEventListener("abort", abortHandler);
     }
@@ -465,7 +464,7 @@ export class BackgroundTaskRuntime implements BackgroundTaskPort {
   async waitFor(taskId: string): Promise<PilotDeckBackgroundBashTask> {
     const entry = this.entries.get(taskId);
     if (!entry) throw new Error(`Unknown taskId: ${taskId}`);
-    await entry.done;
+    await keepEventLoopAlive(entry.done);
     return entry.task;
   }
 
@@ -576,6 +575,15 @@ export class BackgroundTaskRuntime implements BackgroundTaskPort {
       // Completion notifications are best-effort and must never break task cleanup.
     }
     this.completionEvents.emit(event);
+  }
+}
+
+async function keepEventLoopAlive<T>(promise: Promise<T>): Promise<T> {
+  const keepAlive = setInterval(() => undefined, 60_000);
+  try {
+    return await promise;
+  } finally {
+    clearInterval(keepAlive);
   }
 }
 

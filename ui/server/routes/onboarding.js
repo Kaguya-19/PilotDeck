@@ -39,6 +39,20 @@ const PRESETS = {
   openrouter: { protocol: 'openai', endpoint: 'https://openrouter.ai/api/v1' },
   ollama: { protocol: 'openai', endpoint: 'http://localhost:11434/v1' },
 };
+const PROVIDER_CATALOG = [
+  { id: 'anthropic', displayName: 'Anthropic', logoUrl: '/onboarding/providers/anthropic.svg' },
+  { id: 'openai', displayName: 'OpenAI', logoUrl: '/onboarding/providers/openai.svg' },
+  { id: 'openai-responses', displayName: 'OpenAI (Responses API)', logoUrl: '/onboarding/providers/openai.svg' },
+  { id: 'dashscope', displayName: '阿里云百炼 (DashScope)', logoUrl: '/onboarding/providers/bailian-color.svg' },
+  { id: 'deepseek', displayName: 'DeepSeek', logoUrl: '/onboarding/providers/deepseek-color.svg' },
+  { id: 'google', displayName: 'Google AI (Gemini)', logoUrl: '/onboarding/providers/gemini-color.svg' },
+  { id: 'openrouter', displayName: 'OpenRouter', logoUrl: '/onboarding/providers/openrouter-color.svg' },
+  { id: 'ollama', displayName: 'Ollama', logoUrl: '/onboarding/providers/ollama.svg' },
+  { id: 'minimax', displayName: 'MiniMax', logoUrl: '/onboarding/providers/minimax-color.svg' },
+  { id: 'moonshot', displayName: 'Moonshot AI (Kimi)', logoUrl: '/onboarding/providers/kimi.svg' },
+  { id: 'volc_ark', displayName: '火山方舟 (Volcano Ark)', logoUrl: '/onboarding/providers/volcengine-color.svg' },
+  { id: 'zhipu', displayName: '智谱 Z.AI', logoUrl: '/onboarding/providers/zhipu-color.svg' },
+];
 const PROTOCOLS = new Set(['openai', 'openai-responses', 'anthropic', 'google']);
 
 function createInFlightLimiter(globalLimit, perUserLimit) {
@@ -113,14 +127,19 @@ function sameKey(fingerprint, apiKey) {
   return fingerprint?.length === candidate.length && timingSafeEqual(fingerprint, candidate);
 }
 
+// Normalize only catalog lookup; never use this value as a configuration key.
+function presetIdFor(providerId) {
+  const lookupId = text(providerId).toLowerCase();
+  return Object.hasOwn(ALIASES, lookupId) ? ALIASES[lookupId] : lookupId;
+}
+
 export function connectionTestMatchesProvider(record, provider) {
-  const presetEndpoint = Object.hasOwn(PRESETS, provider?.providerId)
-    ? PRESETS[provider.providerId].endpoint
-    : '';
+  const presetId = presetIdFor(provider?.providerId);
+  const presetEndpoint = Object.hasOwn(PRESETS, presetId) ? PRESETS[presetId].endpoint : '';
   const endpoint = canonicalEndpoint(text(provider?.url) || presetEndpoint);
   const testedEndpoint = canonicalEndpoint(record?.provider?.endpoint);
   if (!record || !provider || !endpoint || !testedEndpoint || record.provider.protocol !== provider.protocol || testedEndpoint !== endpoint) return false;
-  return provider.providerId === 'ollama' || sameKey(record.keyFingerprint, text(provider.apiKey));
+  return presetIdFor(provider.providerId) === 'ollama' || sameKey(record.keyFingerprint, text(provider.apiKey));
 }
 function hasOnlyKeys(value, keys) {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -150,10 +169,15 @@ function retryPolicy(value) {
   return output;
 }
 function resolveProvider(body, { allowPresetEndpointOverride = false } = {}) {
-  const requested = text(body.providerId).toLowerCase();
-  const providerId = Object.hasOwn(ALIASES, requested) ? ALIASES[requested] : requested;
-  if (Object.hasOwn(PRESETS, providerId)) {
-    const preset = PRESETS[providerId];
+  const providerId = text(body.providerId);
+  const presetId = presetIdFor(providerId);
+  if (Object.hasOwn(PRESETS, presetId)) {
+    const preset = { ...PRESETS[presetId] };
+    // Settings may use a custom protocol under any user-chosen provider ID.
+    if (allowPresetEndpointOverride && text(body.protocol)) {
+      preset.protocol = text(body.protocol).toLowerCase();
+      if (!PROTOCOLS.has(preset.protocol)) return null;
+    }
     const requestedEndpoint = allowPresetEndpointOverride ? text(body.endpoint) : '';
     if (!requestedEndpoint) return { providerId, ...preset, custom: false };
     try {
@@ -228,96 +252,124 @@ export function modelTestRateLimiter(req, res, next) {
   return apiError(res, 429, 'RATE_LIMITED', 'Too many connection tests.');
 }
 
-export async function modelConnectionTestsHandler(req, res) {
-  const provider = resolveProvider(req.body || {}, { allowPresetEndpointOverride: req.allowPresetEndpointOverride === true });
-  const requestedModels = Array.isArray(req.body?.models) ? req.body.models.map(text) : [];
+router.get('/providers', (_req, res) => {
+  res.json({
+    providers: PROVIDER_CATALOG.map((item) => {
+      const preset = PRESETS[item.id];
+      return {
+        id: item.id,
+        displayName: item.displayName,
+        protocol: preset.protocol,
+        endpoint: preset.endpoint,
+        logoUrl: item.logoUrl,
+        requiresApiKey: item.id !== 'ollama',
+      };
+    }),
+  });
+});
+
+// Reserve the shared probe slot synchronously; both HTTP and background tasks use it.
+export function prepareConnectionTest(body, userId, allowPresetEndpointOverride = false) {
+  const provider = resolveProvider(body || {}, { allowPresetEndpointOverride });
+  const requestedModels = Array.isArray(body?.models) ? body.models.map(text) : [];
   const models = [...new Set(requestedModels.filter(Boolean))];
-  const retry = retryPolicy(req.body?.retryPolicy);
-  const apiKey = text(req.body?.apiKey);
-  if (!hasOnlyKeys(req.body, ['providerId', 'protocol', 'endpoint', 'apiKey', 'models', 'retryPolicy']) || !provider || !models.length || models.length !== requestedModels.length || models.length > MAX_MODELS_PER_TEST || !retry || (provider.providerId !== 'ollama' && !apiKey)) {
-    return apiError(res, 400, 'INVALID_REQUEST', 'providerId, models, retryPolicy, and the required API key are invalid.');
+  const retry = retryPolicy(body?.retryPolicy);
+  const apiKey = text(body?.apiKey);
+  if (!hasOnlyKeys(body, ['providerId', 'protocol', 'endpoint', 'apiKey', 'models', 'retryPolicy']) || !provider || !models.length || models.length !== requestedModels.length || models.length > MAX_MODELS_PER_TEST || !retry || (presetIdFor(provider.providerId) !== 'ollama' && !apiKey)) {
+    throw Object.assign(new Error('providerId, models, retryPolicy, and the required API key are invalid.'), { status: 400, code: 'INVALID_REQUEST' });
   }
-  const release = probeInFlight.tryAcquire(req.user.id);
+  const release = probeInFlight.tryAcquire(userId);
   if (!release) {
-    res.setHeader('Retry-After', '1');
-    return apiError(res, 429, 'RATE_LIMITED', 'Too many connection tests are already running.');
+    throw Object.assign(new Error('Too many connection tests are already running.'), { status: 429, code: 'TEST_BUSY' });
   }
-  const requestAbort = abortOnDisconnect(req, res);
-  const results = [];
-  try {
-    for (const modelId of models) {
-      requestAbort.signal.throwIfAborted();
-      let textProbe;
-      try {
-        textProbe = await probeModelConnection({
-          protocol: provider.protocol, baseUrl: provider.endpoint, apiKey, model: modelId, signal: requestAbort.signal, retryPolicy: retry,
-        });
-      } catch (error) {
-        if (requestAbort.signal.aborted) throw error;
-        textProbe = { ok: false, code: 'ENDPOINT_UNREACHABLE', error: error?.message || 'Connection failed.' };
+  return async (signal) => {
+    const results = [];
+    try {
+      for (const modelId of models) {
+        signal.throwIfAborted();
+        let textProbe;
+        try {
+          textProbe = await probeModelConnection({
+            protocol: provider.protocol, baseUrl: provider.endpoint, apiKey, model: modelId, signal, retryPolicy: retry,
+          });
+        } catch (error) {
+          if (signal.aborted) throw error;
+          textProbe = { ok: false, code: 'ENDPOINT_UNREACHABLE', error: error?.message || 'Connection failed.' };
+        }
+        if (!textProbe.ok) {
+          results.push({ modelId, textInput: 'unsupported', imageInput: 'unknown', error: { code: textProbe.code || 'TEXT_TEST_FAILED', message: textProbe.error, modelId } });
+          continue;
+        }
+        let imageProbe;
+        try {
+          imageProbe = await probeModelConnection({
+            protocol: provider.protocol,
+            baseUrl: provider.endpoint,
+            endpointUrl: textProbe.endpointUrl,
+            apiKey,
+            model: modelId,
+            image: true,
+            signal,
+            retryPolicy: retry,
+          });
+        } catch (error) {
+          if (signal.aborted) throw error;
+          imageProbe = { ok: false, imageUnsupported: false, error: error?.message || 'Image capability could not be determined.' };
+        }
+        results.push(imageProbe.ok
+          ? { modelId, textInput: 'supported', imageInput: 'supported', error: null }
+          : imageProbe.imageUnsupported
+            ? { modelId, textInput: 'supported', imageInput: 'unsupported', error: null }
+            : { modelId, textInput: 'supported', imageInput: 'unknown', error: { code: 'IMAGE_CAPABILITY_UNKNOWN', message: imageProbe.error, modelId } });
       }
-      if (!textProbe.ok) {
-        results.push({ modelId, textInput: 'unsupported', imageInput: 'unknown', error: { code: textProbe.code || 'TEXT_TEST_FAILED', message: textProbe.error, modelId } });
-        continue;
+      signal.throwIfAborted();
+      const status = testStatus(results);
+      const record = { id: randomUUID(), userId, provider, retry, keyFingerprint: keyFingerprint(apiKey), models: results, status, testedAt: new Date().toISOString(), expiresAt: Date.now() + TEST_TTL_MS, error: aggregateError(results, status) };
+      tests.set(record.id, record);
+      return publicResult(record);
+    } catch (error) {
+      if (signal.aborted) throw signal.reason;
+      const message = error?.message || 'Unable to test the model connection.';
+      const completed = new Set(results.map((model) => model.modelId));
+      for (const modelId of models) {
+        if (completed.has(modelId)) continue;
+        results.push({ modelId, textInput: 'unsupported', imageInput: 'unknown', error: { code: 'ENDPOINT_UNREACHABLE', message, modelId } });
       }
-      let imageProbe;
-      try {
-        imageProbe = await probeModelConnection({
-          protocol: provider.protocol,
-          baseUrl: provider.endpoint,
-          endpointUrl: textProbe.endpointUrl,
-          apiKey,
-          model: modelId,
-          image: true,
-          signal: requestAbort.signal,
-          retryPolicy: retry,
-        });
-      } catch (error) {
-        if (requestAbort.signal.aborted) throw error;
-        imageProbe = { ok: false, imageUnsupported: false, error: error?.message || 'Image capability could not be determined.' };
-      }
-      results.push(imageProbe.ok
-        ? { modelId, textInput: 'supported', imageInput: 'supported', error: null }
-        : imageProbe.imageUnsupported
-          ? { modelId, textInput: 'supported', imageInput: 'unsupported', error: null }
-          : { modelId, textInput: 'supported', imageInput: 'unknown', error: { code: 'IMAGE_CAPABILITY_UNKNOWN', message: imageProbe.error, modelId } });
+      const status = 'failed';
+      const record = { id: randomUUID(), userId, provider, retry, keyFingerprint: keyFingerprint(apiKey), models: results, status, testedAt: new Date().toISOString(), expiresAt: Date.now() + TEST_TTL_MS, error: aggregateError(results, status) };
+      tests.set(record.id, record);
+      return publicResult(record);
+    } finally {
+      release();
     }
-    requestAbort.signal.throwIfAborted();
-    const status = testStatus(results);
-    const record = { id: randomUUID(), userId: req.user.id, provider, retry, keyFingerprint: keyFingerprint(apiKey), models: results, status, testedAt: new Date().toISOString(), expiresAt: Date.now() + TEST_TTL_MS, error: aggregateError(results, status) };
-    tests.set(record.id, record);
-    return res.json(publicResult(record));
-  } catch (error) {
-    if (requestAbort.signal.aborted) return;
-    const message = error?.message || 'Unable to test the model connection.';
-    const completed = new Set(results.map((model) => model.modelId));
-    for (const modelId of models) {
-      if (completed.has(modelId)) continue;
-      results.push({ modelId, textInput: 'unsupported', imageInput: 'unknown', error: { code: 'ENDPOINT_UNREACHABLE', message, modelId } });
-    }
-    const status = 'failed';
-    const record = { id: randomUUID(), userId: req.user.id, provider, retry, keyFingerprint: keyFingerprint(apiKey), models: results, status, testedAt: new Date().toISOString(), expiresAt: Date.now() + TEST_TTL_MS, error: aggregateError(results, status) };
-    tests.set(record.id, record);
-    return res.json(publicResult(record));
-  } finally {
-    requestAbort.cleanup();
-    release();
-  }
+  };
 }
 
-export function imageCapabilitiesHandler(req, res) {
-  const record = getTest(req, res); if (!record) return;
-  const supplied = Array.isArray(req.body?.models) ? req.body.models : [];
+export async function modelConnectionTestsHandler(req, res) {
+  let run;
+  try { run = prepareConnectionTest(req.body || {}, req.user.id, req.allowPresetEndpointOverride === true); }
+  catch (error) {
+    if (error.status === 429) res.setHeader('Retry-After', '1');
+    return apiError(res, error.status || 500, error.code === 'TEST_BUSY' ? 'RATE_LIMITED' : error.code, error.message);
+  }
+  const requestAbort = abortOnDisconnect(req, res);
+  try { res.json(await run(requestAbort.signal)); }
+  catch (error) { if (!requestAbort.signal.aborted) apiError(res, 500, 'TEST_FAILED', error.message); }
+  finally { requestAbort.cleanup(); }
+}
+
+export function applyImageCapabilities(record, body) {
+  const supplied = Array.isArray(body?.models) ? body.models : [];
   const normalizedSupplied = supplied.map((model) => ({
     ...model,
     modelId: text(model?.modelId),
   }));
   const unknown = record.models.filter((model) => model.imageInput === 'unknown').map((model) => model.modelId).sort();
   const received = normalizedSupplied.map((model) => model.modelId).sort();
-  const validPayload = hasOnlyKeys(req.body, ['models'])
+  const validPayload = hasOnlyKeys(body, ['models'])
     && normalizedSupplied.every((model) => hasOnlyKeys(model, ['modelId', 'imageInput']) && model.modelId && ['supported', 'unsupported'].includes(model?.imageInput));
   if (!validPayload) {
-    return apiError(res, 400, 'INVALID_REQUEST', 'models must provide exactly every unknown image capability.');
+    throw Object.assign(new Error('models must provide exactly every unknown image capability.'), { status: 400, code: 'INVALID_REQUEST' });
   }
   if (!unknown.length) {
     const manualCapabilities = record.manualImageCapabilities;
@@ -326,11 +378,11 @@ export function imageCapabilitiesHandler(req, res) {
       && expected.length === received.length
       && expected.every((id, index) => id === received[index])
       && normalizedSupplied.every((model) => manualCapabilities[model.modelId] === model.imageInput);
-    if (isReplay) return res.json(publicResult(record));
-    return apiError(res, 400, 'INVALID_REQUEST', 'models must provide exactly every unknown image capability.');
+    if (isReplay) return publicResult(record);
+    throw Object.assign(new Error('models must provide exactly every unknown image capability.'), { status: 400, code: 'INVALID_REQUEST' });
   }
   if (unknown.length !== received.length || unknown.some((id, index) => id !== received[index])) {
-    return apiError(res, 400, 'INVALID_REQUEST', 'models must provide exactly every unknown image capability.');
+    throw Object.assign(new Error('models must provide exactly every unknown image capability.'), { status: 400, code: 'INVALID_REQUEST' });
   }
   for (const model of record.models) {
     const suppliedModel = normalizedSupplied.find((item) => item.modelId === model.modelId);
@@ -339,7 +391,13 @@ export function imageCapabilitiesHandler(req, res) {
   record.manualImageCapabilities = Object.fromEntries(normalizedSupplied.map((model) => [model.modelId, model.imageInput]));
   record.status = testStatus(record.models);
   record.error = aggregateError(record.models, record.status);
-  return res.json(publicResult(record));
+  return publicResult(record);
+}
+
+export function imageCapabilitiesHandler(req, res) {
+  const record = getTest(req, res); if (!record) return;
+  try { return res.json(applyImageCapabilities(record, req.body)); }
+  catch (error) { return apiError(res, error.status || 500, error.code, error.message); }
 }
 
 router.post('/model-connection-tests', modelTestRateLimiter, modelConnectionTestsHandler);
@@ -371,7 +429,7 @@ router.put('/model-configuration', async (req, res) => {
       const existingProvider = recordConfig.config?.model?.providers?.[provider.providerId] || {};
       const suppliedKey = req.body?.apiKey;
       let apiKey;
-      if (provider.providerId === 'ollama') {
+      if (presetIdFor(provider.providerId) === 'ollama') {
         if (typeof suppliedKey === 'string' && suppliedKey.trim()) {
           return { error: ['INVALID_REQUEST', 'Ollama does not use an apiKey.'] };
         }
@@ -383,7 +441,7 @@ router.put('/model-configuration', async (req, res) => {
       } else {
         return { error: ['INVALID_REQUEST', 'apiKey is required for this provider.'] };
       }
-      if (provider.providerId !== 'ollama' && !sameKey(record.keyFingerprint, apiKey)) {
+      if (presetIdFor(provider.providerId) !== 'ollama' && !sameKey(record.keyFingerprint, apiKey)) {
         return { error: ['CONFIGURATION_MISMATCH', 'apiKey does not match the credential used for testing.'] };
       }
       const configurationId = `cfg_${randomUUID()}`;
@@ -405,7 +463,7 @@ router.put('/model-configuration', async (req, res) => {
         retry: { ...(existingProvider.retry && typeof existingProvider.retry === 'object' ? existingProvider.retry : {}), requestMaxRetries: retry.maxRetries, streamMaxRetries: retry.maxStreamRetries, streamIdleTimeoutMs: retry.streamIdleTimeoutMs, baseDelayMs: retry.baseDelayMs, maxDelayMs: retry.maxDelayMs },
         models: { ...existingModels, ...modelsConfig },
       };
-      if (provider.providerId === 'ollama') delete savedProvider.apiKey;
+      if (presetIdFor(provider.providerId) === 'ollama') delete savedProvider.apiKey;
       else savedProvider.apiKey = apiKey;
       const nextConfig = {
         ...recordConfig.config,

@@ -11,23 +11,23 @@ type IntegrationsSectionsProps = {
   title: string;
 };
 
-export default function IntegrationsSections({ title }: IntegrationsSectionsProps) {
+export default function IntegrationsSections({
+  title: _title,
+}: IntegrationsSectionsProps) {
   const { t } = useTranslation("settings");
-  const { raw, setRaw, save, loading, error } = usePilotDeckConfig();
+  const { raw, commitRaw, loading, error } = usePilotDeckConfig();
   const parsedConfig = useMemo(() => safeParseYaml(raw), [raw]);
 
   const onFormChange = (next: PilotDeckConfig) => {
     try {
-      setRaw(configToYamlString(next));
-      void save();
+      void commitRaw(configToYamlString(next));
     } catch (caught) {
       console.error("Failed to serialise integrations config patch", caught);
     }
   };
 
   return (
-    <div className="space-y-6">
-      <h2 className="text-2xl font-semibold text-foreground">{title}</h2>
+    <div className="integration-page-content">
       <ConfigSaveError error={error} />
       {loading ? (
         <div className="py-6 text-xs text-muted-foreground">

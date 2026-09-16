@@ -79,9 +79,21 @@ test("default sidecar factory preserves canonical message lifecycle metadata", a
       requestId: "request-metadata",
       payload: {
         messages: [{
-          role: "user",
-          content: "Injected runtime context",
+          role: "assistant",
+          content: [{
+            type: "text",
+            text: "Injected runtime context",
+            blockId: "response-1:text:0",
+            timeline: {
+              version: 1,
+              turnId: "origin-turn",
+              id: "response-1:text:0",
+              order: 0,
+              revision: 2,
+            },
+          }],
           metadata: {
+            model: "model-a",
             synthetic: true,
             transient: true,
             transientId: "runtime-context-1",
@@ -98,9 +110,21 @@ test("default sidecar factory preserves canonical message lifecycle metadata", a
   });
 
   assert.deepEqual(execution.input.messages, [{
-    role: "user",
-    content: [{ type: "text", text: "Injected runtime context" }],
+    role: "assistant",
+    content: [{
+      type: "text",
+      text: "Injected runtime context",
+      blockId: "response-1:text:0",
+      timeline: {
+        version: 1,
+        turnId: "origin-turn",
+        id: "response-1:text:0",
+        order: 0,
+        revision: 2,
+      },
+    }],
     metadata: {
+      model: "model-a",
       synthetic: true,
       transient: true,
       transientId: "runtime-context-1",

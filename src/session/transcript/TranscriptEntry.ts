@@ -3,6 +3,7 @@ import type {
   CanonicalModelEvent,
   CanonicalModelRequest,
 } from "../../model/index.js";
+import type { TimelinePosition } from "../../model/protocol/timeline.js";
 import type { AgentTurnResult } from "../../agent/protocol/result.js";
 import type { AgentInput, AgentSubmitOptions } from "../../agent/protocol/input.js";
 import type { PilotDeckToolCall, PilotDeckToolResult } from "../../tool/index.js";
@@ -345,6 +346,7 @@ export type AgentFileSnapshotRecordedTranscriptEntry = AgentTranscriptEntryBase 
 };
 
 export type CompactBoundaryMetadata = {
+  timeline?: TimelinePosition;
   /** Stable identity shared by live and persisted representations. */
   compactionId?: string;
   trigger: "manual" | "auto" | "reactive";
@@ -421,7 +423,7 @@ export type SessionMetadataValue = {
   /** Persisted dialog model preference. Null is an explicit clear tombstone. */
   modelSelection?:
     | { mode: "auto" }
-    | { mode: "model"; provider: string; model: string; reasoning?: number; temperature?: number; speed?: number }
+    | { mode: "model"; provider: string; model: string; reasoning?: number; speed?: number }
     | null;
   linkedPullRequest?: {
     number: number;

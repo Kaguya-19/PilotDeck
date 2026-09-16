@@ -1,6 +1,8 @@
+import type { ChatModelSelection } from '../hooks/useChatProviderState';
 import type { ChatAttachment } from './types';
 
-export type QueuedInputStatus = 'queued' | 'steering' | 'dispatching' | 'delivery_uncertain' | 'failed';
+export type QueuedInputStatus = 'submitting' | 'queued' | 'steering' | 'dispatching' | 'delivery_uncertain' | 'failed';
+export const isSendingInput = (item: { status: QueuedInputStatus }) => item.status === 'submitting' || item.status === 'dispatching';
 export type InputQueuePauseReason = 'user_stopped' | 'previous_turn_failed' | 'restart_recovery';
 
 export type QueuedInputSummary = {
@@ -34,11 +36,22 @@ export type PreparedQueuedInput = {
     permissionMode?: string;
     basePermissionMode?: string;
     model?: string;
+    modelSelection?: ChatModelSelection;
+    modelOverride?: {
+      mode: 'model';
+      provider: string;
+      model: string;
+      reasoning?: number;
+      speed?: number;
+    };
     thinking?: unknown;
     sessionSummary?: string | null;
     toolsSettings?: unknown;
     userVisibleInput?: string;
     images?: unknown[];
     attachments?: ChatAttachment[];
+    /** Rendered in the accepted queue echo, never forwarded as model input. */
+    displayAttachments?: ChatAttachment[];
+    uploadedAttachments?: Array<{ uploadId: string; attachmentIds?: string[] }>;
   };
 };

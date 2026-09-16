@@ -1,12 +1,8 @@
 import { existsSync, watch, type FSWatcher } from "node:fs";
 import { dirname } from "node:path";
-import {
-  getPilotConfigFilePath,
-  getPilotProjectConfigFilePath,
-  resolvePilotHome,
-} from "../paths.js";
+import { getPilotProjectConfigFilePath } from "../paths.js";
 import { classifyConfigChanges, diffConfigSnapshots } from "./classifyChanges.js";
-import { loadPilotConfig } from "./loadPilotConfig.js";
+import { loadPilotConfig, resolvePilotConfigPath } from "./loadPilotConfig.js";
 import {
   PilotConfigError,
   type PilotConfigDiagnostic,
@@ -154,13 +150,11 @@ class DefaultPilotConfigStore implements PilotConfigStore {
   }
 
   private getWatchedPaths(): string[] {
-    const env = this.options.env ?? process.env;
-    const pilotHome = resolvePilotHome(env);
-    return [
-      getPilotConfigFilePath(pilotHome),
+    return [...new Set([
+      resolvePilotConfigPath(this.options),
       ...(this.options.projectRoot
         ? [getPilotProjectConfigFilePath(this.options.projectRoot)]
         : []),
-    ];
+    ])];
   }
 }

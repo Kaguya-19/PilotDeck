@@ -1,3 +1,4 @@
+import type { TimelinePosition, StreamBoundary } from "../../model/protocol/timeline.js";
 import type { AgentTurnResult } from "../../agent/index.js";
 import type { AgentStatusMessageInput } from "../../session/transcript/TranscriptWriter.js";
 import type { AgentRunMode } from "../../agent/protocol/input.js";
@@ -487,6 +488,9 @@ export type GatewayRecordAgentStatusMessageInput = {
 };
 
 type GatewayTurnScopedEventMetadata = {
+  timeline?: TimelinePosition;
+  streamBoundary?: StreamBoundary;
+  streamState?: "open" | "closed";
   /**
    * Stable id of the active turn that produced this event. Turn-scoped events
    * carry it so streaming clients can match deltas with lifecycle boundaries.
@@ -506,15 +510,18 @@ export type GatewayEvent = GatewayTurnScopedEventMetadata & (
       model: string;
       source: "turn" | "session" | "router" | "default";
       reasoning?: number;
+      /** @deprecated Provider adapters may ignore temperature. */
       temperature?: number;
       speed?: number;
     }
-  | { type: "assistant_text_delta"; text: string; model?: string }
+  | { type: "assistant_block"; blockId: string; kind: "text" | "thinking"; text: string; model?: string }
+  | { type: "assistant_stream_end" }
+  | { type: "assistant_text_delta"; text: string; model?: string; blockId?: string }
   /** Opt-in post-turn UI guidance; it is not a transcript message. */
   | { type: "prompt_suggestion"; suggestion: string }
   | { type: "assistant_attachment"; attachment: GatewayOutboundAttachment }
   | { type: "file_artifacts"; artifacts: import("../../session/artifacts/FileArtifact.js").FileArtifact[] }
-  | { type: "assistant_thinking_delta"; text: string }
+  | { type: "assistant_thinking_delta"; text: string; blockId?: string }
   /** Opt-in child text projection; it is not part of the parent assistant output. */
   | { type: "subagent_text_delta"; subagentId: string; subagentType: string; text: string }
   | { type: "tool_call_started"; toolCallId: string; name: string; argsPreview?: string }
@@ -1171,7 +1178,6 @@ export type ModelCatalogItem = {
   available: boolean;
   capabilities: {
     reasoning?: ModelNumericCapability;
-    temperature?: ModelNumericCapability;
     speed?: ModelNumericCapability;
   };
 };
@@ -1195,6 +1201,7 @@ export type ExplicitModelSelection = {
   provider: string;
   model: string;
   reasoning?: number;
+  /** @deprecated Provider adapters may ignore temperature. */
   temperature?: number;
   speed?: number;
 };
@@ -1210,6 +1217,7 @@ export type SessionModelResult = SessionModelInput & {
     model: string;
     source: "session" | "router" | "default";
     reasoning?: number;
+    /** @deprecated Provider adapters may ignore temperature. */
     temperature?: number;
     speed?: number;
   };

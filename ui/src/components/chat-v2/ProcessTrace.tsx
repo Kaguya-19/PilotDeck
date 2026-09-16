@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState, type ReactNode, type WheelEvent } from 'react';
+import { useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   Activity,
@@ -14,6 +14,7 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import { AgentTimeline } from './AgentTimeline';
+import { StreamingScrollViewport } from './StreamingScrollViewport';
 
 export type ProcessTraceMetric = {
   key: string;
@@ -28,6 +29,7 @@ export type ProcessTraceStep = {
   severity?: string;
   phase?: string;
   toolName?: string;
+  toolId?: string;
 };
 
 type ProcessTraceProps = {
@@ -48,9 +50,13 @@ type ProcessTraceProps = {
 export function ProcessRunHeader({
   label,
   className = '',
+  expanded,
+  onExpandedChange,
 }: {
   label: string;
   className?: string;
+  expanded?: boolean;
+  onExpandedChange?: (expanded: boolean) => void;
 }) {
   return (
     <div
@@ -58,7 +64,13 @@ export function ProcessRunHeader({
       aria-live="polite"
       className={`mb-3 border-b border-neutral-200/70 pb-1.5 text-[14px] leading-relaxed text-neutral-500 dark:border-neutral-800/80 dark:text-neutral-400 ${className}`}
     >
-      <span className="tabular-nums">{label}</span>
+      {onExpandedChange ? (
+        <button type="button" aria-expanded={expanded} onClick={() => onExpandedChange(!expanded)}
+          className="hover-brand-text flex items-center gap-1.5 text-left">
+          <ChevronRight className={`h-3.5 w-3.5 ${expanded ? 'rotate-90' : ''}`} />
+          <span className="tabular-nums">{label}</span>
+        </button>
+      ) : <span className="tabular-nums">{label}</span>}
     </div>
   );
 }
@@ -125,7 +137,7 @@ export function ProcessLiveStatus({
 
   return (
     <div
-      className={`process-live-status ${compact ? 'py-0' : 'pb-1'} text-[14px] leading-relaxed text-neutral-400 dark:text-neutral-500 ${className}`}
+      className={`process-live-status w-full min-w-0 ${compact ? 'py-0' : 'pb-1'} text-[14px] leading-relaxed text-neutral-400 dark:text-neutral-500 ${className}`}
     >
       <div role="status" aria-live="polite">
         {hasDetails ? (
@@ -133,7 +145,7 @@ export function ProcessLiveStatus({
             type="button"
             aria-expanded={expanded}
             onClick={() => setExpanded((value) => !value)}
-            className={`group inline-flex min-w-0 max-w-full items-start gap-2 text-left transition hover:text-neutral-600 dark:hover:text-neutral-300 ${
+            className={`hover-brand-text group inline-flex min-w-0 max-w-full items-start gap-2 text-left transition hover:text-neutral-600 dark:hover:text-neutral-300 ${
               isRunning ? 'animate-pulse' : ''
             }`}
           >
@@ -146,7 +158,7 @@ export function ProcessLiveStatus({
         )}
       </div>
       {expanded && hasDetails ? (
-        <div className={`mt-1.5 space-y-1.5 ${contentClassName ?? 'pl-5'}`}>
+        <div className={`mt-1.5 space-y-1.5 ${contentClassName ?? ''}`}>
           {children}
         </div>
       ) : null}
@@ -250,7 +262,8 @@ export function ProcessTrace({
   };
   const hasDetails = steps.length > 0 || Boolean(children);
   const visibleCollapsedDetail = !expanded && collapsedDetail;
-  const summaryIconStep = steps[0] || { title: label, state: status };
+  // Individual tool failures belong in the expanded details, not the group icon.
+  const summaryIconStep = { ...(steps[0] || { title: label }), state: status, severity: undefined };
   const SummaryIcon = getStepIcon(summaryIconStep);
   const isRunning = status === 'running';
 
@@ -258,7 +271,7 @@ export function ProcessTrace({
     <div
       role={live ? 'status' : undefined}
       aria-live={live ? 'polite' : undefined}
-      className={`process-trace py-0 ${className}`}
+      className={`process-trace w-full min-w-0 py-0 ${className}`}
     >
       <button
         type="button"
@@ -269,7 +282,7 @@ export function ProcessTrace({
           }
         }}
         disabled={!hasDetails}
-        className={`group inline-flex min-w-0 max-w-full items-center gap-2 text-left text-[14px] leading-relaxed text-neutral-400 transition hover:text-neutral-600 disabled:cursor-default disabled:hover:text-neutral-400 dark:text-neutral-500 dark:hover:text-neutral-300 dark:disabled:hover:text-neutral-500 ${
+        className={`hover-brand-text group inline-flex min-w-0 max-w-full items-center gap-2 text-left text-[14px] leading-relaxed text-neutral-400 transition hover:text-neutral-600 disabled:cursor-default disabled:hover:text-neutral-400 dark:text-neutral-500 dark:hover:text-neutral-300 dark:disabled:hover:text-neutral-500 ${
           isRunning ? 'animate-pulse' : ''
         }`}
       >
@@ -295,7 +308,7 @@ export function ProcessTrace({
       </button>
 
       {expanded ? (
-        <div className="mt-1.5 space-y-1.5 pl-5">
+        <div className="mt-1.5 space-y-1.5">
           {steps.length > 3 ? (
             <AgentTimeline steps={steps} />
           ) : (
@@ -320,55 +333,19 @@ export function StreamingThinkingPreview({
   scrollable?: boolean;
 }) {
   const { t } = useTranslation('chat');
-  const followLatestRef = useRef(true);
-  const viewportRef = useRef<HTMLDivElement>(null);
   const lines = content.split('\n');
   const visibleLines = lines.slice(-maxLines);
   const hasOverflow = lines.length > maxLines;
 
-  useLayoutEffect(() => {
-    if (!scrollable || !followLatestRef.current) return;
-    const viewport = viewportRef.current;
-    if (viewport) {
-      viewport.scrollTop = viewport.scrollHeight;
-    }
-  }, [content, scrollable]);
-
-  const handleScroll = () => {
-    const viewport = viewportRef.current;
-    if (!viewport) return;
-    const distanceFromBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
-    followLatestRef.current = distanceFromBottom <= 24;
-  };
-
-  const handleWheel = (event: WheelEvent<HTMLDivElement>) => {
-    const viewport = viewportRef.current;
-    if (!viewport) return;
-    if (event.deltaY < 0) {
-      followLatestRef.current = false;
-    }
-    const canScrollUp = event.deltaY < 0 && viewport.scrollTop > 0;
-    const canScrollDown = event.deltaY > 0
-      && viewport.scrollTop + viewport.clientHeight < viewport.scrollHeight;
-    if (canScrollUp || canScrollDown) {
-      event.stopPropagation();
-    }
-  };
-
   if (scrollable) {
     return (
       <div className="mt-1 px-3 py-2 font-mono text-xs leading-relaxed text-neutral-500 dark:text-neutral-400">
-        <div
-          ref={viewportRef}
-          role="region"
-          tabIndex={0}
-          aria-label={t('thinking.liveContentLabel', { defaultValue: 'Live thinking content' })}
-          onScroll={handleScroll}
-          onWheel={handleWheel}
-          className="max-h-64 overflow-y-auto whitespace-pre-wrap break-words border-l-2 border-neutral-200 pl-3 outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40 dark:border-neutral-700"
+        <StreamingScrollViewport
+          label={t('thinking.liveContentLabel', { defaultValue: 'Live thinking content' })}
+          className="whitespace-pre-wrap break-words border-l-2 border-neutral-200 pl-3 dark:border-neutral-700"
         >
           {content}
-        </div>
+        </StreamingScrollViewport>
       </div>
     );
   }

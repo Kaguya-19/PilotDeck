@@ -74,19 +74,7 @@ export function createNodeDetachedExecutableStarter(
       pid: typeof child.pid === "number" ? child.pid : undefined,
       exit,
       terminate(signal) {
-        if (process.platform !== "win32" && child.pid) {
-          try {
-            process.kill(-child.pid, signal);
-            return;
-          } catch {
-            // Fall back to the process handle when no detached group remains.
-          }
-        }
-        try {
-          child.kill(signal);
-        } catch {
-          // The process may have exited between status observation and kill.
-        }
+        terminateDetachedChild(child, signal);
       },
     };
   };
@@ -130,21 +118,45 @@ export function createNodeDetachedShellPort(
         exit,
         terminate(signal) {
           if (exited) return;
-          if (process.platform !== "win32" && child.pid) {
-            try {
-              process.kill(-child.pid, signal);
-              return;
-            } catch {
-              // Fall back to the process handle when no detached group remains.
-            }
-          }
-          try {
-            child.kill(signal);
-          } catch {
-            // The process may have exited between status observation and kill.
-          }
+          terminateDetachedChild(child, signal);
         },
       };
     },
   };
+}
+
+function terminateDetachedChild(child: ChildProcess, signal: NodeJS.Signals): void {
+  if (process.platform === "win32" && child.pid) {
+    try {
+      const killer = spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
+        stdio: "ignore",
+        windowsHide: true,
+      });
+      killer.once("error", () => {
+        try {
+          child.kill(signal);
+        } catch {
+          // Best effort after taskkill startup failure.
+        }
+      });
+      killer.unref();
+      return;
+    } catch {
+      // Fall back to the process handle below.
+    }
+  }
+
+  if (process.platform !== "win32" && child.pid) {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch {
+      // Fall back to the process handle when no detached group remains.
+    }
+  }
+  try {
+    child.kill(signal);
+  } catch {
+    // The process may have exited between status observation and kill.
+  }
 }

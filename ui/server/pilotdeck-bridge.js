@@ -32,10 +32,9 @@
  *     re-shapes gateway events into the legacy NormalizedMessage frames
  *     the React frontend reducer still expects.
  *
- * The pair is started together via `cd ui && npm run dev` (or
- * `npm start`), which uses `concurrently` to launch both. Either order
- * is fine — the bridge retries the WebSocket handshake for
- * `GATEWAY_CONNECT_TIMEOUT_MS` so race conditions resolve themselves.
+ * The runtime supervisor starts the UI server first, then starts the Gateway
+ * after model configuration is ready. The bridge still retries the WebSocket
+ * handshake for `GATEWAY_CONNECT_TIMEOUT_MS` while Gateway is starting.
  */
 
 import { fileURLToPath } from 'node:url';
@@ -59,12 +58,16 @@ import {
 // rewriting the offending @type annotation below to `ReturnType<typeof
 // createRemoteGateway>`, which is why this import can live on `src/` again.)
 import { createRemoteGateway } from '../../src/gateway/index.js';
+import { getModelConfigurationState } from './services/modelConfigurationState.js';
+import { createModelFreeHistory } from './services/modelFreeHistory.js';
 import {
     createVisibleErrorStatusDetail,
     isVisibleFailureStatusDetail,
 } from '../../src/status/agentStatus.js';
 import { createNormalizedMessage } from './pilotdeck-message.js';
 import { readPermissionSettings } from './services/permissionSettings.js';
+import { createGatewayConnectionCache } from './services/gatewayConnectionCache.js';
+import { ensureGeneralWorkspaceDirectory } from './utils/generalWorkspace.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -76,10 +79,8 @@ const GATEWAY_URL =
 const GATEWAY_TOKEN_PATH =
     process.env.PILOTDECK_GATEWAY_TOKEN_PATH ||
     path.join(GENERAL_HOME, 'server-token');
-// The two processes (gateway + bridge) are typically started in
-// parallel by `concurrently`. We allow up to 30 s for the gateway to
-// come up before failing the first call — covers cold MCP startup on
-// slower machines.
+// Gateway starts only after model configuration is ready. Allow enough time
+// for a cold MCP startup before failing the first call.
 const GATEWAY_CONNECT_TIMEOUT_MS =
     Number.parseInt(process.env.PILOTDECK_BRIDGE_TIMEOUT ?? '', 10) || 60_000;
 const GATEWAY_CONNECT_RETRY_INTERVAL_MS = 500;
@@ -192,15 +193,13 @@ const WEB_DEFAULT_PERMISSION_MODE =
 // builds mis-parse such tokens inside JSDoc when running through
 // `node --import tsx`, producing a spurious "Parse error" at EOF during
 // ESM rewriting on fresh installs.
-/** @type {ReturnType<typeof createRemoteGateway> | null} */
-let gatewayPromise = null;
-/** @type {Awaited<ReturnType<typeof createRemoteGateway>> | null} */
-let gatewayInstance = null;
 // The bridge, not the browser, owns the Gateway WebSocket in the current Web
 // deployment. Keep the retired binding only long enough to prove ownership on
 // the replacement connection; the Gateway remains the pending-request owner.
 let disconnectedInteractionBinding = null;
 let reconnectingInteractionsPromise = null;
+/** @type {Set<(name: string, payload: unknown) => void>} */
+const gatewayNotificationHandlers = new Set();
 
 async function readGatewayToken() {
     try {
@@ -242,38 +241,36 @@ async function connectWithRetry() {
     );
 }
 
+const gatewayConnections = createGatewayConnectionCache({
+    connect: connectWithRetry,
+    shouldReconnect: () => gatewayNotificationHandlers.size > 0,
+    onConnected(gateway) {
+        for (const handler of gatewayNotificationHandlers) {
+            gateway.onNotification(handler);
+        }
+        void reconnectActiveInteractionsAfterGatewayReconnect(gateway).catch((error) => {
+            console.warn('[pilotdeck-bridge] failed to restore Gateway interactions:', error?.message || error);
+        });
+    },
+    onDisconnected(error, gateway) {
+        const binding = interactionBindingFromGateway(gateway);
+        if (binding) disconnectedInteractionBinding = binding;
+        console.warn(
+            '[pilotdeck-bridge] gateway disconnected; notification forwarding will reconnect:',
+            error?.message || error,
+        );
+    },
+});
+
 function ensureGateway() {
-    if (!gatewayPromise) {
-        const pending = connectWithRetry()
-            .then((gateway) => {
-                if (gatewayPromise === pending) {
-                    gatewayInstance = gateway;
-                    void reconnectActiveInteractionsAfterGatewayReconnect(gateway).catch((error) => {
-                        console.warn('[pilotdeck-bridge] failed to restore Gateway interactions:', error?.message || error);
-                    });
-                }
-                return gateway;
-            })
-            .catch((error) => {
-                // Reset only if this failed attempt is still current. A newer
-                // caller may already have started a replacement connection.
-                if (gatewayPromise === pending) {
-                    gatewayPromise = null;
-                    gatewayInstance = null;
-                }
-                throw error;
-            });
-        gatewayPromise = pending;
-    }
-    return gatewayPromise;
+    return gatewayConnections.get();
 }
 
 function resetGatewayConnection(expectedGateway) {
-    if (expectedGateway && gatewayInstance !== expectedGateway) return;
-    const binding = interactionBindingFromGateway(expectedGateway || gatewayInstance);
+    const gateway = expectedGateway || gatewayConnections.current();
+    const binding = interactionBindingFromGateway(gateway);
     if (binding) disconnectedInteractionBinding = binding;
-    gatewayPromise = null;
-    gatewayInstance = null;
+    gatewayConnections.invalidate(expectedGateway);
 }
 
 function interactionBindingFromGateway(gateway) {
@@ -571,6 +568,30 @@ export async function getPilotDeckGateway() {
     return ensureGateway();
 }
 
+/**
+ * Retry a read-only Gateway operation once when the shared WebSocket drops.
+ * Mutating operations deliberately do not use this helper: replaying an
+ * uncertain submit/steer/write could duplicate user-visible effects.
+ *
+ * @template T
+ * @param {(gateway: Awaited<ReturnType<typeof createRemoteGateway>>) => Promise<T>} operation
+ * @returns {Promise<T>}
+ */
+export async function withPilotDeckGatewayReadRetry(operation) {
+    if (getModelConfigurationState({ validateGateway: false }).state === 'empty') {
+        return operation(createModelFreeHistory({ pilotHome: resolvePilotHome(process.env), projectRoot: REPO_ROOT }));
+    }
+    let gateway = await ensureGateway();
+    try {
+        return await operation(gateway);
+    } catch (error) {
+        if (!isGatewayUnavailableError(error)) throw error;
+        resetGatewayConnection(gateway);
+        gateway = await ensureGateway();
+        return operation(gateway);
+    }
+}
+
 export function getPilotDeckRepoRoot() {
     return REPO_ROOT;
 }
@@ -582,6 +603,8 @@ export function getPilotDeckRepoRoot() {
  * the transcript and the agent state machine.
  */
 const sessionState = new Map();
+const deletingProjects = new Set();
+const deletingSessions = new Set();
 let sessionInputNotificationSink = null;
 
 export function registerSessionInputNotificationForwarding(forward) {
@@ -607,10 +630,17 @@ function loadQueueState(state) {
     if (!filePath) return;
     try {
         const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+        state.lastAcceptedModelSelection = parsed.lastAcceptedModelSelection;
+        state.acceptedInputIds = new Set((Array.isArray(parsed.acceptedInputIds) ? parsed.acceptedInputIds : []).filter(id => typeof id === 'string'));
         if (Array.isArray(parsed.items)) {
             state.inputQueue = parsed.items
                 .filter((item) => item && typeof item.id === 'string' && typeof item.command === 'string')
                 .map(restoreQueuedInputFromStorage);
+            for (const item of state.inputQueue) state.acceptedInputIds.add(item.id);
+        }
+        if (parsed.version !== 2 && !state.lastAcceptedModelSelection) {
+            const last = [...state.inputQueue].reverse().find(item => item.options?.modelSelection);
+            if (last) captureAcceptedModel(state, last.options.modelSelection, last.id);
         }
         if (state.inputQueue.length > 0) {
             state.queuePaused = true;
@@ -753,30 +783,43 @@ export function hydrateQueuedInputOptions(options = {}) {
     };
 }
 
-function persistQueueState(state) {
+function persistQueueState(state, strict = false) {
+    if (state.deleted || state.deleting) return;
     const filePath = queueSidecarPath(state);
     if (!filePath) return;
+    let tempPath;
     try {
-        if (state.inputQueue.length === 0) {
+        if (state.inputQueue.length === 0 && !state.lastAcceptedModelSelection && !state.acceptedInputIds?.size) {
             fs.rmSync(filePath, { force: true });
             return;
         }
         fs.mkdirSync(path.dirname(filePath), { recursive: true });
-        const tempPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+        tempPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
         fs.writeFileSync(tempPath, JSON.stringify({
-            version: 1,
+            version: 2,
+            lastAcceptedModelSelection: state.lastAcceptedModelSelection,
+            acceptedInputIds: [...(state.acceptedInputIds || [])],
             revision: state.queueRevision,
             paused: state.queuePaused,
             pauseReason: state.queuePauseReason,
             items: state.inputQueue.map(serializeQueuedInputForStorage),
         }, null, 2), { mode: 0o600 });
         fs.renameSync(tempPath, filePath);
+        tempPath = undefined;
     } catch (error) {
         console.warn('[pilotdeck-bridge] failed to persist queued inputs:', error?.message || error);
+        if (strict) throw error;
+    } finally {
+        if (tempPath) { try { fs.rmSync(tempPath, {force: true}); } catch { /* Preserve the write error. */ } }
     }
 }
 
 function publicQueueItem(item) {
+    const uploadedAttachmentCount = Array.isArray(item.options?.uploadedAttachments)
+        ? item.options.uploadedAttachments.reduce((count, upload) => (
+            count + (Array.isArray(upload?.attachmentIds) ? upload.attachmentIds.length : 0)
+        ), 0)
+        : 0;
     return {
         id: item.id,
         displayText: item.displayText,
@@ -785,7 +828,7 @@ function publicQueueItem(item) {
         attachmentCount: [
             ...(Array.isArray(item.options?.images) ? item.options.images : []),
             ...(Array.isArray(item.options?.attachments) ? item.options.attachments : []),
-        ].length,
+        ].length + uploadedAttachmentCount,
     };
 }
 
@@ -808,13 +851,13 @@ function emitInputQueueState(state, writer) {
     return snapshot;
 }
 
-function mutateInputQueue(state, writer) {
+function mutateInputQueue(state, writer, strict = false) {
     state.queueRevision += 1;
     if (state.inputQueue.length === 0) {
         state.queuePaused = false;
         state.queuePauseReason = undefined;
     }
-    persistQueueState(state);
+    persistQueueState(state, strict);
     return emitInputQueueState(state, writer);
 }
 
@@ -836,7 +879,53 @@ function newSessionKey() {
     return `web${sep}s_${randomUUID()}`;
 }
 
+export function beginProjectDeletion(projectKey) { return beginDeletion(projectKey); }
+export function beginSessionDeletion(projectKey, sessionKey) { return beginDeletion(projectKey, sessionKey); }
+
+function beginDeletion(projectKey, sessionKey) {
+    const key = path.resolve(projectKey);
+    const scope = sessionKey ? JSON.stringify([key, sessionKey]) : key;
+    const blocked = sessionKey ? deletingSessions : deletingProjects;
+    if (deletingProjects.has(key) || blocked.has(scope)) throw new Error('Deletion is already in progress.');
+    blocked.add(scope);
+    const states = [...sessionState.values()].filter(state => path.resolve(state.projectKey || GENERAL_HOME) === key && (!sessionKey || state.sessionKey === sessionKey));
+    for (const state of states) state.deleting = true;
+    return (deleted) => {
+        for (const state of states) {
+            state.deleting = false;
+            if (deleted) {
+                state.deleted = true;
+                state.inputQueue = [];
+                sessionState.delete(state.sessionKey);
+            }
+        }
+        blocked.delete(scope);
+    };
+}
+
+/** The queue sidecar also retains the last accepted send after the queue drains. */
+export function getAcceptedModelSelection(projectKey, sessionKey) {
+    const state = ensureSessionState(sessionKey, projectKey, 'web');
+    return state.lastAcceptedModelSelection?.selection ?? null;
+}
+
+function captureAcceptedModel(state, selection, requestId) {
+    if (!selection || !['auto', 'model'].includes(selection.mode)) return;
+    state.lastAcceptedModelSelection = {selection: {...selection}, requestId, acceptedAt: new Date().toISOString()};
+}
+
+export function recordAcceptedModelSelection(projectKey, sessionKey, selection, requestId) {
+    const state = ensureSessionState(sessionKey, projectKey, 'web');
+    const previous = state.lastAcceptedModelSelection;
+    if (selection === null) state.lastAcceptedModelSelection = undefined;
+    else captureAcceptedModel(state, selection, requestId);
+    try { persistQueueState(state, true); }
+    catch (error) { state.lastAcceptedModelSelection = previous; throw error; }
+}
+
 function ensureSessionState(sessionKey, projectKey, channelKey) {
+    const resolvedProject = path.resolve(projectKey || GENERAL_HOME);
+    if (deletingProjects.has(resolvedProject) || deletingSessions.has(JSON.stringify([resolvedProject, sessionKey]))) throw new Error('Project or session is being deleted.');
     let state = sessionState.get(sessionKey);
     if (!state) {
         state = {
@@ -848,6 +937,7 @@ function ensureSessionState(sessionKey, projectKey, channelKey) {
             tokenBudget: null,
             hasVisibleFailureStatus: false,
             inputQueue: [],
+            acceptedInputIds: new Set(),
             queuePaused: false,
             queuePauseReason: undefined,
             queueRevision: 0,
@@ -872,6 +962,8 @@ function ensureSessionState(sessionKey, projectKey, channelKey) {
     } else {
         if (projectKey && state.projectKey !== projectKey && state.inputQueue.length === 0) {
             state.queueLoaded = false;
+            state.acceptedInputIds = new Set();
+            state.lastAcceptedModelSelection = undefined;
             state.projectKey = projectKey;
         }
         state.channelKey = channelKey;
@@ -1078,7 +1170,7 @@ export function uiFilesToAttachments(files) {
 function normalizePermissionMode(value) {
     if (value === undefined || value === null || value === '') return undefined;
     if (value === 'default' || value === 'plan' || value === 'bypassPermissions') return value;
-    return 'default';
+    return undefined;
 }
 
 function normalizeRunMode(value) {
@@ -1087,15 +1179,12 @@ function normalizeRunMode(value) {
     return 'agent';
 }
 
-function resolvePermissionMode(options) {
+export function resolvePermissionMode(options, readPersisted = readPermissionSettings) {
     const explicit = normalizePermissionMode(options?.permissionMode || options?.mode);
-    // A literal "default" from the chat composer is the implicit
-    // no-special-mode position of the per-turn picker, not a real
-    // per-turn override. Let the user-level skipPermissions toggle
-    // win over it. Genuine non-default picks (plan / bypassPermissions)
-    // still take precedence — they're a deliberate per-turn decision.
-    if (explicit && explicit !== 'default') return explicit;
-    const persisted = readPermissionSettings();
+    // The composer sends a snapshot of the global preference (or a plan
+    // override). Later preference changes must not alter an already submitted turn.
+    if (explicit) return explicit;
+    const persisted = readPersisted();
     if (persisted.skipPermissions === true) {
         return 'bypassPermissions';
     }
@@ -1111,10 +1200,10 @@ function resolvePermissionMode(options) {
  * @returns {object[]} NormalizedMessage frames.
  */
 export function gatewayEventToFrames(event, sessionId, provider) {
-    const base = { sessionId, provider, ...(event.runId ? { runId: event.runId } : {}) };
+    const base = { sessionId, provider, ...(event.runId ? { runId: event.runId } : {}), ...(event.timeline ? { timeline: event.timeline, streamState: event.streamState } : {}), ...(event.streamBoundary ? { streamBoundary: event.streamBoundary } : {}) };
     switch (event.type) {
         case 'input_accepted':
-            return [];
+            return event.modelSelection ? [{ type: 'model-selection-saved', ...base, selection: { ...event.modelSelection } }] : [];
         case 'steer_unapplied':
             return [];
         case 'steer_applied': {
@@ -1150,6 +1239,15 @@ export function gatewayEventToFrames(event, sessionId, provider) {
                     text: 'started',
                 }),
             ];
+        case 'model_selection_changed':
+            return [{
+                type: 'model-selection-changed',
+                sessionId: base.sessionId,
+                runId: event.runId,
+                modelProvider: event.provider,
+                model: event.model,
+                source: event.source,
+            }];
         case 'model_request_started':
             return [
                 createNormalizedMessage({
@@ -1160,12 +1258,21 @@ export function gatewayEventToFrames(event, sessionId, provider) {
                     provider: event.provider,
                 }),
             ];
+        case 'assistant_stream_end':
+            return [createNormalizedMessage({ ...base, kind: 'stream_end' })];
+        case 'assistant_block':
+            return [createNormalizedMessage({ ...base, kind: event.kind === 'text' ? 'text' : 'thinking',
+                role: 'assistant', blockId: event.blockId, content: event.text, isFinal: true,
+                ...(event.model ? { model: event.model } : {}),
+            })];
         case 'assistant_text_delta':
             return [
                 createNormalizedMessage({
                     ...base,
                     kind: 'stream_delta',
                     content: event.text,
+                    ...(event.blockId ? { blockId: event.blockId } : {}),
+                    ...(event.model ? { model: event.model } : {}),
                 }),
             ];
         case 'assistant_thinking_delta':
@@ -1174,6 +1281,7 @@ export function gatewayEventToFrames(event, sessionId, provider) {
                     ...base,
                     kind: 'thinking',
                     content: event.text,
+                    ...(event.blockId ? { blockId: event.blockId } : {}),
                 }),
             ];
         case 'file_artifacts':
@@ -1615,9 +1723,23 @@ function createSubagentDetailFrames(event, base, detail) {
         sessionId: base.sessionId,
         subagentId,
         isSubagentDetail: true,
+        ...(detail.blockId ? { blockId: detail.blockId } : {}),
     };
 
     switch (event?.event) {
+        case 'subagent_compact_started':
+        case 'subagent_compact_completed':
+            return [createNormalizedMessage({ ...detailBase, kind: 'compact_boundary',
+                compactionId: detail.compactionId,
+                compactState: event.event === 'subagent_compact_started' ? 'running' : detail.status === 'failed' ? 'failed' : 'completed',
+                trigger: detail.trigger, preTokens: detail.preTokens, postTokens: detail.postTokens,
+                messagesSummarized: detail.messagesSummarized,
+            })];
+        case 'subagent_stream_end':
+            return [createNormalizedMessage({ ...detailBase, kind: 'stream_end' })];
+        case 'subagent_assistant_block':
+            return [createNormalizedMessage({ ...detailBase, kind: detail.kind, content: detail.text,
+                role: 'assistant', isFinal: true, streamState: 'closed' })];
         case 'subagent_text_delta':
             return [createNormalizedMessage({
                 ...detailBase,
@@ -1658,7 +1780,7 @@ function createSubagentDetailFrames(event, base, detail) {
         case 'subagent_model_error':
             return [createNormalizedMessage({
                 ...detailBase,
-                id: `subagent_detail_error_${sanitizeMessageId(detailSessionId)}_${Date.now()}`,
+                id: `subagent_detail_error_${sanitizeMessageId(detailSessionId)}_${detail.errorId || randomUUID()}`,
                 kind: 'error',
                 content: detail.message || detail.error || 'Subagent model error',
             })];
@@ -1769,7 +1891,7 @@ function sendBridgeStatusEvent(writer, statusEvent, sessionKey, provider) {
  * @param {object} options Legacy options blob from the WS frame.
  * @param {{send: (msg: object) => void}} writer Existing writer.
  * @param {string} provider Provider hint (kept for legacy frame branding).
- * @param {{onInputAccepted?: (input: {sessionKey: string, runId: string}) => void | Promise<void>}} hooks
+ * @param {{onInputAccepted?: (input: {sessionKey: string, runId: string}) => void | Promise<void>, fromQueue?: boolean, getGateway?: () => Promise<object>}} hooks
  */
 export async function runChatViaGateway(
     command,
@@ -1779,6 +1901,12 @@ export async function runChatViaGateway(
     hooks = {},
 ) {
     const projectKey = options.projectPath || options.cwd || GENERAL_HOME;
+    const isGeneralConversation = path.resolve(projectKey) === path.resolve(GENERAL_HOME);
+    // Never trust a browser-provided cwd for General. Its transcript identity
+    // stays under PILOT_HOME, but every turn executes in the managed workspace.
+    const workspaceCwd = isGeneralConversation
+        ? await ensureGeneralWorkspaceDirectory(process.env)
+        : options.workspaceCwd;
     const channelKey = 'web';
 
     const incoming = options.sessionId || options.sessionKey;
@@ -1789,7 +1917,7 @@ export async function runChatViaGateway(
     state.interactionWriter = writer;
     state.interactionProvider = provider;
     const staleRunId = state.active ? state.runId : undefined;
-
+    const runId = resolveTurnRunId(options?.runId);
 
     if (isNewSession) {
         writer.send(
@@ -1799,11 +1927,12 @@ export async function runChatViaGateway(
                 kind: 'session_created',
                 newSessionId: sessionKey,
                 sessionKey,
+                projectKey,
+                runId,
             }),
         );
     }
 
-    const runId = resolveTurnRunId(options?.runId);
     if (!staleRunId) {
         clearActiveTurnReplayPolling(state);
         state.awaitingGatewayReconnect = false;
@@ -1827,7 +1956,8 @@ export async function runChatViaGateway(
     let sawGatewayError = false;
     let turnFinishReason = null;
     try {
-        gw = await ensureGateway();
+        gw = await (hooks.getGateway ? hooks.getGateway() : ensureGateway());
+        if (state.deleted || state.deleting) throw new Error('Project is being deleted.');
 
         if (staleRunId) {
             const message = 'This session already has an active turn. Queue the message or stop the current response first.';
@@ -1853,15 +1983,22 @@ export async function runChatViaGateway(
             runId,
             ...(Array.isArray(options?.uploadedAttachments) ? { uploadedAttachments: options.uploadedAttachments } : {}),
             ...(options?.modelOverride ? { modelOverride: options.modelOverride } : {}),
+            ...(options?.modelSelection ? { modelSelection: options.modelSelection } : {}),
             ...(basePermissionMode ? { basePermissionMode } : {}),
             ...(attachments.length > 0 ? { attachments } : {}),
-            ...(options.workspaceCwd ? { workspaceCwd: options.workspaceCwd } : {}),
+            ...(workspaceCwd ? { workspaceCwd } : {}),
             ...(Array.isArray(options?.syntheticMessages) ? { syntheticMessages: options.syntheticMessages } : {}),
         });
 
         for await (const event of stream) {
             if (event && event.type === 'input_accepted') {
                 inputAccepted = true;
+                writer.send({ type: 'session-input-accepted', sessionId: sessionKey, runId });
+                // Queue acceptance already recorded this choice; execution must
+                // never replace a newer accepted message's model preference.
+                if (!hooks.fromQueue && options.modelSelection && !state.deleted && !state.deleting) {
+                    recordAcceptedModelSelection(projectKey, sessionKey, options.modelSelection, runId);
+                }
                 if (state.pendingGatewayRunId === runId) {
                     setPendingGatewayRun(state, undefined);
                 }
@@ -1924,7 +2061,7 @@ export async function runChatViaGateway(
                         ...eventForFrames,
                         displayText: queuedItem.displayText,
                         images: hydratedOptions.images,
-                        attachments: hydratedOptions.attachments,
+                        attachments: hydratedOptions.displayAttachments ?? hydratedOptions.attachments,
                     };
                     state.inputQueue = state.inputQueue.filter((item) => item.id !== event.itemId);
                     mutateInputQueue(state);
@@ -2071,7 +2208,7 @@ export function queuedInputDispositionAfterTurn(finishReason, queuePaused) {
     return 'keep';
 }
 
-function queuedUserFrame(item, sessionKey, runId, provider) {
+export function queuedUserFrame(item, sessionKey, runId, provider) {
     return createNormalizedMessage({
         provider,
         sessionId: sessionKey,
@@ -2081,12 +2218,12 @@ function queuedUserFrame(item, sessionKey, runId, provider) {
         content: item.displayText,
         queueItemId: item.id,
         images: (item.options?.images || []).map((image) => image?.data).filter(Boolean),
-        attachments: item.options?.attachments || [],
+        attachments: item.options?.displayAttachments ?? item.options?.attachments ?? [],
     });
 }
 
 async function dispatchNextQueuedInput(state, writer, provider = 'pilotdeck') {
-    if (state.active || state.queuePaused || state.queueDispatching) return false;
+    if (state.deleted || state.deleting || state.active || state.queuePaused || state.queueDispatching) return false;
     const item = state.inputQueue[0];
     if (!item) return false;
     if (item.status === 'delivery_uncertain') {
@@ -2113,6 +2250,7 @@ async function dispatchNextQueuedInput(state, writer, provider = 'pilotdeck') {
             writer,
             provider,
             {
+                fromQueue: true,
                 onInputAccepted: async () => {
                     accepted = true;
                     state.inputQueue = state.inputQueue.filter((entry) => entry.id !== item.id);
@@ -2239,6 +2377,18 @@ export function scheduleQueuedDispatchAfterActivityCheck(
             const syncResult = syncLocalActiveRunFromSnapshot(state, activeSnapshot, snapshotGuard);
             retryAfterNewerSnapshot = !syncResult.applied && syncResult.reason === 'stale_request';
             if (retryAfterNewerSnapshot) return;
+            // A fresh connection may discover a turn owned by another client.
+            // Only then is the provisional send actually waiting in a queue.
+            if (state.active) {
+                let changed = false;
+                for (const item of state.inputQueue || []) {
+                    if (item.status === 'submitting') {
+                        item.status = 'queued';
+                        changed = true;
+                    }
+                }
+                if (changed) mutateInputQueue(state, writer);
+            }
         } catch (error) {
             console.warn('[pilotdeck-bridge] failed to verify activity before queued dispatch:', error?.message || error);
         }
@@ -2271,12 +2421,16 @@ export async function enqueueInputViaGateway(sessionId, item, writer, provider =
     if (!item || typeof item.id !== 'string' || typeof item.command !== 'string') {
         return { ok: false, error: 'Invalid queued input.' };
     }
-    if (state.inputQueue.some((entry) => entry.id === item.id)) {
+    if (state.acceptedInputIds.has(item.id) || state.inputQueue.some((entry) => entry.id === item.id)) {
         return { ok: true, state: inputQueueSnapshot(state) };
     }
     if (state.inputQueue.length >= 20) {
         return { ok: false, error: 'The message queue is full.' };
     }
+    const submitting = !state.active && !state.queuePaused && !state.queueDispatching && state.inputQueue.length === 0;
+    const previousSelection = state.lastAcceptedModelSelection;
+    const previousRevision = state.queueRevision;
+    state.acceptedInputIds.add(item.id);
     state.inputQueue.push({
         id: item.id,
         runId: item.runId,
@@ -2284,9 +2438,23 @@ export async function enqueueInputViaGateway(sessionId, item, writer, provider =
         displayText: String(item.displayText || item.command).trim(),
         createdAt: item.createdAt || new Date().toISOString(),
         options: item.options || {},
-        status: 'queued',
+        status: submitting ? 'submitting' : 'queued',
     });
-    mutateInputQueue(state, writer);
+    captureAcceptedModel(state, item.options?.modelSelection, item.id);
+    state.queueRevision += 1;
+    try { persistQueueState(state, true); }
+    catch (error) {
+        state.acceptedInputIds.delete(item.id);
+        state.inputQueue = state.inputQueue.filter(entry => entry.id !== item.id);
+        state.lastAcceptedModelSelection = previousSelection;
+        state.queueRevision = previousRevision;
+        return {ok: false, error: error?.message || 'Failed to persist queued input.'};
+    }
+    emitInputQueueState(state, writer);
+    if (item.options?.modelSelection) writer?.send?.({
+        type: 'model-selection-saved', sessionId, runId: item.runId || item.id,
+        selection: item.options.modelSelection,
+    });
     if (!state.active && !state.queuePaused) {
         // Acknowledge persistence immediately. Gateway startup/snapshot reads
         // can exceed the UI operation timeout, so verification and dispatch
@@ -2372,6 +2540,9 @@ export function pauseInputQueueViaGateway(sessionId, writer, reason = 'user_stop
     if (!state || state.inputQueue.length === 0) return null;
     state.queuePaused = true;
     state.queuePauseReason = reason;
+    for (const item of state.inputQueue) {
+        if (item.status === 'submitting') item.status = 'queued';
+    }
     return mutateInputQueue(state, writer);
 }
 
@@ -2449,6 +2620,9 @@ export async function steerQueuedInputViaGateway(sessionId, itemId, writer, prov
             message: item.command,
             projectKey: state.projectKey,
             ...(attachments.length > 0 ? { attachments } : {}),
+            ...(Array.isArray(hydratedOptions.uploadedAttachments)
+                ? { uploadedAttachments: hydratedOptions.uploadedAttachments }
+                : {}),
         });
         if (!result?.accepted) {
             if (result?.reason === 'cancelled') {
@@ -3662,10 +3836,13 @@ export function registerAlwaysOnNotificationForwarding(clients, forwardToSession
         }
     };
     const onNotification = createAlwaysOnTurnEventForwarder(forwardFrame);
+    gatewayNotificationHandlers.add(onNotification);
 
-    ensureGateway().then((gw) => {
-        gw.onNotification(onNotification);
-    }).catch((err) => {
+    const gateway = gatewayConnections.current();
+    if (gateway) {
+        gateway.onNotification(onNotification);
+    }
+    ensureGateway().catch((err) => {
         console.warn('[pilotdeck-bridge] failed to register always-on notification forwarding:', err?.message || err);
     });
 }

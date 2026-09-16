@@ -46,6 +46,12 @@ test("gateway session model bundle keeps model policy, transcript state, and rou
       calls.push(`catalog:${input.projectKey}`);
       return { items: [], router: { enabled: true, autoAvailable: true } };
     },
+    normalizeSelection(selection) {
+      return selection;
+    },
+    restoreSelection(_projectKey, selection) {
+      return selection;
+    },
     validateSelection(projectKey, selection) {
       calls.push(`validate:${projectKey}:${selection.mode}`);
     },
@@ -93,7 +99,6 @@ test("gateway session model bundle keeps model policy, transcript state, and rou
       model: "session-model",
       source: "session",
       reasoning: 0.6,
-      temperature: undefined,
       speed: undefined,
     },
   });
@@ -118,7 +123,7 @@ test("gateway session model bundle keeps model policy, transcript state, and rou
   assert.ok(calls.includes("validate:/resolved:model"));
   assert.ok(calls.includes("validate-explicit:/fallback:turn-provider/turn-model"));
   assert.ok(calls.includes("clear:/resolved:session"));
-  assert.ok(calls.includes("catalog:/resolved"));
+  assert.ok(calls.includes("catalog:alias"));
 });
 
 test("local gateway wires the transcript-backed session model bundle", async (t) => {

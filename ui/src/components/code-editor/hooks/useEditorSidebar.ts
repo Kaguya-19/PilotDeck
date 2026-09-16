@@ -1,3 +1,4 @@
+import { createFrameBatcher } from '../../../utils/frameBatcher';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { MouseEvent as ReactMouseEvent } from 'react';
 import type { Project } from '../../../types/app';
@@ -342,7 +343,7 @@ export const useEditorSidebar = ({
   );
 
   useEffect(() => {
-    const handleMouseMove = (event: globalThis.MouseEvent) => {
+    const moveBatch = createFrameBatcher((event: globalThis.MouseEvent) => {
       if (!isResizing) {
         return;
       }
@@ -364,9 +365,11 @@ export const useEditorSidebar = ({
       if (newWidth >= minWidth && newWidth <= maxWidth) {
         setEditorWidth(newWidth);
       }
-    };
+    });
+    const handleMouseMove = moveBatch.schedule;
 
     const handleMouseUp = () => {
+      moveBatch.flush();
       setIsResizing(false);
     };
 
@@ -378,6 +381,7 @@ export const useEditorSidebar = ({
     }
 
     return () => {
+      moveBatch.cancel();
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
       document.body.style.cursor = '';

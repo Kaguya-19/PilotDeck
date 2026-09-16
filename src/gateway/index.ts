@@ -107,7 +107,12 @@ export type {
   GatewayAttachmentTurnComposerPort,
   GatewayAttachmentTurnComposition,
 } from "./dialog/GatewayAttachmentTurnComposerPort.js";
-export { GatewayWsClient, GatewayRequestError, type GatewayWsClientOptions } from "./client/GatewayWsClient.js";
+export {
+  GatewayWsClient,
+  GatewayRequestError,
+  type GatewayWsClientOptions,
+  type GatewayWsDisconnectHandler,
+} from "./client/GatewayWsClient.js";
 export { RemoteGateway, createRemoteGateway } from "./client/RemoteGateway.js";
 export { connectRemoteGatewayIfAvailable, probeGatewayServer, type ProbeGatewayServerOptions } from "./client/probeServer.js";
 export { startGatewayServer, type GatewayServer, type GatewayServerOptions } from "./server/GatewayServer.js";

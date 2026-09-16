@@ -4,6 +4,7 @@ import { AlertTriangle, CornerDownRight, Loader2, MoreHorizontal, MoveUp, Pause,
 import { useTranslation } from 'react-i18next';
 import { cn } from '../../lib/utils.js';
 import type { InputQueueState } from '../chat/types/queuedInput';
+import { isSendingInput } from '../chat/types/queuedInput';
 import { getQueueMenuPosition } from './queueMenuPosition';
 
 type QueuedMessagesTrayProps = {
@@ -76,8 +77,9 @@ export default function QueuedMessagesTray({
     };
   }, [openMenuId]);
 
-  if (state.items.length === 0) return null;
-  const hasDeliveryUncertainItem = state.items.some((item) => item.status === 'delivery_uncertain');
+  const queuedItems = state.items.filter((item) => !isSendingInput(item));
+  if (queuedItems.length === 0) return null;
+  const hasDeliveryUncertainItem = queuedItems.some((item) => item.status === 'delivery_uncertain');
 
   return (
     <section
@@ -113,7 +115,7 @@ export default function QueuedMessagesTray({
       ) : null}
 
       <div data-testid="queue-scroll-region" className="max-h-[156px] overflow-y-auto">
-        {state.items.map((item, index) => {
+        {queuedItems.map((item, index) => {
           const busy = item.status === 'steering' || item.status === 'dispatching';
           const deliveryUncertain = item.status === 'delivery_uncertain';
           return (

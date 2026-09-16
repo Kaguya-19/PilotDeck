@@ -316,7 +316,24 @@ class AgentLoopSidecarRunner implements AgentLoopRunner {
         transportObserver: this.options.transportObserver,
         moduleHandlers: Object.freeze({ ...dispatcher.handlers, ...moduleHandlers }),
       });
-      const result = yield* protocol.execute(connection);
+      const iterator = protocol.execute(connection);
+      let result: SidecarTerminal;
+      while (true) {
+        const next = await iterator.next();
+        if (next.done) {
+          result = next.value;
+          break;
+        }
+        const event = next.value;
+        if (event.type === "steer_applied") {
+          await input.onDurableMessage?.(event.message);
+          input.onSteerApplied?.(event.itemId);
+        }
+        yield event;
+        if (event.type === "assistant_message" || event.type === "tool_results_projected") {
+          await input.onDurableMessage?.(event.message);
+        }
+      }
       this.seedState = result.seedState;
       return { result: result.result, messages: result.messages };
     } finally {

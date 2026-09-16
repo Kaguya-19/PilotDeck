@@ -60,9 +60,10 @@ export function getPilotDeckSettings(): PilotDeckSettings {
   if (!raw) {
     return {
       allowedTools: [],
+      askTools: [],
       disallowedTools: [],
       skipPermissions: false,
-      projectSortOrder: 'name',
+      projectSortOrder: 'date',
     };
   }
 
@@ -71,19 +72,21 @@ export function getPilotDeckSettings(): PilotDeckSettings {
     return {
       ...parsed,
       allowedTools: Array.isArray(parsed.allowedTools) ? parsed.allowedTools : [],
+      askTools: Array.isArray(parsed.askTools) ? parsed.askTools : [],
       disallowedTools: Array.isArray(parsed.disallowedTools) ? parsed.disallowedTools : [],
       skipPermissions:
         typeof parsed.skipPermissions === 'boolean'
           ? parsed.skipPermissions
           : false,
-      projectSortOrder: parsed.projectSortOrder || 'name',
+      projectSortOrder: parsed.projectSortOrder || 'date',
     };
   } catch {
     return {
       allowedTools: [],
+      askTools: [],
       disallowedTools: [],
       skipPermissions: false,
-      projectSortOrder: 'name',
+      projectSortOrder: 'date',
     };
   }
 }
@@ -127,13 +130,15 @@ function mergePermissionSettings(value: unknown): PilotDeckSettings {
   const current = getPilotDeckSettings();
   const parsed = value && typeof value === 'object' ? value as Partial<PilotDeckSettings> : {};
   const backendAllowed = Array.isArray(parsed.allowedTools) ? parsed.allowedTools : [];
+  const backendAsk = Array.isArray(parsed.askTools) ? parsed.askTools : [];
   const backendDisallowed = Array.isArray(parsed.disallowedTools) ? parsed.disallowedTools : [];
   return {
     ...current,
     ...parsed,
     allowedTools: unionStringArrays(current.allowedTools, backendAllowed),
+    askTools: unionStringArrays(current.askTools, backendAsk),
     disallowedTools: unionStringArrays(current.disallowedTools, backendDisallowed),
     skipPermissions: typeof parsed.skipPermissions === 'boolean' ? parsed.skipPermissions : current.skipPermissions,
-    projectSortOrder: current.projectSortOrder || 'name',
+    projectSortOrder: current.projectSortOrder || 'date',
   };
 }

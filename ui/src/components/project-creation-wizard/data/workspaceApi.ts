@@ -7,6 +7,7 @@ import type {
   CreateWorkspaceResponse,
   CredentialsResponse,
   FolderSuggestion,
+  NativeFolderPickerResponse,
   TokenMode,
 } from '../types';
 
@@ -38,8 +39,8 @@ export const fetchGithubTokenCredentials = async () => {
   return (data.credentials || []).filter((credential) => credential.is_active);
 };
 
-export const browseFilesystemFolders = async (pathToBrowse: string) => {
-  const endpoint = `/browse-filesystem?path=${encodeURIComponent(pathToBrowse)}`;
+export const browseFilesystemFolders = async (pathToBrowse: string, showHidden = false) => {
+  const endpoint = `/browse-filesystem?path=${encodeURIComponent(pathToBrowse)}${showHidden ? '&showHidden=true' : ''}`;
   const response = await api.get(endpoint);
   const data = await parseJson<BrowseFilesystemResponse>(response);
 
@@ -50,7 +51,23 @@ export const browseFilesystemFolders = async (pathToBrowse: string) => {
   return {
     path: data.path || pathToBrowse,
     suggestions: (data.suggestions || []) as FolderSuggestion[],
+    rootsPath: data.rootsPath,
   };
+};
+
+export const pickNativeFolder = async () => {
+  const response = await api.post('/browse-filesystem/native-folder', {});
+  const data = await parseJson<NativeFolderPickerResponse>(response);
+
+  if (!response.ok) {
+    throw new Error(data.error || 'Failed to open native folder dialog');
+  }
+
+  if (data.cancelled || !data.path) {
+    return null;
+  }
+
+  return data.path;
 };
 
 export const createFolderInFilesystem = async (folderPath: string) => {

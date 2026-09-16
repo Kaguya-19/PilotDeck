@@ -159,6 +159,7 @@ import type {
 import { createVisibleErrorStatusDetail } from "../../status/agentStatus.js";
 import type { TelemetryClient } from "../../telemetry/index.js";
 import { DialogGatewayError } from "../dialog/errors.js";
+import { normalizeSessionModelSelection } from "../dialog/modelCatalog.js";
 import { GatewayAttachmentTurnComposer } from "../dialog/GatewayAttachmentTurnComposer.js";
 import type { GatewayAttachmentTurnComposerPort } from "../dialog/GatewayAttachmentTurnComposerPort.js";
 import { GatewayAgentEventProjector } from "./GatewayAgentEventProjector.js";
@@ -636,6 +637,15 @@ export class InProcessGateway implements Gateway {
   }
 
   async *submitTurn(input: GatewaySubmitTurnInput): AsyncIterable<GatewayEvent> {
+    input = {
+      ...input,
+      ...(input.modelSelection
+        ? { modelSelection: normalizeSessionModelSelection(input.modelSelection) }
+        : {}),
+      ...(input.modelOverride
+        ? { modelOverride: normalizeSessionModelSelection(input.modelOverride) as typeof input.modelOverride }
+        : {}),
+    };
     if (input.projectKey) this.dialogProjectKeys.set(input.sessionKey, input.projectKey);
     if (input.interactionBinding) {
       const reconnect = this.interactionCoordinator.reconnectForTurn(
@@ -2036,7 +2046,20 @@ export class InProcessGateway implements Gateway {
         "read_session_messages is not configured. Wire `readSessionMessages` via createLocalGateway.",
       );
     }
-    return this.options.readSessionMessages(input);
+    // A turn snapshot is an epoch. If it settles or is replaced while durable
+    // history is being read, reread so the completed turn cannot fall between
+    // the durable result and the live replay snapshot.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const before = this.turnEventCoordinator.snapshot({
+        sessionKey: input.sessionKey,
+        includeEvents: false,
+      });
+      const history = await this.options.readSessionMessages(input);
+      const stream = this.turnEventCoordinator.snapshot({ sessionKey: input.sessionKey });
+      if (!sameTurnEpoch(before, stream)) continue;
+      return { ...history, stream };
+    }
+    throw new Error("Session changed during transcript synchronization; retry the snapshot.");
   }
 
   async readSubagentMessages(input: WebReadSubagentMessagesInput): Promise<WebReadSubagentMessagesResult> {
@@ -2705,4 +2728,13 @@ function operationDeadlineForTimeout(
   const startedAt = now().getTime();
   if (!Number.isFinite(startedAt)) return undefined;
   return new Date(startedAt + timeoutMs).toISOString();
+}
+
+function sameTurnEpoch(
+  left: GatewayActiveTurnSnapshot,
+  right: GatewayActiveTurnSnapshot,
+): boolean {
+  return left.active === right.active
+    && left.runId === right.runId
+    && left.terminal === right.terminal;
 }

@@ -4,6 +4,7 @@ import type { ChatMessage } from '../chat/types/types';
 import { normalizedToChatMessages } from '../chat/hooks/useChatMessages';
 import {
   buildRenderableMessageItems,
+  foldCompletedTurns,
   getLiveProcessGroups,
   hasPendingWebFetchInRunningGroup,
   shouldShowWebFetchWaitingHint,
@@ -279,6 +280,17 @@ describe('processGrouping', () => {
     expect(processAttachments(thirdAssistant)).toHaveLength(0);
   });
 
+  it('keeps alternating thinking and tool segments in chronological order after completion', () => {
+    const transcript = [user('u'), thinking('think-a'), tool('read', 'Read'), thinking('think-b'), tool('bash', 'Bash'), assistant('answer', 'Done')];
+    const items = buildRenderableMessageItems(transcript, { isAssistantWorking: false });
+    const timeline = items.flatMap((item) => [
+      ...item.beforeProcessAttachments.flatMap((attachment) => attachment.processDetailMessages.map((message) => message.id)),
+      item.message.id,
+      ...item.afterProcessAttachments.flatMap((attachment) => attachment.processDetailMessages.map((message) => message.id)),
+    ]);
+    expect(timeline).toEqual(transcript.map((message) => message.id));
+  });
+
   it('attaches completed run duration after the user turn finishes', () => {
     const messages: ChatMessage[] = [
       user('u1'),
@@ -497,7 +509,7 @@ describe('processGrouping', () => {
     expect(groups[0].messages.map((message) => message.id)).toEqual(['read-1', 'grep-1']);
   });
 
-  it('does not render thinking as standalone after empty live assistant shells', () => {
+  it('keeps thinking standalone after empty live assistant shells to preserve its viewport', () => {
     const messages = [
       user('u1'),
       assistant('a1', 'Starting work.', 100),
@@ -509,10 +521,10 @@ describe('processGrouping', () => {
     const items = buildRenderableMessageItems(messages, { isAssistantWorking: true });
     const groups = getLiveProcessGroups(messages, { isAssistantWorking: true });
 
-    expect(items.map((item) => item.message.id)).toEqual(['u1', 'a1']);
+    expect(items.map((item) => item.message.id)).toEqual(['u1', 'a1', 'think-1']);
     expect(groups).toHaveLength(1);
-    expect(groups[0].messages.map((message) => message.id)).toEqual(['bash-1', 'think-1']);
-    expect(groups[0].detailMessages.map((message) => message.id)).toEqual(['bash-1', 'think-1']);
+    expect(groups[0].messages.map((message) => message.id)).toEqual(['bash-1']);
+    expect(groups[0].detailMessages.map((message) => message.id)).toEqual(['bash-1']);
   });
 
   it('keeps leading live thinking inside the current running status details', () => {
@@ -583,5 +595,64 @@ describe('processGrouping', () => {
       normalizedTool('read-1', 'Read', { file_path: '/repo/src/App.tsx' }, 100),
       empty,
     ]).map((message) => message.id)).toEqual(['u1', 'read-1', 'a-empty']);
+  });
+});
+
+
+describe('completed turn folding', () => {
+  const fold = (messages: ChatMessage[], working = false) => foldCompletedTurns(
+    messages, buildRenderableMessageItems(messages, { isAssistantWorking: working }), working,
+  );
+
+  it.each(['thinking', 'prose'])('keeps mid-turn compaction after preceding %s when the turn completes', (kind) => {
+    const preceding = kind === 'thinking' ? thinking('before') : assistant('before', 'Before compact');
+    const items = fold([user('u'), preceding, compact('middle'), assistant('final', 'After compact')]);
+    const row = items.flatMap(item => item.turnTrace?.items ?? []).find(item => item.message.id === 'before');
+    expect(row?.beforeProcessAttachments).toEqual([]);
+    expect(row?.afterProcessAttachments).toHaveLength(1);
+    expect(row?.afterProcessAttachments[0].processSummary.compactCount).toBe(1);
+  });
+
+  it('does not move a trailing compaction ahead of unfinished thinking', () => {
+    const items = fold([user('u'), thinking('before'), compact('middle')]);
+    const row = items.find(item => item.message.id === 'before');
+    expect(row?.beforeProcessAttachments).toEqual([]);
+    expect(row?.afterProcessAttachments).toHaveLength(1);
+  });
+
+  it('moves user/final-hosted process attachments inside the trace without modifying messages', () => {
+    const messages = [user('u'), thinking('t'), tool('tool', 'Read'), assistant('final', 'Answer')];
+    const original = JSON.stringify(messages);
+    const items = fold(messages);
+    expect(items.map((item) => item.message.id)).toEqual(['u', 'turn-trace-u', 'final']);
+    expect(items[0].afterRunAttachment).toBeNull();
+    expect(items[2].beforeProcessAttachments).toEqual([]);
+    expect(items[1].turnTrace?.items.flatMap((item) => [...item.beforeProcessAttachments, ...item.afterProcessAttachments])).toHaveLength(1);
+    expect(JSON.stringify(messages)).toBe(original);
+  });
+
+  it('retains an artifact-only final reply outside the trace', () => {
+    const final = { ...assistant('final', ''), artifacts: [{
+      id: 'file', name: 'result.md', path: '/result.md', operation: 'created' as const,
+      source: 'tool' as const, status: 'complete' as const, size: 12, sha256: 'hash', createdAt: timestamp(1000),
+    }] };
+    const items = fold([user('u'), assistant('intermediate', 'Writing a file'), final]);
+    expect(items.at(-1)?.message).toBe(final);
+    expect(items[1].turnTrace?.items[0].message.content).toBe('Writing a file');
+  });
+
+  it('folds historical turns while leaving the current running turn expanded', () => {
+    const messages = [user('u1'), thinking('t1'), assistant('a1', 'First answer'),
+      user('u2'), assistant('interim', 'Still working'), assistant('a2', 'More work')];
+    const items = fold(messages, true);
+    expect(items.filter((item) => item.turnTrace)).toHaveLength(1);
+    expect(items.some((item) => item.message.id === 'interim')).toBe(true);
+  });
+
+  it.each(['failed', 'cancelled'])('does not conceal a %s run behind a previous prose response', (state) => {
+    const messages = [user('u'), thinking('t'), assistant('a', 'Partial reply'), {
+      ...assistant('summary', ''), isAgentActivitySummary: true, state, startedAt: timestamp(0), endedAt: timestamp(2000),
+    }];
+    expect(fold(messages).some((item) => item.turnTrace)).toBe(false);
   });
 });

@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { createBackgroundSessionForwarder, createSessionActivityRegistry } from './session-activity.js';
+import '../../scripts/check-node-runtime.mjs';
 // Load environment variables before other imports execute
 import { assertRequiredPilotDeckEnv } from './load-env.js';
 // Install global fetch proxy (PILOTDECK_PROXY / HTTPS_PROXY) before any network calls
@@ -44,6 +46,7 @@ assertRequiredPilotDeckEnv();
 console.log('SERVER_PORT from runtime config:', process.env.SERVER_PORT);
 
 import express from 'express';
+import { rateLimit } from 'express-rate-limit';
 import { WebSocketServer, WebSocket } from 'ws';
 import bcrypt from 'bcrypt';
 import os from 'os';
@@ -58,11 +61,14 @@ import JSZip from 'jszip';
 import { readPermissionSettings } from './services/permissionSettings.js';
 import { regenerateLastMessageTransaction } from './services/regenerateLastMessage.js';
 import { getDefaultPtyShell } from './utils/defaultShell.js';
+import { pickNativeFolder } from './utils/nativeFolderPicker.js';
+import { browseDirectories } from './utils/browseDirectories.js';
 import { getOpenUrlSpawnCommand } from './utils/processSpawn.js';
 import { TerminalSessionRegistry } from './services/terminalSessionRegistry.js';
 import { createNodeTerminalPtyPort } from './services/terminalPtyPort.js';
+import { createProjectUpdateScheduler } from './projectUpdateScheduler.js';
 
-import { getProjects, getProjectCronJobsOverview, getSessions, renameProject, deleteSession, deleteProject, addProjectManually, extractProjectDirectory, clearProjectDirectoryCache, searchConversations } from './projects.js';
+import { getProjectsSnapshot, getProjectCronJobsOverview, getSessions, renameProject, deleteSession, deleteProject, addProjectManually, extractProjectDirectory, clearProjectDirectoryCache, searchConversations } from './projects.js';
 import {
     runChatViaGateway,
     replaceLastTurnViaGateway,
@@ -77,6 +83,7 @@ import {
     getRouterSessionStats,
     getRouterStatsSummary,
     getPilotDeckGateway,
+    isGatewayUnavailableError,
     registerAlwaysOnNotificationForwarding,
     registerSessionInputNotificationForwarding,
     getSessionTokenBudget,
@@ -132,6 +139,7 @@ import { createNormalizedMessage, createOptimisticUserFrames } from './pilotdeck
 import { startEnabledPluginServers, stopAllPlugins, getPluginPort } from './utils/plugin-process-manager.js';
 import { initializeDatabase, sessionNamesDb, applyCustomSessionNames, userDb } from './database/db.js';
 import { configureWebPush } from './services/vapid-keys.js';
+import { runtimeCoordination } from './services/runtimeCoordination.js';
 
 import { runServerStartupBeforeListen, startServerAfterStartup } from './services/server-startup.js';
 import { validateApiKey, authenticateToken, authenticateWebSocket } from './middleware/auth.js';
@@ -139,10 +147,34 @@ import { DISABLE_LOCAL_AUTH, IS_PLATFORM } from './constants/config.js';
 import { getConnectableHost } from '../shared/networkHosts.js';
 import { contentDispositionAttachment } from './utils/downloadHeaders.js';
 import { createSessionWatchRegistry } from './session-watch-registry.js';
+import { isPathInsideOrEqual } from './utils/pathSafety.js';
+import { isVirtualProjectPath, resolvePilotHome } from './utils/pilotPaths.js';
 
 // PilotDeck-only mode: chat execution always goes through src/gateway via
 // cursor-cli, openai-codex, gemini-cli) has been removed.
 const VALID_PROVIDERS = ['pilotdeck'];
+
+async function requireRealProjectFilesystem(req, res, next) {
+    try {
+        const projectRoot = await extractProjectDirectory(req.params.projectName);
+        if (isVirtualProjectPath(projectRoot, resolvePilotHome(process.env), process.env)) {
+            return res.status(403).json({
+                error: {
+                    code: 'PROJECT_PATH_FORBIDDEN',
+                    message: 'Project file operations are unavailable for General conversations.',
+                },
+            });
+        }
+        return next();
+    } catch (error) {
+        return res.status(404).json({
+            error: {
+                code: 'PROJECT_NOT_FOUND',
+                message: error instanceof Error ? error.message : 'Project not found',
+            },
+        });
+    }
+}
 
 // File-system watchers for the chat transcript root maintained by
 // PilotDeck. Provider-specific watchers (.pilotdeck) were dropped along with the four provider adapters.
@@ -167,17 +199,25 @@ const WATCHER_IGNORED_PATTERNS = [
 ];
 const WATCHER_DEBOUNCE_MS = 300;
 let projectsWatchers = [];
-let projectsWatcherDebounceTimer = null;
+let projectUpdateScheduler = null;
 const connectedClients = new Set();
+const sessionActivityRegistry = createSessionActivityRegistry();
+function broadcastSessionActivity(frame, userId) {
+    const activity = sessionActivityRegistry.receive(userId, frame);
+    if (!activity) return;
+    const payload = JSON.stringify({type: 'session-activity', activity});
+    for (const client of connectedClients) {
+        if (client.readyState === WebSocket.OPEN && (client.__pilotdeckUserId ?? null) === userId) client.send(payload);
+    }
+}
 const sessionWatchRegistry = createSessionWatchRegistry();
-registerAlwaysOnNotificationForwarding(connectedClients, (sessionId, frame) => {
-    // Always-On gateway notifications do not carry the originating UI socket.
-    // Delivering them to every tab caused unrelated sessions' live status
-    // (notably compaction progress) to race in the frontend. A tab explicitly
-    // watches its displayed session, so that registry is the routing authority.
-    broadcastToSessionWatchers(sessionId, frame, undefined);
-});
-let isGetProjectsRunning = false; // Flag to prevent reentrant calls
+registerAlwaysOnNotificationForwarding(connectedClients, createBackgroundSessionForwarder({
+    // This installation is single-user (including authenticated OSS mode).
+    // Resolve its persisted owner, never the set of currently connected watchers.
+    getUserId: () => userDb.getFirstUser()?.id,
+    broadcastActivity: broadcastSessionActivity,
+    forwardToWatchers: broadcastToSessionWatchers,
+}));
 
 function normalizeSessionId(value) {
     if (typeof value !== 'string') return null;
@@ -186,6 +226,7 @@ function normalizeSessionId(value) {
 }
 
 function broadcastChatFrame(frame, originWs, userId) {
+    broadcastSessionActivity(frame, userId);
     const payload = JSON.stringify(frame);
     const delivered = new Set();
     const frameSessionId = normalizeSessionId(frame?.sessionId);
@@ -257,6 +298,7 @@ function broadcastConfigReloaded(payload) {
             client.send(message);
         }
     });
+    runtimeCoordination.publishConfigurationState();
 }
 process.on('pilotdeck:config-broadcast', broadcastConfigReloaded);
 
@@ -264,10 +306,7 @@ process.on('pilotdeck:config-broadcast', broadcastConfigReloaded);
 async function setupProjectsWatcher() {
     const chokidar = (await import('chokidar')).default;
 
-    if (projectsWatcherDebounceTimer) {
-        clearTimeout(projectsWatcherDebounceTimer);
-        projectsWatcherDebounceTimer = null;
-    }
+    projectUpdateScheduler?.dispose();
 
     await Promise.all(
         projectsWatchers.map(async (watcher) => {
@@ -280,48 +319,31 @@ async function setupProjectsWatcher() {
     );
     projectsWatchers = [];
 
+    const scheduler = createProjectUpdateScheduler({
+        debounceMs: WATCHER_DEBOUNCE_MS,
+        scan: () => {
+            clearProjectDirectoryCache();
+            return getProjectsSnapshot(broadcastProgress);
+        },
+        publish: (snapshot, { eventType, filePath, provider, rootPath }) => {
+            const updateMessage = JSON.stringify({
+                type: 'projects_updated',
+                projects: snapshot.projects,
+                projectListRevision: snapshot.revision,
+                timestamp: new Date().toISOString(),
+                changeType: eventType,
+                changedFile: path.relative(rootPath, filePath),
+                watchProvider: provider,
+            });
+            connectedClients.forEach(client => {
+                if (client.readyState === WebSocket.OPEN) client.send(updateMessage);
+            });
+        },
+        onError: (error) => console.error('[ERROR] Error handling project changes:', error),
+    });
+    projectUpdateScheduler = scheduler;
     const debouncedUpdate = (eventType, filePath, provider, rootPath) => {
-        if (projectsWatcherDebounceTimer) {
-            clearTimeout(projectsWatcherDebounceTimer);
-        }
-
-        projectsWatcherDebounceTimer = setTimeout(async () => {
-            // Prevent reentrant calls
-            if (isGetProjectsRunning) {
-                return;
-            }
-
-            try {
-                isGetProjectsRunning = true;
-
-                // Clear project directory cache when files change
-                clearProjectDirectoryCache();
-
-                // Get updated projects list
-                const updatedProjects = await getProjects(broadcastProgress);
-
-                // Notify all connected clients about the project changes
-                const updateMessage = JSON.stringify({
-                    type: 'projects_updated',
-                    projects: updatedProjects,
-                    timestamp: new Date().toISOString(),
-                    changeType: eventType,
-                    changedFile: path.relative(rootPath, filePath),
-                    watchProvider: provider
-                });
-
-                connectedClients.forEach(client => {
-                    if (client.readyState === WebSocket.OPEN) {
-                        client.send(updateMessage);
-                    }
-                });
-
-            } catch (error) {
-                console.error('[ERROR] Error handling project changes:', error);
-            } finally {
-                isGetProjectsRunning = false;
-            }
-        }, WATCHER_DEBOUNCE_MS);
+        scheduler.schedule({ eventType, filePath, provider, rootPath });
     };
 
     for (const { provider, rootPath } of PROVIDER_WATCH_PATHS) {
@@ -876,9 +898,18 @@ app.use(express.static(path.join(__dirname, '../dist'), {
 
 app.get('/api/projects', authenticateToken, async (req, res) => {
     try {
-        const projects = await getProjects(broadcastProgress);
-        res.json(projects);
+        const snapshot = await getProjectsSnapshot(broadcastProgress);
+        res.setHeader('X-Projects-Revision', String(snapshot.revision));
+        res.json(snapshot.projects);
     } catch (error) {
+        if (isGatewayUnavailableError(error)) {
+            return res.status(503).json({
+                error: {
+                    code: 'gateway_unavailable',
+                    message: 'PilotDeck Gateway is restarting. Retry shortly.',
+                },
+            });
+        }
         res.status(500).json({ error: error.message });
     }
 });
@@ -890,6 +921,14 @@ app.get('/api/projects/:projectName/sessions', authenticateToken, async (req, re
         applyCustomSessionNames(result.sessions, 'pilotdeck');
         res.json(result);
     } catch (error) {
+        if (isGatewayUnavailableError(error)) {
+            return res.status(503).json({
+                error: {
+                    code: 'gateway_unavailable',
+                    message: 'PilotDeck Gateway is restarting. Retry shortly.',
+                },
+            });
+        }
         res.status(500).json({ error: error.message });
     }
 });
@@ -916,6 +955,11 @@ app.delete('/api/projects/:projectName/sessions/:sessionId', authenticateToken, 
             relativeTranscriptPath: req.query.relativeTranscriptPath || null,
         });
         sessionNamesDb.deleteName(sessionId, 'pilotdeck');
+        const userId = req.user?.id ?? req.user?.userId ?? null;
+        const payload = JSON.stringify({ type: 'session-deleted', projectName, sessionId });
+        connectedClients.forEach((client) => {
+            if (client.readyState === WebSocket.OPEN && (client.__pilotdeckUserId ?? null) === userId) client.send(payload);
+        });
         console.log(`[API] Session ${sessionId} deleted successfully`);
         res.json({ success: true });
     } catch (error) {
@@ -1070,7 +1114,7 @@ const getWindowsDriveSuggestions = async () => {
             return {
                 path: drivePath,
                 name: drivePath,
-                type: 'directory',
+                type: 'drive',
             };
         } catch (error) {
             return null;
@@ -1085,9 +1129,7 @@ function resolvePathInProject(projectRoot, targetPath = '') {
     const resolved = path.isAbsolute(targetPath)
         ? path.resolve(targetPath)
         : path.resolve(projectRoot, targetPath);
-    const normalizedRoot = path.resolve(projectRoot);
-
-    if (resolved !== normalizedRoot && !resolved.startsWith(normalizedRoot + path.sep)) {
+    if (!isPathInsideOrEqual(projectRoot, resolved)) {
         return { valid: false, error: 'Path must be under project root' };
     }
 
@@ -1264,6 +1306,17 @@ const officePreviewPdfRateLimiter = createRouteRateLimiter({
     message: 'Too many Office preview conversion requests',
 });
 
+const nativeFolderPickerRateLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    limit: 10,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: {
+        error: 'Too many native folder picker requests',
+        code: 'RATE_LIMITED',
+    },
+});
+
 async function addDirectoryToZip(zip, directoryPath, rootPath) {
     const entries = await fsPromises.readdir(directoryPath, { withFileTypes: true });
 
@@ -1314,6 +1367,7 @@ app.get('/api/browse-filesystem', authenticateToken, async (req, res) => {
             return res.json({
                 path: '/',
                 suggestions,
+                rootsPath: '/',
             });
         }
 
@@ -1341,24 +1395,7 @@ app.get('/api/browse-filesystem', authenticateToken, async (req, res) => {
             return res.status(404).json({ error: 'Directory not accessible' });
         }
 
-        // Use existing getFileTree function with shallow depth (only direct children)
-        const fileTree = await getFileTree(resolvedPath, 1, 0, false); // maxDepth=1, showHidden=false
-
-        // Filter only directories and format for suggestions
-        const directories = fileTree
-            .filter(item => item.type === 'directory')
-            .map(item => ({
-                path: item.path,
-                name: item.name,
-                type: 'directory'
-            }))
-            .sort((a, b) => {
-                const aHidden = a.name.startsWith('.');
-                const bHidden = b.name.startsWith('.');
-                if (aHidden && !bHidden) return 1;
-                if (!aHidden && bHidden) return -1;
-                return a.name.localeCompare(b.name);
-            });
+        const directories = await browseDirectories(resolvedPath, req.query.showHidden === 'true');
 
         // Add common directories if browsing home directory
         const suggestions = [];
@@ -1380,12 +1417,31 @@ app.get('/api/browse-filesystem', authenticateToken, async (req, res) => {
 
         res.json({
             path: resolvedPath,
-            suggestions: suggestions
+            suggestions: suggestions,
+            ...(process.platform === 'win32' ? { rootsPath: '/' } : {}),
         });
 
     } catch (error) {
         console.error('Error browsing filesystem:', error);
         res.status(500).json({ error: 'Failed to browse filesystem' });
+    }
+});
+
+app.post('/api/browse-filesystem/native-folder', nativeFolderPickerRateLimiter, authenticateToken, async (req, res) => {
+    req.setTimeout(0);
+    res.setTimeout(0);
+
+    try {
+        const pickedPath = await pickNativeFolder();
+        if (!pickedPath) {
+            return res.json({ cancelled: true });
+        }
+        return res.json({ path: pickedPath });
+    } catch (error) {
+        console.error('Error opening native folder dialog:', error);
+        res.status(500).json({
+            error: error instanceof Error ? error.message : 'Failed to open native folder dialog',
+        });
     }
 });
 
@@ -1430,7 +1486,7 @@ app.post('/api/create-folder', authenticateToken, async (req, res) => {
 });
 
 // Read file content endpoint
-app.get('/api/projects/:projectName/file', authenticateToken, async (req, res) => {
+app.get('/api/projects/:projectName/file', authenticateToken, requireRealProjectFilesystem, async (req, res) => {
     try {
         const { projectName } = req.params;
         const { filePath } = req.query;
@@ -1450,8 +1506,7 @@ app.get('/api/projects/:projectName/file', authenticateToken, async (req, res) =
         const resolved = path.isAbsolute(filePath)
             ? path.resolve(filePath)
             : path.resolve(projectRoot, filePath);
-        const normalizedRoot = path.resolve(projectRoot) + path.sep;
-        if (!resolved.startsWith(normalizedRoot)) {
+        if (!isPathInsideOrEqual(projectRoot, resolved)) {
             return res.status(403).json({ error: 'Path must be under project root' });
         }
 
@@ -1470,7 +1525,7 @@ app.get('/api/projects/:projectName/file', authenticateToken, async (req, res) =
 });
 
 // Serve raw file bytes for previews and downloads.
-app.get('/api/projects/:projectName/files/content', authenticateToken, async (req, res) => {
+app.get('/api/projects/:projectName/files/content', authenticateToken, requireRealProjectFilesystem, async (req, res) => {
     try {
         const { projectName } = req.params;
         const { path: filePath } = req.query;
@@ -1545,7 +1600,7 @@ app.get('/api/office-preview/status', authenticateToken, officePreviewStatusRate
 // Convert Office files to PDF for lightweight read-only preview.
 // This is an optional fallback for legacy Office/PPT formats; it only works
 // when LibreOffice/soffice is available on the host.
-app.get('/api/projects/:projectName/files/preview/pdf', authenticateToken, officePreviewPdfRateLimiter, async (req, res) => {
+app.get('/api/projects/:projectName/files/preview/pdf', authenticateToken, requireRealProjectFilesystem, officePreviewPdfRateLimiter, async (req, res) => {
     try {
         const { projectName } = req.params;
         const { path: filePath } = req.query;
@@ -1608,7 +1663,7 @@ app.get('/api/projects/:projectName/files/preview/pdf', authenticateToken, offic
 // Preserve workbook semantics for spreadsheet previews. The manifest exposes
 // visible worksheet tabs, while each worksheet is rendered as its own PDF so
 // multi-page sheets remain grouped under one tab in the UI.
-app.get('/api/projects/:projectName/files/preview/spreadsheet/manifest', authenticateToken, officePreviewPdfRateLimiter, async (req, res) => {
+app.get('/api/projects/:projectName/files/preview/spreadsheet/manifest', authenticateToken, requireRealProjectFilesystem, officePreviewPdfRateLimiter, async (req, res) => {
     try {
         const { projectName } = req.params;
         const { path: filePath } = req.query;
@@ -1651,7 +1706,7 @@ app.get('/api/projects/:projectName/files/preview/spreadsheet/manifest', authent
     }
 });
 
-app.get('/api/projects/:projectName/files/preview/spreadsheet/data', authenticateToken, officePreviewPdfRateLimiter, async (req, res) => {
+app.get('/api/projects/:projectName/files/preview/spreadsheet/data', authenticateToken, requireRealProjectFilesystem, officePreviewPdfRateLimiter, async (req, res) => {
     try {
         const { projectName } = req.params;
         const { path: filePath } = req.query;
@@ -1698,7 +1753,7 @@ app.get('/api/projects/:projectName/files/preview/spreadsheet/data', authenticat
     }
 });
 
-app.get('/api/projects/:projectName/files/preview/spreadsheet/sheet', authenticateToken, officePreviewPdfRateLimiter, async (req, res) => {
+app.get('/api/projects/:projectName/files/preview/spreadsheet/sheet', authenticateToken, requireRealProjectFilesystem, officePreviewPdfRateLimiter, async (req, res) => {
     try {
         const { projectName } = req.params;
         const { path: filePath, sheet: sheetIndex } = req.query;
@@ -1751,7 +1806,7 @@ app.get('/api/projects/:projectName/files/preview/spreadsheet/sheet', authentica
 
 // Serve project files through a stable project-root URL so generated HTML can
 // load sibling CSS, JS and image assets with normal relative paths.
-app.get('/api/projects/:projectName/preview/*', authenticateToken, async (req, res) => {
+app.get('/api/projects/:projectName/preview/*', authenticateToken, requireRealProjectFilesystem, async (req, res) => {
     try {
         const { projectName } = req.params;
         const relativeFilePath = req.params[0] || 'index.html';
@@ -1787,7 +1842,7 @@ app.get('/api/projects/:projectName/preview/*', authenticateToken, async (req, r
 });
 
 // Download the complete project as a zip archive.
-app.get('/api/projects/:projectName/download', authenticateToken, async (req, res) => {
+app.get('/api/projects/:projectName/download', authenticateToken, requireRealProjectFilesystem, async (req, res) => {
     try {
         const { projectName } = req.params;
         const projectRoot = await extractProjectDirectory(projectName).catch(() => null);
@@ -1830,7 +1885,7 @@ app.get('/api/projects/:projectName/download', authenticateToken, async (req, re
 });
 
 // Save file content endpoint
-app.put('/api/projects/:projectName/file', authenticateToken, async (req, res) => {
+app.put('/api/projects/:projectName/file', authenticateToken, requireRealProjectFilesystem, async (req, res) => {
     try {
         const { projectName } = req.params;
         const { filePath, content } = req.body;
@@ -1854,8 +1909,7 @@ app.put('/api/projects/:projectName/file', authenticateToken, async (req, res) =
         const resolved = path.isAbsolute(filePath)
             ? path.resolve(filePath)
             : path.resolve(projectRoot, filePath);
-        const normalizedRoot = path.resolve(projectRoot) + path.sep;
-        if (!resolved.startsWith(normalizedRoot)) {
+        if (!isPathInsideOrEqual(projectRoot, resolved)) {
             return res.status(403).json({ error: 'Path must be under project root' });
         }
 
@@ -1879,7 +1933,7 @@ app.put('/api/projects/:projectName/file', authenticateToken, async (req, res) =
     }
 });
 
-app.get('/api/projects/:projectName/files', authenticateToken, async (req, res) => {
+app.get('/api/projects/:projectName/files', authenticateToken, requireRealProjectFilesystem, async (req, res) => {
     try {
 
         // Using fsPromises from import
@@ -1923,8 +1977,7 @@ function validatePathInProject(projectRoot, targetPath) {
     const resolved = path.isAbsolute(targetPath)
         ? path.resolve(targetPath)
         : path.resolve(projectRoot, targetPath);
-    const normalizedRoot = path.resolve(projectRoot) + path.sep;
-    if (!resolved.startsWith(normalizedRoot)) {
+    if (!isPathInsideOrEqual(projectRoot, resolved)) {
         return { valid: false, error: 'Path must be under project root' };
     }
     return { valid: true, resolved };
@@ -1957,7 +2010,7 @@ function validateFilename(name) {
 }
 
 // POST /api/projects/:projectName/files/create - Create new file or directory
-app.post('/api/projects/:projectName/files/create', authenticateToken, async (req, res) => {
+app.post('/api/projects/:projectName/files/create', authenticateToken, requireRealProjectFilesystem, async (req, res) => {
     try {
         const { projectName } = req.params;
         const { path: parentPath, type, name } = req.body;
@@ -2034,7 +2087,7 @@ app.post('/api/projects/:projectName/files/create', authenticateToken, async (re
 });
 
 // PUT /api/projects/:projectName/files/rename - Rename file or directory
-app.put('/api/projects/:projectName/files/rename', authenticateToken, async (req, res) => {
+app.put('/api/projects/:projectName/files/rename', authenticateToken, requireRealProjectFilesystem, async (req, res) => {
     try {
         const { projectName } = req.params;
         const { oldPath, newName } = req.body;
@@ -2111,7 +2164,7 @@ app.put('/api/projects/:projectName/files/rename', authenticateToken, async (req
 });
 
 // DELETE /api/projects/:projectName/files - Delete file or directory
-app.delete('/api/projects/:projectName/files', authenticateToken, async (req, res) => {
+app.delete('/api/projects/:projectName/files', authenticateToken, requireRealProjectFilesystem, async (req, res) => {
     try {
         const { projectName } = req.params;
         const { path: targetPath, type } = req.body;
@@ -2337,7 +2390,7 @@ const uploadFilesHandler = async (req, res) => {
     });
 };
 
-app.post('/api/projects/:projectName/files/upload', authenticateToken, uploadFilesHandler);
+app.post('/api/projects/:projectName/files/upload', authenticateToken, requireRealProjectFilesystem, uploadFilesHandler);
 
 /**
  * Proxy an authenticated client WebSocket to a plugin's internal WS server.
@@ -2420,6 +2473,7 @@ class WebSocketWriter {
     }
 
     send(data) {
+        broadcastSessionActivity(data, this.userId);
         const message = JSON.stringify(data);
         if (this.ws.readyState === 1) { // WebSocket.OPEN
             this.ws.send(message);
@@ -2472,6 +2526,10 @@ function handleChatConnection(ws, request) {
             const data = JSON.parse(message);
 
             if (data.type === 'ping') return;
+            if (data.type === 'get-session-activity') {
+                writer.send({type: 'session-activity-snapshot', activities: sessionActivityRegistry.snapshot(userId)});
+                return;
+            }
             const requestSessionId = normalizeSessionId(data.sessionId);
 
             if (data.type === 'watch-session') {
@@ -2544,6 +2602,18 @@ function handleChatConnection(ws, request) {
                 });
             } else if (data.type === 'delete-queued-input') {
                 const result = await deleteQueuedInputViaGateway(requestSessionId, data.itemId, streamWriter);
+                if (result.ok) {
+                    // A submitting tab can retain sidebar activity after navigating
+                    // away (and unwatching). Notify every socket for this user.
+                    const payload = JSON.stringify({
+                        type: 'session-input-removed', sessionId: requestSessionId, itemId: data.itemId,
+                    });
+                    connectedClients.forEach((client) => {
+                        if (client.readyState === WebSocket.OPEN && (client.__pilotdeckUserId ?? null) === userId) {
+                            client.send(payload);
+                        }
+                    });
+                }
                 writer.send({
                     type: 'input-queue-operation-result',
                     operation: 'delete',
@@ -3534,6 +3604,18 @@ app.get('/api/projects/:projectName/sessions/:sessionId/token-usage', authentica
     }
 });
 
+// API requests must never fall through to the SPA shell. Returning index.html
+// with HTTP 200 hides missing/stale backend routes and makes JSON clients show
+// an empty result instead of a useful error.
+app.use('/api', (req, res) => {
+    res.status(404).json({
+        error: {
+            code: 'API_ROUTE_NOT_FOUND',
+            message: `API route not found: ${req.method} ${req.originalUrl}`,
+        },
+    });
+});
+
 // Serve React app for all other routes (excluding static files)
 app.get('*', (req, res) => {
     // Skip requests for actual static asset extensions only
@@ -3741,6 +3823,7 @@ async function startServer() {
                 // that self-reference SERVER_PORT (e.g. routes/taskmaster.js) hit
                 // the right port after a fallback.
                 process.env.SERVER_PORT = String(boundPort);
+                runtimeCoordination.publishConfigurationState();
                 {
                     const appInstallPath = path.join(__dirname, '..');
 

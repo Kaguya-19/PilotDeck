@@ -2,27 +2,30 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { ChatMessage } from '../../types/types';
+import { I18nextProvider } from 'react-i18next';
+import { createTestI18n } from '../../../../i18n/testInstance';
 import MessageComponent from './MessageComponent';
 
 afterEach(() => {
   cleanup();
 });
 
-function renderToolMessage(message: ChatMessage) {
+async function renderToolMessage(message: ChatMessage) {
+  const i18n = await createTestI18n();
   return render(
-    <MessageComponent
+    <I18nextProvider i18n={i18n}><MessageComponent
       message={message}
       prevMessage={null}
       createDiff={() => []}
       provider="pilotdeck"
       onShowSettings={() => {}}
-    />,
+    /></I18nextProvider>,
   );
 }
 
 describe('MessageComponent todo_write rendering', () => {
-  it('renders markdown checklist details for lowercase todo_write tool calls', () => {
-    renderToolMessage({
+  it('renders markdown checklist details for lowercase todo_write tool calls', async () => {
+    await renderToolMessage({
       id: 'todo-tool-1',
       type: 'assistant',
       content: '',
@@ -41,12 +44,12 @@ describe('MessageComponent todo_write rendering', () => {
 
     expect(screen.getByText('Create project directory structure')).toBeTruthy();
     expect(screen.getByText('Implement game constants')).toBeTruthy();
-    expect(screen.getByText('completed')).toBeTruthy();
-    expect(screen.getByText('in progress')).toBeTruthy();
+    expect(screen.getByText('Completed')).toBeTruthy();
+    expect(screen.getByText('In progress')).toBeTruthy();
   });
 
-  it('renders TodoWrite success result message', () => {
-    renderToolMessage({
+  it('renders TodoWrite success result message', async () => {
+    await renderToolMessage({
       id: 'todo-tool-2',
       type: 'assistant',
       content: '',

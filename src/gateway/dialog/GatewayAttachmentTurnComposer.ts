@@ -241,7 +241,7 @@ async function attachmentsToContentBlocks(
       });
     } else {
       resolverRequests.push({
-        request: { type: "file", path: attachment.path },
+        request: { type: "file", path: attachment.path, name: attachment.name },
         path: resolve(attachment.path),
         registered: Boolean(attachment.metadata?.channelKey),
       });

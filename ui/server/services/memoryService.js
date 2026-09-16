@@ -7,11 +7,12 @@ import {
   EdgeClawMemoryService,
   MemoryBundleValidationError,
   hashText,
-} from '../../../src/context/memory/edgeclaw-memory-core/lib/index.js';
+} from 'edgeclaw-memory-core';
 import { extractProjectDirectory } from '../projects.js';
 import {
   buildMemoryDefaults,
   readPilotDeckConfigFile,
+  resolveModel,
 } from './pilotdeckConfig.js';
 
 const MEMORY_ROOT_DIR = path.join(process.env.PILOT_HOME || path.join(os.homedir(), '.pilotdeck'), 'memory');
@@ -391,7 +392,8 @@ export async function rollbackLastMemoryDream(service, dataDir) {
 
 export async function runMemorySchedulerCycle() {
   try {
-    if (!readPilotDeckConfigFile().config.memory?.enabled) {
+    const config = readPilotDeckConfigFile().config;
+    if (!config.memory?.enabled || !resolveModel(config, config.memory?.model || config.agent?.model, { allowMissing: true })) {
       return null;
     }
   } catch {
@@ -420,7 +422,8 @@ export async function runMemorySchedulerCycle() {
 
 export function startMemoryScheduler() {
   try {
-    if (!readPilotDeckConfigFile().config.memory?.enabled) {
+    const config = readPilotDeckConfigFile().config;
+    if (!config.memory?.enabled || !resolveModel(config, config.memory?.model || config.agent?.model, { allowMissing: true })) {
       return;
     }
   } catch {

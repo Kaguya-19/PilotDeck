@@ -42,6 +42,7 @@ export class ToolRuntime {
   ) {}
 
   async execute(call: PilotDeckToolCall, context: PilotDeckToolRuntimeContext): Promise<PilotDeckToolResult> {
+    context = withPlanDirectoryWorkspaceRoot(context);
     const startedAtDate = now(context);
     const runtimeContext: PilotDeckToolRuntimeContext = context.executeTool
       ? context
@@ -624,6 +625,23 @@ export function createToolErrorResult(input: {
     },
     startedAt: input.startedAt,
     completedAt: now(input.context).toISOString(),
+  };
+}
+
+function withPlanDirectoryWorkspaceRoot(context: PilotDeckToolRuntimeContext): PilotDeckToolRuntimeContext {
+  const planDirectoryPath = context.permissionContext.planDirectoryPath;
+  if (context.permissionContext.mode !== "plan" || !planDirectoryPath) return context;
+
+  const resolvedPlanDirectory = resolve(planDirectoryPath);
+  const roots = context.permissionContext.additionalWorkingDirectories;
+  if (roots.some((root) => resolve(root) === resolvedPlanDirectory)) return context;
+
+  return {
+    ...context,
+    permissionContext: {
+      ...context.permissionContext,
+      additionalWorkingDirectories: [...roots, resolvedPlanDirectory],
+    },
   };
 }
 

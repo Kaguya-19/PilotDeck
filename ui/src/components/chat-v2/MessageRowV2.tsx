@@ -1,7 +1,7 @@
-import { memo, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
+import { Fragment, memo, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
-import { AlertTriangle, Check, ChevronRight, Copy, GitBranch, Loader2, Pencil } from 'lucide-react';
+import { AlertTriangle, Check, Copy, GitBranch, Loader2, Pencil } from 'lucide-react';
 import { copyTextToClipboard } from '../../utils/clipboard';
 import { isImeEnterEvent } from '../../utils/ime.js';
 import { cn } from '../../lib/utils.js';
@@ -15,6 +15,7 @@ import {
   normalizeContentReference,
   type ContentReference,
 } from '../../types/contentReference';
+import { partitionContentReferences } from '../../types/assistantReplyReference';
 import type {
   ChatAttachment,
   ChatMessage,
@@ -27,10 +28,13 @@ import ImageLightbox, { type LightboxImage } from '../chat/view/subcomponents/Im
 import { Markdown } from '../chat/view/subcomponents/Markdown';
 import { formatUsageLimitText } from '../chat/utils/chatFormatting';
 import { ProcessTrace } from './ProcessTrace';
-import { processSummaryToTrace, type ProcessAttachment } from './processGrouping';
+import { isSingleToolProcess, processSummaryToTrace, type ProcessAttachment } from './processGrouping';
 import SubagentCard from './SubagentCard';
 import { useTypewriter } from './useTypewriter';
+import { ThinkingBlock } from './ThinkingBlock';
+import { useUploadedAttachmentPreviews } from '../chat/hooks/useUploadedAttachmentPreviews';
 import DocumentReferenceChip from './DocumentReferenceChip';
+import ReplyQuoteChip from './ReplyQuoteChip';
 import { AgentFileArtifactGroup, UserAttachmentCards } from './MessageFileCards';
 
 type DiffLine = { type: string; content: string; lineNum: number };
@@ -93,7 +97,6 @@ type MessageRowV2Props = {
     suggestion: PilotDeckPermissionSuggestion,
   ) => SessionPermissionGrantResult | null | undefined;
   autoExpandTools?: boolean;
-  showRawParameters?: boolean;
   showThinking?: boolean;
   inlineThinking?: boolean;
   isProcessExpanded?: (processKey: string, defaultExpanded?: boolean) => boolean;
@@ -139,7 +142,6 @@ function MessageRowV2({
   onShowSettings,
   onGrantSessionToolPermission,
   autoExpandTools,
-  showRawParameters,
   showThinking,
   inlineThinking,
   isProcessExpanded,
@@ -165,30 +167,40 @@ function MessageRowV2({
     () => formatUsageLimitText(String(message.content ?? '')),
     [message.content],
   );
-  const thinkingDisplayText = useTypewriter(formattedContent, !!message.isStreaming && !!message.isThinking, 4);
   const contentDisplayText = useTypewriter(formattedContent, !!message.isStreaming && !message.isThinking, 6);
   const assistantArtifacts = useMemo(
     () => (Array.isArray(message.artifacts) ? message.artifacts : []),
     [message.artifacts],
   );
-  const messageAttachments = useMemo(
+  const rawMessageAttachments = useMemo(
     () =>
       Array.isArray(message.attachments)
         ? message.attachments.filter((attachment) => attachment && typeof attachment.name === 'string')
         : [],
     [message.attachments],
   );
+  const messageAttachments = useUploadedAttachmentPreviews(rawMessageAttachments);
   const documentReferenceAttachments = useMemo(
     () => messageAttachments
       .map(attachmentToDocumentReference)
       .filter((reference): reference is ContentReference => Boolean(reference)),
     [messageAttachments],
   );
+  const { fileReferences: fileDocumentReferences, replyQuotes: replyQuoteReferences } = useMemo(
+    () => partitionContentReferences(documentReferenceAttachments),
+    [documentReferenceAttachments],
+  );
   const referenceImageNames = useMemo(
     () => new Set(documentReferenceAttachments
       .filter((reference) => reference.selectionMode === 'region')
       .map((reference) => reference.image.name)),
     [documentReferenceAttachments],
+  );
+  const uploadedImagePreviews = useMemo(
+    () => messageAttachments.filter((attachment) => (
+      typeof attachment.previewData === 'string' && attachment.previewData.startsWith('data:image/')
+    )),
+    [messageAttachments],
   );
   const messageImages = useMemo(
     () =>
@@ -201,12 +213,27 @@ function MessageRowV2({
         : [],
     [message.images, referenceImageNames],
   );
+  // Canonical history supplies images after acceptance. Until then use the
+  // upload's display-only preview, retaining attachment identities for edits.
+  const visibleImages = useMemo(() => {
+    const remaining = [...uploadedImagePreviews];
+    const confirmed = messageImages.map((image) => {
+      const index = remaining.findIndex((attachment) => attachment.previewData === image.data);
+      if (index < 0) return image;
+      const [preview] = remaining.splice(index, 1);
+      return { ...image, name: image.name || preview.name };
+    });
+    return [...confirmed, ...remaining.map((attachment) => ({
+      data: attachment.previewData!, name: attachment.name, mimeType: attachment.mimeType,
+    }))];
+  }, [messageImages, uploadedImagePreviews]);
   const fileAttachments = useMemo(
     () => messageAttachments.filter((attachment) => (
       attachment.kind !== DOCUMENT_SELECTION_ATTACHMENT_KIND
       && attachment.kind !== CONTENT_REFERENCE_ATTACHMENT_KIND
+      && !uploadedImagePreviews.includes(attachment)
     )),
-    [messageAttachments],
+    [messageAttachments, uploadedImagePreviews],
   );
   const [userImageLightbox, setUserImageLightbox] = useState<number | null>(null);
   const [isEditing, setIsEditing] = useState(false);
@@ -222,7 +249,7 @@ function MessageRowV2({
   }, [editDraft, isEditing]);
   const hasForkUnsupportedContent =
     Boolean(message.forkUnsupportedContent) ||
-    messageImages.length > 0 ||
+    visibleImages.length > 0 ||
     messageAttachments.length > 0;
 
   if (message.isAgentActivitySummary) {
@@ -253,7 +280,6 @@ function MessageRowV2({
           onShowSettings={onShowSettings}
           onGrantSessionToolPermission={onGrantSessionToolPermission}
           autoExpandTools={autoExpandTools}
-          showRawParameters={showRawParameters}
           showThinking={showThinking}
           isProcessExpanded={isProcessExpanded}
           onProcessExpandedChange={onProcessExpandedChange}
@@ -270,14 +296,12 @@ function MessageRowV2({
   );
 
   const withProcessRows = (content: ReactNode) => {
-    if (beforeProcessAttachments.length === 0 && afterProcessAttachments.length === 0) {
-      return content;
-    }
-
+    // Keep the body in the same React slot when completed process attachments
+    // appear, so thinking expansion and its nested scroll controller survive.
     return (
       <div className="flex min-w-0 flex-col gap-2">
         {beforeProcessAttachments.map(renderProcessAttachment)}
-        {content}
+        <Fragment key="body">{content}</Fragment>
         {afterProcessAttachments.map(renderProcessAttachment)}
       </div>
     );
@@ -300,7 +324,7 @@ function MessageRowV2({
 
   if (delegate) {
     return withProcessRows(
-      <div className="ui-v2-legacy-row">
+      <div className="ui-v2-legacy-row min-w-0 w-full">
         <MessageComponent
           message={message}
           prevMessage={prevMessage}
@@ -309,13 +333,13 @@ function MessageRowV2({
           onShowSettings={onShowSettings}
           onGrantSessionToolPermission={onGrantSessionToolPermission}
           autoExpandTools={autoExpandTools}
-          showRawParameters={showRawParameters}
           showThinking={showThinking}
           isToolSectionExpanded={isToolSectionExpanded}
           onToolSectionExpandedChange={onToolSectionExpandedChange}
           selectedProject={selectedProject ?? null}
           provider={provider}
           hideHeader
+          isSessionRunning={isSessionRunning}
         />
       </div>,
     );
@@ -324,10 +348,10 @@ function MessageRowV2({
   const isUser = message.type === 'user';
   const isError = message.type === 'error';
 
-  // User: right-aligned grey bubble.
+  // User: right-aligned bubble.
   if (isUser) {
     const messageTime = formatMessageTime(message.timestamp);
-    const lightboxImages: LightboxImage[] = messageImages.map((image) => ({
+    const lightboxImages: LightboxImage[] = visibleImages.map((image) => ({
       data: image.data,
       name: image.name,
       mimeType: image.mimeType,
@@ -370,9 +394,12 @@ function MessageRowV2({
             <span className="inline-block h-4 w-2 animate-pulse bg-neutral-400 dark:bg-neutral-500" />
           ) : (
             <>
-              {documentReferenceAttachments.length > 0 ? (
+              {fileDocumentReferences.length > 0 || replyQuoteReferences.length > 0 ? (
                 <div className={formattedContent || fileAttachments.length > 0 ? 'mb-2 flex flex-wrap gap-2' : 'flex flex-wrap gap-2'}>
-                  {documentReferenceAttachments.map((reference) => (
+                  {replyQuoteReferences.length > 0 ? (
+                    <ReplyQuoteChip quotes={replyQuoteReferences} />
+                  ) : null}
+                  {fileDocumentReferences.map((reference) => (
                     <DocumentReferenceChip
                       key={reference.id}
                       reference={reference}
@@ -394,9 +421,9 @@ function MessageRowV2({
                   />
                 </div>
               ) : null}
-              {messageImages.length > 0 ? (
+              {visibleImages.length > 0 ? (
                 <div className={formattedContent ? 'mb-2 grid grid-cols-1 gap-2' : 'grid grid-cols-1 gap-2'}>
-                  {messageImages.map((image, index) => (
+                  {visibleImages.map((image, index) => (
                     <button
                       type="button"
                       key={`${image.name || 'image'}-${index}`}
@@ -533,57 +560,20 @@ function MessageRowV2({
 
   if (message.isThinking) {
     if (!showThinking) return null;
-    const isThinkingStreaming = !!message.isStreaming;
-
-    if (inlineThinking) {
-      // Inline mode: unified <details> with typewriter animation + blue theme
-      return withProcessRows(
-        <div className="min-w-0 text-[14px] leading-relaxed">
-          <details className="group" open={(isThinkingStreaming ? thinkingDisplayText.length > 12 : false) || undefined}>
-            <summary className="flex cursor-pointer select-none items-center gap-1.5 text-[13px] font-medium text-blue-600/70 hover:text-blue-700 dark:text-blue-400/70 dark:hover:text-blue-300">
-              {isThinkingStreaming
-                ? <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2} />
-                : <ChevronRight className="h-3.5 w-3.5 transition-transform group-open:rotate-90" strokeWidth={2} />}
-              <span>
-                {isThinkingStreaming
-                  ? t('thinking.title', { defaultValue: 'Thinking...' })
-                  : t('thinking.completed', { defaultValue: 'Thought process' })}
-              </span>
-            </summary>
-            <div className={`mt-1.5 max-h-64 overflow-y-auto border-l-2 pl-3 text-[13px] ${
-              isThinkingStreaming
-                ? 'border-blue-400/50 text-neutral-600 dark:border-blue-500/40 dark:text-neutral-300'
-                : 'border-blue-400/30 text-neutral-600 dark:border-blue-500/30 dark:text-neutral-400'
-            }`}>
-              <Markdown projectName={selectedProject?.name}
-          onFileOpen={onFileOpen} isStreaming={isThinkingStreaming}>
-                {isThinkingStreaming ? thinkingDisplayText : formattedContent}
-              </Markdown>
-            </div>
-          </details>
-        </div>,
-      );
-    }
-
-    // Default (status-bar preview mode): simple collapsible accordion
     return withProcessRows(
-      <div className="min-w-0 text-[14px] leading-relaxed">
-        <details className="group">
-          <summary className="flex cursor-pointer select-none items-center gap-1.5 text-[13px] font-medium text-neutral-500 hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200">
-            <ChevronRight className="h-3.5 w-3.5 transition-transform group-open:rotate-90" strokeWidth={2} />
-            <span>{t('thinking.completed', { defaultValue: 'Thought process' })}</span>
-          </summary>
-          <div className="mt-1.5 max-h-64 overflow-y-auto border-l-2 border-neutral-300 pl-3 text-[13px] text-neutral-500 dark:border-neutral-700 dark:text-neutral-400">
-            <Markdown projectName={selectedProject?.name}
-          onFileOpen={onFileOpen}>{formattedContent}</Markdown>
-          </div>
-        </details>
-      </div>,
+      <ThinkingBlock
+        content={formattedContent}
+        isStreaming={Boolean(message.isStreaming)}
+        inline={inlineThinking}
+        projectName={selectedProject?.name}
+        onFileOpen={onFileOpen}
+      />,
     );
   }
 
   // Assistant: plain prose, no avatar and no bubble.
   const hasAssistantProse = contentDisplayText.trim().length > 0;
+  const isTextRenderingPending = contentDisplayText !== formattedContent;
   const showStreamingCursor = Boolean(message.isStreaming && !contentDisplayText);
   const resolvedShowAssistantActions = showAssistantActions ?? true;
   const assistantMessageTime = resolvedShowAssistantActions
@@ -597,13 +587,23 @@ function MessageRowV2({
   const assistantForkDisabled = Boolean(
     forkDisabled || isSessionRunning || message.isStreaming || !message.entryId,
   );
-  const assistantBody = (hasAssistantProse || showStreamingCursor || assistantArtifacts.length > 0) ? (
-    <div className="group/assistant-msg min-w-0 text-[14px] leading-relaxed text-neutral-900 dark:text-neutral-100">
+  const assistantBody = (hasAssistantProse || showStreamingCursor || isTextRenderingPending || assistantArtifacts.length > 0) ? (
+    <div
+      data-chat-search-render-pending={isTextRenderingPending ? 'true' : undefined}
+      className="group/assistant-msg min-w-0 text-[14px] leading-relaxed text-neutral-900 dark:text-neutral-100"
+    >
       {showStreamingCursor ? (
         <span className="inline-block h-4 w-2 animate-pulse bg-neutral-400 dark:bg-neutral-500" />
       ) : (
-        <Markdown className="prose prose-sm prose-neutral max-w-none dark:prose-invert prose-headings:mb-2 prose-headings:mt-4 prose-h2:text-lg prose-h3:text-base prose-p:my-2 prose-pre:my-3 prose-ol:my-2 prose-ul:my-2 prose-table:my-0 prose-hr:my-4" projectName={selectedProject?.name}
-        onFileOpen={onFileOpen} isStreaming={message.isStreaming} artifactFiles={assistantArtifacts}>{contentDisplayText}</Markdown>
+        <div
+          {...(!message.isStreaming ? {
+            'data-assistant-quote-source': '',
+            'data-assistant-quote-message-id': message.id || message.entryId || message.turnId || '',
+          } : {})}
+        >
+          <Markdown className="prose prose-sm prose-neutral max-w-none dark:prose-invert prose-headings:mb-2 prose-headings:mt-4 prose-h2:text-lg prose-h3:text-base prose-p:my-2 prose-pre:my-3 prose-ol:my-2 prose-ul:my-2 prose-table:my-0 prose-hr:my-4" projectName={selectedProject?.name}
+          onFileOpen={onFileOpen} isStreaming={Boolean(message.isStreaming) || contentDisplayText !== formattedContent} artifactFiles={assistantArtifacts}>{contentDisplayText}</Markdown>
+        </div>
       )}
       {assistantArtifacts.length > 0 ? (
         <AgentFileArtifactGroup
@@ -617,6 +617,11 @@ function MessageRowV2({
           data-testid="assistant-message-actions"
           className="pointer-events-none mt-1.5 flex h-6 items-center justify-start gap-1 opacity-0 transition-opacity duration-150 group-hover/assistant-msg:pointer-events-auto group-hover/assistant-msg:opacity-100 group-focus-within/assistant-msg:pointer-events-auto group-focus-within/assistant-msg:opacity-100"
         >
+          {message.model ? (
+            <span data-testid="assistant-message-model" className="mr-1 truncate text-xs text-neutral-400 dark:text-neutral-500">
+              {message.model}
+            </span>
+          ) : null}
           {assistantMessageTime ? (
             <time
               dateTime={assistantMessageTime.dateTime}
@@ -789,6 +794,11 @@ function ProcessAttachmentRow({
       })),
     [attachment.inlineImages],
   );
+
+  // The tool row itself owns image previews when there is no enclosing group.
+  if (isSingleToolProcess(attachment.processMessages)) {
+    return renderDetail(attachment.processDetailMessages[0], 0);
+  }
 
   return (
     <div className="flex min-w-0 flex-col items-start gap-2">

@@ -1,4 +1,13 @@
 {
+  "copyBlock": {
+    "plainText": "纯文本",
+    "wrap": "代码自动换行",
+    "code": "复制代码",
+    "table": "复制表格",
+    "tableMarkdown": "复制表格 Markdown",
+    "copied": "已复制",
+    "failed": "复制失败，请重试"
+  },
   "codeBlock": {
     "copy": "复制",
     "copied": "已复制",
@@ -9,6 +18,7 @@
     "emptyDescription": "需要把文件加入上下文时，请用 @ 引用工作区文件。"
   },
   "inputQueue": {
+    "sending": "发送中",
     "label": "排队消息",
     "resume": "继续",
     "pausedAfterStop": "由于你中断了当前响应，队列已暂停",
@@ -33,7 +43,9 @@
     "copied": "消息已复制",
     "selectFormat": "选择复制格式",
     "copyAsMarkdown": "复制为 Markdown",
-    "copyAsText": "复制为纯文本"
+    "copyAsText": "复制为纯文本",
+    "markdownShort": "MD",
+    "textShort": "TXT"
   },
   "edit": {
     "message": "修改消息",
@@ -92,6 +104,8 @@
     "executingTool": "执行工具中...",
     "generating": "正在生成回复",
     "compacting": "正在压缩上下文...",
+    "compactFailed": "上下文压缩失败",
+    "compactCancelled": "上下文压缩已停止",
     "compactingLevel": "正在触发 {{level}} 级压缩：{{label}}",
     "waitingForPermission": "等待授权",
     "retrying": "重连中 {{attempt}}/{{max}}{{delay}}",
@@ -255,11 +269,47 @@
     "placeholder": "输入 / 调用命令，@ 选择文件，或向 {{provider}} 提问...",
     "placeholderDefault": "输入您的消息...",
     "disabled": "输入已禁用",
+    "uploading": "正在上传…",
+    "uploadComplete": "上传完毕",
+    "retryUpload": "重试",
+    "cancelUpload": "取消上传 {{file}}",
+    "removeAttachment": "删除附件 {{file}}",
+    "attachmentOnlyPrompt": "请查看所选附件。",
+    "projectOnlyPrompt": "请查看所选项目内容。",
+    "skillOnlyPrompt": "请使用所选技能完成任务。",
+    "contextFolder": "文件夹",
+    "contextFile": "文件",
+    "projectContextTitle": "引用的项目内容：",
     "attachFile": "上传附件",
     "attachFiles": "附加文件",
     "attachImages": "附加图片",
     "mentionFile": "引用文件",
     "slashCommand": "运行斜杠命令",
+    "projectFiles": "引用项目内容",
+    "projectFilesCount_one": "{{count}} 项可引用内容",
+    "projectFilesCount_other": "{{count}} 项可引用内容",
+    "projectFilesAriaLabel": "可引用的项目内容",
+    "projectFilesLoading": "正在加载项目文件…",
+    "projectFilesEmpty": "没有匹配的项目内容",
+    "projectFilesLoadingMore": "加载更多…",
+    "projectPathMissing": "未找到当前项目路径。",
+    "projectFilesNonJson": "项目文件接口返回了无效响应（{{contentType}}），请重启后端服务。",
+    "projectFilesLoadFailedStatus": "项目文件加载失败（{{status}}）。",
+    "projectFilesLoadFailed": "项目文件加载失败。",
+    "selectedFilesAndSkills": "已选文件、技能与命令",
+    "removeSelectedFile": "删除 {{name}}",
+    "removeSelectedSkill": "删除 {{name}}",
+    "removeSelectedCommand": "删除 {{name}}",
+    "removeSelectedRunMode": "删除 {{name}}",
+    "remove": "删除",
+    "addContext": "添加文件或技能",
+    "files": "文件",
+    "filesAndFoldersDescription": "添加本地内容作为任务上下文",
+    "folders": "文件夹",
+    "foldersDescription": "保留目录层级并上传全部内容",
+    "skills": "技能",
+    "noSkills": "暂无可用技能",
+    "searchSkills": "检索技能",
     "send": "发送",
     "stop": "停止",
     "hintText": {
@@ -283,7 +333,9 @@
       "defaultDescription": "需要风险操作时先询问",
       "bypassPermissions": "完全访问权限",
       "bypassPermissionsDescription": "跳过确认并允许完全访问",
-      "change": "选择权限模式"
+      "change": "选择权限模式",
+      "saveFailed": "权限设置读取或保存失败，请重试后再发送。",
+      "retry": "重试"
     },
     "runModes": {
       "agent": "智能体",
@@ -293,13 +345,57 @@
       "agentDescription": "直接处理并执行任务",
       "planDescription": "先产出计划，确认后再执行",
       "askDescription": "仅回答问题，不修改文件"
-    }
+    },
+    "models": {
+      "select": "选择模型",
+      "auto": "自动",
+      "change": "选择模型",
+      "search": "搜索模型",
+      "empty": "没有匹配的模型",
+      "advanced": "高级设置",
+      "reasoning": "推理强度",
+      "speed": "速度",
+      "reasoningLevels": {
+        "off": "关闭",
+        "light": "轻度",
+        "low": "低",
+        "medium": "中",
+        "high": "高",
+        "xhigh": "极高",
+        "max": "最高",
+        "default": "默认"
+      },
+      "reasoningMenuLevels": {
+        "default": "默认(Default)",
+        "low": "低(Low)",
+        "medium": "中(Medium)",
+        "high": "高(High)",
+        "xhigh": "极高(Xhigh)",
+        "max": "最高(Max)"
+      },
+      "speedLevels": {
+        "standard": "标准",
+        "fast": "快速"
+      },
+      "backToModels": "返回模型列表"
+    },
+    "sending": "发送中…",
+    "queueSend": "加入发送队列",
+    "stopping": "正在停止…"
   },
   "documentReferences": {
     "defaultPrompt": "请根据我引用的文档内容回答。",
     "pages": "第 {{pages}} 页",
     "pageUnknown": "页码未知",
-    "remove": "删除引用"
+    "remove": "删除引用",
+    "open": "打开 {{name}}"
+  },
+  "replyQuotes": {
+    "addToChat": "添加到PilotDeck对话",
+    "chip": "{{count}}条标签",
+    "remove": "删除这条标签",
+    "removeAll": "删除全部标签",
+    "panelLabel": "已引用的回复内容"
   },
   "commandMenu": {
     "empty": "暂无可用命令",
@@ -310,7 +406,10 @@
       "project": "项目",
       "user": "用户",
       "other": "其他"
-    }
+    },
+    "title": "命令",
+    "search": "搜索",
+    "ariaLabel": "可用命令"
   },
   "thinkingMode": {
     "selector": {
@@ -387,7 +486,11 @@
       "loadingAll": "正在加载全部消息...",
       "allLoaded": "全部消息已加载",
       "perfWarning": "已加载全部消息 - 滚动可能变慢。点击「滚动到底部」恢复性能。"
-    }
+    },
+    "scroll": {
+      "returnToLatest": "回到最新"
+    },
+    "readonlyTranscript": "此对话记录为只读。"
   },
   "loading": "加载中...",
   "emptyChat": {
@@ -401,7 +504,9 @@
       "plan": "为该项目规划一次重构",
       "summary": "总结最近的变更",
       "review": "审查我最近修改的文件"
-    }
+    },
+    "readonlyTranscriptTitle": "此只读记录中没有可显示的消息",
+    "readonlyTranscriptDescription": "此只读记录仅包含聊天界面无法显示的记录。"
   },
   "shell": {
     "selectProject": {
@@ -466,9 +571,17 @@
     "placeholder": "告诉 PilotDeck 你想完成什么…",
     "welcomePlaceholder": "告诉 PilotDeck 你想完成什么…"
   },
+  "workspacePicker": {
+    "select": "选择工作空间",
+    "search": "搜索项目",
+    "newProject": "新建项目",
+    "generalConversation": "通用对话",
+    "empty": "未找到匹配的项目",
+    "selectRequired": "请先选择工作空间"
+  },
   "welcome": {
-    "greetingWithProject": "今天想做点什么？",
-    "noProject": "从左侧选择一个项目开始"
+    "greetingWithProject": "你想让我们在 {{project}} 中构建什么？",
+    "noProject": "今天想做点什么？"
   },
   "subagent": {
     "detailTitle": "子任务详情",
@@ -480,7 +593,8 @@
       "completed": "已完成",
       "stopped": "已停止",
       "thinking": "思考中",
-      "executingTool": "正在执行 {{toolName}}"
+      "executingTool": "正在执行 {{toolName}}",
+      "connecting": "连接中…"
     }
   },
   "agentStatus": {
@@ -531,6 +645,78 @@
     "toolCallRecoveryExhausted": {
       "message": "{{message}}",
       "hint": "请用更短 prompt 重试，让 agent 把大型工具输入拆成更小步骤，或在“设置 → 模型 Provider”中切换到工具调用能力更强的模型。"
+    }
+  },
+  "fork": {
+    "missingTarget": "无法从这条消息分叉。",
+    "ready": "分叉已创建，可编辑输入后发送。",
+    "failed": "分叉失败。",
+    "emptyTitle": "新分叉已就绪",
+    "emptyDescription": "这个分叉从原对话的起点开始。输入框中已填入分叉的消息，编辑并发送即可继续。",
+    "banner": "从 {{parent}} 分叉",
+    "unsupportedAttachments": "暂不支持分叉包含附件或媒体的消息",
+    "fromHere": "从此处分叉 · 携带 {{count}} 条消息"
+  },
+  "common": {
+    "remove": "移除"
+  },
+  "fileArtifacts": {
+    "updatedSinceMessage": "该文件在此消息之后已发生变化，是否打开当前版本？",
+    "browseTitle": "浏览",
+    "browse": "浏览 {{name}}",
+    "download": "下载／保存副本",
+    "downloadName": "下载 {{name}}",
+    "reference": "在对话中引用",
+    "referenceName": "在对话中引用 {{name}}",
+    "incomplete": "任务未完成",
+    "generated": "本轮生成",
+    "updated": "本轮更新",
+    "collapse": "收起",
+    "showAll": "查看全部 {{count}} 个文件"
+  },
+  "toolDisplay": {
+    "copyCommand": "复制命令",
+    "collapse": "收起完整内容",
+    "full": "展开完整内容",
+    "copy": "复制",
+    "details": "工具详情",
+    "output": "输出",
+    "success": "成功",
+    "failed": "失败",
+    "exitCode": "退出码 {{code}}",
+    "executing": "正在运行…",
+    "actionRequired": "需要处理",
+    "noResult": "未记录执行结果",
+    "noOutput": "无输出",
+    "fileContent": "文件内容",
+    "changes": "变更",
+    "noChanges": "无变更",
+    "running": {
+      "command": "正在运行",
+      "write": "正在写入",
+      "edit": "正在编辑",
+      "read": "正在读取",
+      "search": "正在搜索",
+      "tool": "正在使用",
+      "skill": "正在读取技能"
+    },
+    "pending": {
+      "command": "命令",
+      "write": "写入",
+      "edit": "编辑",
+      "read": "读取",
+      "search": "搜索",
+      "tool": "工具",
+      "skill": "读取技能"
+    },
+    "done": {
+      "command": "已运行",
+      "write": "已写入",
+      "edit": "已编辑",
+      "read": "已读取",
+      "search": "已搜索",
+      "tool": "已使用",
+      "skill": "已读取技能"
     }
   }
 }

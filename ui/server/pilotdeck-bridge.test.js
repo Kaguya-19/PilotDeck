@@ -16,6 +16,7 @@ import {
     queuedInputDispositionAfterTurn,
     reconcileRecoveredQueueItems,
     resetSteeringItemForRun,
+    resolvePermissionMode,
     resumeInputQueueState,
     scheduleQueuedDispatchAfterActivityCheck,
     setLocalActiveRun,
@@ -27,6 +28,52 @@ import {
     syncLocalActiveRunFromSnapshot,
     uiFilesToAttachments,
 } from './pilotdeck-bridge.js';
+
+describe('model block identity', () => {
+    it('preserves absolute snapshots and explicit end boundaries for parent and child streams', () => {
+        const timeline = { version: 1, turnId: 'child-turn', id: 'thought', order: 2, revision: 8 };
+        const streamBoundary = { turnId: 'child-turn', through: 2, revision: 9 };
+        expect(gatewayEventToFrames({ type: 'assistant_block', runId: 'parent', blockId: 'thought',
+            kind: 'thinking', text: 'complete', timeline }, 'session', 'pilotdeck')[0])
+            .toMatchObject({ timeline, kind: 'thinking', content: 'complete', isFinal: true });
+        expect(gatewayEventToFrames({ type: 'agent_status', runId: 'parent', event: 'subagent_thinking_delta',
+            timeline, streamState: 'closed', detail: { subagentId: 'child', text: 'complete' } }, 'session', 'pilotdeck')[0])
+            .toMatchObject({ timeline, streamState: 'closed', subagentId: 'child', content: 'complete' });
+        expect(gatewayEventToFrames({ type: 'agent_status', runId: 'parent', event: 'subagent_stream_end',
+            streamBoundary, detail: { subagentId: 'child' } }, 'session', 'pilotdeck')[0])
+            .toMatchObject({ streamBoundary, kind: 'stream_end', subagentId: 'child' });
+    });
+
+    it('preserves model block identity on both live output kinds', () => {
+        for (const type of ['assistant_text_delta', 'assistant_thinking_delta']) {
+            expect(gatewayEventToFrames({ type, runId: 'turn-1', text: 'same', blockId: `${type}:1` }, 'session', 'pilotdeck'))
+                .toEqual([expect.objectContaining({ blockId: `${type}:1`, runId: 'turn-1', content: 'same' })]);
+        }
+    });
+});
+
+describe('per-turn permission precedence', () => {
+    it('lets an explicit default selection turn off persisted full access for one turn', () => {
+        expect(resolvePermissionMode(
+            { permissionMode: 'default' },
+            () => ({ skipPermissions: true }),
+        )).toBe('default');
+    });
+
+    it('uses persisted full access when the turn has no explicit selection', () => {
+        expect(resolvePermissionMode(
+            {},
+            () => ({ skipPermissions: true }),
+        )).toBe('bypassPermissions');
+    });
+
+    it('does not let an invalid explicit value disable persisted full access', () => {
+        expect(resolvePermissionMode(
+            { permissionMode: 'unexpected-mode' },
+            () => ({ skipPermissions: true }),
+        )).toBe('bypassPermissions');
+    });
+});
 
 describe('Gateway interaction replay', () => {
     it('maps Gateway replay DTOs into the existing permission/question event vocabulary', () => {

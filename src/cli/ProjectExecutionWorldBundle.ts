@@ -1,4 +1,5 @@
 import type { PilotConfigSnapshot } from "../pilot/index.js";
+import { isOptionalFeatureEnabled } from "../pilot/config/optionalFeature.js";
 import {
   createBuiltinRegistry,
   createNodeExecutionWorldBundle,
@@ -89,8 +90,7 @@ function resolveWebSearchOptions(
   snapshot: PilotConfigSnapshot,
 ): Pick<CreateBuiltinRegistryOptions, "webSearch"> {
   const webSearch = snapshot.config.tools?.webSearch;
-  if (webSearch?.enabled === false) return { webSearch: false };
-  if (!webSearch) return {};
+  if (!webSearch || !isOptionalFeatureEnabled(webSearch)) return { webSearch: false };
   return {
     webSearch: {
       ...(webSearch.provider ? { provider: webSearch.provider } : {}),

@@ -36,7 +36,13 @@ export class GatewayAgentEventProjector implements GatewayAgentEventProjectorPor
 
   project(input: GatewayAgentEventProjectionInput): GatewayEvent[] {
     return projectAgentEventForTurn(input.event, input.runId, this.toolResultArtifacts, input.forwardSubagentText === true).map((event) =>
-      withGatewayRunId(event, input.runId)
+      withGatewayRunId({
+        ...event,
+        ...(input.event.timeline && event.type !== "assistant_attachment"
+          ? { timeline: input.event.timeline }
+          : {}),
+        ...(input.event.streamBoundary ? { streamBoundary: input.event.streamBoundary } : {}),
+      }, input.runId)
     );
   }
 }
@@ -74,17 +80,41 @@ function projectAgentEventForTurn(
     case "input_accepted":
       return [{ type: "input_accepted", runId }];
     case "steer_applied":
-      return [{ type: "steer_applied", itemId: event.itemId, message: event.message }];
+      return [{
+        type: "steer_applied",
+        itemId: event.itemId,
+        message: event.message,
+        ...(event.message.content.find((block) => block.timeline)?.timeline
+          ? { timeline: event.message.content.find((block) => block.timeline)!.timeline }
+          : {}),
+      }];
     case "steer_unapplied":
       return [{ type: "steer_unapplied", itemId: event.itemId, reason: event.reason }];
     case "model_request_started":
       return [{ type: "model_request_started", model: event.model, provider: event.provider }];
     case "model_event":
-      return mapModelEvent(event.event, runId);
+      return mapModelEvent(event.event, runId).map((frame) =>
+        event.blockId ? { ...frame, blockId: event.blockId } : frame
+      );
+    case "assistant_message":
+      return event.message.content.flatMap((block): GatewayEvent[] =>
+        (block.type === "text" || block.type === "thinking") && block.blockId && block.timeline
+          ? [{
+              type: "assistant_block",
+              kind: block.type,
+              blockId: block.blockId,
+              text: block.text,
+              timeline: block.timeline,
+              streamState: "closed",
+              model: event.message.metadata?.model,
+            }]
+          : []
+      );
     case "prompt_suggestion":
       return [{ type: "prompt_suggestion", suggestion: event.suggestion }];
     case "tool_calls_detected":
       return event.calls.map((call) => ({
+        ...(call.timeline ? { timeline: call.timeline } : {}),
         type: "tool_call_started",
         toolCallId: call.id,
         name: call.name,

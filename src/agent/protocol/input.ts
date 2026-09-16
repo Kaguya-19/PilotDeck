@@ -16,6 +16,7 @@ export function parseAgentRunMode(value: unknown): AgentRunMode | undefined {
 export type AgentModelOverride = {
   provider: string;
   model: string;
+  /** @deprecated Provider adapters may ignore temperature. */
   temperature?: number;
   speed?: number;
   thinking?: import("../../model/index.js").CanonicalThinkingConfig;

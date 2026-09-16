@@ -100,6 +100,9 @@ export class GatewayTurnReplacementCoordinator implements GatewayTurnReplacement
       if (activeRunId) {
         await this.options.session.abortExpectedTurn(input.sessionKey, activeRunId);
       }
+      // Stop the session-owned writer and background metadata work before the
+      // storage provider rewrites the durable transcript tail.
+      await this.options.session.closeSession(input.sessionKey);
       result = await replaceLastTurn(input);
       this.pending.set(input.sessionKey, {
         transactionId: result.transactionId,
@@ -108,7 +111,6 @@ export class GatewayTurnReplacementCoordinator implements GatewayTurnReplacement
         phase: "prepared",
       });
       this.scheduleTimeout(input.sessionKey);
-      await this.options.session.closeSession(input.sessionKey);
       return result;
     } catch (error) {
       this.clearPending(input.sessionKey);

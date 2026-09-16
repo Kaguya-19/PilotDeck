@@ -242,7 +242,6 @@ export class AgentSession {
       this.steerMailbox.finish(turnId);
       throw error;
     }
-
     if (!this.options.projections) {
       this.state.messages = runResult.messages;
       this.state.usage = mergeSessionUsage(this.state.usage, runResult.result.usage);

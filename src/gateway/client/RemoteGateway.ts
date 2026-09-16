@@ -90,7 +90,11 @@ import type {
   CronUpdateInput,
   CronUpdateResult,
 } from "../../cron/protocol/types.js";
-import { GatewayWsClient, type GatewayWsNotificationHandler } from "./GatewayWsClient.js";
+import {
+  GatewayWsClient,
+  type GatewayWsDisconnectHandler,
+  type GatewayWsNotificationHandler,
+} from "./GatewayWsClient.js";
 import { parseReloadConfigResult } from "../protocol/reloadConfigResult.js";
 
 export class RemoteGateway implements Gateway {
@@ -106,6 +110,10 @@ export class RemoteGateway implements Gateway {
 
   onNotification(handler: GatewayWsNotificationHandler): void {
     this.client.onNotification(handler);
+  }
+
+  onDisconnect(handler: GatewayWsDisconnectHandler): void {
+    this.client.onDisconnect(handler);
   }
 
   submitTurn(input: GatewaySubmitTurnInput): AsyncIterable<GatewayEvent> {
@@ -134,6 +142,10 @@ export class RemoteGateway implements Gateway {
 
   async newSession(input: NewSessionInput): Promise<{ sessionKey: string }> {
     return (await this.client.request("new_session", input)) as { sessionKey: string };
+  }
+
+  async closeProjectSessions(input: { projectKey: string; resume?: boolean }): Promise<{ sessionKeys: string[] }> {
+    return await this.client.request("close_project_sessions", input) as { sessionKeys: string[] };
   }
 
   async closeSession(input: { sessionKey: string; reason?: string }): Promise<void> {

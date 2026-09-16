@@ -34,16 +34,16 @@ export class GatewaySessionModelBundle {
   constructor(private readonly options: GatewaySessionModelBundleOptions) {}
 
   async modelCatalogList(input: ModelCatalogListInput): Promise<ModelCatalogListResult> {
-    const projectKey = await this.options.resolveProjectKey(input.projectKey ?? this.options.fallbackProjectKey);
-    return this.options.policy.listCatalog({ ...input, projectKey });
+    return this.options.policy.listCatalog(input);
   }
 
   async sessionModelGet(input: SessionModelInput): Promise<SessionModelResult> {
     const projectKey = await this.options.resolveProjectKey(input.projectKey);
+    const saved = await this.options.selectionPort.read({ projectKey, sessionKey: input.sessionKey });
     return this.result(
       projectKey,
       input.sessionKey,
-      await this.options.selectionPort.read({ projectKey, sessionKey: input.sessionKey }),
+      saved ? this.options.policy.restoreSelection(projectKey, saved) : undefined,
     );
   }
 
@@ -56,13 +56,14 @@ export class GatewaySessionModelBundle {
       throw new DialogGatewayError("INVALID_MODEL_OVERRIDE", "selection is required.");
     }
     this.options.policy.validateSelection(projectKey, input.selection);
+    const selection = this.options.policy.normalizeSelection(input.selection);
     await this.options.selectionPort.write({
       projectKey,
       sessionKey: input.sessionKey,
-      selection: input.selection,
+      selection,
     });
     await this.options.router.close(input.sessionKey);
-    return this.result(projectKey, input.sessionKey, input.selection);
+    return this.result(projectKey, input.sessionKey, selection);
   }
 
   async sessionModelClear(input: SessionModelInput): Promise<void> {
@@ -93,15 +94,20 @@ export class GatewaySessionModelBundle {
         throw new DialogGatewayError("INVALID_MODEL_OVERRIDE", "modelSelection must be an object.");
       }
       this.options.policy.validateSelection(projectKey, input.modelSelection);
-      return input.modelSelection.mode === "model"
-        ? { selection: input.modelSelection, source: "turn" }
+      const selection = this.options.policy.normalizeSelection(input.modelSelection);
+      return selection.mode === "model"
+        ? { selection, source: "turn" }
         : { source: "router" };
     }
     if (input.modelOverride) {
       this.options.policy.validateExplicit(projectKey, input.modelOverride);
-      return { selection: input.modelOverride, source: "turn" };
+      return {
+        selection: this.options.policy.normalizeSelection(input.modelOverride) as NonNullable<GatewaySubmitTurnInput["modelOverride"]>,
+        source: "turn",
+      };
     }
-    const saved = await this.options.selectionPort.read({ projectKey, sessionKey: input.sessionKey });
+    const stored = await this.options.selectionPort.read({ projectKey, sessionKey: input.sessionKey });
+    const saved = stored ? this.options.policy.restoreSelection(projectKey, stored) : undefined;
     if (saved?.mode === "model") {
       this.options.policy.validateExplicit(projectKey, saved);
       return { selection: saved, source: "session" };
@@ -126,7 +132,6 @@ export class GatewaySessionModelBundle {
             model: explicit.model,
             source: "session",
             reasoning: explicit.reasoning,
-            temperature: explicit.temperature,
             speed: explicit.speed,
           }
         : {

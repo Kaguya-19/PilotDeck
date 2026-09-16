@@ -24,6 +24,10 @@ import os from 'node:os';
 
 import {
     getPilotDeckGateway,
+    beginProjectDeletion,
+    beginSessionDeletion,
+    isGatewayUnavailableError,
+    withPilotDeckGatewayReadRetry,
 } from './pilotdeck-bridge.js';
 import { mapLegacySessionPresentation } from '../../src/web/server/legacySessionPresentation.js';
 import {
@@ -35,6 +39,7 @@ import {
 import { mapCronRunOutcome } from '../../src/cron/protocol/types.js';
 import sessionManager from './sessionManager.js';
 import { applyCustomSessionNames } from './database/db.js';
+import { ensureGeneralWorkspaceDirectory } from './utils/generalWorkspace.js';
 
 // Optional taskmaster detection. Read once per project; lightweight.
 async function detectTaskMaster(projectPath) {
@@ -58,6 +63,20 @@ async function detectTaskMaster(projectPath) {
 }
 
 const directoryCache = new Map();
+
+// Order snapshots by when their scan starts, not when it finishes. A slow
+// pre-creation scan must never overwrite a successfully registered project.
+let projectListRevision = Date.now();
+function nextProjectListRevision() {
+    projectListRevision = Math.max(Date.now(), projectListRevision + 1);
+    return projectListRevision;
+}
+
+async function getProjectsSnapshot(progressCallback = null) {
+    const revision = nextProjectListRevision();
+    const projects = await getProjects(progressCallback);
+    return { projects, revision };
+}
 
 function rememberProjectDirectory(name, fullPath) {
     if (!name || !fullPath) return;
@@ -145,8 +164,9 @@ async function readProjectCreatedAt(projectId) {
 }
 
 async function getProjects(progressCallback = null) {
-    const gateway = await getPilotDeckGateway();
-    const { projects: webProjects } = await gateway.listProjects();
+    const { projects: webProjects } = await withPilotDeckGatewayReadRetry(
+        (gateway) => gateway.listProjects(),
+    );
     const markedProjects = await readMarkedProjectPaths();
     const markedProjectIdsByPath = new Map(
         [...markedProjects.entries()].map(([id, cwd]) => [path.resolve(cwd), id]),
@@ -211,8 +231,11 @@ async function getProjects(progressCallback = null) {
         let sessionsResult;
         let sessionPreviewSucceeded = true;
         try {
-            sessionsResult = await gateway.listSessions({ projectKey: fullPath, limit: 5 });
-        } catch {
+            sessionsResult = await withPilotDeckGatewayReadRetry(
+                (gateway) => gateway.listSessions({ projectKey: fullPath, limit: 5 }),
+            );
+        } catch (error) {
+            if (isGatewayUnavailableError(error)) throw error;
             sessionsResult = { sessions: [] };
             sessionPreviewSucceeded = false;
         }
@@ -256,32 +279,50 @@ async function getProjects(progressCallback = null) {
         progressCallback({ phase: 'done', processed: total, total });
     }
 
-    // Virtual "general" workspace — a non-project chat space rooted at
-    // ~/.pilotdeck. SidebarV2 looks for a project whose `name` or
+    // Virtual "general" conversation space. Its session identity remains
+    // rooted at PILOT_HOME for backwards-compatible transcript discovery,
+    // while agent execution uses a separate managed workspace directory.
+    // SidebarV2 looks for a project whose `name` or
     // `displayName` equals 'general' to populate the dedicated "General"
     // toggle section. PilotDeck's gateway.listProjects() only returns
     // real project directories, so we synthesize one here. New chats
     // started from the General section use this cwd; sessions are
     // sourced from the same backend as any other project.
     const generalHome = resolvePilotHome(process.env);
+    let generalWorkspaceCwd;
+    try {
+        generalWorkspaceCwd = await ensureGeneralWorkspaceDirectory(process.env);
+    } catch (error) {
+        // Keep existing conversations visible even when the configured
+        // workspace root is temporarily unavailable. Sending a turn will
+        // retry the same safety check and surface the failure to the user.
+        console.warn('[projects] failed to prepare General workspace:', error?.message || error);
+    }
     let generalSessions = [];
     let generalTotal = 0;
     let generalLastActivity;
     try {
-        const generalGateway = await getPilotDeckGateway();
         // Pair the first page query with describeProject so the General
         // workspace gets the real session count instead of the page size.
         // Without this, sessionMeta.hasMore was hardcoded `false` and the
         // sidebar would silently truncate to the first 5 sessions even
         // when dozens existed under ~/.pilotdeck/projects/<encoded>/chats/.
-        const sessionsPromise = generalGateway
-            .listSessions({ projectKey: generalHome, limit: 5 })
+        const sessionsPromise = withPilotDeckGatewayReadRetry(
+            (gateway) => gateway.listSessions({ projectKey: generalHome, limit: 5 }),
+        )
             .then((sessionsResult) => ({ sessionsResult, succeeded: true }))
-            .catch(() => ({ sessionsResult: { sessions: [] }, succeeded: false }));
-        const summaryPromise = generalGateway
-            .describeProject({ projectKey: generalHome })
+            .catch((error) => {
+                if (isGatewayUnavailableError(error)) throw error;
+                return { sessionsResult: { sessions: [] }, succeeded: false };
+            });
+        const summaryPromise = withPilotDeckGatewayReadRetry(
+            (gateway) => gateway.describeProject({ projectKey: generalHome }),
+        )
             .then((summary) => ({ summary, succeeded: true }))
-            .catch(() => ({ summary: null, succeeded: false }));
+            .catch((error) => {
+                if (isGatewayUnavailableError(error)) throw error;
+                return { summary: null, succeeded: false };
+            });
         const [
             { sessionsResult: generalSessionsResult, succeeded: generalSessionPreviewSucceeded },
             { summary: generalSummary, succeeded: generalSummarySucceeded },
@@ -303,7 +344,8 @@ async function getProjects(progressCallback = null) {
                 && (generalSummary?.sessionCount ?? generalSessions.length) === 0
                 ? generalSummary?.createdAt
                 : generalSummary?.lastActivity;
-    } catch {
+    } catch (error) {
+        if (isGatewayUnavailableError(error)) throw error;
         generalSessions = [];
         generalTotal = 0;
         generalLastActivity = undefined;
@@ -312,8 +354,15 @@ async function getProjects(progressCallback = null) {
     result.unshift({
         name: 'general',
         displayName: 'general',
+        kind: 'general',
         fullPath: generalHome,
         path: generalHome,
+        ...(generalWorkspaceCwd ? { workspaceCwd: generalWorkspaceCwd } : {}),
+        capabilities: {
+            files: false,
+            explore: false,
+            projectFileMentions: false,
+        },
         lastActivity: generalLastActivity,
         sessions: generalSessions,
         sessionMeta: {
@@ -332,7 +381,6 @@ async function getProjects(progressCallback = null) {
 }
 
 async function getSessions(projectName, limit = 5, offset = 0) {
-    const gateway = await getPilotDeckGateway();
     const projectPath = await extractProjectDirectory(projectName);
     const cursor = offset > 0 ? String(offset) : undefined;
     // Fan-out the page query and the project summary (for the authoritative
@@ -344,12 +392,18 @@ async function getSessions(projectName, limit = 5, offset = 0) {
     // to the user as a button that "doesn't react" once they've already
     // pulled in everything that exists.
     const [listResult, summary] = await Promise.all([
-        gateway
-            .listSessions({ projectKey: projectPath, limit, cursor })
-            .catch(() => ({ sessions: [] })),
-        gateway
-            .describeProject({ projectKey: projectPath })
-            .catch(() => null),
+        withPilotDeckGatewayReadRetry(
+            (gateway) => gateway.listSessions({ projectKey: projectPath, limit, cursor }),
+        ).catch((error) => {
+            if (isGatewayUnavailableError(error)) throw error;
+            return { sessions: [] };
+        }),
+        withPilotDeckGatewayReadRetry(
+            (gateway) => gateway.describeProject({ projectKey: projectPath }),
+        ).catch((error) => {
+            if (isGatewayUnavailableError(error)) throw error;
+            return null;
+        }),
     ]);
     const sessions = (listResult.sessions || []).map((session) =>
         toLegacySession(session, projectName),
@@ -427,6 +481,7 @@ async function addProjectManually(projectPath, _displayName = null) {
             `[projects] failed to materialize PilotDeck project dir for ${name}:`,
             error?.message || error,
         );
+        throw error;
     }
 
     return {
@@ -434,6 +489,8 @@ async function addProjectManually(projectPath, _displayName = null) {
         displayName: projectDisplayName(absolute),
         fullPath: absolute,
         path: absolute,
+        lastActivity: await readProjectCreatedAt(name),
+        projectListRevision: nextProjectListRevision(),
     };
 }
 
@@ -474,29 +531,39 @@ async function deleteSession(projectName, sessionId, _options = {}) {
     const fullPath = await extractProjectDirectory(projectName);
     const pilotHome = resolvePilotHome(process.env);
     const projectId = await resolveProjectIdForPathOrName(projectName, fullPath);
-    // Try the sanitized filename first (current storage layout), then the
-    // raw form (legacy files written before the sanitize fix).
-    const safeId = sanitizeSessionIdForPath(sessionId);
-    const filenames = safeId === sessionId ? [sessionId] : [safeId, sessionId];
-    let removed = false;
-    for (const name of filenames) {
-        const transcript = path.join(
-            pilotHome,
-            'projects',
-            projectId,
-            'chats',
-            `${name}.jsonl`,
-        );
-        try {
-            await fs.unlink(transcript);
-            removed = true;
-        } catch (error) {
-            if (error?.code !== 'ENOENT') {
-                throw error;
+    // The Gateway owns background title requests and the transcript write queue.
+    // Drain/close it before unlinking, so late completions cannot recreate files.
+    const gateway = await getPilotDeckGateway();
+    const finishDeletion = beginSessionDeletion(fullPath, sessionId);
+    let deleted = false;
+    try {
+        await gateway.closeSession({ sessionKey: sessionId, reason: 'session_deleted' });
+        // Try the sanitized filename first (current storage layout), then the
+        // raw form (legacy files written before the sanitize fix).
+        const safeId = sanitizeSessionIdForPath(sessionId);
+        const filenames = safeId === sessionId ? [sessionId] : [safeId, sessionId];
+        let removed = false;
+        for (const name of filenames) {
+            const transcript = path.join(
+                pilotHome,
+                'projects',
+                projectId,
+                'chats',
+                `${name}.jsonl`,
+            );
+            try {
+                await fs.unlink(transcript);
+                removed = true;
+            } catch (error) {
+                if (error?.code !== 'ENOENT') {
+                    throw error;
+                }
             }
         }
-    }
-    return removed;
+        await fs.rm(path.join(pilotHome, 'projects', projectId, 'pending-inputs', `${safeId}.json`), { force: true });
+        deleted = true;
+        return removed;
+    } finally { finishDeletion(deleted); }
 }
 
 async function deleteProject(projectName, force = false) {
@@ -504,15 +571,22 @@ async function deleteProject(projectName, force = false) {
     const pilotHome = resolvePilotHome(process.env);
     const projectId = await resolveProjectIdForPathOrName(projectName, fullPath);
     const projectDir = path.join(pilotHome, 'projects', projectId);
+    const gateway = await getPilotDeckGateway();
+    if (!gateway.closeProjectSessions) throw new Error('Gateway does not support project session closure.');
+    const finishDeletion = beginProjectDeletion(fullPath);
+    let deleted = false;
     try {
+        await gateway.closeProjectSessions({ projectKey: fullPath });
         await fs.rm(projectDir, { recursive: true, force });
+        deleted = true;
         directoryCache.delete(projectName);
         return true;
     } catch (error) {
-        if (error?.code === 'ENOENT') {
-            return false;
-        }
+        if (error?.code === 'ENOENT') { deleted = true; return false; }
         throw error;
+    } finally {
+        finishDeletion(deleted);
+        await gateway.closeProjectSessions({ projectKey: fullPath, resume: true });
     }
 }
 
@@ -632,6 +706,7 @@ async function searchConversations(query, limit = 50, onProjectResult = null, si
 
 export {
     getProjects,
+    getProjectsSnapshot,
     getProjectCronJobsOverview,
     getSessions,
     renameProject,
