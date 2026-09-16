@@ -1,4 +1,13 @@
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+    lstatSync,
+    mkdirSync,
+    mkdtempSync,
+    readFileSync,
+    readdirSync,
+    rmSync,
+    symlinkSync,
+    writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -184,6 +193,46 @@ describe('readPilotDeckConfigFile fallback behavior', () => {
 
         expect(readFileSync(configPath, 'utf8')).toBe(externalRaw);
         expect(readdirSync(dirname(configPath)).filter(name => name.endsWith('.tmp'))).toEqual([]);
+    });
+
+    it('rechecks the revision after the final pre-write callback', async () => {
+        const configPath = useTempConfig('schemaVersion: 1\ncustomEnv:\n  VALUE: first\n');
+        const loaded = readPilotDeckConfigFile();
+        const externalRaw = 'schemaVersion: 1\ncustomEnv:\n  VALUE: external\n';
+
+        await expect(writePilotDeckConfig({
+            schemaVersion: 1,
+            customEnv: { VALUE: 'stale' },
+        }, {
+            expectedRevision: configRevision(loaded.raw),
+            beforeWrite: () => writeFileSync(configPath, externalRaw, 'utf8'),
+        })).rejects.toMatchObject({ code: 'CONFIG_CONFLICT' });
+
+        expect(readFileSync(configPath, 'utf8')).toBe(externalRaw);
+    });
+
+    it('atomically updates a symlink target without replacing the symlink', async () => {
+        const dir = mkdtempSync(join(tmpdir(), 'pilotdeck-config-symlink-test-'));
+        tempDirs.push(dir);
+        const managedDir = join(dir, 'managed');
+        mkdirSync(managedDir);
+        const targetPath = join(managedDir, 'pilotdeck.yaml');
+        const configPath = join(dir, 'pilotdeck.yaml');
+        writeFileSync(targetPath, 'schemaVersion: 1\ncustomEnv:\n  VALUE: first\n', 'utf8');
+        symlinkSync(targetPath, configPath);
+        process.env.PILOTDECK_CONFIG_PATH = configPath;
+
+        const loaded = readPilotDeckConfigFile();
+        await writePilotDeckConfig({
+            schemaVersion: 1,
+            customEnv: { VALUE: 'updated' },
+        }, {
+            expectedRevision: configRevision(loaded.raw),
+        });
+
+        expect(lstatSync(configPath).isSymbolicLink()).toBe(true);
+        expect(readFileSync(targetPath, 'utf8')).toContain('VALUE: updated');
+        expect(readFileSync(configPath, 'utf8')).toBe(readFileSync(targetPath, 'utf8'));
     });
 });
 

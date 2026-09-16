@@ -890,21 +890,51 @@ function valueAtPath(value, keys) {
   return current;
 }
 
+async function resolveConfigWritePath(configPath) {
+  let current = path.resolve(configPath);
+  const visited = new Set();
+  for (;;) {
+    if (visited.has(current)) {
+      const error = new Error(`Too many symbolic links while resolving config path: ${configPath}`);
+      error.code = 'ELOOP';
+      throw error;
+    }
+    visited.add(current);
+
+    let stat;
+    try {
+      stat = await fsPromises.lstat(current);
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+      const resolvedDir = await fsPromises.realpath(path.dirname(current)).catch((dirError) => {
+        if (dirError?.code === 'ENOENT') return path.dirname(current);
+        throw dirError;
+      });
+      return path.join(resolvedDir, path.basename(current));
+    }
+    if (!stat.isSymbolicLink()) return fsPromises.realpath(current);
+
+    const linkTarget = await fsPromises.readlink(current);
+    current = path.resolve(path.dirname(current), linkTarget);
+  }
+}
+
 async function atomicWritePilotDeckYaml(raw, { expectedRevision, beforeWrite } = {}) {
   const configPath = getPilotDeckConfigPath();
-  const configDir = path.dirname(configPath);
+  const writePath = await resolveConfigWritePath(configPath);
+  const configDir = path.dirname(writePath);
   await fsPromises.mkdir(configDir, { recursive: true });
 
   let mode = 0o600;
   try {
-    mode = (await fsPromises.stat(configPath)).mode & 0o777;
+    mode = (await fsPromises.stat(writePath)).mode & 0o777;
   } catch (error) {
     if (error?.code !== 'ENOENT') throw error;
   }
 
   const tempPath = path.join(
     configDir,
-    `.${path.basename(configPath)}.${process.pid}.${randomUUID()}.tmp`,
+    `.${path.basename(writePath)}.${process.pid}.${randomUUID()}.tmp`,
   );
   let handle;
   try {
@@ -913,18 +943,32 @@ async function atomicWritePilotDeckYaml(raw, { expectedRevision, beforeWrite } =
     await handle.sync();
     await handle.close();
     handle = null;
-    const currentRaw = await fsPromises.readFile(configPath, 'utf8').catch((error) => {
-      if (error?.code === 'ENOENT') return '';
-      throw error;
-    });
+    await beforeWrite?.();
+    const finalWritePath = await resolveConfigWritePath(configPath);
+    if (finalWritePath !== writePath) {
+      throw configFileError(
+        'CONFIG_CONFLICT',
+        'Config path changed while this update was being saved.',
+      );
+    }
+
+    let currentRaw;
+    try {
+      currentRaw = fs.readFileSync(writePath, 'utf8');
+    } catch (error) {
+      if (error?.code === 'ENOENT') currentRaw = '';
+      else throw error;
+    }
     if (expectedRevision && configRevision(currentRaw) !== expectedRevision) {
       throw configFileError(
         'CONFIG_CONFLICT',
         'Config changed while this update was being saved.',
       );
     }
-    beforeWrite?.();
-    await fsPromises.rename(tempPath, configPath);
+    // Keep the final version check and atomic replacement adjacent without
+    // yielding back to the event loop, so a detected external save cannot be
+    // overwritten by a queued local callback.
+    fs.renameSync(tempPath, writePath);
     try {
       const dirHandle = await fsPromises.open(configDir, 'r');
       try { await dirHandle.sync(); } finally { await dirHandle.close(); }
