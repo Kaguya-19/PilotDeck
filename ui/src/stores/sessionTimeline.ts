@@ -27,23 +27,47 @@ const isContent = (message: NormalizedMessage) => message.kind === 'thinking'
 export class SessionTimeline {
   private rendered = new Map<string, { source: NormalizedMessage; closed: boolean; row: NormalizedMessage }>();
   private blocks = new Map<string, NormalizedMessage>();
-  private missingPredecessors = new Set<string>();
+  private missingPredecessors = new Map<string, NormalizedMessage>();
   private conflicts = new Set<string>();
   private pending = new Map<string, Map<number, NormalizedMessage>>();
   private closedThrough = new Map<string, number>();
   private removedTurns = new Set<string>();
   private terminalTurns = new Set<string>();
+  private terminalAgents = new Set<string>();
+
+  private isTerminal(message: NormalizedMessage): boolean {
+    const child = detailAgent(message);
+    return this.terminalTurns.has(turn(message)) || this.terminalTurns.has(message.runId || '')
+      || Boolean(child && (this.terminalAgents.has(JSON.stringify([message.runId, child]))
+        || this.terminalAgents.has(JSON.stringify([undefined, child]))));
+  }
+
+  private clearGaps(matches: (message: NormalizedMessage) => boolean): void {
+    for (const [id, message] of this.missingPredecessors) if (matches(message)) this.missingPredecessors.delete(id);
+    for (const [id, frames] of this.pending) if ([...frames.values()].some(matches)) this.pending.delete(id);
+    for (const id of this.conflicts) {
+      const message = this.blocks.get(id);
+      if (message && matches(message)) this.conflicts.delete(id);
+    }
+  }
 
   apply(message: NormalizedMessage): boolean {
+    // HTTP baselines contain lifecycle frames as well as content. Completion
+    // can arrive before the child's first restored block.
+    if (message.kind === 'agent_activity' && message.phase === 'subagent' && message.subagentId
+        && ['completed', 'failed', 'cancelled'].includes(message.state || '')) {
+      this.close(message.parentRunId, true, message.subagentId);
+    }
     if (!isTimelineMessage(message)) return false;
     const id = key(message);
     const p = message.timeline!;
     if (this.removedTurns.has(p.turnId) || this.removedTurns.has(message.runId || "")) return this.hasGap;
+    // Restore absolute content after termination, but never resume its stream.
+    if (this.isTerminal(message) && p.offset !== undefined) return this.hasGap;
     this.missingPredecessors.delete(id);
     if (p.offset !== undefined && p.previousId && !this.blocks.has(`${p.turnId}:${p.previousId}`)) {
-      this.missingPredecessors.add(`${p.turnId}:${p.previousId}`);
+      this.missingPredecessors.set(`${p.turnId}:${p.previousId}`, message);
     }
-    if ((this.terminalTurns.has(p.turnId) || this.terminalTurns.has(message.runId || '')) && !message.isFinal) return this.hasGap;
     // A new block closes earlier blocks, even if packets for them arrive late.
     const channel = scope(message);
     this.closedThrough.set(channel, Math.max(this.closedThrough.get(channel) ?? -1, p.order - 1));
@@ -90,11 +114,16 @@ export class SessionTimeline {
   get hasGap(): boolean { return this.pending.size > 0 || this.missingPredecessors.size > 0 || this.conflicts.size > 0; }
 
   close(runId?: string, terminal = false, subagentId?: string, boundary?: { turnId: string; through: number }): void {
+    const matches = (message: NormalizedMessage) =>
+      (!runId || turn(message) === runId || message.runId === runId)
+      && (subagentId !== undefined ? detailAgent(message) === subagentId : terminal || !detailAgent(message))
+      && (!boundary || turn(message) === boundary.turnId);
+    if (terminal) {
+      if (subagentId) this.terminalAgents.add(JSON.stringify([runId, subagentId]));
+      this.clearGaps(matches);
+    }
     for (const message of this.blocks.values()) {
-      if (runId && turn(message) !== runId && message.runId !== runId) continue;
-      if (subagentId !== undefined && detailAgent(message) !== subagentId) continue;
-      if (subagentId === undefined && !terminal && detailAgent(message)) continue;
-      if (boundary && turn(message) !== boundary.turnId) continue;
+      if (!matches(message)) continue;
       const channel = scope(message);
       this.closedThrough.set(channel, Math.max(this.closedThrough.get(channel) ?? -1, boundary?.through ?? message.timeline!.order));
       if (terminal) this.terminalTurns.add(turn(message));
@@ -104,19 +133,19 @@ export class SessionTimeline {
 
   removeTurn(runId: string): void {
     this.removedTurns.add(runId);
+    this.clearGaps(message => turn(message) === runId || message.runId === runId);
     for (const [id, message] of this.blocks) if (turn(message) === runId || message.runId === runId) {
       this.blocks.delete(id);
       this.rendered.delete(id);
       this.pending.delete(id);
       this.conflicts.delete(id);
     }
-    for (const id of this.missingPredecessors) if (id.startsWith(`${runId}:`)) this.missingPredecessors.delete(id);
     this.terminalTurns.add(runId);
   }
 
   values(subagentId?: string | null): NormalizedMessage[] {
     return [...this.blocks.values()].filter(m => subagentId === null || detailAgent(m) === subagentId).map(message => {
-      const closed = message.isFinal || this.terminalTurns.has(turn(message)) || this.terminalTurns.has(message.runId || "")
+      const closed = message.isFinal || this.isTerminal(message)
         || message.timeline!.order <= (this.closedThrough.get(scope(message)) ?? -1);
       if (!isContent(message)) return message;
       const id = key(message);

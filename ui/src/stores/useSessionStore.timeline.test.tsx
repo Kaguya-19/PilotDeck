@@ -64,3 +64,17 @@ it('parent termination closes and refreshes cached child details and rejects lat
     timeline: { ...child.timeline, revision: 2, offset: child.content!.length } }));
   expect(result.current.getSubagentDetailMessages('s', 'child')[0]).toMatchObject({ content: 'child thought', streamState: 'closed' });
 });
+
+it.each(['fetchFromServer', 'refreshFromServer'] as const)('%s applies child termination before content in a restored baseline', async (method) => {
+  const activity: NormalizedMessage = { ...thought(1, ''), timeline: undefined, kind: 'agent_activity',
+    phase: 'subagent', state: 'failed', parentRunId: 'run', runId: 'subagent:child', subagentId: 'child' };
+  const child: NormalizedMessage = { ...thought(2, 'Interrupted thought'), subagentId: 'child', isSubagentDetail: true,
+    streamState: 'open', timeline: { ...thought(2, '').timeline!, turnId: 'child-t0' } };
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+    messages: [], stream: { active: true, runId: 'run', messages: [activity, child, thought(3, 'Parent continues')] },
+  }))));
+  const { result } = renderHook(useSessionStore);
+  await act(async () => { await result.current[method]('s'); });
+  expect(result.current.getSubagentDetailMessages('s', 'child')[0]).toMatchObject({ content: 'Interrupted thought', streamState: 'closed' });
+  expect(result.current.getMessages('s')[0]).toMatchObject({ content: 'Parent continues', streamState: 'open' });
+});

@@ -70,7 +70,7 @@ test("agent loop drops interrupted tool calls and continues with a chunked-write
     yield { type: "message_end", finishReason: "stop" };
   }, () => { scheduledToolCalls += 1; });
 
-  const events: Array<{ type: string }> = [];
+  const events: AgentEvent[] = [];
   for await (const event of loop.run({
     sessionId: "stream-interruption",
     turnId: "turn-1",
@@ -81,6 +81,10 @@ test("agent loop drops interrupted tool calls and continues with a chunked-write
 
   assert.equal(requests.length, 2);
   assert.equal(scheduledToolCalls, 0);
+  const recoveredDelta = events.find(event => event.type === "model_event" && event.event.type === "text_delta");
+  assert.ok(recoveredDelta?.timeline);
+  assert.equal(recoveredDelta.timeline.previousId, undefined, "an incomplete tool must not leave a predecessor dependency");
+
   assert.ok(events.some((event) => event.type === "turn_continued"));
   assert.ok(!events.some((event) => event.type === "turn_failed"));
   const recoveryRequest = requests[1]!;

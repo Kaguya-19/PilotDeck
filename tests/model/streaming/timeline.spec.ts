@@ -111,3 +111,15 @@ for (const withStart of [true, false]) test(`tool-separated text keeps wire/hist
   assert.equal(toolCalls[0].timeline?.order, 1);
   assert.equal(rows[2].timeline?.previousId, 'tool:call');
 });
+
+test('uncompleted tools reserve order without becoming predecessors of interleaved or retried text', () => {
+  const timeline = new TurnTimeline('turn');
+  const first = timeline.event({ type: 'model_event', ...base, blockId: 'first', event: { type: 'text_delta', text: 'Before' } });
+  timeline.event({ type: 'model_event', ...base, event: { type: 'tool_call_start', id: 'discarded', name: 'write_file' } });
+  const during = timeline.event({ type: 'model_event', ...base, blockId: 'during', event: { type: 'text_delta', text: 'During' } });
+  assert.equal(during.timeline?.previousId, first.timeline?.id);
+  timeline.event({ type: 'model_request_started', ...base, model: 'test', provider: 'test' });
+  const retry = timeline.event({ type: 'model_event', ...base, blockId: 'retry', event: { type: 'text_delta', text: 'Recovered' } });
+  assert.equal(retry.timeline?.previousId, during.timeline?.id);
+  assert.ok(retry.timeline!.order > during.timeline!.order);
+});

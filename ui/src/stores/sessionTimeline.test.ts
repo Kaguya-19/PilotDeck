@@ -112,3 +112,38 @@ describe('versioned session timeline', () => {
     expect(computeMerged([persisted], [state.values('child')[0]])).toHaveLength(1);
   });
 });
+
+it('restores a terminated child snapshot without reopening it or blocking the parent', () => {
+  const state = new SessionTimeline();
+  state.close('turn', true, 'child');
+  const child = frame('thought', 0, 1, 'Restored thought', undefined, {
+    kind: 'thinking', isSubagentDetail: true, subagentId: 'child', streamState: 'open',
+  });
+  child.timeline!.turnId = 'child-t0';
+  state.apply(child);
+  expect(state.values('child')[0]).toMatchObject({ content: 'Restored thought', streamState: 'closed' });
+  expect(state.apply({ ...child, content: ' late', timeline: { ...child.timeline!, offset: 16, revision: 2 } })).toBe(false);
+  expect(state.values('child')[0].content).toBe('Restored thought');
+  state.apply(frame('parent', 0, 1, 'Parent continues', 0));
+  expect(state.values()[0].streamState).toBe('open');
+});
+
+it('terminal recovery clears orphaned predecessors, pending deltas and conflicts only for that turn', () => {
+  const state = new SessionTimeline();
+  const retry = frame('retry', 2, 3, 'Recovered', 0);
+  retry.timeline!.previousId = 'tool:discarded';
+  expect(state.apply(retry)).toBe(true);
+  state.apply(frame('pending', 3, 4, 'tail', 10));
+  state.apply(frame('retry', 2, 3, 'conflict', 0));
+  state.apply(frame('retry', 2, 5, 'Recovered', undefined, { isFinal: true }));
+  const other = frame('other', 0, 1, 'tail', 4, { runId: 'other-run' });
+  other.timeline!.turnId = 'other-run';
+  state.apply(other);
+  state.close('turn', true);
+  expect(state.hasGap).toBe(true); // The other active turn still needs recovery.
+  expect(state.apply({ ...other, content: 'head', timeline: { ...other.timeline!, offset: 0 } })).toBe(false);
+  expect(state.apply(retry)).toBe(false); // Late packets cannot recreate the discarded dependency.
+  const next = frame('next', 0, 1, 'New turn', 0, { runId: 'next-run' });
+  next.timeline!.turnId = 'next-run';
+  expect(state.apply(next)).toBe(false);
+});

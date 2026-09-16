@@ -10,14 +10,26 @@ export class TurnTimeline {
   private nextOrder = 0;
   private revision = 0;
   private positions = new Map<string, TimelinePosition>();
+  private provisionalTools = new Set<string>();
   private offsets = new Map<string, number>();
 
-  position(id: string): TimelinePosition {
+  position(id: string, provisional = false): TimelinePosition {
     let position = this.positions.get(id);
     if (!position) {
       position = { version: 1, turnId: this.turnId, id, ...(this.previousId ? { previousId: this.previousId } : {}), order: this.nextOrder++, revision: ++this.revision };
       this.positions.set(id, position);
-      this.previousId = id;
+      if (provisional) this.provisionalTools.add(id);
+      else this.previousId = id;
+    }
+    if (!provisional && this.provisionalTools.delete(id)) {
+      // Only complete tools enter the predecessor chain. A reserved but
+      // interrupted argument stream must never become a recoverable dependency.
+      const previous = [...this.positions.values()].filter(candidate =>
+        candidate.order < position!.order && !this.provisionalTools.has(candidate.id))
+        .sort((a, b) => b.order - a.order)[0];
+      position = { ...position, previousId: previous?.id };
+      this.positions.set(id, position);
+      if (!this.previousId || this.positions.get(this.previousId)!.order < position.order) this.previousId = id;
     }
     return position;
   }
@@ -41,10 +53,14 @@ export class TurnTimeline {
   }
 
   event(event: AgentEvent): AgentEvent {
+    if (event.type === 'model_request_started') {
+      for (const id of this.provisionalTools) this.positions.delete(id);
+      this.provisionalTools.clear();
+    }
     if (event.type === 'model_event') {
       // Reserve the tool's slot before any subsequent text gets a position.
       // Some adapters emit only a complete tool call, without a start frame.
-      if (event.event.type === 'tool_call_start') this.position(`tool:${event.event.id}`);
+      if (event.event.type === 'tool_call_start') this.position(`tool:${event.event.id}`, true);
       if (event.event.type === 'tool_call_end') this.position(`tool:${event.event.toolCall.id}`);
     }
     if (event.type === 'model_event' && event.blockId &&

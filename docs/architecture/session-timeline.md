@@ -11,6 +11,9 @@ if an older assembler already combined non-adjacent parts.
 - `turnId` identifies the originating agent turn, including child-agent turns.
 - `id` and `order` are allocated before the first update and survive persistence.
 - `previousId` allows a client to notice a completely missing live block.
+  Tool starts reserve ordering slots but join this chain only once complete;
+  interrupted, unfinished tool reservations are discarded before the next model
+  request. They are never advertised as recoverable predecessors.
 - `revision` increases within the turn. An older snapshot never replaces newer
   content. Final snapshots replace drafts by identity, not by comparing text.
 - `offset` is the UTF-16 string offset of an incremental text payload. Absence
@@ -39,6 +42,11 @@ transcript synchronization, not model inference.
    edited-away turns. New content bypasses legacy text/position reconciliation.
 5. Rendering derives order and active status from this state. React keys remain
    stable through settlement. Expansion and scrolling remain view state.
+
+Terminal child state is retained by parent-run/child identity even before any
+content arrives. Restored absolute snapshots remain readable but closed; late
+deltas cannot restart them. Terminal transitions clear pending recovery work for
+that execution, without clearing gaps in other active executions.
 
 There is deliberately no client reconstruction of a provider response from its
 text. Legacy records/frames use the old adapter at the boundary. Runtime status
