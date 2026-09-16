@@ -30,6 +30,8 @@ function createSessionStore() {
     finalizeStreaming: vi.fn(),
     finalizeStreamingThinking: vi.fn(),
     appendRealtime: vi.fn(),
+    closeTimeline: vi.fn(),
+    applyTimelineMessage: vi.fn(),
     setActivities: vi.fn(),
   } as unknown as SessionStore;
 }

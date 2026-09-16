@@ -1,3 +1,4 @@
+import { SessionTimeline, isTimelineMessage, mergeTimeline, type TimelinePosition } from './sessionTimeline';
 /**
  * Session-keyed message store.
  *
@@ -47,6 +48,9 @@ export interface CompactProgress {
 }
 
 export interface NormalizedMessage {
+  timeline?: TimelinePosition;
+  streamBoundary?: { turnId: string; through: number; revision: number };
+  streamState?: "open" | "closed";
   model?: string;
   id: string;
   /** Stable UI identity across streaming finalization. */
@@ -192,6 +196,8 @@ export interface NormalizedMessage {
 export type SessionStatus = 'idle' | 'loading' | 'streaming' | 'error';
 
 export interface SessionSlot {
+  timeline?: SessionTimeline;
+  timelineServerRef?: NormalizedMessage[];
   serverMessages: NormalizedMessage[];
   realtimeMessages: NormalizedMessage[];
   activityMessages: NormalizedMessage[];
@@ -1178,6 +1184,13 @@ function reconcileStreamSnapshots(
  * Realtime messages that aren't yet in server stay (in-flight streaming).
  */
 export function computeMerged(server: NormalizedMessage[], realtime: NormalizedMessage[]): NormalizedMessage[] {
+  if (!server.some(isTimelineMessage) && !realtime.some(isTimelineMessage)) return computeLegacyMerged(server, realtime);
+  const timeline = new SessionTimeline();
+  for (const message of [...server, ...realtime]) timeline.apply(message);
+  return mergeTimeline(computeLegacyMerged(server.filter(m => !isTimelineMessage(m)), realtime.filter(m => !isTimelineMessage(m))), timeline.values(null));
+}
+
+function computeLegacyMerged(server: NormalizedMessage[], realtime: NormalizedMessage[]): NormalizedMessage[] {
   if (realtime.length === 0) {
     return server;
   }
@@ -1431,14 +1444,30 @@ function recomputeMergedIfNeeded(slot: SessionSlot): boolean {
   }
   slot._lastServerRef = slot.serverMessages;
   slot._lastRealtimeRef = slot.realtimeMessages;
-  slot.merged = inheritMessageRenderKeys(slot.merged, computeMerged(slot.serverMessages, slot.realtimeMessages));
+  const timeline = slot.timeline ??= new SessionTimeline();
+  if (slot.timelineServerRef !== slot.serverMessages) {
+    for (const message of slot.serverMessages) timeline.apply(message);
+    slot.timelineServerRef = slot.serverMessages;
+  }
+  slot.merged = inheritMessageRenderKeys(slot.merged, mergeTimeline(
+    computeLegacyMerged(slot.serverMessages.filter(m => !isTimelineMessage(m)), slot.realtimeMessages.filter(m => !isTimelineMessage(m))),
+    timeline.values(),
+  ));
   return true;
 }
 
 function forceRecomputeMerged(slot: SessionSlot): void {
   slot._lastServerRef = slot.serverMessages;
   slot._lastRealtimeRef = slot.realtimeMessages;
-  slot.merged = inheritMessageRenderKeys(slot.merged, computeMerged(slot.serverMessages, slot.realtimeMessages));
+  const timeline = slot.timeline ??= new SessionTimeline();
+  if (slot.timelineServerRef !== slot.serverMessages) {
+    for (const message of slot.serverMessages) timeline.apply(message);
+    slot.timelineServerRef = slot.serverMessages;
+  }
+  slot.merged = inheritMessageRenderKeys(slot.merged, mergeTimeline(
+    computeLegacyMerged(slot.serverMessages.filter(m => !isTimelineMessage(m)), slot.realtimeMessages.filter(m => !isTimelineMessage(m))),
+    timeline.values(),
+  ));
 }
 
 function streamingKey(sessionId: string, runId?: string): string {
@@ -1645,6 +1674,13 @@ export function useSessionStore() {
       const data = await response.json();
       if (requestGeneration < slot._serverAppliedGeneration) return slot;
       slot._serverAppliedGeneration = requestGeneration;
+      if (Array.isArray(data.stream?.messages)) {
+        const timeline = slot.timeline ??= new SessionTimeline();
+        for (const frame of data.stream.messages) {
+          timeline.apply(normalizeCompactionMessage(frame));
+          if (frame.subagentId) slot.subagentDetailMessages.set(frame.subagentId, timeline.values(frame.subagentId));
+        }
+      }
       const messages: NormalizedMessage[] = data.messages || [];
 
       const previousById = new Map(slot.serverMessages.map(message => [message.id, message]));
@@ -1752,7 +1788,26 @@ export function useSessionStore() {
    * Append a realtime (WebSocket) message to the correct session slot.
    * This works regardless of which session is actively viewed.
    */
+  const applyTimelineMessage = useCallback((sessionId: string, message: NormalizedMessage): boolean => {
+    const slot = getSlot(sessionId);
+    const timeline = slot.timeline ??= new SessionTimeline();
+    const gap = timeline.apply(message);
+    if (message.subagentId) slot.subagentDetailMessages.set(message.subagentId, timeline.values(message.subagentId));
+    forceRecomputeMerged(slot);
+    notify(sessionId);
+    return gap;
+  }, [getSlot, notify]);
+
+  const closeTimeline = useCallback((sessionId: string, runId?: string, terminal = false, subagentId?: string, boundary?: NormalizedMessage["streamBoundary"]) => {
+    const slot = getSlot(sessionId);
+    slot.timeline?.close(runId, terminal, subagentId, boundary);
+    if (subagentId) slot.subagentDetailMessages.set(subagentId, slot.timeline?.values(subagentId) ?? []);
+    forceRecomputeMerged(slot);
+    notify(sessionId);
+  }, [getSlot, notify]);
+
   const appendRealtime = useCallback((sessionId: string, msg: NormalizedMessage) => {
+    if (isTimelineMessage(msg)) { applyTimelineMessage(sessionId, msg); return; }
     msg = normalizeCompactionMessage(msg);
     const slot = getSlot(sessionId);
     const capturedMessage = captureOptimisticUserServerTail(
@@ -1773,7 +1828,7 @@ export function useSessionStore() {
       recomputeMergedIfNeeded(slot);
       notify(sessionId);
     }
-  }, [getSlot, notify]);
+  }, [getSlot, notify, applyTimelineMessage]);
 
   /**
    * Replace the transcript tail in-place after the gateway atomically removes
@@ -1804,6 +1859,7 @@ export function useSessionStore() {
     };
 
     const previousServerMessageCount = slot.serverMessages.length;
+    slot.timeline?.removeTurn(replacedTurnId);
     slot.serverMessages = truncateAtTurn(slot.serverMessages);
     slot.realtimeMessages = [
       ...truncateAtTurn(slot.realtimeMessages),
@@ -2130,6 +2186,13 @@ export function useSessionStore() {
         return;
       }
       slot._serverAppliedGeneration = requestGeneration;
+      if (Array.isArray(data.stream?.messages)) {
+        const timeline = slot.timeline ??= new SessionTimeline();
+        for (const frame of data.stream.messages) {
+          timeline.apply(normalizeCompactionMessage(frame));
+          if (frame.subagentId) slot.subagentDetailMessages.set(frame.subagentId, timeline.values(frame.subagentId));
+        }
+      }
       // Don't overwrite existing server messages with empty response
       // (race condition: server hasn't committed yet after stop/complete).
       if (incomingMessages.length > 0 || slot.serverMessages.length === 0) {
@@ -2396,7 +2459,7 @@ export function useSessionStore() {
     has,
     fetchFromServer,
     fetchMore,
-    appendRealtime,
+    appendRealtime, applyTimelineMessage, closeTimeline,
     replaceLastTurn,
     upsertActivity,
     setActivities,
@@ -2424,7 +2487,7 @@ export function useSessionStore() {
     finalizeSubagentDetailThinking,
   }), [
     getSlot, has, fetchFromServer, fetchMore,
-    appendRealtime, replaceLastTurn, upsertActivity, setActivities, cancelRunningActivities, appendRealtimeBatch, refreshFromServer,
+    appendRealtime, applyTimelineMessage, closeTimeline, replaceLastTurn, upsertActivity, setActivities, cancelRunningActivities, appendRealtimeBatch, refreshFromServer,
     setActiveSession, setStatus, isStale, updateStreaming, finalizeStreaming,
     updateStreamingThinking, finalizeStreamingThinking,
     clearRealtime, clearAssistantRealtime, getMessages, getActivityMessages, getSubagentDetailMessages, getSessionSlot,

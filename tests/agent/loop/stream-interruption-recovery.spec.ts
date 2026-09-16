@@ -471,7 +471,8 @@ for (const [name, text] of Object.entries(literalToolExamples)) {
       const blockIds = [...new Set(events.flatMap(event =>
         event.type === "model_event" && event.blockId ? [event.blockId] : []))];
       assert.equal(blockIds.length, chunked ? 2 : 1);
-      assert.deepEqual(durable[0]!.content, [
+      assert.ok(durable[0]!.content.every(block => block.timeline?.version === 1));
+      assert.deepEqual(durable[0]!.content.map(({ timeline: _timeline, ...block }) => block), [
         ...(chunked ? [{ type: "thinking", text: reasoning, reasoningContent: reasoning, blockId: blockIds[0] }] : []),
         { type: "text", text, blockId: blockIds.at(-1) },
       ]);

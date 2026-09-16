@@ -1,0 +1,37 @@
+import { act, renderHook } from '@testing-library/react';
+import { afterEach, expect, it, vi } from 'vitest';
+import { useSessionStore, type NormalizedMessage } from './useSessionStore';
+vi.mock('../utils/api', () => ({ authenticatedFetch: (...args: unknown[]) => fetch(...args as Parameters<typeof fetch>), readAgentStatusErrorFromResponse: vi.fn() }));
+afterEach(() => vi.unstubAllGlobals());
+const thought = (revision: number, content: string, offset?: number): NormalizedMessage => ({
+  id: 'wire', sessionId: 's', runId: 'run', kind: 'thinking', provider: 'pilotdeck', timestamp: '2026-01-01', content,
+  timeline: { version: 1, turnId: 'run', id: 'thought', order: 0, revision, offset },
+});
+it('history racing live updates does not change identity, regress content or lose the user anchor', async () => {
+  let resolveHistory!: (response: Response) => void;
+  vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(resolve => { resolveHistory = resolve; })));
+  const { result } = renderHook(useSessionStore);
+  let request: Promise<unknown>;
+  act(() => { result.current.setActiveSession('s'); request = result.current.fetchFromServer('s'); });
+  act(() => {
+    result.current.appendRealtime('s', { ...thought(1, 'question'), id: 'local_user', timeline: undefined, role: 'user', kind: 'text' });
+    result.current.applyTimelineMessage('s', thought(1, 'one', 0));
+    result.current.applyTimelineMessage('s', thought(2, ' two', 3));
+  });
+  const id = result.current.getMessages('s').find(m => m.timeline)?.id;
+  await act(async () => {
+    resolveHistory(new Response(JSON.stringify({ messages: [], stream: { messages: [thought(1, 'one')] } })));
+    await request;
+  });
+  expect(result.current.getMessages('s').map(m => m.content)).toEqual(['question', 'one two']);
+  expect(result.current.getMessages('s').find(m => m.timeline)?.id).toBe(id);
+  act(() => result.current.closeTimeline('s', 'run', false, undefined, { turnId: 'run', through: 0, revision: 3 }));
+  expect(result.current.getMessages('s').find(m => m.timeline)?.streamState).toBe('closed');
+});
+it('editing a turn tombstones its protocol rows and rejects late final snapshots', () => {
+  const { result } = renderHook(useSessionStore);
+  act(() => result.current.applyTimelineMessage('s', thought(1, 'old', 0)));
+  act(() => result.current.replaceLastTurn('s', 'run', { ...thought(1, 'new'), id: 'replacement', timeline: undefined, runId: 'new-run', role: 'user', kind: 'text' }));
+  act(() => result.current.applyTimelineMessage('s', { ...thought(2, 'old final'), isFinal: true }));
+  expect(result.current.getMessages('s').map(m => m.content)).toEqual(['new']);
+});
