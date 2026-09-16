@@ -1,8 +1,6 @@
-import { spawn } from "node:child_process";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
 
 const sourceRoot = process.env.PARITY_SOURCE_ROOT;
@@ -25,30 +23,27 @@ const importFrom = (root, relative) => import(pathToFileURL(path.join(root, rela
 const { createLocalGateway } = await importFrom(sourceRoot, "dist/src/cli/createLocalGateway.js");
 const { startPilotDeckServer } = await importFrom(sourceRoot, "dist/src/cli/pilotdeckServer.js");
 const { GatewayWsClient } = await importFrom(sourceRoot, "dist/src/gateway/client/GatewayWsClient.js");
-const { createRouterModelInvokerPort, createToolSchedulerPort } = await importFrom(
-  sidecarRoot,
-  "dist/src/agent/modules/adapters.js",
-);
-const { createNativeOneShotSubagentPort } = await importFrom(
-  sidecarRoot,
-  "dist/src/agent/sub/OneShotSubagentPort.js",
-);
-const { requiresPromptCapability } = await importFrom(
-  sourceRoot,
-  "dist/src/tool/userInteractionConstraints.js",
-);
 const { DEFAULT_MODEL_CAPABILITIES } = await importFrom(
   sourceRoot,
   "dist/src/model/protocol/capabilities.js",
 );
-const { materializeMediaReferences } = await importFrom(
+const { getPilotProjectChatDir } = await importFrom(
   sourceRoot,
-  "dist/src/model/index.js",
+  "dist/src/pilot/paths.js",
+);
+const { sanitizeSessionIdForPath } = await importFrom(
+  sourceRoot,
+  "dist/src/session/storage/ProjectSessionStorage.js",
+);
+const { nodeProjectSessionStorageProvider } = await importFrom(
+  sourceRoot,
+  "dist/src/session/storage/ProjectSessionStorageProvider.js",
 );
 
 let sequence = 0;
 const trace = [];
 let modelAttempt = 0;
+const scopedModelAttempts = new Map();
 let markModelStarted;
 const modelStarted = new Promise((resolve) => {
   markModelStarted = resolve;
@@ -80,41 +75,61 @@ const post = async (pathname, body, signal) => {
 };
 
 async function waitForSubagentModelRequest({ timeoutMs = 5000 } = {}) {
+  return waitForSubagentModelRequests({ timeoutMs, count: 1 });
+}
+
+async function waitForSubagentModelRequests({ timeoutMs = 5000, count }) {
   const deadline = Date.now() + timeoutMs;
   let latest = 0;
   while (Date.now() < deadline) {
     const state = await post("/control/state", { runKey });
     latest = Number(state.subagentModelRequests ?? 0);
-    if (latest >= 1) return latest;
+    if (latest >= count) return latest;
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
-  throw new Error(`Timed out waiting for a subagent model request; observed ${latest}.`);
+  throw new Error(`Timed out waiting for ${count} subagent model request(s); observed ${latest}.`);
+}
+
+async function waitForScopedModelResponses({ timeoutMs = 5000, agentScope, count }) {
+  const deadline = Date.now() + timeoutMs;
+  let latest = 0;
+  while (Date.now() < deadline) {
+    latest = trace.filter((record) =>
+      record.kind === "model.response" && record.agentScope === agentScope).length;
+    if (latest >= count) return latest;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timed out waiting for ${count} ${agentScope} model response(s); observed ${latest}.`);
 }
 
 class MockModelRuntime {
   async *stream(request, options = {}) {
     modelAttempt += 1;
-    push("model.request", { attempt: modelAttempt, modelView: modelView(request), request });
+    const invocationAttempt = modelAttempt;
+    const agentScope = isSubagentModelRequest(request) ? "child" : "parent";
+    const attempt = (scopedModelAttempts.get(agentScope) ?? 0) + 1;
+    scopedModelAttempts.set(agentScope, attempt);
+    push("model.request", { agentScope, attempt, modelView: modelView(request), request });
     markModelStarted();
-    const fault = faultAt("model", modelAttempt);
+    const fault = faultAt("model", invocationAttempt);
     if (fault?.action === "retryable_error" || fault?.action === "non_retryable_error") {
       const retryable = fault.action === "retryable_error";
       const error = Object.assign(new Error(retryable ? "Deterministic temporary provider failure." : "Deterministic permanent provider failure."), {
         code: retryable ? "provider_unavailable" : "invalid_model_response",
         retryable,
       });
-      push("fault.injected", { target: "model", action: fault.action, attempt: modelAttempt });
-      push("model.error", { code: error.code, message: error.message, retryable, attempt: modelAttempt });
+      push("fault.injected", { agentScope, target: "model", action: fault.action, attempt });
+      push("model.error", { agentScope, code: error.code, message: error.message, retryable, attempt });
       throw error;
     }
     if (fault?.action === "stream_interruption") {
-      push("fault.injected", { target: "model", action: fault.action, attempt: modelAttempt });
+      push("fault.injected", { agentScope, target: "model", action: fault.action, attempt });
       yield { type: "request_started", provider: request.provider, model: request.model };
       yield { type: "message_start", role: "assistant" };
       yield { type: "text_delta", text: "partial" };
       throw Object.assign(new Error("Deterministic stream interruption."), { code: "stream_interrupted", retryable: false });
     }
-    const response = await post("/v1/chat/completions", {
+    const responsePromise = post("/v1/chat/completions", {
       scenarioId: scenario.scenarioId,
       q: scenario.q,
       messages: request.messages,
@@ -122,7 +137,7 @@ class MockModelRuntime {
       // A child AgentLoop inherits this metadata through the native subagent
       // composition. The deterministic provider uses it only to select its
       // fixture response; the sidecar never receives or owns child state.
-      isSubagent: typeof request.metadata?.subagentId === "string",
+      isSubagent: isSubagentModelRequest(request),
       delays: scenario.delays,
       toolDelays: scenario.toolDelays,
       // Model faults are injected above using the shared invocation sequence.
@@ -131,12 +146,26 @@ class MockModelRuntime {
       faults: { ...(scenario.faults ?? {}), model: [] },
       runKey,
     }, options.signal);
+    if (scenario.scenarioId === "sidecar_live_model_stream") {
+      yield { type: "request_started", provider: request.provider, model: request.model };
+      yield { type: "message_start", role: "assistant" };
+      push("model.stream", { agentScope, state: "first_delta" });
+      yield { type: "text_delta", text: "STREAM_PREFIX::" };
+      const response = await responsePromise;
+      push("model.stream", { agentScope, state: "provider_completed" });
+      const message = response.choices[0].message;
+      push("model.response", { agentScope, attempt, modelView: message, response: message });
+      yield { type: "text_delta", text: message.content ?? "" };
+      yield { type: "message_end", finishReason: "stop" };
+      return;
+    }
+    const response = await responsePromise;
     if (fault?.action === "malformed_response") {
-      push("fault.injected", { target: "model", action: fault.action, attempt: modelAttempt });
+      push("fault.injected", { agentScope, target: "model", action: fault.action, attempt });
       throw Object.assign(new Error("Deterministic malformed model response."), { code: "invalid_model_response", retryable: false });
     }
     const message = response.choices[0].message;
-    push("model.response", { attempt: modelAttempt, modelView: message, response: message });
+    push("model.response", { agentScope, attempt, modelView: message, response: message });
     yield { type: "request_started", provider: request.provider, model: request.model };
     yield { type: "message_start", role: "assistant" };
     for (const call of message.tool_calls ?? []) {
@@ -148,6 +177,9 @@ class MockModelRuntime {
           input: JSON.parse(call.function.arguments),
         },
       };
+    }
+    if (scenario.scenarioId === "sidecar_budget_limit") {
+      yield { type: "usage", usage: { inputTokens: 1_000, outputTokens: 20, totalTokens: 1_020, nativeCost: 1 } };
     }
     if (message.tool_calls?.length) {
       yield { type: "message_end", finishReason: "tool_call" };
@@ -178,10 +210,21 @@ class MockModelRuntime {
   }
 }
 
+function isSubagentModelRequest(request) {
+  if (typeof request.metadata?.subagentId === "string") return true;
+  return (request.messages ?? []).some((message) =>
+    (message.content ?? []).some((block) =>
+      block?.type === "text"
+      && (block.text === "Return one deterministic subagent report."
+        || block.text === "Return one deterministic one-shot subagent report.")
+    )
+  );
+}
+
 function createTools() {
-  return (scenario.tools ?? []).filter((name) => name !== "ask_user_question" && name !== "read_file").map((name) => ({
+  return (scenario.tools ?? []).filter((name) => !["ask_user_question", "read_file", "write_file"].includes(name)).map((name) => ({
     name,
-    description: name,
+    description: scenario.toolDescription ?? name,
     kind: "custom",
     inputSchema: { type: "object" },
     isReadOnly: () => !["restricted", "loop"].includes(name),
@@ -257,621 +300,113 @@ function createParityReadFileTool() {
   };
 }
 
-class MessageQueue {
-  values = [];
-  waiters = [];
-  failure;
-
-  push(value) {
-    const waiter = this.waiters.shift();
-    if (waiter) waiter.resolve(value);
-    else this.values.push(value);
-  }
-
-  fail(error) {
-    this.failure = error;
-    for (const waiter of this.waiters.splice(0)) waiter.reject(error);
-  }
-
-  async shift() {
-    if (this.values.length) return this.values.shift();
-    if (this.failure) throw this.failure;
-    return new Promise((resolve, reject) => this.waiters.push({ resolve, reject }));
-  }
-}
-
-class StdioAgentLoopRunner {
-  constructor(config, dependencies, seedState) {
-    this.config = config;
-    this.dependencies = dependencies;
-    this.seedState = seedState;
-    // Reuse the session bundle's durable host ports. They own the ordered
-    // model/tool/permission records consumed by the session projection.
-    this.modelPort = dependencies.ports?.model ?? createRouterModelInvokerPort(dependencies.router, {
-      isMainAgent: true,
-      projectPath: config.cwd,
-    });
-    this.toolPort = dependencies.ports?.tools
-      ?? createToolSchedulerPort(dependencies.tools.registry, dependencies.tools.scheduler);
-    this.preparedModelInvocations = new Map();
-    this.latestPreparedByOperation = new Map();
-  }
-
-  snapshotFileState() {
-    return this.seedState ?? { allowedReadFiles: [] };
-  }
-
-  async *run(input) {
-    if (input.abortSignal?.aborted) return abortedTerminal(input);
-    const child = spawn(process.execPath, [path.join(sidecarRoot, "dist/src/cli/pilotdeck-agent-loop-sidecar.js")], {
-      cwd: sidecarRoot,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    const queue = new MessageQueue();
-    const errors = [];
-    const pendingModuleDispatches = new Set();
-    let projectedTurnCompleted;
-    const reader = createInterface({ input: child.stdout });
-    let terminalSeen = false;
-    const requestId = `request-${input.turnId}`;
-    const runId = input.execution?.runId ?? input.turnId;
-    const operationId = input.execution?.operationId ?? input.turnId;
-    // Preserve the selected AgentRuntimeConfig exactly. In particular, a
-    // native child may intentionally omit inherited token caps; injecting a
-    // catalog output cap into its sidecar payload changes its budget semantics.
-    const maxContextTokens = this.config.maxContextTokens;
-    const maxOutputTokens = this.config.maxOutputTokens;
-    const write = (message) => child.stdin.write(`${JSON.stringify(message)}\n`);
-    let executeWritten = false;
-    let cancelSent = false;
-
-    child.stderr.on("data", (chunk) => errors.push(String(chunk)));
-    child.on("error", (error) => queue.fail(error));
-    child.on("exit", (code) => {
-      debug("sidecar exit", code);
-      if (!terminalSeen) {
-        queue.fail(new Error(`AgentLoop sidecar exited before terminal result (${code}): ${errors.join("")}`));
-      }
-    });
-    reader.on("line", (line) => {
-      let message;
-      try {
-        message = JSON.parse(line);
-      } catch (error) {
-        queue.fail(error);
-        return;
-      }
-      if (message.kind === "request" && message.method === "module_call") {
-        debug("module call", message.module, message.messageId);
-        const dispatch = this.dispatchModule(message, input, queue).then(write, (error) => {
-          write({
-            kind: "response",
-            messageId: `module-error-${message.messageId}`,
-            inReplyTo: message.messageId,
-            requestId: message.requestId,
-            ok: false,
-            code: error?.code ?? "MODULE_ERROR",
-            error: { message: error?.message ?? String(error) },
-          });
-        });
-        pendingModuleDispatches.add(dispatch);
-        void dispatch.finally(() => pendingModuleDispatches.delete(dispatch));
-        return;
-      }
-      debug("sidecar message", message.kind, message.method ?? message.eventType ?? message.outcome ?? "", JSON.stringify({
-        final: message.final,
-        runId: message.runId,
-        operationId: message.operationId,
-        requestId: message.requestId,
-        expected: { runId, operationId, requestId },
-      }));
-      queue.push(message);
-    });
-
-    const abort = () => {
-      if (!executeWritten || cancelSent || child.exitCode !== null) return;
-      cancelSent = true;
-      debug("forward cancel", operationId);
-      write({
-        kind: "request",
-        messageId: `cancel-${input.turnId}`,
-        method: "cancel",
-        runId,
-        operationId,
-        requestId,
-        reason: String(input.abortSignal?.reason ?? "host_cancelled"),
-      });
-    };
-    input.abortSignal?.addEventListener("abort", abort, { once: true });
-
-    write({
-      kind: "request",
-      messageId: `execute-${input.turnId}`,
-      method: "execute",
-      runId,
-      operationId,
-      requestId,
-      sessionId: input.sessionId,
-      turnId: input.turnId,
-      idempotencyKey: input.execution?.idempotencyKey,
-      operationDeadline: input.execution?.operationDeadline,
-      payload: {
-        agent: {
-          provider: this.config.provider,
-          model: this.config.model,
-          cwd: this.config.cwd,
-          systemPrompt: this.config.systemPrompt,
-          isSubagent: this.config.isSubagent === true,
-          ...(this.config.subagentModel
-            ? { subagentModel: this.config.subagentModel }
-            : {}),
-          maxOutputTokens,
-          maxContextTokens,
-          runMode: input.runMode ?? this.config.runMode,
-          permissionMode: input.permissionMode ?? this.config.permissionMode,
-          maxTurns: input.maxTurns,
-          modelOverride: input.modelOverride,
-        },
-        messages: input.messages,
-        tools: this.dependencies.tools.registry.list().map((tool) => ({
-          name: tool.name,
-          description: tool.description,
-          kind: tool.kind,
-          inputSchema: tool.inputSchema,
-          readOnly: tool.isReadOnly({}),
-          concurrencySafe: tool.isConcurrencySafe({}),
-          requiresUserInteraction: requiresPromptCapability(tool, {}),
-          requiredRuntimeCapabilities: tool.requiredRuntimeCapabilities,
-        })),
-        hostModules: {
-          model: { methods: ["prepare", "stream"] },
-          ...(this.dependencies.context ? {
-            context: {
-              methods: [
-                "prepare_for_model",
-                ...(typeof this.dependencies.context.applyToolResults === "function" ? ["apply_tool_results"] : []),
-                ...(typeof this.dependencies.context.recoverFromModelError === "function" ? ["recover_from_model_error"] : []),
-                ...(typeof this.dependencies.context.captureTurn === "function" ? ["capture_turn"] : []),
-                ...(typeof this.dependencies.context.tryAutoCompact === "function" ? ["try_auto_compact"] : []),
-              ],
-            },
-          } : {}),
-          capability: { methods: ["execute", "execute_batch"] },
-        },
-        permissionContext: {
-          ...this.config.permissionContext,
-          mode: input.permissionMode ?? this.config.permissionMode,
-          canPrompt: input.canPrompt ?? this.config.permissionContext.canPrompt,
-          rules: input.permissionRules ?? this.config.permissionContext.rules,
-        },
-        seedState: this.seedState,
-        executionContext: this.config.metadata,
-      },
-    });
-    executeWritten = true;
-    // Abort may have happened before the listener was attached while the
-    // stdio child was spawning. Send cancel only after execute is on the wire.
-    if (input.abortSignal?.aborted) abort();
-
-    try {
-      while (true) {
-        const message = await queue.shift();
-        if (message.kind === "host_event") {
-          yield message.payload;
-          continue;
-        }
-        // An operation deadline can expire before the server accepts a stream.
-        // That valid final execute response has no stream identity or event.
-        if (message.kind === "response") {
-          if (
-            message.inReplyTo === `execute-${input.turnId}`
-            && message.requestId === requestId
-            && message.ok === false
-            && message.final === true
-            && message.outcome === "failed"
-          ) {
-            terminalSeen = true;
-            await Promise.allSettled([...pendingModuleDispatches]);
-            const terminalResult = this.rejectedExecuteTerminal(message, input);
-            yield {
-              type: "turn_completed",
-              sessionId: input.sessionId,
-              turnId: input.turnId,
-              result: terminalResult.result,
-            };
-            return terminalResult;
-          }
-          continue;
-        }
-        if (message.kind !== "event") continue;
-        if (message.runId !== runId || message.operationId !== operationId || message.requestId !== requestId) continue;
-        if (!message.final) {
-          if (message.payload?.type === "turn_completed") {
-            projectedTurnCompleted = message.payload;
-            continue;
-          }
-          if (input.abortSignal?.aborted) continue;
-          yield message.payload;
-          continue;
-        }
-        terminalSeen = true;
-        debug("sidecar terminal", message.outcome);
-        // Cancellation may terminalize the sidecar before its host-owned
-        // capability call has written its durable result. Preserve the native
-        // ordering: settle host module work before publishing the turn result.
-        await Promise.allSettled([...pendingModuleDispatches]);
-        const payload = message.payload ?? {};
-        let terminalResult;
-        if (payload.result && Array.isArray(payload.messages)) {
-          terminalResult = { result: payload.result, messages: payload.messages };
-        } else if (projectedTurnCompleted?.result) {
-          terminalResult = { result: projectedTurnCompleted.result, messages: input.messages };
-        } else if (message.outcome === "cancelled") {
-          const now = new Date().toISOString();
-          terminalResult = {
-            result: {
-              type: "aborted",
-              sessionId: input.sessionId,
-              turnId: input.turnId,
-              stopReason: "aborted_streaming",
-              usage: {},
-              permissionDenials: [],
-              turns: 0,
-              startedAt: now,
-              completedAt: now,
-            },
-            messages: input.messages,
-          };
-        } else if (message.outcome === "failed") {
-          const now = new Date().toISOString();
-          terminalResult = {
-            result: {
-              type: "error",
-              sessionId: input.sessionId,
-              turnId: input.turnId,
-              stopReason: "model_error",
-              usage: {},
-              permissionDenials: [],
-              turns: 0,
-              startedAt: now,
-              completedAt: now,
-              errors: [{
-                code: message.code ?? message.error?.code ?? "sidecar_execution_failed",
-                message: message.error?.message ?? "Sidecar execution failed.",
-              }],
-            },
-            messages: input.messages,
-          };
-        } else {
-          throw new Error(`Invalid sidecar terminal payload: ${JSON.stringify(message)}`);
-        }
-        const durableMessages = terminalResult.messages.slice(input.messages.length);
-        for (const durableMessage of durableMessages) {
-          await input.onDurableMessage?.(durableMessage);
-        }
-        yield {
-          type: "turn_completed",
-          sessionId: input.sessionId,
-          turnId: input.turnId,
-          result: terminalResult.result,
-        };
-        return terminalResult;
-      }
-    } finally {
-      debug("runner cleanup");
-      input.abortSignal?.removeEventListener("abort", abort);
-      reader.close();
-      this.clearPreparedInvocations(runId, operationId);
-      if (child.exitCode === null) child.kill();
-    }
-  }
-
-  rejectedExecuteTerminal(message, input) {
-    const error = message.error && typeof message.error === "object" ? message.error : {};
-    const code = message.code ?? (typeof error.code === "string" ? error.code : undefined);
-    const failureMessage = typeof error.message === "string"
-      ? error.message
-      : code
-        ? `Sidecar rejected execute request: ${code}`
-        : "Sidecar rejected execute request.";
-    const now = new Date().toISOString();
-    return {
-      result: {
-        type: "error",
-        sessionId: input.sessionId,
-        turnId: input.turnId,
-        stopReason: code === "DEADLINE_EXCEEDED" ? "aborted_streaming" : "model_error",
-        usage: {},
-        permissionDenials: [],
-        turns: 0,
-        startedAt: now,
-        completedAt: now,
-        errors: [{
-          code: "agent_execution_rejected",
-          message: failureMessage,
-          ...(code ? { sidecarCode: code } : {}),
-          ...(message.error === undefined ? {} : { sidecarError: message.error }),
-        }],
-      },
-      messages: input.messages,
-    };
-  }
-
-  async dispatchModule(message, input, queue) {
-    const payload = message.payload ?? {};
-    if (message.module === "model") {
-      const context = { ...(payload.context ?? {}), abortSignal: input.abortSignal };
-      if (payload.operation === "prepare") {
-        const prepared = await this.modelPort.prepare({ request: payload.request, context });
-        this.rememberPreparedInvocation(message, payload.preparationId, prepared);
-        return this.response(message, { prepared: this.projectPreparedInvocation(prepared) });
-      }
-      const prepared = this.findPreparedInvocation(message, payload.preparationId)
-        ?? await this.modelPort.prepare({ request: payload.request, context });
-      const events = [];
-      for await (const event of this.modelPort.stream({ prepared, context })) events.push(event);
-      return this.response(message, { events });
-    }
-    if (message.module === "capability") {
-      const subagent = createNativeOneShotSubagentPort({
-        config: this.config,
-        dependencies: this.dependencies,
-      }).createForkApi({
-        sessionId: input.sessionId,
-        turnId: input.turnId,
-        parentReadFileState: this.seedState?.readFileState,
-        parentWriteSnapshots: this.seedState?.writeSnapshots,
-      });
-      const toolContext = {
-        ...(payload.context ?? {}),
-        abortSignal: input.abortSignal,
-        subagent,
-        currentToolCallId: payload.toolCallId,
-        auditRecorder: this.dependencies.auditRecorder,
-        now: this.dependencies.now,
-        elicitation: this.dependencies.elicitation,
-        fileHistory: this.dependencies.fileHistory,
-        fileUpdateNotifier: this.dependencies.fileUpdateNotifier,
-      };
-      const execution = { ...(payload.execution ?? {}), abortSignal: input.abortSignal };
-      if (payload.operation === "execute_batch") {
-        const calls = Array.isArray(payload.calls) ? payload.calls : [];
-        const results = await this.toolPort.executeAll(calls.map((call) => ({
-          id: call.toolCallId,
-          name: call.name,
-          input: call.arguments ?? {},
-        })), toolContext, execution);
-        for (const event of this.dependencies.drainEvents?.() ?? []) {
-          queue.push({ kind: "host_event", payload: event });
-        }
-        return this.response(message, { results });
-      }
-      const [result] = await this.toolPort.executeAll([{
-        id: payload.toolCallId,
-        name: payload.name,
-        input: payload.arguments ?? {},
-      }], toolContext, execution);
-      for (const event of this.dependencies.drainEvents?.() ?? []) {
-        queue.push({ kind: "host_event", payload: event });
-      }
-      return this.response(message, result);
-    }
-    if (message.module === "context") {
-      const contextRuntime = this.dependencies.context;
-      if (!contextRuntime) throw new Error("Host context runtime is unavailable.");
-      const contextInput = { ...(payload.input ?? {}), abortSignal: input.abortSignal };
-      let result;
-      if (payload.operation === "prepare_for_model") {
-        result = await contextRuntime.prepareForModel(contextInput);
-      } else if (payload.operation === "apply_tool_results" && typeof contextRuntime.applyToolResults === "function") {
-        result = await contextRuntime.applyToolResults(contextInput);
-      } else if (payload.operation === "recover_from_model_error" && typeof contextRuntime.recoverFromModelError === "function") {
-        result = await contextRuntime.recoverFromModelError(contextInput);
-      } else if (payload.operation === "capture_turn" && typeof contextRuntime.captureTurn === "function") {
-        await contextRuntime.captureTurn(contextInput);
-        result = null;
-      } else if (payload.operation === "try_auto_compact" && typeof contextRuntime.tryAutoCompact === "function") {
-        const { budgetProjection, ...autoCompactInput } = contextInput;
-        debug("host compaction budget", {
-          sessionId: autoCompactInput.sessionId,
-          turnId: autoCompactInput.turnId,
-          isSubagent: this.config.isSubagent === true,
-          budgetProjection,
-          maxContextTokens: autoCompactInput.maxContextTokens,
-          reservedOutputTokens: autoCompactInput.reservedOutputTokens,
-        });
-        const budgetEvaluator = this.createCompactionBudgetEvaluator({
-          message,
-          input,
-          contextRuntime,
-          contextInput: autoCompactInput,
-          budgetProjection,
-        });
-        result = await contextRuntime.tryAutoCompact({
-          ...autoCompactInput,
-          ...(budgetEvaluator ? { budgetEvaluator } : {}),
-        });
-      } else {
-        throw new Error(`Unsupported host context operation: ${payload.operation}`);
-      }
-      return this.response(message, { result });
-    }
-    return this.response(message, { accepted: true });
-  }
-
-  preparedInvocationKey(message, preparationId) {
-    return `${message.runId}\u0000${message.operationId}\u0000${preparationId}`;
-  }
-
-  operationKey(message) {
-    return `${message.runId}\u0000${message.operationId}`;
-  }
-
-  rememberPreparedInvocation(message, preparationId, prepared) {
-    if (typeof preparationId !== "string" || preparationId.length === 0) {
-      throw new Error("Model prepare is missing preparationId.");
-    }
-    const operationKey = this.operationKey(message);
-    const entry = { preparationId, prepared };
-    this.preparedModelInvocations.set(this.preparedInvocationKey(message, preparationId), entry);
-    this.latestPreparedByOperation.set(operationKey, entry);
-  }
-
-  findPreparedInvocation(message, preparationId) {
-    if (typeof preparationId !== "string" || preparationId.length === 0) return undefined;
-    return this.preparedModelInvocations.get(this.preparedInvocationKey(message, preparationId))?.prepared;
-  }
-
-  latestPreparedInvocation(message) {
-    return this.latestPreparedByOperation.get(this.operationKey(message))?.prepared;
-  }
-
-  clearPreparedInvocations(runId, operationId) {
-    const prefix = `${runId}\u0000${operationId}\u0000`;
-    for (const key of this.preparedModelInvocations.keys()) {
-      if (key.startsWith(prefix)) this.preparedModelInvocations.delete(key);
-    }
-    this.latestPreparedByOperation.delete(`${runId}\u0000${operationId}`);
-  }
-
-  projectPreparedInvocation(prepared) {
-    return {
-      request: prepared.request,
-      provider: prepared.provider,
-      model: prepared.model,
-      ...(prepared.maxContextTokens
-        ? { maxContextTokens: prepared.maxContextTokens }
-        : {}),
-      ...(prepared.maxOutputTokens
-        ? { maxOutputTokens: prepared.maxOutputTokens }
-        : {}),
-    };
-  }
-
-  createCompactionBudgetEvaluator({ message, input, contextRuntime, contextInput, budgetProjection }) {
-    const tokenAccounting = this.dependencies.tokenAccounting;
-    if (!tokenAccounting) return undefined;
-    const prepared = this.latestPreparedInvocation(message);
-    const effectiveProvider = prepared?.provider ?? input.modelOverride?.provider ?? this.config.provider;
-    const effectiveModel = prepared?.model ?? input.modelOverride?.model ?? this.config.model;
-    // The context window comes from the host model catalog when the child
-    // config intentionally omits inherited caps. Output reservation, however,
-    // must remain the value selected by the sidecar AgentLoop (or zero when
-    // absent), matching native child execution.
-    const catalogLimits = this.dependencies.getModelTokenLimits?.(effectiveProvider, effectiveModel);
-    const maxContextTokens = positiveInteger(budgetProjection?.maxContextTokens)
-      ?? positiveInteger(contextInput.maxContextTokens)
-      ?? positiveInteger(this.config.maxContextTokens)
-      ?? positiveInteger(catalogLimits?.maxContextTokens);
-    if (!maxContextTokens) return undefined;
-    const reservedOutputTokens = positiveInteger(budgetProjection?.reservedOutputTokens)
-      ?? positiveInteger(contextInput.reservedOutputTokens)
-      ?? positiveInteger(this.config.maxOutputTokens);
-    return async (messages) => {
-      const request = await this.buildCompactionRequest(messages, input, contextRuntime);
-      let candidate = request;
-      if (prepared) {
-        const patched = {
-          ...prepared.request,
-          messages: request.messages,
-          systemPrompt: request.systemPrompt,
-          tools: request.tools,
-          cacheBreakpoints: request.cacheBreakpoints,
-          cachePlan: request.cachePlan,
-        };
-        candidate = prepared.opaque && this.dependencies.router.materializeRequest
-          ? this.dependencies.router.materializeRequest(prepared.opaque, patched)
-          : { ...patched, provider: prepared.provider, model: prepared.model };
-      }
-      return tokenAccounting.evaluateRequestBudget(candidate, {
-        maxContextTokens,
-        reservedOutputTokens,
-        signal: input.abortSignal,
-      });
-    };
-  }
-
-  async buildCompactionRequest(messages, input, contextRuntime) {
-    const requestProvider = input.modelOverride?.provider ?? this.config.provider;
-    const requestModel = input.modelOverride?.model ?? this.config.model;
-    const permissionMode = input.permissionMode ?? this.config.permissionMode;
-    const canPrompt = input.canPrompt ?? this.config.permissionContext.canPrompt;
-    const tools = this.dependencies.tools.registry.list()
-      .filter((tool) => canPrompt || !requiresPromptCapability(tool, {}))
-      .map((tool) => ({
-        name: tool.name,
-        description: tool.description,
-        inputSchema: tool.inputSchema,
-      }));
-    const prepared = await contextRuntime.prepareForModel({
-      sessionId: input.sessionId,
-      turnId: input.turnId,
-      cwd: this.config.cwd,
-      runtimeContextSurface: this.config.runtimeContextSurface,
-      provider: requestProvider,
-      model: requestModel,
-      protocol: this.dependencies.getModelProtocol?.(requestProvider),
-      supportsPromptCache: this.dependencies.getModelSupportsPromptCache?.(requestProvider, requestModel),
-      permissionMode,
-      runMode: input.runMode ?? this.config.runMode ?? "agent",
-      additionalWorkingDirectories: this.config.permissionContext.additionalWorkingDirectories,
-      messages,
-      tools,
-      maxMessages: this.config.maxContextMessages,
-      customSystemPrompt: this.config.systemPrompt,
-      abortSignal: input.abortSignal,
-    });
-    const materialized = await materializeMediaReferences(prepared.messages);
-    return {
-      provider: requestProvider,
-      model: requestModel,
-      messages: materialized.messages,
-      systemPrompt: prepared.systemPrompt ?? this.config.systemPrompt,
-      tools: prepared.tools,
-      toolChoice: this.config.toolChoice,
-      maxOutputTokens: this.config.maxOutputTokens,
-      temperature: input.modelOverride?.temperature ?? this.config.temperature,
-      speed: input.modelOverride?.speed,
-      thinking: input.modelOverride?.thinking ?? this.config.thinking,
-      stream: true,
-      metadata: this.config.metadata,
-      cacheBreakpoints: prepared.cacheBreakpoints,
-      cachePlan: prepared.cachePlan,
-    };
-  }
-
-  response(message, payload) {
-    return {
-      kind: "response",
-      messageId: `response-${message.messageId}`,
-      inReplyTo: message.messageId,
-      requestId: message.requestId,
-      ok: true,
-      payload,
-    };
-  }
-}
-
-function positiveInteger(value) {
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
-}
-
-function abortedTerminal(input) {
-  const now = new Date().toISOString();
+function createParityCompactionProvider() {
+  let compacted = false;
   return {
-    result: {
-      type: "aborted",
-      sessionId: input.sessionId,
-      turnId: input.turnId,
-      stopReason: "aborted_streaming",
-      usage: {},
-      permissionDenials: [],
-      turns: 0,
-      startedAt: now,
-      completedAt: now,
+    async autoCompact(input) {
+      if (compacted) {
+        return {
+          type: "skipped",
+          snapshot: {
+            tokens: 20,
+            maxContextTokens: input.maxContextTokens ?? 1_024,
+            warningRatio: 0.8,
+            blockingRatio: 0.9,
+            state: "ok",
+            ratio: 0.02,
+          },
+        };
+      }
+      if (scenario.scenarioId === "sidecar_full_request_compaction_budget") {
+        if (!input.budgetEvaluator) throw new Error("Full-request compaction scenario requires a request budget evaluator.");
+        const budget = await input.budgetEvaluator(input.messages);
+        push("compaction.budget", {
+          tokens: budget.tokens,
+          systemTokens: budget.breakdown?.system ?? 0,
+          toolTokens: budget.breakdown?.tools ?? 0,
+          messageTokens: budget.breakdown?.messages ?? 0,
+        });
+      }
+      compacted = true;
+      const messages = [
+        { role: "assistant", content: [{ type: "text", text: "durable compact summary" }] },
+        { role: "user", content: [{ type: "text", text: scenario.q }] },
+      ];
+      return {
+        type: "compacted",
+        tier: "full",
+        messages,
+        snapshot: {
+          tokens: 20,
+          maxContextTokens: input.maxContextTokens ?? 1_024,
+          warningRatio: 0.8,
+          blockingRatio: 0.9,
+          state: "ok",
+          ratio: 0.02,
+        },
+        result: {
+          compactionId: "parity-durable-compaction",
+          trigger: "auto",
+          preTokens: 800,
+          postTokens: 20,
+          messagesSummarized: 1,
+          boundaryMarker: { role: "assistant", content: [{ type: "text", text: "durable compact boundary" }] },
+          messagesToKeep: [],
+          attachments: [],
+          hookResults: [],
+          diagnostics: [],
+        },
+      };
     },
-    messages: input.messages,
+    buildPostCompactMessages: () => [],
+    truncateHeadPreservingCheckpoint: (messages) => messages,
   };
+}
+
+function createObservedPersistenceProvider() {
+  return {
+    ...nodeProjectSessionStorageProvider,
+    create(input) {
+      const backends = nodeProjectSessionStorageProvider.create(input);
+      const agentScope = input.kind === "subagent" ? "child" : "parent";
+      return {
+        ...backends,
+        persistence: {
+          append: async (entry) => {
+            await backends.persistence.append(entry);
+            if (entry.type === "agent_status_message") {
+              push("durable.status", { agentScope, event: entry.event, statusKind: entry.kind, text: entry.text });
+            }
+            if (entry.type === "durable_message" && entry.message?.metadata?.queueItemId) {
+              push("durable.steer", { agentScope, itemId: entry.message.metadata.queueItemId, message: entry.message });
+            }
+            if (entry.type === "control_boundary" && entry.boundary?.subtype === "compact_boundary") {
+              push("compact.boundary", {
+                agentScope,
+                compactionId: entry.boundary.compactMetadata?.compactionId,
+                messages: entry.boundary.replacementMessages,
+                metadata: entry.boundary.compactMetadata,
+              });
+            }
+            if (entry.type === "compaction_completed") {
+              push("durable.compaction_completed", { agentScope, operationId: entry.operationId });
+            }
+          },
+          load: () => backends.persistence.load(),
+          flush: () => backends.persistence.flush(),
+        },
+      };
+    },
+  };
+}
+
+async function readTranscriptEntries(sessionKey) {
+  const transcriptPath = path.join(
+    getPilotProjectChatDir(projectRoot, pilotHome),
+    `${sanitizeSessionIdForPath(sessionKey)}.jsonl`,
+  );
+  const contents = await readFile(transcriptPath, "utf8");
+  return contents.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
 }
 
 const configuredRuntimeRoot = process.env.PARITY_RUNTIME_ROOT;
@@ -884,21 +419,41 @@ await mkdir(pilotHome, { recursive: true });
 process.env.PILOT_HOME = pilotHome;
 const projectRoot = pilotHome;
 const configuredContextTokens = scenario.limits?.maxContextTokens ?? 65536;
-await writeFile(path.join(pilotHome, "pilotdeck.yaml"), `schemaVersion: 1\nagent:\n  model: parity/deterministic\n  maxContextTokens: ${configuredContextTokens}\n  maxOutputTokens: 8192\nmodel:\n  providers:\n    parity:\n      protocol: openai\n      url: ${mockBaseUrl}\n      apiKey: parity-test\n      models:\n        deterministic:\n          capabilities:\n            supportsToolUse: true\n            maxContextTokens: ${configuredContextTokens}\n            maxOutputTokens: 8192\ntelemetry:\n  enabled: false\n`, "utf8");
+const configuredOutputTokens = scenario.limits?.maxOutputTokens ?? 8192;
+await writeFile(path.join(pilotHome, "pilotdeck.yaml"), `schemaVersion: 1\nagent:\n  model: parity/deterministic\n  maxContextTokens: ${configuredContextTokens}\n  maxOutputTokens: ${configuredOutputTokens}\nmodel:\n  providers:\n    parity:\n      protocol: openai\n      url: ${mockBaseUrl}\n      apiKey: parity-test\n      models:\n        deterministic:\n          capabilities:\n            supportsToolUse: true\n            maxContextTokens: ${configuredContextTokens}\n            maxOutputTokens: ${configuredOutputTokens}\ntelemetry:\n  enabled: false\n`, "utf8");
 await writeFile(path.join(projectRoot, "parity-input.txt"), "deterministic file content\n", "utf8");
+const gatewayEnv = {
+  ...process.env,
+  ...(mode === "sidecar" ? {
+    PILOTDECK_AGENT_LOOP_TRANSPORT: "stdio",
+    PILOTDECK_AGENT_LOOP_SIDECAR_COMMAND: process.execPath,
+    PILOTDECK_AGENT_LOOP_SIDECAR_PATH: path.join(sidecarRoot, "dist/src/cli/pilotdeck-agent-loop-sidecar.js"),
+  } : {
+    PILOTDECK_AGENT_LOOP_TRANSPORT: "native",
+  }),
+};
+push("harness.proof", { state: "transport_selected", transport: mode === "sidecar" ? "stdio" : "native" });
 
-  const local = createLocalGateway({
+const local = createLocalGateway({
   projectRoot,
   pilotHome,
+  env: gatewayEnv,
   permissionMode: scenario.permission?.mode ?? "default",
-    extraTools: [
-      ...createTools(),
-    ],
+  extraTools: [
+    ...createTools(),
+  ],
   __testModelFactory: () => new MockModelRuntime(),
-  autoElicitation: scenario.permission?.answer === "allow",
+  autoElicitation: scenario.permission?.answer === "allow" || scenario.interaction?.elicitationAvailable === true,
+  storageProvider: createObservedPersistenceProvider(),
+  ...(["sidecar_durable_compaction", "sidecar_full_request_compaction_budget"].includes(scenario.scenarioId)
+    ? { compactionProviderFactory: () => createParityCompactionProvider() }
+    : {}),
   ...(mode === "sidecar" ? {
-    __testAgentLoopFactory: ({ config, dependencies, seedState }) =>
-      new StdioAgentLoopRunner(config, dependencies, seedState),
+    agentLoopTransportObserver: {
+      observe(observation) {
+        push("harness.proof", { state: observation.type, ...observation });
+      },
+    },
   } : {}),
 });
 const server = await startPilotDeckServer({
@@ -930,6 +485,8 @@ try {
   // while isolating their durable session histories. A prior adapter can still
   // be flushing its transcript when the next one begins.
   const sessionKey = `full-${scenario.scenarioId}-${mode}`;
+  const runId = `run-${scenario.scenarioId}`;
+  let seedReadResult;
   if (scenario.scenarioId === "checkpoint_resume") {
     for await (const _event of client.stream("submit_turn", {
       sessionKey,
@@ -940,6 +497,16 @@ try {
     })) {
       // Populate the real transcript before the resumed turn.
     }
+  }
+  if (scenario.scenarioId === "sidecar_seed_read_state") {
+    const observedMtime = Math.floor((await stat(path.join(projectRoot, "parity-input.txt"))).mtimeMs);
+    seedReadResult = await client.request("seed_read_state", {
+      sessionKey,
+      channelKey: "test",
+      workspaceCwd: projectRoot,
+      path: "parity-input.txt",
+      mtime: observedMtime,
+    });
   }
   const attachments = [];
   if ((scenario.messages ?? []).some((message) => Array.isArray(message.content) && message.content.some((item) => item.type === "image_url"))) {
@@ -958,7 +525,11 @@ try {
     attachments,
     mode: scenario.permission?.mode ?? "default",
     canPrompt: scenario.permission?.canPrompt ?? false,
+    canElicit: scenario.permission?.canElicit ?? false,
+    ...(scenario.systemPrompt ? { sdkSessionConfig: { systemPrompt: scenario.systemPrompt } } : {}),
+    runId,
     maxTurns: limits.maxTurns,
+    maxBudgetUsd: limits.maxBudgetUsd,
     timeoutMs: limits.deadlineMs,
   });
   const cancelAfterMs = limits.cancelAfterToolStartMs ?? limits.cancelAfterMs;
@@ -971,6 +542,18 @@ try {
           () => push("cancel.acknowledged", { sessionKey }),
           (error) => push("cancel.error", { message: error?.message ?? String(error) }),
         );
+      })
+    : undefined;
+  const steerTask = scenario.steer?.message
+    ? modelStarted.then(async () => {
+        const result = await controlClient.request("steer_turn", {
+          sessionKey,
+          runId,
+          itemId: scenario.steer.itemId ?? "parity-steer-1",
+          message: scenario.steer.message,
+        });
+        push("steer.request", { itemId: scenario.steer.itemId ?? "parity-steer-1", accepted: result.accepted });
+        return result;
       })
     : undefined;
   const closeAfterChildModel = scenario.lifecycle?.closeSessionAfterSubagentModel === true;
@@ -1011,7 +594,8 @@ try {
   let visibleOutput = "";
   let terminal;
   let terminalCount = 0;
-  const builtinToolLifecycleNames = new Set(["agent", "read_file", "subagent", "send_message"]);
+  let terminalErrorCode;
+  const builtinToolLifecycleNames = new Set(["agent", "read_file", "write_file", "subagent", "send_message"]);
   for await (const event of stream) {
     // These built-ins emit lifecycle only through the Gateway stream. Keep
     // their port-level effects in the same trace vocabulary as parity tools.
@@ -1046,6 +630,12 @@ try {
     if (event.type === "permission_request") {
       push("permission.request", { requestId: event.requestId, toolName: event.toolName, payload: event.payload });
     }
+    if (event.type === "steer_applied") {
+      push("steer.applied", { itemId: event.itemId, message: event.message });
+    }
+    if (event.type === "agent_status") {
+      push("agent.status", { event: event.event, detail: event.detail });
+    }
     if (event.type === "assistant_text_delta") {
       visibleOutput += event.text;
       push("user.output", { text: event.text });
@@ -1054,9 +644,13 @@ try {
       terminal = event;
       terminalCount += 1;
     }
-    if (event.type === "error") push("gateway.error", { code: event.code, message: event.message });
+    if (event.type === "error") {
+      terminalErrorCode = event.code;
+      push("gateway.error", { code: event.code, message: event.message });
+    }
   }
   if (cancelTask) await cancelTask;
+  if (steerTask) await steerTask;
   if (closeTask) await closeTask;
   if (abortTask) {
     await abortTask;
@@ -1067,19 +661,68 @@ try {
       terminalCount,
     });
   }
+  if (scenario.scenarioId === "sidecar_seed_read_state") {
+    push("seed.state", {
+      applied: seedReadResult?.applied === true,
+      fileContent: await readFile(path.join(projectRoot, "parity-input.txt"), "utf8"),
+    });
+  }
+  if (["sidecar_continuable_followup_live", "sidecar_continuable_followup_cold"].includes(scenario.scenarioId)) {
+    const timeoutMs = Number(scenario.limits?.subagentWaitMs) || 5000;
+    await waitForSubagentModelRequests({
+      timeoutMs,
+      count: 2,
+    });
+    await waitForScopedModelResponses({ timeoutMs, agentScope: "child", count: 2 });
+    if (scenario.scenarioId === "sidecar_continuable_followup_live") {
+      await waitForScopedModelResponses({ timeoutMs, agentScope: "parent", count: 4 });
+    }
+  }
   const mockState = await post("/control/state", { runKey });
   const sideEffectCounts = mockState.sideEffects ?? {};
   push("side_effect.state", {
     counts: sideEffectCounts,
     sideEffectCount: Object.values(sideEffectCounts).reduce((total, value) => total + Number(value || 0), 0),
   });
+  const transcriptEntries = await readTranscriptEntries(sessionKey);
+  const durableStatusCount = transcriptEntries.filter((entry) =>
+    entry.type === "agent_status_message" && entry.event === "max_budget_reached"
+  ).length;
+  const durableSteerCount = transcriptEntries.filter((entry) =>
+    entry.type === "durable_message" && entry.message?.metadata?.queueItemId === (scenario.steer?.itemId ?? "parity-steer-1")
+  ).length;
+  const compactionBoundaryCount = transcriptEntries.filter((entry) =>
+    entry.type === "control_boundary" && entry.boundary?.subtype === "compact_boundary"
+  ).length;
+  const compactionCompletedCount = transcriptEntries.filter((entry) => entry.type === "compaction_completed").length;
+  let replayedStatusCount;
+  if (scenario.verifyStatusReplay === true) {
+    const replayClient = new GatewayWsClient({ url: server.wsUrl, token: server.token, clientName: "test-replay" });
+    await replayClient.connect();
+    try {
+      const history = await replayClient.request("read_session_messages", { sessionKey });
+      replayedStatusCount = (history.messages ?? []).filter((message) =>
+        message.payload?.event === "max_budget_reached"
+      ).length;
+    } finally {
+      replayClient.close();
+    }
+  }
+  push("durable.state", {
+    durableStatusCount,
+    durableSteerCount,
+    compactionBoundaryCount,
+    compactionCompletedCount,
+    ...(replayedStatusCount === undefined ? {} : { replayedStatusCount }),
+  });
   debug("gateway stream closed", terminal?.finishReason ?? "without terminal");
   const finishReason = terminal?.finishReason ?? "unknown";
   push("terminal", {
     outcome: finishReason === "completed" ? "completed" : finishReason.includes("abort") ? "cancelled" : "failed",
-    code: finishReason === "max_turns" ? "agent_max_turns_reached" : undefined,
+    code: terminalErrorCode ?? (finishReason === "max_turns" ? "agent_max_turns_reached" : undefined),
     stopReason: finishReason,
     output: visibleOutput,
+    usage: terminal?.usage,
   });
   await writeFile(traceOut, `${trace.map((item) => JSON.stringify(item)).join("\n")}\n`, "utf8");
 } finally {

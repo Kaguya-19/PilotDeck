@@ -35,6 +35,7 @@ import type {
 import { MODULE_PROTOCOL_VERSION, validateModuleMessage } from "../protocol.js";
 import type { AgentLoopRuntimeFactory } from "../../loop/AgentLoopRuntimeFactory.js";
 import type { AgentLoopInput, AgentLoopRunResult, AgentLoopSeedState } from "../../loop/AgentLoop.js";
+import { seedAgentReadState } from "../../loop/seedReadState.js";
 import type { AgentEvent } from "../../protocol/events.js";
 import { agentError } from "../../protocol/errors.js";
 import type { AgentTurnResult } from "../../protocol/result.js";
@@ -139,6 +140,8 @@ export type SidecarModuleHandler = (call: ModuleCallRequest) => Promise<Record<s
  */
 export type SidecarModuleHandlerRegistry = Readonly<Partial<{
   model: SidecarModuleHandler;
+  budget: SidecarModuleHandler;
+  turn: SidecarModuleHandler;
   capability: SidecarModuleHandler;
   permission: SidecarModuleHandler;
   context: SidecarModuleHandler;
@@ -148,6 +151,8 @@ export type SidecarModuleHandlerRegistry = Readonly<Partial<{
 
 export type SidecarModuleHandlerFactory = Readonly<{
   model?: (input: SidecarModelHandlerFactoryInput) => SidecarModuleHandler;
+  budget?: (input: SidecarBudgetHandlerFactoryInput) => SidecarModuleHandler;
+  turn?: (input: SidecarTurnHandlerFactoryInput) => SidecarModuleHandler;
   capability?: (input: SidecarCapabilityHandlerFactoryInput) => SidecarModuleHandler;
   permission?: (input: SidecarPermissionHandlerFactoryInput) => SidecarModuleHandler;
   context?: (input: SidecarContextHandlerFactoryInput) => SidecarModuleHandler;
@@ -167,6 +172,13 @@ type SidecarModuleTurnIdentity = Readonly<{
 export type SidecarModelHandlerFactoryInput = Readonly<{
   port: SidecarModelModulePort;
   turn: SidecarModuleTurnIdentity & Readonly<{ projectPath: string }>;
+}>;
+export type SidecarBudgetHandlerFactoryInput = Readonly<{
+  port: NonNullable<SidecarModuleComposition["budget"]>;
+  turn: SidecarModuleTurnIdentity;
+}>;
+export type SidecarTurnHandlerFactoryInput = Readonly<{
+  turn: SidecarModuleTurnIdentity;
 }>;
 export type SidecarCapabilityHandlerFactoryInput = Readonly<{
   port: SidecarCapabilityModulePort;
@@ -267,11 +279,28 @@ class AgentLoopSidecarRunner implements AgentLoopRunner {
     return cloneSeedState(this.seedState) ?? {};
   }
 
+  async seedReadState(filePath: string, mtimeMs: number): Promise<{ applied: boolean }> {
+    const state = cloneSeedState(this.seedState) ?? {};
+    const mutable = {
+      readFileState: state.readFileState ?? new Map(),
+      writeSnapshots: state.writeSnapshots ?? new Map(),
+      allowedReadFiles: new Set(state.allowedReadFiles ?? []),
+    };
+    const result = await seedAgentReadState(this.options.config, mutable, filePath, mtimeMs);
+    this.seedState = {
+      readFileState: mutable.readFileState,
+      writeSnapshots: mutable.writeSnapshots,
+      allowedReadFiles: [...mutable.allowedReadFiles],
+    };
+    return result;
+  }
+
   async *run(input: AgentLoopInput): AsyncGenerator<AgentEvent, AgentLoopRunResult, unknown> {
     if (this.active) throw new Error("AgentLoop sidecar runner does not support concurrent turns.");
     this.active = true;
     let connection: AgentLoopSidecarConnection | undefined;
     let protocol: SidecarTurnProtocol | undefined;
+    let dispatcher: ReturnType<typeof createSidecarDefaultModuleDispatcher> | undefined;
     try {
       // Native AgentLoop applies submit overrides before it evaluates this
       // turn. The host keeps the resulting live policy for later turns too.
@@ -283,7 +312,7 @@ class AgentLoopSidecarRunner implements AgentLoopRunner {
       // clone so it cannot alter the host-owned seed used by capability calls.
       const turnSeedState = this.snapshotFileState();
       const hostToolCheckpoint = new HostToolCheckpoint(turnSeedState, input.allowedReadFiles);
-      const dispatcher = createSidecarDefaultModuleDispatcher({
+      dispatcher = createSidecarDefaultModuleDispatcher({
         config: this.options.config,
         modules: this.modules,
         input,
@@ -320,6 +349,9 @@ class AgentLoopSidecarRunner implements AgentLoopRunner {
       let result: SidecarTerminal;
       while (true) {
         const next = await iterator.next();
+        for (const hostEvent of this.options.modules.event?.drain?.() ?? []) {
+          yield hostEvent;
+        }
         if (next.done) {
           result = next.value;
           break;
@@ -328,6 +360,14 @@ class AgentLoopSidecarRunner implements AgentLoopRunner {
         if (event.type === "steer_applied") {
           await input.onDurableMessage?.(event.message);
           input.onSteerApplied?.(event.itemId);
+        }
+        if (event.type === "agent_status" && event.kind && event.text) {
+          await input.onAgentStatusMessage?.({
+            event: event.event,
+            kind: event.kind,
+            text: event.text,
+            detail: event.detail,
+          });
         }
         yield event;
         if (event.type === "assistant_message" || event.type === "tool_results_projected") {
@@ -338,7 +378,11 @@ class AgentLoopSidecarRunner implements AgentLoopRunner {
       return { result: result.result, messages: result.messages };
     } finally {
       this.active = false;
-      await protocol?.close("agent_loop_turn_finished") ?? connection?.close?.("agent_loop_turn_finished");
+      try {
+        await protocol?.close("agent_loop_turn_finished") ?? connection?.close?.("agent_loop_turn_finished");
+      } finally {
+        await dispatcher?.dispose();
+      }
     }
   }
 
@@ -366,6 +410,8 @@ type CachedModuleResponse = {
 /** One host-owned Module Protocol handler. Handlers are composed per turn. */
 type SidecarModuleHandlers = Readonly<Partial<{
   model: SidecarModuleHandler;
+  budget: SidecarModuleHandler;
+  turn: SidecarModuleHandler;
   capability: SidecarModuleHandler;
   permission: SidecarModuleHandler;
   context: SidecarModuleHandler;
@@ -612,11 +658,20 @@ class SidecarTurnProtocol {
       payload: {
         agent: serializeAgentConfig(config),
         messages: input.messages,
+        ...(input.maxTurns !== undefined ? { maxTurns: input.maxTurns } : {}),
+        ...(input.maxBudgetUsd !== undefined ? { maxBudgetUsd: input.maxBudgetUsd } : {}),
+        ...(input.taskBudgetUsd !== undefined ? { taskBudgetUsd: input.taskBudgetUsd } : {}),
+        ...(input.initialTaskBudgetSpentUsd !== undefined
+          ? { initialTaskBudgetSpentUsd: input.initialTaskBudgetSpentUsd }
+          : {}),
+        ...(input.canElicit !== undefined ? { canElicit: input.canElicit } : {}),
+        ...(input.modelOverride !== undefined ? { modelOverride: input.modelOverride } : {}),
         ...(input.basePermissionMode !== undefined ? { basePermissionMode: input.basePermissionMode } : {}),
         ...(input.allowPlanModeTools !== undefined ? { allowPlanModeTools: input.allowPlanModeTools } : {}),
         tools: this.manifest.tools,
         permissionContext: this.manifest.permissionContext,
         hostModules: this.manifest.hostModules,
+        interactionCapabilities: this.manifest.interactionCapabilities,
         ...(seedState ? { seedState: serializeAgentLoopSeedStateProjection(seedState) } : {}),
       },
     };
@@ -680,6 +735,11 @@ class SidecarTurnProtocol {
     this.supportsResume = execute.resumeSupport === "streaming"
       && capabilities.methods.some((method) => method.name === "resume" && method.enabled !== false)
       && capabilities.methods.some((method) => method.name === "ack" && method.enabled !== false);
+    this.observe({
+      type: "handshake_completed",
+      moduleId: binding.moduleId,
+      capabilitiesVersion: binding.capabilitiesVersion,
+    });
   }
 
   private resumeRequest(): Extract<ModuleMessage, { kind: "request"; method: "resume" }> {
@@ -911,6 +971,11 @@ class SidecarTurnProtocol {
   private async dispatchModuleCall(call: ModuleCallRequest): Promise<ModuleResponse> {
     try {
       this.assertModuleCallIdentity(call);
+      this.observe({
+        type: "module_call_received",
+        module: call.module,
+        ...(typeof call.payload.operation === "string" ? { operation: call.payload.operation } : {}),
+      });
       const payload = await this.dispatchModule(call);
       return moduleResponse(call, this.options.uuid, true, payload);
     } catch (error) {
@@ -1067,9 +1132,31 @@ function moduleResponse(
     inReplyTo: call.messageId,
     requestId: call.requestId,
     ok: false,
-    code: "HOST_MODULE_FAILED",
-    error: { message: error instanceof Error ? error.message : String(error) },
+    code: errorCode(error) ?? "HOST_MODULE_FAILED",
+    error: {
+      message: error instanceof Error ? error.message : String(error),
+      ...(errorBoolean(error, "retryable") !== undefined ? { retryable: errorBoolean(error, "retryable") } : {}),
+      ...(errorNumber(error, "retryAfterMs") !== undefined ? { retryAfterMs: errorNumber(error, "retryAfterMs") } : {}),
+    },
   };
+}
+
+function errorCode(error: unknown): string | undefined {
+  return typeof error === "object" && error !== null && typeof (error as { code?: unknown }).code === "string"
+    ? (error as { code: string }).code
+    : undefined;
+}
+
+function errorBoolean(error: unknown, field: string): boolean | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  const value = (error as Record<string, unknown>)[field];
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function errorNumber(error: unknown, field: string): number | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  const value = (error as Record<string, unknown>)[field];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 function serializeAgentConfig(config: AgentRuntimeConfig): Record<string, unknown> {
@@ -1078,11 +1165,21 @@ function serializeAgentConfig(config: AgentRuntimeConfig): Record<string, unknow
     model: config.model,
     cwd: config.cwd,
     ...(config.systemPrompt ? { systemPrompt: config.systemPrompt } : {}),
+    ...(config.appendSystemPrompt ? { appendSystemPrompt: config.appendSystemPrompt } : {}),
+    ...(config.planModeInstructions ? { planModeInstructions: config.planModeInstructions } : {}),
     ...(config.runtimeContextSurface ? { runtimeContextSurface: config.runtimeContextSurface } : {}),
     ...(config.maxOutputTokens ? { maxOutputTokens: config.maxOutputTokens } : {}),
     ...(config.maxContextTokens ? { maxContextTokens: config.maxContextTokens } : {}),
+    ...(config.thinking ? { thinking: config.thinking } : {}),
+    ...(config.toolChoice ? { toolChoice: config.toolChoice } : {}),
+    ...(config.maxContextMessages !== undefined ? { maxContextMessages: config.maxContextMessages } : {}),
+    ...(config.stopOnStructuredOutput !== undefined
+      ? { stopOnStructuredOutput: config.stopOnStructuredOutput }
+      : {}),
+    ...(config.jsonSelfCorrect !== undefined ? { jsonSelfCorrect: config.jsonSelfCorrect } : {}),
     ...(config.runMode ? { runMode: config.runMode } : {}),
     ...(config.isSubagent !== undefined ? { isSubagent: config.isSubagent } : {}),
+    ...(config.metadata ? { metadata: config.metadata } : {}),
     ...(config.subagentModel ? { subagentModel: config.subagentModel } : {}),
   };
 }

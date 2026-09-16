@@ -12,17 +12,21 @@ import { createHostContextRuntime } from "../agent/modules/context/index.js";
 import { createHostLifecycleRuntime } from "../agent/modules/lifecycle/index.js";
 import { createHostAgentEventBridge } from "../agent/modules/events/index.js";
 import { createHostPermissionDecisionPort } from "../agent/modules/permission/index.js";
+import { createHostModelBudgetPort } from "../agent/modules/budget/index.js";
+import { createHostTurnCallbacks } from "../agent/modules/turn/index.js";
 import { resolveRuntimeContextSurface } from "../context/index.js";
 import type {
   HostModuleCapabilities,
 } from "../agent/modules/protocol.js";
 import {
   readHostCapabilityModuleMethods,
+  readHostBudgetModuleMethods,
   readHostContextModuleMethods,
   readHostEventModuleMethods,
   readHostLifecycleModuleMethods,
   readHostModelModuleMethods,
   readHostPermissionModuleMethods,
+  readHostTurnModuleMethods,
 } from "../agent/modules/protocol.js";
 import { AgentLoop } from "../agent/loop/AgentLoop.js";
 import { createSidecarAgentTurnCapabilities } from "../agent/loop/AgentTurnCapabilities.js";
@@ -34,7 +38,14 @@ import {
   isPermissionMode,
 } from "../permission/index.js";
 import type { PermissionRuleSet } from "../permission/index.js";
-import type { CanonicalContentBlock, CanonicalMessage, CanonicalMessageMetadata } from "../model/index.js";
+import type {
+  CanonicalContentBlock,
+  CanonicalMessage,
+  CanonicalMessageMetadata,
+  CanonicalThinkingConfig,
+  CanonicalToolChoice,
+} from "../model/index.js";
+import type { AgentModelOverride } from "../agent/protocol/input.js";
 import type { TimelinePosition } from "../model/protocol/timeline.js";
 import type {
   PilotDeckToolDefinition,
@@ -49,6 +60,7 @@ export type SidecarAgentLoopPayload = {
   messages?: unknown;
   tools?: unknown;
   hostModules?: HostModuleCapabilities;
+  interactionCapabilities?: { elicitationAvailable?: boolean };
   /** Host-owned context projection for a single execution. */
   contextOverride?: {
     systemPrompt?: unknown;
@@ -73,7 +85,10 @@ export const createSidecarExecution: SidecarExecutionFactory = async ({ request,
   const contextOverride = asRecord(payload.contextOverride) ?? {};
   const executionContext = asRecord(payload.executionContext);
   const hostModules = asRecord(payload.hostModules);
+  const interactionCapabilities = asRecord(payload.interactionCapabilities);
   const modelMethods = readHostModelModuleMethods(asRecord(hostModules?.model)?.methods);
+  const budgetMethods = readHostBudgetModuleMethods(asRecord(hostModules?.budget)?.methods);
+  const turnMethods = readHostTurnModuleMethods(asRecord(hostModules?.turn)?.methods);
   const contextMethods = readHostContextModuleMethods(asRecord(hostModules?.context)?.methods);
   const lifecycleMethods = readHostLifecycleModuleMethods(asRecord(hostModules?.lifecycle)?.methods);
   const eventMethods = readHostEventModuleMethods(asRecord(hostModules?.event)?.methods);
@@ -100,9 +115,18 @@ export const createSidecarExecution: SidecarExecutionFactory = async ({ request,
     systemPrompt: asString(
       contextOverride.systemPrompt ?? agent.systemPrompt ?? payload.systemPrompt,
     ),
+    appendSystemPrompt: asString(agent.appendSystemPrompt ?? payload.appendSystemPrompt),
+    planModeInstructions: asString(agent.planModeInstructions ?? payload.planModeInstructions),
     runtimeContextSurface: resolveRuntimeContextSurface(agent.runtimeContextSurface),
     maxOutputTokens: asPositiveInteger(agent.maxOutputTokens ?? payload.maxOutputTokens),
     maxContextTokens: asPositiveInteger(agent.maxContextTokens ?? payload.maxContextTokens),
+    thinking: asThinkingConfig(agent.thinking ?? payload.thinking),
+    toolChoice: asToolChoice(agent.toolChoice ?? payload.toolChoice),
+    maxContextMessages: asPositiveInteger(agent.maxContextMessages ?? payload.maxContextMessages),
+    stopOnStructuredOutput: readOptionalBoolean(
+      agent.stopOnStructuredOutput ?? payload.stopOnStructuredOutput,
+    ),
+    jsonSelfCorrect: readOptionalBoolean(agent.jsonSelfCorrect ?? payload.jsonSelfCorrect),
     runMode,
     isSubagent: readOptionalBoolean(agent.isSubagent ?? payload.isSubagent),
     ...(subagentModel ? { subagentModel } : {}),
@@ -114,7 +138,11 @@ export const createSidecarExecution: SidecarExecutionFactory = async ({ request,
       bypassAvailable,
       rules: asPermissionRules(permissionContextInput.rules),
     }),
-    metadata: mergeMetadata(executionContext, asRecord(contextOverride.metadata)),
+    metadata: mergeMetadata(
+      asRecord(agent.metadata),
+      executionContext,
+      asRecord(contextOverride.metadata),
+    ),
   };
   const tools = readToolDescriptors(
     contextOverride.tools !== undefined ? contextOverride.tools : payload.tools,
@@ -130,6 +158,8 @@ export const createSidecarExecution: SidecarExecutionFactory = async ({ request,
     execute: async () => ({ content: [{ type: "text", text: "Capability is executed by the host module." }] }),
   } satisfies PilotDeckToolDefinition));
   const moduleBinding = sidecarModuleBinding(request);
+  const budget = createHostModelBudgetPort(callModule, moduleBinding, budgetMethods);
+  const turnCallbacks = createHostTurnCallbacks(callModule, moduleBinding, turnMethods);
   const context = createSidecarContextComposition(callModule, moduleBinding, contextMethods);
   const permissionPort = createSidecarPermissionComposition(callModule, moduleBinding, permissionMethods);
   const lifecycle = createSidecarLifecycleComposition(callModule, moduleBinding, lifecycleMethods);
@@ -138,7 +168,6 @@ export const createSidecarExecution: SidecarExecutionFactory = async ({ request,
   if (planTodo) await planTodo.initialize(sessionId, turnId);
   const sidecarPorts = createSidecarCapabilityComposition(callModule, {
     tools,
-    permission: permissionPort,
     binding: moduleBinding,
     modelMethods,
     capabilityMethods,
@@ -148,7 +177,7 @@ export const createSidecarExecution: SidecarExecutionFactory = async ({ request,
     ports: {
       model: sidecarPorts.model,
       toolExecution: sidecarPorts.toolExecution,
-      ...(sidecarPorts.toolAuthorization ? { toolAuthorization: sidecarPorts.toolAuthorization } : {}),
+      ...(budget ? { budget } : {}),
     },
     ...(context ? { context } : {}),
     ...(permissionPort ? { permission: permissionPort } : {}),
@@ -156,6 +185,7 @@ export const createSidecarExecution: SidecarExecutionFactory = async ({ request,
     ...(eventBridge ? { eventEmitter: eventBridge.emitter } : {}),
     ...(planTodo ? { planTodoManager: planTodo } : {}),
     ...(planTodo ? { toolResultObserver: createPlanTodoResultObserver({ planTodo, sessionId, turnId }) } : {}),
+    elicitationAvailable: interactionCapabilities?.elicitationAvailable === true,
   };
   const loop = new AgentLoop(
     config,
@@ -173,6 +203,9 @@ export const createSidecarExecution: SidecarExecutionFactory = async ({ request,
         hasOverrideMessages,
       ),
       maxTurns: asPositiveInteger(agent.maxTurns ?? payload.maxTurns),
+      maxBudgetUsd: asPositiveFiniteNumber(payload.maxBudgetUsd),
+      taskBudgetUsd: asPositiveFiniteNumber(payload.taskBudgetUsd),
+      initialTaskBudgetSpentUsd: asNonNegativeFiniteNumber(payload.initialTaskBudgetSpentUsd),
       runMode,
       abortSignal,
       permissionMode,
@@ -181,6 +214,8 @@ export const createSidecarExecution: SidecarExecutionFactory = async ({ request,
         : undefined,
       allowPlanModeTools: payload.allowPlanModeTools === true,
       canPrompt,
+      canElicit: payload.canElicit === true,
+      ...turnCallbacks,
       permissionRules: asPermissionRules(permissionContextInput.rules),
       modelOverride: asModelOverride(agent.modelOverride ?? payload.modelOverride),
       execution: {
@@ -387,9 +422,107 @@ function toCanonicalContentBlocks(value: unknown): CanonicalContentBlock[] {
       source: "base64",
       mimeType: block.mimeType,
       data: block.data,
+      ...(asNonNegativeFiniteNumber(block.bytes) !== undefined ? { bytes: asNonNegativeFiniteNumber(block.bytes) } : {}),
       ...(block.detail === "auto" || block.detail === "low" || block.detail === "high"
         ? { detail: block.detail }
         : {}),
+      ...(timeline ? { timeline } : {}),
+    }];
+  }
+  if (block.type === "image" && block.source === "url" && typeof block.data === "string" && typeof block.mimeType === "string") {
+    return [{
+      type: "image",
+      source: "url",
+      mimeType: block.mimeType,
+      data: block.data,
+      ...(asNonNegativeFiniteNumber(block.bytes) !== undefined ? { bytes: asNonNegativeFiniteNumber(block.bytes) } : {}),
+      ...(block.detail === "auto" || block.detail === "low" || block.detail === "high"
+        ? { detail: block.detail }
+        : {}),
+      ...(timeline ? { timeline } : {}),
+    }];
+  }
+  if (
+    block.type === "pdf"
+    && block.source === "base64"
+    && typeof block.data === "string"
+    && block.mimeType === "application/pdf"
+    && asNonNegativeFiniteNumber(block.bytes) !== undefined
+  ) {
+    return [{
+      type: "pdf",
+      source: "base64",
+      data: block.data,
+      mimeType: "application/pdf",
+      bytes: asNonNegativeFiniteNumber(block.bytes)!,
+      ...(asPositiveInteger(block.pages) !== undefined ? { pages: asPositiveInteger(block.pages) } : {}),
+      ...(timeline ? { timeline } : {}),
+    }];
+  }
+  if (
+    block.type === "audio"
+    && (block.source === "base64" || block.source === "url")
+    && typeof block.data === "string"
+    && typeof block.mimeType === "string"
+  ) {
+    return [{
+      type: "audio",
+      source: block.source,
+      data: block.data,
+      mimeType: block.mimeType,
+      ...(asNonNegativeFiniteNumber(block.bytes) !== undefined ? { bytes: asNonNegativeFiniteNumber(block.bytes) } : {}),
+      ...(asNonNegativeFiniteNumber(block.durationSeconds) !== undefined
+        ? { durationSeconds: asNonNegativeFiniteNumber(block.durationSeconds) }
+        : {}),
+      ...(timeline ? { timeline } : {}),
+    }];
+  }
+  if (
+    block.type === "tool_result_reference"
+    && typeof block.toolCallId === "string"
+    && typeof block.path === "string"
+    && asNonNegativeFiniteNumber(block.originalBytes) !== undefined
+    && typeof block.preview === "string"
+    && typeof block.hasMore === "boolean"
+  ) {
+    return [{
+      type: "tool_result_reference",
+      toolCallId: block.toolCallId,
+      path: block.path,
+      originalBytes: asNonNegativeFiniteNumber(block.originalBytes)!,
+      preview: block.preview,
+      hasMore: block.hasMore,
+      ...(block.isError === true ? { isError: true } : {}),
+      ...(typeof block.readFilePath === "string" ? { readFilePath: block.readFilePath } : {}),
+      ...(typeof block.mimeType === "string" ? { mimeType: block.mimeType } : {}),
+      ...(typeof block.reason === "string" ? { reason: block.reason } : {}),
+      ...(timeline ? { timeline } : {}),
+    }];
+  }
+  if (
+    block.type === "media_reference"
+    && typeof block.path === "string"
+    && asNonNegativeFiniteNumber(block.originalBytes) !== undefined
+    && typeof block.preview === "string"
+    && typeof block.hasMore === "boolean"
+    && typeof block.mimeType === "string"
+    && (block.mediaType === "image" || block.mediaType === "pdf" || block.mediaType === "audio")
+  ) {
+    return [{
+      type: "media_reference",
+      path: block.path,
+      originalBytes: asNonNegativeFiniteNumber(block.originalBytes)!,
+      preview: block.preview,
+      hasMore: block.hasMore,
+      mimeType: block.mimeType,
+      mediaType: block.mediaType,
+      ...(typeof block.toolCallId === "string" ? { toolCallId: block.toolCallId } : {}),
+      ...(asPositiveInteger(block.pages) !== undefined ? { pages: asPositiveInteger(block.pages) } : {}),
+      ...(block.detail === "auto" || block.detail === "low" || block.detail === "high"
+        ? { detail: block.detail }
+        : {}),
+      ...(typeof block.reason === "string" ? { reason: block.reason } : {}),
+      ...(timeline ? { timeline } : {}),
     }];
   }
   if (block.type === "image_url") {
@@ -425,11 +558,11 @@ function canonicalTimelinePosition(value: unknown): TimelinePosition | undefined
 }
 
 function mergeMetadata(
-  executionContext: Record<string, unknown> | undefined,
-  overrideMetadata: Record<string, unknown> | undefined,
+  ...sources: Array<Record<string, unknown> | undefined>
 ): Record<string, unknown> | undefined {
-  if (!executionContext && !overrideMetadata) return undefined;
-  return { ...(executionContext ?? {}), ...(overrideMetadata ?? {}) };
+  const present = sources.filter((source): source is Record<string, unknown> => source !== undefined);
+  if (present.length === 0) return undefined;
+  return Object.assign({}, ...present);
 }
 
 function readToolDescriptors(value: unknown): ToolDescriptor[] {
@@ -480,11 +613,58 @@ function asPositiveInteger(value: unknown): number | undefined {
   return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : undefined;
 }
 
-function asModelOverride(value: unknown): { provider: string; model: string } | undefined {
+function asPositiveFiniteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+function asNonNegativeFiniteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function asModelOverride(value: unknown): AgentModelOverride | undefined {
   const override = asRecord(value);
   const provider = asString(override?.provider);
   const model = asString(override?.model);
-  return provider && model ? { provider, model } : undefined;
+  if (!provider || !model) return undefined;
+  return {
+    provider,
+    model,
+    ...(typeof override?.temperature === "number" && Number.isFinite(override.temperature)
+      ? { temperature: override.temperature }
+      : {}),
+    ...(typeof override?.speed === "number" && Number.isFinite(override.speed)
+      ? { speed: override.speed }
+      : {}),
+    ...(asThinkingConfig(override?.thinking) ? { thinking: asThinkingConfig(override?.thinking) } : {}),
+  };
+}
+
+function asThinkingConfig(value: unknown): CanonicalThinkingConfig | undefined {
+  if (value === undefined) return undefined;
+  const thinking = asRecord(value);
+  if (!thinking || typeof thinking.enabled !== "boolean") return undefined;
+  const modes: NonNullable<CanonicalThinkingConfig["mode"]>[] = [
+    "default", "off", "minimal", "low", "medium", "high", "xhigh", "max",
+  ];
+  return {
+    enabled: thinking.enabled,
+    ...(typeof thinking.mode === "string" && modes.includes(thinking.mode as NonNullable<CanonicalThinkingConfig["mode"]>)
+      ? { mode: thinking.mode as NonNullable<CanonicalThinkingConfig["mode"]> }
+      : {}),
+    ...(asPositiveInteger(thinking.budgetTokens) !== undefined
+      ? { budgetTokens: asPositiveInteger(thinking.budgetTokens) }
+      : {}),
+    ...(typeof thinking.preserve === "boolean" ? { preserve: thinking.preserve } : {}),
+    ...(typeof thinking.splitReasoning === "boolean" ? { splitReasoning: thinking.splitReasoning } : {}),
+  };
+}
+
+function asToolChoice(value: unknown): CanonicalToolChoice | undefined {
+  if (value === "auto" || value === "none" || value === "required") return value;
+  const choice = asRecord(value);
+  return choice?.type === "tool" && asString(choice.name)
+    ? { type: "tool", name: asString(choice.name)! }
+    : undefined;
 }
 
 function asSubagentModel(value: unknown): AgentRuntimeConfig["subagentModel"] | undefined {

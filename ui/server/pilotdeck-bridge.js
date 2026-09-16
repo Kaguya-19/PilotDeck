@@ -252,9 +252,11 @@ const gatewayConnections = createGatewayConnectionCache({
             console.warn('[pilotdeck-bridge] failed to restore Gateway interactions:', error?.message || error);
         });
     },
-    onDisconnected(error, gateway) {
+    onInvalidated(gateway) {
         const binding = interactionBindingFromGateway(gateway);
         if (binding) disconnectedInteractionBinding = binding;
+    },
+    onDisconnected(error, gateway) {
         console.warn(
             '[pilotdeck-bridge] gateway disconnected; notification forwarding will reconnect:',
             error?.message || error,
@@ -267,9 +269,6 @@ function ensureGateway() {
 }
 
 function resetGatewayConnection(expectedGateway) {
-    const gateway = expectedGateway || gatewayConnections.current();
-    const binding = interactionBindingFromGateway(gateway);
-    if (binding) disconnectedInteractionBinding = binding;
     gatewayConnections.invalidate(expectedGateway);
 }
 

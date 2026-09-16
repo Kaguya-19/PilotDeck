@@ -4,11 +4,13 @@ import path from "node:path";
 import test from "node:test";
 import {
   HOST_CAPABILITY_MODULE_METHODS,
+  HOST_BUDGET_MODULE_METHODS,
   HOST_CONTEXT_MODULE_METHODS,
   HOST_EVENT_MODULE_METHODS,
   HOST_LIFECYCLE_MODULE_METHODS,
   HOST_MODEL_MODULE_METHODS,
   HOST_PERMISSION_MODULE_METHODS,
+  HOST_TURN_MODULE_METHODS,
 } from "../../src/agent/modules/protocol.js";
 
 const root = process.cwd();
@@ -26,7 +28,10 @@ test("Module Protocol v2 schema and SOP are shipped together", () => {
   assert.deepEqual(schema.$defs?.moduleCallRequest?.required, ["kind", "messageId", "method", "runId", "operationId", "requestId", "module", "payload"]);
   assert.equal(schema.$defs?.event?.required?.includes("attemptId"), false);
   assert.ok(schema.$defs?.hostModules);
+  assert.ok(schema.$defs?.interactionCapabilities);
   assert.match(JSON.stringify(schema.$defs?.moduleCallRequest), /context/);
+  assert.match(JSON.stringify(schema.$defs?.moduleCallRequest), /budget/);
+  assert.match(JSON.stringify(schema.$defs?.moduleCallRequest), /turn/);
   assert.ok(schema.$defs?.moduleCallRequest?.properties?.idempotencyKey);
   assert.ok(schema.$defs?.event?.properties?.code);
   assert.match(JSON.stringify(schema.$defs?.hostModules), /permission/);
@@ -37,6 +42,8 @@ test("Module Protocol v2 schema and SOP are shipped together", () => {
   assert.match(JSON.stringify(schema.$defs?.hostModules), /emit/);
   assert.deepEqual(hostModuleMethodEnum(schema, "context"), HOST_CONTEXT_MODULE_METHODS);
   assert.deepEqual(hostModuleMethodEnum(schema, "model"), HOST_MODEL_MODULE_METHODS);
+  assert.deepEqual(hostModuleMethodEnum(schema, "budget"), HOST_BUDGET_MODULE_METHODS);
+  assert.deepEqual(hostModuleMethodEnum(schema, "turn"), HOST_TURN_MODULE_METHODS);
   assert.deepEqual(hostModuleMethodEnum(schema, "capability"), HOST_CAPABILITY_MODULE_METHODS);
   assert.deepEqual(hostModuleMethodEnum(schema, "permission"), HOST_PERMISSION_MODULE_METHODS);
   assert.deepEqual(hostModuleMethodEnum(schema, "lifecycle"), HOST_LIFECYCLE_MODULE_METHODS);
@@ -49,7 +56,7 @@ test("Module Protocol v2 schema and SOP are shipped together", () => {
 
 function hostModuleMethodEnum(
   schema: { $defs?: Record<string, unknown> },
-  module: "model" | "context" | "capability" | "permission" | "lifecycle" | "event",
+  module: "model" | "budget" | "turn" | "context" | "capability" | "permission" | "lifecycle" | "event",
 ): string[] | undefined {
   const hostModules = schema.$defs?.hostModules as {
     properties?: Record<string, { properties?: Record<string, { items?: { enum?: string[] } }> }>;

@@ -46,15 +46,19 @@ describe('gateway connection cache', () => {
     const connect = vi.fn()
       .mockResolvedValueOnce(first)
       .mockResolvedValueOnce(second);
-    const cache = createGatewayConnectionCache({ connect });
+    const onInvalidated = vi.fn();
+    const cache = createGatewayConnectionCache({ connect, onInvalidated });
 
     await cache.get();
     cache.invalidate(first);
+    expect(onInvalidated).toHaveBeenCalledTimes(1);
+    expect(onInvalidated).toHaveBeenCalledWith(first);
     await cache.get();
     first.disconnect();
 
     expect(await cache.get()).toBe(second);
     expect(connect).toHaveBeenCalledTimes(2);
+    expect(onInvalidated).toHaveBeenCalledTimes(1);
   });
 
   it('allows a later caller to retry after connection setup fails', async () => {

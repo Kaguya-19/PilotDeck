@@ -22,10 +22,26 @@ test("default sidecar factory maps host-neutral execution payloads", async () =>
           model: "model-a",
           cwd: "/workspace",
           systemPrompt: "Use the host tools.",
+          appendSystemPrompt: "Keep the final answer concise.",
+          planModeInstructions: "Write a plan before editing.",
           runtimeContextSurface: "system_prompt",
-          maxTurns: 2,
+          thinking: { enabled: true, mode: "high", preserve: true },
+          toolChoice: { type: "tool", name: "lookup" },
+          maxContextMessages: 12,
+          stopOnStructuredOutput: true,
+          jsonSelfCorrect: true,
           runMode: "ask",
-          modelOverride: { provider: "provider-b", model: "model-b" },
+        },
+        maxTurns: 2,
+        maxBudgetUsd: 1.5,
+        taskBudgetUsd: 4,
+        initialTaskBudgetSpentUsd: 0.25,
+        canElicit: true,
+        modelOverride: {
+          provider: "provider-b",
+          model: "model-b",
+          speed: 2,
+          thinking: { enabled: true, mode: "medium" },
         },
         task: { prompt: "Inspect the input." },
         messages: [
@@ -49,13 +65,30 @@ test("default sidecar factory maps host-neutral execution payloads", async () =>
   assert.equal(execution.input.sessionId, "session-1");
   assert.equal(execution.input.turnId, "turn-1");
   assert.equal(execution.input.maxTurns, 2);
+  assert.equal(execution.input.maxBudgetUsd, 1.5);
+  assert.equal(execution.input.taskBudgetUsd, 4);
+  assert.equal(execution.input.initialTaskBudgetSpentUsd, 0.25);
   assert.equal(execution.input.runMode, "ask");
   assert.equal(execution.input.permissionMode, "plan");
   assert.equal(execution.input.basePermissionMode, "default");
   assert.equal(execution.input.allowPlanModeTools, true);
   assert.equal(execution.input.canPrompt, true);
-  assert.deepEqual(execution.input.modelOverride, { provider: "provider-b", model: "model-b" });
-  assert.equal((execution.loop as any).config.runtimeContextSurface, "system_prompt");
+  assert.equal(execution.input.canElicit, true);
+  assert.deepEqual(execution.input.modelOverride, {
+    provider: "provider-b",
+    model: "model-b",
+    speed: 2,
+    thinking: { enabled: true, mode: "medium" },
+  });
+  const loopConfig = (execution.loop as any).config;
+  assert.equal(loopConfig.runtimeContextSurface, "system_prompt");
+  assert.equal(loopConfig.appendSystemPrompt, "Keep the final answer concise.");
+  assert.equal(loopConfig.planModeInstructions, "Write a plan before editing.");
+  assert.deepEqual(loopConfig.thinking, { enabled: true, mode: "high", preserve: true });
+  assert.deepEqual(loopConfig.toolChoice, { type: "tool", name: "lookup" });
+  assert.equal(loopConfig.maxContextMessages, 12);
+  assert.equal(loopConfig.stopOnStructuredOutput, true);
+  assert.equal(loopConfig.jsonSelfCorrect, true);
   assert.deepEqual(execution.input.execution, {
     runId: "run-1",
     operationId: "operation-1",
@@ -66,6 +99,40 @@ test("default sidecar factory maps host-neutral execution payloads", async () =>
     { role: "user", content: [{ type: "text", text: "Additional context" }, { type: "image", source: "base64", mimeType: "image/png", data: "abc" }] },
     { role: "assistant", content: [{ type: "text", text: "Acknowledged" }] },
   ]);
+});
+
+test("default sidecar factory preserves every canonical media and reference block", async () => {
+  const timeline = {
+    version: 1 as const,
+    turnId: "media-turn",
+    id: "media-block",
+    order: 3,
+    revision: 1,
+  };
+  const content = [
+    { type: "image", source: "url", data: "https://example.test/image.png", mimeType: "image/png", bytes: 12, detail: "high", timeline },
+    { type: "pdf", source: "base64", data: "cGRm", mimeType: "application/pdf", bytes: 3, pages: 1, timeline },
+    { type: "audio", source: "url", data: "https://example.test/audio.mp3", mimeType: "audio/mpeg", bytes: 24, durationSeconds: 2.5, timeline },
+    { type: "tool_result_reference", toolCallId: "tool-1", path: "/tmp/tool.txt", readFilePath: "tool.txt", originalBytes: 100, preview: "preview", hasMore: true, mimeType: "text/plain", reason: "large", timeline },
+    { type: "media_reference", toolCallId: "tool-2", path: "/tmp/media.png", originalBytes: 200, preview: "[image]", hasMore: false, mimeType: "image/png", mediaType: "image", detail: "low", reason: "persisted", timeline },
+  ];
+  const execution = await createSidecarExecution({
+    request: {
+      kind: "request",
+      messageId: "message-media",
+      method: "execute",
+      runId: "run-media",
+      operationId: "operation-media",
+      requestId: "request-media",
+      sessionId: "session-media",
+      turnId: "turn-media",
+      payload: { messages: [{ role: "user", content }] },
+    },
+    abortSignal: new AbortController().signal,
+    callModule: async () => ({ kind: "response", messageId: "response-media", inReplyTo: "call-media", ok: true }),
+  });
+
+  assert.deepEqual(execution.input.messages, [{ role: "user", content }]);
 });
 
 test("default sidecar factory preserves canonical message lifecycle metadata", async () => {
@@ -272,7 +339,10 @@ test("default sidecar factory gives contextOverride precedence and merges metada
       operationId: "operation-1",
       requestId: "request-1",
       payload: {
-        agent: { systemPrompt: "agent prompt" },
+        agent: {
+          systemPrompt: "agent prompt",
+          metadata: { source: "agent", stable: true, shared: "agent" },
+        },
         task: { prompt: "fallback" },
         messages: [{ role: "user", content: "ordinary" }],
         tools: [{ name: "ordinary", inputSchema: { type: "object" } }],
@@ -296,6 +366,7 @@ test("default sidecar factory gives contextOverride precedence and merges metada
   assert.equal(runtimeConfig.systemPrompt, "host prompt");
   assert.deepEqual(runtimeConfig.metadata, {
     source: "execution",
+    stable: true,
     shared: "new",
     iteration: 2,
   });
@@ -645,4 +716,150 @@ test("default sidecar factory retains agent capability requirements", async () =
   const [tool] = (execution.loop as any).toolPort.list();
   assert.equal(tool.kind, "agent");
   assert.deepEqual(tool.requiredRuntimeCapabilities, ["plan_workflow", "subagent_fork"]);
+});
+
+test("default sidecar factory installs only advertised budget, turn, and interaction capabilities", async () => {
+  const calls: Array<{ module: string; operation: string }> = [];
+  const execution = await createSidecarExecution({
+    request: {
+      kind: "request",
+      messageId: "message-host-capabilities",
+      method: "execute",
+      runId: "run-host-capabilities",
+      operationId: "operation-host-capabilities",
+      requestId: "request-host-capabilities",
+      sessionId: "session-host-capabilities",
+      turnId: "turn-host-capabilities",
+      payload: {
+        messages: [{ role: "user", content: "hello" }],
+        interactionCapabilities: { elicitationAvailable: true },
+        hostModules: {
+          budget: {
+            methods: ["estimate_request_input", "evaluate_request_budget", "estimate_usage_cost"],
+          },
+          turn: {
+            methods: ["drain_steer", "drain_or_close_steer", "persist_compaction"],
+          },
+        },
+      },
+    },
+    abortSignal: new AbortController().signal,
+    callModule: async (call) => {
+      const operation = String(call.payload.operation);
+      calls.push({ module: call.module, operation });
+      const base = {
+        kind: "response" as const,
+        messageId: `response-${calls.length}`,
+        inReplyTo: call.requestId,
+        ok: true,
+      };
+      if (operation === "estimate_request_input") return { ...base, payload: { tokens: 12 } };
+      if (operation === "evaluate_request_budget") {
+        return {
+          ...base,
+          payload: {
+            snapshot: {
+              tokens: 12,
+              maxContextTokens: 100,
+              warningRatio: 0.8,
+              blockingRatio: 0.9,
+              state: "ok",
+              ratio: 0.12,
+            },
+          },
+        };
+      }
+      if (operation === "estimate_usage_cost") return { ...base, payload: { costUsd: 1 } };
+      if (operation === "drain_steer") {
+        return {
+          ...base,
+          payload: {
+            messages: [{
+              itemId: "steer-1",
+              message: { role: "user", content: [{ type: "text", text: "continue" }] },
+            }],
+          },
+        };
+      }
+      if (operation === "drain_or_close_steer") return { ...base, payload: { messages: [], closed: true } };
+      if (operation === "persist_compaction") return { ...base, payload: { persisted: true } };
+      throw new Error(`Unexpected operation: ${operation}`);
+    },
+  });
+
+  const capabilities = (execution.loop as any).capabilities;
+  assert.equal(capabilities.interaction.elicitation, undefined);
+  assert.equal(capabilities.interaction.elicitationAvailable, true);
+  assert.equal(await capabilities.model.budget.estimateRequestInput({ provider: "p", model: "m", messages: [] }), 12);
+  assert.equal((await capabilities.model.budget.evaluateRequestBudget(
+    { provider: "p", model: "m", messages: [] },
+    { maxContextTokens: 100 },
+  )).tokens, 12);
+  assert.equal(await capabilities.model.budget.estimateUsageCost(undefined, "p", "m"), 1);
+  assert.equal((await execution.input.drainSteerMessages?.())?.[0]?.itemId, "steer-1");
+  assert.deepEqual(await execution.input.drainOrCloseSteerMailbox?.(), { messages: [], closed: true });
+  await execution.input.onCompactPersisted?.({
+    boundary: { kind: "compact", subtype: "compact_boundary", compactMetadata: {} as never },
+    messages: [],
+  });
+  assert.deepEqual(calls.map((call) => `${call.module}.${call.operation}`), [
+    "budget.estimate_request_input",
+    "budget.evaluate_request_budget",
+    "budget.estimate_usage_cost",
+    "turn.drain_steer",
+    "turn.drain_or_close_steer",
+    "turn.persist_compaction",
+  ]);
+});
+
+test("default sidecar factory rejects malformed advertised budget responses", async () => {
+  const execution = await createSidecarExecution({
+    request: {
+      kind: "request",
+      messageId: "message-invalid-budget",
+      method: "execute",
+      runId: "run-invalid-budget",
+      operationId: "operation-invalid-budget",
+      requestId: "request-invalid-budget",
+      payload: {
+        hostModules: { budget: { methods: ["estimate_usage_cost"] } },
+        messages: [{ role: "user", content: "hello" }],
+      },
+    },
+    abortSignal: new AbortController().signal,
+    callModule: async (call) => ({
+      kind: "response",
+      messageId: "invalid-budget-response",
+      inReplyTo: call.requestId,
+      ok: true,
+      payload: { costUsd: -1 },
+    }),
+  });
+
+  await assert.rejects(
+    () => (execution.loop as any).capabilities.model.budget.estimateUsageCost(undefined, "p", "m"),
+    (error: Error & { code?: string }) => error.code === "INVALID_BUDGET_RESPONSE",
+  );
+});
+
+test("default sidecar factory leaves unadvertised optional host capabilities absent", async () => {
+  const execution = await createSidecarExecution({
+    request: {
+      kind: "request",
+      messageId: "message-no-optional-capabilities",
+      method: "execute",
+      runId: "run-no-optional-capabilities",
+      operationId: "operation-no-optional-capabilities",
+      requestId: "request-no-optional-capabilities",
+      payload: { messages: [{ role: "user", content: "hello" }] },
+    },
+    abortSignal: new AbortController().signal,
+    callModule: async () => assert.fail("unadvertised capability must not issue a module call"),
+  });
+
+  assert.equal((execution.loop as any).capabilities.model.budget, undefined);
+  assert.equal((execution.loop as any).capabilities.interaction.elicitationAvailable, false);
+  assert.equal(execution.input.drainSteerMessages, undefined);
+  assert.equal(execution.input.drainOrCloseSteerMailbox, undefined);
+  assert.equal(execution.input.onCompactPersisted, undefined);
 });

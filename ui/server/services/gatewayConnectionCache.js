@@ -7,6 +7,7 @@ export function createGatewayConnectionCache({
   connect,
   onConnected = () => {},
   onDisconnected = () => {},
+  onInvalidated = () => {},
   shouldReconnect = () => false,
   reconnectBaseDelayMs = 1000,
   reconnectMaxDelayMs = 30000,
@@ -26,8 +27,10 @@ export function createGatewayConnectionCache({
 
   const invalidate = (expectedGateway) => {
     if (expectedGateway && current !== expectedGateway) return false;
+    const invalidatedGateway = current;
     pending = null;
     current = null;
+    if (invalidatedGateway) onInvalidated(invalidatedGateway);
     return true;
   };
 

@@ -68,7 +68,9 @@ class SeedReadStateModel implements ModelRuntime {
   getProviderBaseUrl() { return undefined; }
 }
 
-test("createLocalGateway seed_read_state preserves native write freshness semantics", async () => {
+for (const transport of ["native", "stdio"] as const) test(
+  `createLocalGateway seed_read_state preserves ${transport} write freshness semantics`,
+  async () => {
   const root = await mkdtemp(join(tmpdir(), "pilotdeck-sdk-seed-e2e-"));
   const projectRoot = join(root, "project");
   const pilotHome = join(root, "pilot-home");
@@ -84,6 +86,10 @@ test("createLocalGateway seed_read_state preserves native write freshness semant
     pilotHome,
     fallbackProjectRoot: pilotHome,
     permissionMode: "default",
+    env: {
+      ...process.env,
+      PILOTDECK_AGENT_LOOP_TRANSPORT: transport,
+    },
     __testModelFactory: () => model,
   });
   const gateway = local.gateway;

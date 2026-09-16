@@ -4,7 +4,12 @@ from __future__ import annotations
 import json
 import unittest
 
-from trace import canonicalize, compare_traces, validate_trace_expectations
+from trace import (
+    canonicalize,
+    compare_traces,
+    validate_production_sidecar_proof,
+    validate_trace_expectations,
+)
 
 
 FIRST_SUBAGENT = "11111111-1111-4111-8111-111111111111"
@@ -41,6 +46,79 @@ def subagent_trace(subagent_id: str, message_id: str, turn_id: str, followup_id:
 
 
 class SubagentTraceNormalizationTests(unittest.TestCase):
+    def test_compaction_identity_is_normalized_without_hiding_status_semantics(self) -> None:
+        left = [{
+            "kind": "agent.status",
+            "scenarioId": "compact",
+            "q": "compact",
+            "sequence": 0,
+            "event": "compact_started",
+            "detail": {"compactionId": FIRST_SUBAGENT, "trigger": "auto"},
+        }]
+        right = [{
+            "kind": "agent.status",
+            "scenarioId": "compact",
+            "q": "compact",
+            "sequence": 0,
+            "event": "compact_started",
+            "detail": {"compactionId": SECOND_SUBAGENT, "trigger": "auto"},
+        }]
+        self.assertEqual(compare_traces(left, right), [])
+        right[0]["detail"]["trigger"] = "reactive"
+        self.assertTrue(compare_traces(left, right))
+
+    def test_production_sidecar_proof_fails_closed_without_real_transport_evidence(self) -> None:
+        fake_runner = [{
+            "kind": "harness.proof",
+            "scenarioId": "proof",
+            "q": "proof",
+            "sequence": 0,
+            "state": "transport_selected",
+            "transport": "stdio",
+        }]
+        self.assertEqual(
+            validate_production_sidecar_proof(fake_runner, {"budget"}),
+            [
+                "production sidecar handshake proof is missing",
+                "production sidecar module proof is missing: budget",
+            ],
+        )
+
+    def test_production_sidecar_proof_accepts_handshake_and_required_modules(self) -> None:
+        records = [
+            {"kind": "harness.proof", "state": "transport_selected", "transport": "stdio"},
+            {"kind": "harness.proof", "state": "handshake_completed"},
+            {"kind": "harness.proof", "state": "module_call_received", "module": "budget"},
+            {"kind": "harness.proof", "state": "module_call_received", "module": "turn"},
+        ]
+        self.assertEqual(validate_production_sidecar_proof(records, {"budget", "turn"}), [])
+
+    def test_sidecar_production_oracles_cover_durable_and_model_evidence(self) -> None:
+        scenario = {
+            "expected": {
+                "modelAttempts": 2,
+                "modelInputContains": "durable compact summary",
+                "steerAppliedCount": 1,
+                "durableSteerCount": 1,
+                "compactionBoundaryCount": 1,
+                "compactionCompletedCount": 1,
+                "compactionPersistedBeforeModel": True,
+            },
+        }
+        records = [
+            {"kind": "compact.boundary", "messages": [{"content": [{"text": "durable compact summary"}]}]},
+            {"kind": "model.request", "modelView": {"messages": [{"content": [{"text": "durable compact summary"}]}]}},
+            {"kind": "steer.applied", "itemId": "steer-1"},
+            {"kind": "model.request", "modelView": {"messages": []}},
+            {
+                "kind": "durable.state",
+                "durableSteerCount": 1,
+                "compactionBoundaryCount": 1,
+                "compactionCompletedCount": 1,
+            },
+        ]
+        self.assertEqual(validate_trace_expectations(records, scenario, "pilotdeck", "sidecar"), [])
+
     def test_subagent_duration_is_volatile_in_objects_and_embedded_report_json(self) -> None:
         def record(duration_ms: int) -> dict[str, object]:
             report = {
@@ -69,6 +147,50 @@ class SubagentTraceNormalizationTests(unittest.TestCase):
             }
 
         self.assertEqual(compare_traces([record(2_034)], [record(2_046)]), [])
+
+    def test_parent_child_interleaving_is_not_a_semantic_total_order(self) -> None:
+        parent_request = {
+            "kind": "model.request", "scenarioId": "continuable", "q": "delegate",
+            "sequence": 0, "agentScope": "parent", "attempt": 1,
+            "modelView": {"messages": [{"role": "user", "content": [{"type": "text", "text": "parent"}]}]},
+        }
+        child_request = {
+            "kind": "model.request", "scenarioId": "continuable", "q": "delegate",
+            "sequence": 1, "agentScope": "child", "attempt": 1,
+            "modelView": {"messages": [{"role": "user", "content": [{"type": "text", "text": "child"}]}]},
+        }
+        parent_response = {
+            "kind": "model.response", "scenarioId": "continuable", "q": "delegate",
+            "sequence": 2, "agentScope": "parent", "attempt": 1,
+            "modelView": {"content": "parent done"},
+        }
+        child_response = {
+            "kind": "model.response", "scenarioId": "continuable", "q": "delegate",
+            "sequence": 3, "agentScope": "child", "attempt": 1,
+            "modelView": {"content": "child done"},
+        }
+        self.assertEqual(
+            compare_traces(
+                [parent_request, child_request, parent_response, child_response],
+                [parent_request, parent_response, child_request, child_response],
+            ),
+            [],
+        )
+
+        changed_child = dict(child_response)
+        changed_child["modelView"] = {"content": "different child result"}
+        self.assertTrue(compare_traces(
+            [parent_request, child_request, parent_response, child_response],
+            [parent_request, parent_response, child_request, changed_child],
+        ))
+
+    def test_continuable_subagent_settlement_normalizes_identity_but_not_status(self) -> None:
+        left = {"text": f"Continuable subagent {FIRST_SUBAGENT} settled: completed."}
+        right = {"text": f"Continuable subagent {SECOND_SUBAGENT} settled: completed."}
+        self.assertEqual(canonicalize(left), canonicalize(right))
+
+        failed = {"text": f"Continuable subagent {SECOND_SUBAGENT} settled: failed."}
+        self.assertNotEqual(canonicalize(left), canonicalize(failed))
 
     def test_subagent_duration_normalization_preserves_report_semantics(self) -> None:
         def record(text: str, duration_ms: int) -> dict[str, object]:

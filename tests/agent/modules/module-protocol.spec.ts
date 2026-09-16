@@ -3,17 +3,21 @@ import test from "node:test";
 
 import {
   HOST_CAPABILITY_MODULE_METHODS,
+  HOST_BUDGET_MODULE_METHODS,
   HOST_CONTEXT_MODULE_METHODS,
   HOST_EVENT_MODULE_METHODS,
   HOST_LIFECYCLE_MODULE_METHODS,
   HOST_MODEL_MODULE_METHODS,
   HOST_PERMISSION_MODULE_METHODS,
+  HOST_TURN_MODULE_METHODS,
   readHostCapabilityModuleMethods,
+  readHostBudgetModuleMethods,
   readHostContextModuleMethods,
   readHostEventModuleMethods,
   readHostLifecycleModuleMethods,
   readHostModelModuleMethods,
   readHostPermissionModuleMethods,
+  readHostTurnModuleMethods,
   validateModuleMessage,
   type ModuleExecuteRequest,
 } from "../../../src/agent/modules/protocol.js";
@@ -40,7 +44,17 @@ test("Module Protocol defines and normalizes advertised host module operations",
     "capture_turn",
     "try_auto_compact",
   ]);
-  assert.deepEqual(HOST_MODEL_MODULE_METHODS, ["prepare", "stream"]);
+  assert.deepEqual(HOST_MODEL_MODULE_METHODS, ["prepare", "stream", "stream_next", "close_stream"]);
+  assert.deepEqual(HOST_BUDGET_MODULE_METHODS, [
+    "estimate_request_input",
+    "evaluate_request_budget",
+    "estimate_usage_cost",
+  ]);
+  assert.deepEqual(HOST_TURN_MODULE_METHODS, [
+    "drain_steer",
+    "drain_or_close_steer",
+    "persist_compaction",
+  ]);
   assert.deepEqual(HOST_CAPABILITY_MODULE_METHODS, ["execute", "execute_batch", "plan_todo"]);
   assert.deepEqual(HOST_PERMISSION_MODULE_METHODS, ["decide"]);
   assert.deepEqual(HOST_LIFECYCLE_MODULE_METHODS, ["dispatch"]);
@@ -49,7 +63,13 @@ test("Module Protocol defines and normalizes advertised host module operations",
     "prepare_for_model",
     "capture_turn",
   ]);
-  assert.deepEqual(readHostModelModuleMethods(["prepare", "unknown", "stream"]), ["prepare", "stream"]);
+  assert.deepEqual(readHostModelModuleMethods(["prepare", "unknown", "stream_next", "close_stream"]), [
+    "prepare",
+    "stream_next",
+    "close_stream",
+  ]);
+  assert.deepEqual(readHostBudgetModuleMethods(["estimate_usage_cost", "unknown"]), ["estimate_usage_cost"]);
+  assert.deepEqual(readHostTurnModuleMethods(["unknown", "persist_compaction"]), ["persist_compaction"]);
   assert.deepEqual(readHostCapabilityModuleMethods(["execute_batch", "unknown", "plan_todo"]), ["execute_batch", "plan_todo"]);
   assert.deepEqual(readHostPermissionModuleMethods(["unknown", "decide"]), ["decide"]);
   assert.deepEqual(readHostLifecycleModuleMethods(["unknown", "dispatch"]), ["dispatch"]);
@@ -85,6 +105,26 @@ test("Module Protocol v2 validates slim execute and event profiles", () => {
 });
 
 test("Module Protocol v2 validates host-owned module_call requests", () => {
+  assert.deepEqual(validateModuleMessage({
+    kind: "request",
+    messageId: "call-budget",
+    method: "module_call",
+    runId: "run-1",
+    operationId: "operation-1",
+    requestId: "request-budget",
+    module: "budget",
+    payload: { operation: "estimate_usage_cost", provider: "p", model: "m" },
+  }), { ok: true });
+  assert.deepEqual(validateModuleMessage({
+    kind: "request",
+    messageId: "call-turn",
+    method: "module_call",
+    runId: "run-1",
+    operationId: "operation-1",
+    requestId: "request-turn",
+    module: "turn",
+    payload: { operation: "drain_steer" },
+  }), { ok: true });
   assert.deepEqual(validateModuleMessage({
     kind: "request",
     messageId: "call-1",

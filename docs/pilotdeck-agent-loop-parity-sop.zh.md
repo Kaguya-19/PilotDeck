@@ -27,6 +27,10 @@
 
 sidecar 必须保持宿主无关。context、model、capability/tool 和 permission 由 host module 或 port 提供；对拍不能用 sidecar 内置的宿主逻辑替代真实 host module。
 
+生产 sidecar 验收还必须证明 Gateway 选择了 `stdio` deployment profile、正式
+`createAgentLoopSidecarRuntimeFactory` 完成 handshake/binding，且预期 host module call 确实到达 dispatcher。
+缺失任一证据都属于 `BLOCKED`；自建 runner 或 `__testAgentLoopFactory` 注入即使语义 trace 相同也不能 PASS。
+
 ## 2. 被测链路
 
 | 链路 | 入口 | 唯一执行差异 |
@@ -66,6 +70,8 @@ PilotDeck adapter 必须：
 4. 每个逻辑事件写出一个 JSONL 对象，至少包含 `kind`、`scenarioId`、`q`、`sequence`；
 5. 启动、导入、执行或 trace 写入失败时返回非零并标记 `BLOCKED`；
 6. 不写入 token、真实 API key、数据库或持久化图片 data URL。
+7. sidecar trace 写出不可由 comparator 推断的 `transport_selected`、`handshake_completed` 和
+   `module_call_received` production proof；场景声明的 required module 必须逐一出现。
 
 统一事件类型建议包括：`model.request`、`model.response`、`tool.call`、`tool.result`、`permission.decision`、`checkpoint`、`terminal` 和 `user.output`。对拍器必须能定位最早分叉事件，而不是只报告最终文本不同。
 
@@ -88,6 +94,13 @@ PilotDeck adapter 必须：
 - duplicate execute、相同 idempotency key 重试、旧 request/stream event；
 - checkpoint 位于模型调用前、工具执行后和工具结果回写后；
 - 合法 `seedState` 恢复、非法 seedState 拒绝、历史消息顺序保持。
+- budget 限额在工具副作用前终止，usage/spend 与 durable status 一致；
+- `canPrompt=false, canElicit=true` 的 elicitation tool exposure；
+- active turn live steer 的单次持久化、单次 apply 和 terminal mailbox close；
+- compaction replacement/boundary 先 durable commit，再进行后续 model request。
+- full-request compaction budget 必须包含 system prompt、tools、cache plan/output cap 和当前 messages；
+- native/sidecar `seed_read_state` 必须共享相同 path、file type、mtime 和 active-turn gate；
+- sidecar 首个 model delta 必须在 provider completion 前可见，partial-output error 不能丢失已发布前缀。
 
 每个 suite 至少连续运行两次，语义投影必须一致。mock provider/tool 必须由 `scenarioId + q + normalized input` 决定结果，不得依赖 wall clock 或随机值。
 
@@ -111,6 +124,10 @@ PilotDeck adapter 必须：
 | `WARNING` | 仅 provider/transport 格式差异，且 downstream 语义一致 | 不改变 gate |
 
 `completed`、`failed`、`cancelled` 和 `result_unknown` 永远不能互相归一化。缺失 event、sequence gap、错误 requestId、重复 final 或 sidecar 退出也不能用最终文本相同来掩盖。
+
+production proof 不参与 native/sidecar semantic projection，但单独作为 sidecar 前置 oracle。transport selection、
+handshake/binding 或场景要求的 module-call proof（含 operation，例如 `model.stream_next`）缺失时，runner 必须在比较前返回 `BLOCKED`。negative-control
+必须证明 fake runner 或删除 handshake 证据无法取得 PASS。
 
 ## 6. 运行顺序
 
@@ -174,9 +191,16 @@ PilotDeck native/sidecar 对拍只有同时满足以下条件才可标记通过�
 - cancel、deadline、断线、重启、`result_unknown` 和迟到事件分类正确；
 - 两次连续运行的 canonical projection 一致；
 - native direct/gateway 回归、sidecar module tests 和项目 build/check 通过；
+- 完整 Gateway matrix 为 45 个场景，结果为 `PASS=45`、`FAIL=0`、`BLOCKED=0`、oracle failure `=0`；
+- budget、elicitation、live steer、durable compaction、full-request budget、seed read state 和 live model stream 的 raw trace 均包含 child process、正式 handshake、预期
+  module calls、正确 model request 顺序及 durable transcript/boundary/mailbox 证据；
+- live model stream 的 raw trace 必须明确证明 first delta 早于 provider completion；
 - `git diff --check` 通过，临时 trace、数据库、日志和凭证未进入 Git。
 
 若仍有差异，报告必须分成“已确认对齐”“确认不一致”“测试设施问题”“known gap”，并给出最早分叉路径和两侧规范化值。
+
+确定性 mock model/tool 只能作为正式 host dispatcher 的 provider/tool dependency。它证明 production sidecar
+composition 和协议调用，不等同于连接真实外部服务、安装包或跨主机 deployment E2E。
 
 ## 8. 相关文档
 

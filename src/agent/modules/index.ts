@@ -1,17 +1,21 @@
 export {
   HOST_CAPABILITY_MODULE_METHODS,
+  HOST_BUDGET_MODULE_METHODS,
   HOST_CONTEXT_MODULE_METHODS,
   HOST_EVENT_MODULE_METHODS,
   HOST_LIFECYCLE_MODULE_METHODS,
   HOST_MODEL_MODULE_METHODS,
   HOST_PERMISSION_MODULE_METHODS,
+  HOST_TURN_MODULE_METHODS,
   MODULE_PROTOCOL_VERSION,
   readHostCapabilityModuleMethods,
+  readHostBudgetModuleMethods,
   readHostContextModuleMethods,
   readHostEventModuleMethods,
   readHostLifecycleModuleMethods,
   readHostModelModuleMethods,
   readHostPermissionModuleMethods,
+  readHostTurnModuleMethods,
   type AgentExecutionContext,
   type ModelExecutionContext,
   type ModelInvokerPort,
@@ -25,11 +29,13 @@ export {
   type ModuleExecuteRequest,
   type ModuleHandshakeRequest,
   type HostCapabilityModuleMethod,
+  type HostBudgetModuleMethod,
   type HostContextModuleMethod,
   type HostEventModuleMethod,
   type HostLifecycleModuleMethod,
   type HostModelModuleMethod,
   type HostPermissionModuleMethod,
+  type HostTurnModuleMethod,
   type HostModuleCapabilities,
   type ModuleMessage,
   type ModuleMessageBase,
@@ -72,6 +78,8 @@ export {
   type SidecarModuleHandler,
   type SidecarModuleHandlerRegistry,
   type SidecarModuleHandlerFactory,
+  type SidecarBudgetHandlerFactoryInput,
+  type SidecarTurnHandlerFactoryInput,
   type StdioAgentLoopSidecarConnectionFactoryOptions,
   type TcpAgentLoopSidecarConnectionFactoryOptions,
   type TcpAgentLoopSidecarAddress,
@@ -101,6 +109,16 @@ export {
   type AgentLoopOperationUnknownTerminal,
 } from "./transport/index.js";
 export { createRouterModelInvokerPort, createToolSchedulerPort } from "./adapters.js";
+export {
+  createHostModelBudgetPort,
+  type HostBudgetModuleBinding,
+  type HostBudgetModuleClient,
+} from "./budget/index.js";
+export {
+  createHostTurnCallbacks,
+  type HostTurnModuleBinding,
+  type HostTurnModuleClient,
+} from "./turn/index.js";
 export {
   createHostCapabilityToolPort,
   createPermissionAwareToolPort,

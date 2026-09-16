@@ -41,6 +41,8 @@ export function createHostModelInvokerPort(
   let preparationSequence = 0;
   const nextPreparationId = (): string => `prepared-${uuid()}-${++preparationSequence}`;
   const supportsRemotePrepare = options.methods?.includes("prepare") === true;
+  const supportsPullStream = options.methods?.includes("stream_next") === true;
+  const supportsCloseStream = options.methods?.includes("close_stream") === true;
   return {
     async prepare({ request, context }): Promise<PreparedModelInvocation> {
       const fallback: PreparedModelInvocation = {
@@ -76,6 +78,46 @@ export function createHostModelInvokerPort(
         preparationId = nextPreparationId();
         rememberPreparationId(prepared, preparationId, preparationIds);
       }
+      if (supportsPullStream) {
+        let done = false;
+        try {
+          while (!done) {
+            const response = await callModule({
+              runId: context.runId,
+              operationId: context.operationId ?? context.turnId,
+              idempotencyKey: context.idempotencyKey,
+              requestId: `model-stream-next-${uuid()}`,
+              module: "model",
+              payload: {
+                operation: "stream_next",
+                request: snapshotCanonicalModelRequest(prepared.request),
+                preparationId,
+                context: serializeModelExecutionContext(context),
+              },
+            });
+            assertModelResponse(response, "Model stream failed");
+            const events = response.payload?.events;
+            if (!Array.isArray(events) || typeof response.payload?.done !== "boolean") {
+              throw invalidModelResponse("Model stream_next response must contain events and done.");
+            }
+            for (const event of events) yield event as CanonicalModelEvent;
+            done = response.payload.done;
+          }
+        } finally {
+          if (!done && supportsCloseStream) {
+            await callModule({
+              runId: context.runId,
+              operationId: context.operationId ?? context.turnId,
+              idempotencyKey: context.idempotencyKey,
+              requestId: `model-close-stream-${uuid()}`,
+              module: "model",
+              recordFailure: false,
+              payload: { operation: "close_stream", preparationId },
+            }).catch(() => undefined);
+          }
+        }
+        return;
+      }
       const response = await callModule({
         runId: context.runId,
         operationId: context.operationId ?? context.turnId,
@@ -89,28 +131,23 @@ export function createHostModelInvokerPort(
           context: serializeModelExecutionContext(context),
         },
       });
-      if (!response.ok) {
-        const failure = new Error(
-          String(response.error?.message ?? response.code ?? "Model module failed"),
-        ) as Error & { code?: string; retryable?: boolean; retryAfterMs?: number };
-        failure.code = response.code;
-        if (typeof response.error?.retryable === "boolean") {
-          failure.retryable = response.error.retryable;
-        }
-        if (typeof response.error?.retryAfterMs === "number") {
-          failure.retryAfterMs = response.error.retryAfterMs;
-        }
-        throw failure;
-      }
+      assertModelResponse(response, "Model module failed");
       const events = response.payload?.events;
       if (!Array.isArray(events)) {
-        const failure = new Error("Model module response must contain canonical events.") as Error & { code?: string };
-        failure.code = "INVALID_MODEL_RESPONSE";
-        throw failure;
+        throw invalidModelResponse("Model module response must contain canonical events.");
       }
       for (const event of events) yield event as CanonicalModelEvent;
     },
   };
+}
+
+function assertModelResponse(response: ModuleResponse, fallback: string): void {
+  if (response.ok) return;
+  throw moduleFailure(response, fallback);
+}
+
+function invalidModelResponse(message: string): Error & { code: string } {
+  return Object.assign(new Error(message), { code: "INVALID_MODEL_RESPONSE" });
 }
 
 function rememberPreparationId(

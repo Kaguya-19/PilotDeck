@@ -1,10 +1,11 @@
-import type { AgentEventEmitter } from "../../protocol/events.js";
+import type { AgentEvent, AgentEventEmitter } from "../../protocol/events.js";
 import type {
   AgentTurnCapabilities,
   AgentTurnContextPort,
   AuxiliaryModelPort,
   InteractionPort,
   LifecycleDispatchPort,
+  ModelBudgetPort,
   PermissionPort,
   PlanModePort,
   SubagentPort,
@@ -32,6 +33,8 @@ import {
 export type SidecarModelModulePort = Readonly<{
   execution: ModelExecutionPort;
 }>;
+
+export type SidecarBudgetModulePort = ModelBudgetPort;
 
 export type SidecarCapabilityModulePort = Readonly<{
   execution: ToolExecutionPort;
@@ -98,7 +101,10 @@ export type SidecarContextModulePort = Readonly<{
   requestIdentity: ContextRequestIdentityServicesPort;
 }>;
 export type SidecarLifecycleModulePort = LifecycleDispatchPort;
-export type SidecarEventModulePort = Readonly<{ emit: AgentEventEmitter }>;
+export type SidecarEventModulePort = Readonly<{
+  emit: AgentEventEmitter;
+  drain?: () => AgentEvent[];
+}>;
 
 export type SidecarToolContextPorts = Readonly<{
   model?: AuxiliaryModelPort;
@@ -113,6 +119,8 @@ export type SidecarToolContextPorts = Readonly<{
 /** The only domain composition shape consumed by a sidecar turn. */
 export type SidecarModuleComposition = Readonly<{
   model: SidecarModelModulePort;
+  budget?: SidecarBudgetModulePort;
+  interaction?: Readonly<{ elicitationAvailable: boolean }>;
   capability: SidecarCapabilityModulePort;
   permission?: SidecarPermissionModulePort;
   planTodo?: SidecarPlanTodoModulePort;
@@ -129,12 +137,14 @@ export type SidecarModuleComposition = Readonly<{
  */
 export type SidecarHostModulePorts = Readonly<{
   model: ModelExecutionPort;
+  budget?: ModelBudgetPort;
   toolExecution: ToolExecutionPort;
   toolResultObserver?: ToolResultObserver;
   permission?: PermissionPort;
   context?: AgentTurnContextPort;
   lifecycle?: LifecycleDispatchPort;
   eventEmitter?: AgentEventEmitter;
+  drainEvents?: () => AgentEvent[];
   auxiliaryModel?: AuxiliaryModelPort;
   interaction?: InteractionPort;
   planMode?: PlanModePort;
@@ -178,6 +188,10 @@ export function createSidecarModuleComposition(
   const contextIdentity = createSidecarContextRequestIdentityServices(toolContext);
   return Object.freeze({
     model: Object.freeze({ execution: ports.model }),
+    ...(ports.budget ? { budget: ports.budget } : {}),
+    ...(ports.interaction?.elicitationAvailable === true || ports.interaction?.elicitation
+      ? { interaction: Object.freeze({ elicitationAvailable: true }) }
+      : {}),
     capability: Object.freeze({
       execution: ports.toolExecution,
       resultObserver: ports.toolResultObserver,
@@ -199,7 +213,12 @@ export function createSidecarModuleComposition(
       }),
     } : {}),
     ...(ports.lifecycle ? { lifecycle: ports.lifecycle } : {}),
-    ...(ports.eventEmitter ? { event: Object.freeze({ emit: ports.eventEmitter }) } : {}),
+    ...(ports.eventEmitter ? {
+      event: Object.freeze({
+        emit: ports.eventEmitter,
+        ...(ports.drainEvents ? { drain: ports.drainEvents } : {}),
+      }),
+    } : {}),
   });
 }
 
@@ -209,12 +228,14 @@ export function createSidecarHostModulePorts(
 ): SidecarHostModulePorts {
   return Object.freeze({
     model: capabilities.model.execution,
+    budget: capabilities.model.budget,
     toolExecution: capabilities.toolExecution,
     toolResultObserver: capabilities.toolResultObserver,
     permission: capabilities.permission,
     ...(isNoopAgentTurnContextPort(capabilities.context) ? {} : { context: capabilities.context }),
     lifecycle: capabilities.hooks.lifecycle,
     eventEmitter: capabilities.events.emit,
+    drainEvents: capabilities.events.drain,
     auxiliaryModel: capabilities.model.auxiliary,
     interaction: capabilities.interaction,
     planMode: capabilities.planMode,

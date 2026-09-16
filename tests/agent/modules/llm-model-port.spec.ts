@@ -350,3 +350,152 @@ test("host model consumer rejects a successful response without canonical events
     (error: Error & { code?: string }) => error.code === "INVALID_MODEL_RESPONSE",
   );
 });
+
+test("host model consumer pulls advertised stream events incrementally", async () => {
+  const operations: string[] = [];
+  let releaseSecond!: () => void;
+  const secondAllowed = new Promise<void>((resolve) => { releaseSecond = resolve; });
+  const port = createHostModelInvokerPort(async (moduleCall) => {
+    const operation = (moduleCall.payload as Record<string, unknown>).operation as string;
+    operations.push(operation);
+    if (operation === "prepare") {
+      return {
+        kind: "response",
+        messageId: "prepared",
+        inReplyTo: "prepare",
+        ok: true,
+        payload: { prepared: { request, provider: request.provider, model: request.model } },
+      };
+    }
+    const pull = operations.filter((candidate) => candidate === "stream_next").length;
+    if (pull === 1) {
+      return {
+        kind: "response",
+        messageId: "delta",
+        inReplyTo: "next-1",
+        ok: true,
+        payload: { events: [{ type: "text_delta", text: "first" }], done: false },
+      };
+    }
+    await secondAllowed;
+    return {
+      kind: "response",
+      messageId: "done",
+      inReplyTo: "next-2",
+      ok: true,
+      payload: { events: [{ type: "message_end", finishReason: "stop" }], done: true },
+    };
+  }, { methods: ["prepare", "stream_next", "close_stream"], uuid: () => "pull" });
+
+  const prepared = await port.prepare({ request, context });
+  const iterator = port.stream({ prepared, context })[Symbol.asyncIterator]();
+  assert.deepEqual(await iterator.next(), { value: { type: "text_delta", text: "first" }, done: false });
+  assert.deepEqual(operations, ["prepare", "stream_next"]);
+  releaseSecond();
+  assert.deepEqual(await iterator.next(), { value: { type: "message_end", finishReason: "stop" }, done: false });
+  assert.deepEqual(await iterator.next(), { value: undefined, done: true });
+  assert.deepEqual(operations, ["prepare", "stream_next", "stream_next"]);
+});
+
+test("host model consumer preserves pulled prefix before a later provider error", async () => {
+  let pulls = 0;
+  const port = createHostModelInvokerPort(async (moduleCall) => {
+    const operation = (moduleCall.payload as Record<string, unknown>).operation;
+    if (operation === "prepare") {
+      return {
+        kind: "response",
+        messageId: "prepared",
+        inReplyTo: "prepare",
+        ok: true,
+        payload: { prepared: { request, provider: request.provider, model: request.model } },
+      };
+    }
+    pulls += 1;
+    if (pulls === 1) {
+      return {
+        kind: "response",
+        messageId: "prefix",
+        inReplyTo: "next-1",
+        ok: true,
+        payload: { events: [{ type: "reasoning_delta", text: "thinking" }], done: false },
+      };
+    }
+    return {
+      kind: "response",
+      messageId: "failure",
+      inReplyTo: "next-2",
+      ok: false,
+      code: "MODEL_STREAM_FAILED",
+      error: { message: "provider failed after output", retryable: false },
+    };
+  }, { methods: ["prepare", "stream_next"], uuid: () => "prefix" });
+
+  const prepared = await port.prepare({ request, context });
+  const iterator = port.stream({ prepared, context })[Symbol.asyncIterator]();
+  assert.deepEqual(await iterator.next(), { value: { type: "reasoning_delta", text: "thinking" }, done: false });
+  await assert.rejects(iterator.next(), (error: Error & { code?: string }) =>
+    error.message === "provider failed after output" && error.code === "MODEL_STREAM_FAILED");
+});
+
+test("host model consumer closes an unfinished pulled stream when iteration stops early", async () => {
+  const operations: string[] = [];
+  const port = createHostModelInvokerPort(async (moduleCall) => {
+    const operation = (moduleCall.payload as Record<string, unknown>).operation as string;
+    operations.push(operation);
+    if (operation === "prepare") {
+      return {
+        kind: "response",
+        messageId: "prepared",
+        inReplyTo: "prepare",
+        ok: true,
+        payload: { prepared: { request, provider: request.provider, model: request.model } },
+      };
+    }
+    if (operation === "close_stream") {
+      return { kind: "response", messageId: "closed", inReplyTo: "close", ok: true, payload: { closed: true } };
+    }
+    return {
+      kind: "response",
+      messageId: "delta",
+      inReplyTo: "next",
+      ok: true,
+      payload: { events: [{ type: "text_delta", text: "first" }], done: false },
+    };
+  }, { methods: ["prepare", "stream_next", "close_stream"], uuid: () => "close" });
+
+  const prepared = await port.prepare({ request, context });
+  for await (const _event of port.stream({ prepared, context })) break;
+  assert.deepEqual(operations, ["prepare", "stream_next", "close_stream"]);
+});
+
+test("host model consumer rejects malformed pulled stream responses", async () => {
+  const port = createHostModelInvokerPort(async (moduleCall) => {
+    const operation = (moduleCall.payload as Record<string, unknown>).operation;
+    if (operation === "prepare") {
+      return {
+        kind: "response",
+        messageId: "prepared",
+        inReplyTo: "prepare",
+        ok: true,
+        payload: { prepared: { request, provider: request.provider, model: request.model } },
+      };
+    }
+    return {
+      kind: "response",
+      messageId: "malformed",
+      inReplyTo: "next",
+      ok: true,
+      payload: { events: [] },
+    };
+  }, { methods: ["prepare", "stream_next"], uuid: () => "malformed" });
+  const prepared = await port.prepare({ request, context });
+
+  await assert.rejects(
+    async () => {
+      for await (const _event of port.stream({ prepared, context })) {
+        // Consume so response validation executes.
+      }
+    },
+    (error: Error & { code?: string }) => error.code === "INVALID_MODEL_RESPONSE",
+  );
+});

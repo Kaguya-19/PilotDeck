@@ -1,6 +1,5 @@
 import { TurnTimeline } from "../stream/TurnTimeline.js";
 import { setTimeout as sleep } from "node:timers/promises";
-import { stat } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import {
   applyModelEventToAssembler,
@@ -72,17 +71,7 @@ import {
 } from "../../tool/askModeConstraints.js";
 import { buildAskModeAgentToolSchema } from "../../tool/builtin/agent.js";
 import { requestFingerprint } from "../../model/streaming/requestFingerprint.js";
-import { resolvePilotDeckWorkspacePath } from "../../tool/builtin/filesystem/pathSafety.js";
-import { readTextFile } from "../../tool/builtin/filesystem/readTextFile.js";
-import { recordWriteSnapshot } from "../../tool/builtin/filesystem/writeSnapshots.js";
-import {
-  hasBinaryExtension,
-  isBlockedDevicePath,
-  isImagePath,
-  isNotebookPath,
-  isPdfPath,
-} from "../../tool/builtin/filesystem/fileTypeSafety.js";
-import { PilotDeckToolRuntimeError } from "../../tool/protocol/errors.js";
+import { seedAgentReadState } from "./seedReadState.js";
 import {
   createAgentStatusDetail,
   createVisibleErrorStatusDetail,
@@ -166,9 +155,11 @@ export type AgentLoopInput = {
   /** Host-owned execution identity. Gateway supplies runId; direct callers may omit it. */
   execution?: Pick<AgentExecutionContext, "runId" | "operationId" | "idempotencyKey" | "operationDeadline">;
   /** Drain user guidance that should join this active turn before the next model request. */
-  drainSteerMessages?: () => AgentSteerMessage[];
+  drainSteerMessages?: () => AgentSteerMessage[] | Promise<AgentSteerMessage[]>;
   /** Atomically drain pending guidance or close the inbox before terminal completion. */
-  drainOrCloseSteerMailbox?: () => { messages: AgentSteerMessage[]; closed: boolean };
+  drainOrCloseSteerMailbox?: () =>
+    | { messages: AgentSteerMessage[]; closed: boolean }
+    | Promise<{ messages: AgentSteerMessage[]; closed: boolean }>;
   /** Acknowledge guidance only after its canonical user message is durable. */
   onSteerApplied?: (itemId: string) => void;
 };
@@ -246,61 +237,11 @@ export class AgentLoop {
    * normal AgentLoop construction and turns leave the state untouched.
    */
   async seedReadState(filePath: string, mtimeMs: number): Promise<{ applied: boolean }> {
-    const pathContext = {
-      cwd: this.config.cwd,
-      permissionMode: this.config.permissionMode,
-      permissionContext: this.config.permissionContext,
-      allowedReadFiles: [...this.allowedReadFiles],
-    } as PilotDeckToolRuntimeContext;
-    const resolved = resolvePilotDeckWorkspacePath(filePath, pathContext, {
-      mustExist: true,
-      allowRegisteredReadFiles: true,
-    });
-    if (!resolved.ok) {
-      throw new PilotDeckToolRuntimeError(resolved.error.code, resolved.error.message, resolved.error.details);
-    }
-    if (
-      isBlockedDevicePath(resolved.absolutePath)
-      || hasBinaryExtension(resolved.absolutePath)
-      || isImagePath(resolved.absolutePath)
-      || isPdfPath(resolved.absolutePath)
-      || isNotebookPath(resolved.absolutePath)
-    ) {
-      throw new PilotDeckToolRuntimeError(
-        "invalid_tool_input",
-        "seedReadState supports only text files previously read by read_file.",
-      );
-    }
-
-    const expectedMtimeMs = Math.floor(mtimeMs);
-    const beforeRead = await stat(resolved.absolutePath);
-    if (!beforeRead.isFile()) {
-      throw new PilotDeckToolRuntimeError("file_conflict", `${resolved.absolutePath} is not a regular file.`);
-    }
-    if (Math.floor(beforeRead.mtimeMs) !== expectedMtimeMs) {
-      return { applied: false };
-    }
-
-    const content = await readTextFile(resolved.absolutePath);
-    const afterRead = await stat(resolved.absolutePath);
-    if (!afterRead.isFile()) {
-      throw new PilotDeckToolRuntimeError("file_conflict", `${resolved.absolutePath} is not a regular file.`);
-    }
-    if (Math.floor(afterRead.mtimeMs) !== expectedMtimeMs) {
-      return { applied: false };
-    }
-
-    this.readFileState.set(`${resolved.absolutePath}::text::1::all::`, {
-      mtimeMs: expectedMtimeMs,
-      kind: "text",
-    });
-    recordWriteSnapshot(
-      { writeSnapshots: this.writeSnapshots } as PilotDeckToolRuntimeContext,
-      resolved.absolutePath,
-      content,
-      expectedMtimeMs,
-    );
-    return { applied: true };
+    return seedAgentReadState(this.config, {
+      readFileState: this.readFileState,
+      writeSnapshots: this.writeSnapshots,
+      allowedReadFiles: this.allowedReadFiles,
+    }, filePath, mtimeMs);
   }
 
   async *run(input: AgentLoopInput): AsyncGenerator<AgentEvent, AgentLoopRunResult, unknown> {
@@ -362,6 +303,8 @@ export class AgentLoop {
       sessionId: input.sessionId,
       turnId: input.turnId,
       event: status.event,
+      kind: status.kind,
+      text: status.text,
       detail: status.detail,
     });
     const emitStatus = async (status: AgentStatusMessage): Promise<AgentEvent> => {
@@ -588,7 +531,7 @@ export class AgentLoop {
         return { result, messages };
       }
 
-      const pendingSteers = input.drainSteerMessages?.() ?? [];
+      const pendingSteers = await input.drainSteerMessages?.() ?? [];
       for await (const event of applySteerMessages(pendingSteers)) {
         yield event;
       }
@@ -604,7 +547,13 @@ export class AgentLoop {
             turnId: input.turnId,
             messages,
             abortSignal: input.abortSignal,
+            budgetStage: "pre_route",
+            maxContextTokens: preRoutingMaxContextTokens,
             reservedOutputTokens,
+            budgetRequest: await this.createBudgetRequest(input, messages, {
+              maxContextTokens: preRoutingMaxContextTokens,
+              reservedOutputTokens,
+            }),
             budgetEvaluator: this.createBudgetEvaluator(input, {
               maxContextTokens: preRoutingMaxContextTokens,
               reservedOutputTokens,
@@ -708,8 +657,16 @@ export class AgentLoop {
               turnId: input.turnId,
               messages,
               abortSignal: input.abortSignal,
+              budgetStage: "routed",
               maxContextTokens: routedMaxCtx,
               reservedOutputTokens,
+              budgetRequest: await this.createBudgetRequest(input, messages, {
+                decision,
+                baseRequest: request,
+                prepared,
+                maxContextTokens: routedMaxCtx,
+                reservedOutputTokens,
+              }),
               budgetEvaluator: this.createBudgetEvaluator(input, {
                 decision,
                 baseRequest: request,
@@ -777,7 +734,7 @@ export class AgentLoop {
       }
 
       const calibrationRequest = prepared.request;
-      const requestInputEstimate = this.capabilities.model.budget?.estimateRequestInput?.(calibrationRequest);
+      const requestInputEstimate = await this.capabilities.model.budget?.estimateRequestInput?.(calibrationRequest);
       const calibrationRequestFingerprint = requestFingerprint(calibrationRequest);
       const assembler = createModelMessageAssemblerState(randomUUID());
       let executedRequest: { provider: string; model: string; fingerprint?: string } | undefined;
@@ -911,7 +868,7 @@ export class AgentLoop {
 
       const budgetProvider = executedRequest?.provider ?? prepared.provider;
       const budgetModel = executedRequest?.model ?? prepared.model;
-      const invocationCostUsd = this.estimateUsageCost(budgetUsage, budgetProvider, budgetModel);
+      const invocationCostUsd = await this.estimateUsageCost(budgetUsage, budgetProvider, budgetModel);
       if (invocationCostUsd !== undefined) {
         spentBudgetUsd += invocationCostUsd;
         turnSpentBudgetUsd += invocationCostUsd;
@@ -1467,8 +1424,15 @@ export class AgentLoop {
                 turnId: input.turnId,
                 messages,
                 abortSignal: input.abortSignal,
+                budgetStage: "recovery",
                 maxContextTokens,
                 reservedOutputTokens,
+                budgetRequest: await this.createBudgetRequest(input, messages, {
+                  decision: recoveryDecision,
+                  baseRequest: { ...request, provider: target.provider, model: target.model },
+                  maxContextTokens,
+                  reservedOutputTokens,
+                }),
                 budgetEvaluator: this.createBudgetEvaluator(input, {
                   decision: recoveryDecision,
                   baseRequest: { ...request, provider: target.provider, model: target.model },
@@ -1799,7 +1763,7 @@ export class AgentLoop {
         // unapplied and the host can keep it queued for a later turn.
         const canContinueForSteer = !input.maxTurns || turnCount < input.maxTurns;
         const terminalSteers = canContinueForSteer
-          ? input.drainOrCloseSteerMailbox?.()
+          ? await input.drainOrCloseSteerMailbox?.()
           : undefined;
         if (terminalSteers && terminalSteers.messages.length > 0) {
           for await (const event of applySteerMessages(terminalSteers.messages)) {
@@ -2203,7 +2167,7 @@ export class AgentLoop {
     const contextRuntime = this.capabilities.contextPreparation;
     const planTodo = this.capabilities.planMode.planTodoManager?.forSession(input.sessionId);
     const canPrompt = input.canPrompt ?? this.config.permissionContext.canPrompt;
-    const canElicit = input.canElicit === true && this.capabilities.interaction.elicitation !== undefined;
+    const canElicit = input.canElicit === true && this.capabilities.interaction.elicitationAvailable === true;
     const promptBlockedToolNames = canPrompt
       ? new Set<string>()
       : new Set(
@@ -2305,12 +2269,12 @@ export class AgentLoop {
     };
   }
 
-  private estimateUsageCost(
+  private async estimateUsageCost(
     usage: CanonicalUsage | undefined,
     provider: string,
     model: string,
-  ): number | undefined {
-    const routerEstimate = this.capabilities.model.budget?.estimateUsageCost?.(usage, provider, model);
+  ): Promise<number | undefined> {
+    const routerEstimate = await this.capabilities.model.budget?.estimateUsageCost?.(usage, provider, model);
     if (typeof routerEstimate === "number" && Number.isFinite(routerEstimate) && routerEstimate >= 0) {
       return routerEstimate;
     }
@@ -2364,27 +2328,7 @@ export class AgentLoop {
       return undefined;
     }
     return async (candidateMessages) => {
-      let candidateRequest = await this.createModelRequest(candidateMessages, input, {
-        emitInstructionEvents: false,
-        previewOnly: true,
-      });
-      if (options.prepared && options.baseRequest) {
-        const patchedBase = { ...options.baseRequest, messages: candidateRequest.messages };
-        const materializedRequest = {
-          ...patchedBase,
-          systemPrompt: candidateRequest.systemPrompt,
-          tools: candidateRequest.tools,
-          cacheBreakpoints: candidateRequest.cacheBreakpoints,
-          cachePlan: candidateRequest.cachePlan,
-        };
-        candidateRequest = this.capabilities.model.routing?.materializeRequest
-          ? this.capabilities.model.routing.materializeRequest(options.prepared, materializedRequest)
-          : {
-              ...materializedRequest,
-              provider: options.prepared.provider,
-              model: options.prepared.model,
-            };
-      }
+      const candidateRequest = await this.createBudgetRequest(input, candidateMessages, options);
       const snapshot = await evaluateRequestBudget.call(tokenAccounting, candidateRequest, {
         maxContextTokens,
         reservedOutputTokens: options.reservedOutputTokens,
@@ -2396,6 +2340,47 @@ export class AgentLoop {
       });
       return snapshot;
     };
+  }
+
+  private async createBudgetRequest(
+    input: AgentLoopInput,
+    candidateMessages: CanonicalMessage[],
+    options: {
+      decision?: { provider: string; model: string };
+      baseRequest?: CanonicalModelRequest;
+      prepared?: PreparedModelInvocation;
+      maxContextTokens?: number;
+      reservedOutputTokens: number;
+    },
+  ): Promise<CanonicalModelRequest> {
+    let candidateRequest = await this.createModelRequest(candidateMessages, input, {
+      emitInstructionEvents: false,
+      previewOnly: true,
+    });
+    if (options.prepared && options.baseRequest) {
+      const materializedRequest = {
+        ...options.baseRequest,
+        messages: candidateRequest.messages,
+        systemPrompt: candidateRequest.systemPrompt,
+        tools: candidateRequest.tools,
+        cacheBreakpoints: candidateRequest.cacheBreakpoints,
+        cachePlan: candidateRequest.cachePlan,
+      };
+      candidateRequest = this.capabilities.model.routing?.materializeRequest
+        ? this.capabilities.model.routing.materializeRequest(options.prepared, materializedRequest)
+        : {
+            ...materializedRequest,
+            provider: options.prepared.provider,
+            model: options.prepared.model,
+          };
+    } else if (options.decision) {
+      candidateRequest = {
+        ...candidateRequest,
+        provider: options.decision.provider,
+        model: options.decision.model,
+      };
+    }
+    return candidateRequest;
   }
 
   private recordTokenCalibration(
@@ -2609,7 +2594,7 @@ export class AgentLoop {
       runMode: this.config.runMode ?? "agent",
       permissionMode: this.config.permissionMode,
       permissionContext,
-      canElicit: input.canElicit === true && this.capabilities.interaction.elicitation !== undefined,
+      canElicit: input.canElicit === true && this.capabilities.interaction.elicitationAvailable === true,
       auditRecorder: this.capabilities.toolExecution.auditRecorder,
       now: this.now,
       env: buildTurnEnvironment(

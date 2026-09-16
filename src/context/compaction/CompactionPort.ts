@@ -1,4 +1,4 @@
-import type { CanonicalMessage } from "../../model/index.js";
+import type { CanonicalMessage, CanonicalModelRequest } from "../../model/index.js";
 import type { ContextRecoveryDecision, ContextRecoveryInput } from "../protocol/types.js";
 import type { TokenBudgetEvaluateOptions, TokenBudgetSnapshot } from "../budget/TokenBudgetManager.js";
 import type { AutoCompactionDecision } from "./AutoCompactionPolicy.js";
@@ -38,11 +38,14 @@ export type CompactionBudgetProjection = {
   reservedOutputTokens?: number;
   manualForce?: boolean;
   allowFallbackOnFailure?: boolean;
+  request?: CanonicalModelRequest;
 };
 
 export type CompactionAutoCompactInput = {
   sessionId?: string;
   turnId?: string;
+  /** Explicit AgentLoop decision point retained across sidecar serialization. */
+  budgetStage?: "pre_route" | "routed" | "recovery";
   /** Lifecycle classification used by durable adapters; defaults to auto. */
   trigger?: "auto" | "reactive" | "manual";
   /**
@@ -59,21 +62,24 @@ export type CompactionAutoCompactInput = {
   /** Legacy compatibility flag; summary failures never fabricate a checkpoint. */
   allowFallbackOnFailure?: boolean;
   budgetEvaluator?: (messages: CanonicalMessage[]) => Promise<TokenBudgetSnapshot>;
+  /** Serializable request template used to reconstruct request-level budgeting across a sidecar boundary. */
+  budgetRequest?: CanonicalModelRequest;
 };
 
 /** Derive the public budget intent from an in-process auto-compaction call. */
 export function projectCompactionBudget(input: CompactionAutoCompactInput): CompactionBudgetProjection {
   return {
-    stage: input.allowFallbackOnFailure === true
+    stage: input.budgetStage ?? (input.allowFallbackOnFailure === true
       ? "recovery"
       : input.maxContextTokens === undefined
         ? "pre_route"
-        : "routed",
+        : "routed"),
     trigger: input.trigger ?? "auto",
     ...(input.maxContextTokens !== undefined ? { maxContextTokens: input.maxContextTokens } : {}),
     ...(input.reservedOutputTokens !== undefined ? { reservedOutputTokens: input.reservedOutputTokens } : {}),
     ...(input.manualForce !== undefined ? { manualForce: input.manualForce } : {}),
     ...(input.allowFallbackOnFailure !== undefined ? { allowFallbackOnFailure: input.allowFallbackOnFailure } : {}),
+    ...(input.budgetRequest ? { request: input.budgetRequest } : {}),
   };
 }
 

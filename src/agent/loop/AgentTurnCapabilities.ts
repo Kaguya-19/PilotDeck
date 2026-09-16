@@ -76,6 +76,7 @@ export type SidecarAgentTurnCapabilityComposition = {
   sidecarOperationLedger?: AgentLoopOperationLedger;
   auditRecorder?: PilotDeckToolAuditRecorder;
   elicitation?: PilotDeckElicitationChannel;
+  elicitationAvailable?: boolean;
   userDialog?: PilotDeckUserDialogChannel;
   fileHistory?: PilotDeckToolFileHistorySink;
   fileUpdateNotifier?: PilotDeckFileUpdateNotifier;
@@ -102,11 +103,16 @@ export type ModelMetadataPort = Readonly<{
 }>;
 
 /** Token estimation and budget evaluation consumed by compaction logic. */
-export type ModelBudgetPort = Partial<Pick<
-  TokenAccountingRuntime,
-  "estimateRequestInput" | "evaluateRequestBudget"
->> & Readonly<{
-  estimateUsageCost?: (usage: CanonicalUsage | undefined, provider: string, model: string) => number | undefined;
+export type ModelBudgetPort = Readonly<{
+  estimateRequestInput?: (
+    ...args: Parameters<TokenAccountingRuntime["estimateRequestInput"]>
+  ) => number | Promise<number>;
+  evaluateRequestBudget?: TokenAccountingRuntime["evaluateRequestBudget"];
+  estimateUsageCost?: (
+    usage: CanonicalUsage | undefined,
+    provider: string,
+    model: string,
+  ) => number | undefined | Promise<number | undefined>;
 }>;
 
 /** Secondary model client for tools and subagent helpers. */
@@ -180,6 +186,7 @@ export type PermissionPort = PermissionDecisionPort;
 
 export type InteractionPort = Readonly<{
   elicitation?: PilotDeckElicitationChannel;
+  elicitationAvailable?: boolean;
   userDialog?: PilotDeckUserDialogChannel;
 }>;
 
@@ -278,6 +285,7 @@ export function createSidecarAgentTurnCapabilities(
   const metadata: ModelMetadataPort = dependencies.ports.metadata ?? Object.freeze({});
   const interaction = Object.freeze({
     elicitation: dependencies.elicitation,
+    elicitationAvailable: dependencies.elicitationAvailable ?? dependencies.elicitation !== undefined,
     userDialog: dependencies.userDialog,
   });
   const planMode = Object.freeze({

@@ -14,7 +14,21 @@ export const HOST_CONTEXT_MODULE_METHODS = [
 ] as const;
 
 /** Host-advertised model operations supported by Module Protocol v2. */
-export const HOST_MODEL_MODULE_METHODS = ["prepare", "stream"] as const;
+export const HOST_MODEL_MODULE_METHODS = ["prepare", "stream", "stream_next", "close_stream"] as const;
+
+/** Host-advertised model-budget operations supported by Module Protocol v2. */
+export const HOST_BUDGET_MODULE_METHODS = [
+  "estimate_request_input",
+  "evaluate_request_budget",
+  "estimate_usage_cost",
+] as const;
+
+/** Host-advertised active-turn operations supported by Module Protocol v2. */
+export const HOST_TURN_MODULE_METHODS = [
+  "drain_steer",
+  "drain_or_close_steer",
+  "persist_compaction",
+] as const;
 
 /** Host-advertised capability operations supported by Module Protocol v2. */
 export const HOST_CAPABILITY_MODULE_METHODS = ["execute", "execute_batch", "plan_todo"] as const;
@@ -30,12 +44,16 @@ export const HOST_EVENT_MODULE_METHODS = ["emit"] as const;
 
 export type HostContextModuleMethod = (typeof HOST_CONTEXT_MODULE_METHODS)[number];
 export type HostModelModuleMethod = (typeof HOST_MODEL_MODULE_METHODS)[number];
+export type HostBudgetModuleMethod = (typeof HOST_BUDGET_MODULE_METHODS)[number];
+export type HostTurnModuleMethod = (typeof HOST_TURN_MODULE_METHODS)[number];
 export type HostCapabilityModuleMethod = (typeof HOST_CAPABILITY_MODULE_METHODS)[number];
 export type HostPermissionModuleMethod = (typeof HOST_PERMISSION_MODULE_METHODS)[number];
 export type HostLifecycleModuleMethod = (typeof HOST_LIFECYCLE_MODULE_METHODS)[number];
 export type HostEventModuleMethod = (typeof HOST_EVENT_MODULE_METHODS)[number];
 export type HostModuleCapabilities = {
   model?: { methods: HostModelModuleMethod[] };
+  budget?: { methods: HostBudgetModuleMethod[] };
+  turn?: { methods: HostTurnModuleMethod[] };
   context?: { methods: HostContextModuleMethod[] };
   capability?: { methods: HostCapabilityModuleMethod[] };
   permission?: { methods: HostPermissionModuleMethod[] };
@@ -45,6 +63,14 @@ export type HostModuleCapabilities = {
 
 export function readHostModelModuleMethods(value: unknown): HostModelModuleMethod[] {
   return readHostModuleMethods(value, HOST_MODEL_MODULE_METHODS);
+}
+
+export function readHostBudgetModuleMethods(value: unknown): HostBudgetModuleMethod[] {
+  return readHostModuleMethods(value, HOST_BUDGET_MODULE_METHODS);
+}
+
+export function readHostTurnModuleMethods(value: unknown): HostTurnModuleMethod[] {
+  return readHostModuleMethods(value, HOST_TURN_MODULE_METHODS);
 }
 
 export function readHostContextModuleMethods(value: unknown): HostContextModuleMethod[] {
@@ -151,7 +177,7 @@ export type ModuleCallRequest = ModuleMessageBase & {
   operationId: string;
   requestId: string;
   idempotencyKey?: string;
-  module: "model" | "capability" | "permission" | "checkpoint" | "context" | "lifecycle" | "event";
+  module: "model" | "budget" | "turn" | "capability" | "permission" | "checkpoint" | "context" | "lifecycle" | "event";
   payload: Record<string, unknown>;
 };
 
@@ -326,6 +352,8 @@ export function validateModuleMessage(value: unknown): ModuleProtocolValidation 
 
 const MODULE_CALL_TARGETS: ModuleCallRequest["module"][] = [
   "model",
+  "budget",
+  "turn",
   "capability",
   "permission",
   "checkpoint",

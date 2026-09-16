@@ -228,11 +228,13 @@ export class AgentSessionRuntimeBundle {
       const capabilities = createAgentTurnCapabilities(this.options.config, dependencies);
       const sidecarModules = createSidecarModuleComposition({
         model: durableModelPort,
+        budget: capabilities.model.budget,
         toolExecution: durableToolPort,
         permission: sessionScope.permission,
         ...(context ? { context: createAgentTurnContextPort(context) } : {}),
         ...(scopedLifecycle ? { lifecycle: createLifecycleDispatchPort(scopedLifecycle) } : {}),
         eventEmitter: emitter,
+        drainEvents: this.options.dependencies.drainEvents ?? eventBuf?.drain,
         auxiliaryModel: this.options.dependencies.ports?.auxiliaryModel,
         interaction: {
           elicitation: scopedElicitation,

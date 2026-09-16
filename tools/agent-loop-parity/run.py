@@ -16,6 +16,7 @@ from trace import (
     Difference,
     compare_trace_details,
     load_trace,
+    validate_production_sidecar_proof,
     validate_trace_expectations,
     write_report,
 )
@@ -158,10 +159,16 @@ def run_adapter(
         detail = error.stderr or error.stdout or ""
         return f"BLOCKED: adapter timeout ({str(detail).strip()[-300:]})"
     if result.returncode != 0:
-        detail = (result.stderr or result.stdout).strip().splitlines()[-3:]
+        detail = (result.stderr or result.stdout).strip().splitlines()[-8:]
         return f"BLOCKED: adapter exited {result.returncode}: {' | '.join(detail)}"
     if not output.exists():
         return "BLOCKED: adapter did not write trace"
+    if surface == "gateway" and mode == "sidecar":
+        records = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines() if line.strip()]
+        required_modules = {str(module) for module in scenario.get("requiredSidecarModules") or []}
+        proof_errors = validate_production_sidecar_proof(records, required_modules)
+        if proof_errors:
+            return f"BLOCKED: {'; '.join(proof_errors)}"
     return "PASS"
 
 

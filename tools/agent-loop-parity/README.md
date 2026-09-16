@@ -43,8 +43,18 @@ python tools/agent-loop-parity/run.py \
 
 `same-version` 是 sidecar parity gate；`baseline`/`both` 的 baseline drift 单独报告，不计入 sidecar 语义结论。缺少 Node、构建产物、adapter 入口、依赖或 trace 时返回 `BLOCKED`，不合成成功结果。
 
+Gateway sidecar adapter 必须设置 `PILOTDECK_AGENT_LOOP_TRANSPORT=stdio` 并进入正式 deployment profile 和
+`createAgentLoopSidecarRuntimeFactory`。trace 中必须存在 transport selection、sidecar handshake/binding，以及场景
+声明的 host module-call 证据；缺失时 runner 直接分类为 `BLOCKED`。禁止通过自建 runner 或
+`__testAgentLoopFactory` 绕过生产 factory。当前完整 gate 为 45 个场景，其中包含 budget、elicitation、live steer、
+durable compaction、full-request compaction budget、sidecar seed read state 和 live model streaming。production proof
+记录 module 与 operation；例如增量流场景必须实际出现 `model.stream_next`，只有 `model` 模块名不足以通过 oracle。
+
 ## 比较和验收
 
 比较规则以 [PilotDeck Native / Sidecar 对拍 SOP](../../docs/pilotdeck-agent-loop-parity-sop.zh.md) 和 [Module Communication SOP](../../docs/pilotdeck-module-communication-sop.zh.md) 为准。只忽略随机身份、时间戳、transport envelope 和 canonical image block 的派生 `bytes`；消息、图片 MIME/data、tool、permission、checkpoint、终态、错误码和用户输出必须严格比较。
 
 退出码：`0` 表示通过，`1` 表示 oracle 或语义差异，`2` 表示环境或 adapter 阻塞。trace、日志、SQLite 和 mock 记录应输出到临时目录，不提交到 Git。
+
+mock model/tool 只作为正式 host dispatcher 的确定性依赖，不代表真实 provider 或完整 deployment E2E。修改
+production proof 时必须同时运行 harness negative-control：fake runner 或缺少 handshake 证据必须得到 `BLOCKED`。

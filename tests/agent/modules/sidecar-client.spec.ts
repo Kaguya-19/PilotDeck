@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
+import { resolve } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 
 import {
   AgentLoopSidecarServer,
@@ -113,6 +113,448 @@ test("capability-only sidecar factory completes a durable host tool turn and res
   assert.equal(restoredFileState.readFileState?.get("/workspace/input.txt")?.kind, "text");
 });
 
+test("production sidecar receives the first model delta before the provider finishes", async () => {
+  let releaseProvider!: () => void;
+  const providerGate = new Promise<void>((resolve) => { releaseProvider = resolve; });
+  let signalProviderDelta!: () => void;
+  const providerDelta = new Promise<void>((resolve) => { signalProviderDelta = resolve; });
+  let providerFinished = false;
+  const model: ModelInvokerPort = {
+    async prepare({ request }) {
+      return { request, provider: request.provider, model: request.model };
+    },
+    async *stream(): AsyncIterable<CanonicalModelEvent> {
+      yield { type: "message_start", role: "assistant" };
+      signalProviderDelta();
+      yield { type: "text_delta", text: "first" };
+      await providerGate;
+      providerFinished = true;
+      yield { type: "message_end", finishReason: "stop" };
+    },
+  };
+  const session = createAgentSession({
+    sessionId: "streaming-sidecar-session",
+    config: config(),
+    dependencies: {
+      router: {} as never,
+      ports: { model, tools: noopTools() },
+      tools: { registry: { list: () => [] } as never, scheduler: { executeAll: async () => [] } as never },
+    },
+    agentLoopFactory: createAgentLoopSidecarRuntimeFactory({
+      connect: () => loopbackConnection(),
+      uuid: deterministicIds(),
+    }),
+  });
+  const iterator = session.submit({ type: "text", text: "stream now" }, {
+    turnId: "streaming-sidecar-turn",
+  })[Symbol.asyncIterator]();
+  const firstDelta = (async () => {
+    while (true) {
+      const next = await iterator.next();
+      if (next.done) return false;
+      if (next.value.type === "model_event" && next.value.event.type === "text_delta") return true;
+    }
+  })();
+
+  await providerDelta;
+  assert.equal(await Promise.race([
+    firstDelta,
+    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 1_000)),
+  ]), true);
+  assert.equal(providerFinished, false);
+  releaseProvider();
+  while (!(await iterator.next()).done) {
+    // Drain the remaining terminal events.
+  }
+});
+
+test("production sidecar closes the host provider iterator when its consumer stops early", async () => {
+  let providerClosed = false;
+  const model: ModelInvokerPort = {
+    async prepare({ request }) {
+      return { request, provider: request.provider, model: request.model };
+    },
+    async *stream(): AsyncIterable<CanonicalModelEvent> {
+      try {
+        yield { type: "message_start", role: "assistant" };
+        yield { type: "text_delta", text: "partial" };
+        await new Promise(() => {});
+      } finally {
+        providerClosed = true;
+      }
+    },
+  };
+  const session = createAgentSession({
+    sessionId: "closing-sidecar-session",
+    config: config(),
+    dependencies: {
+      router: {} as never,
+      ports: { model, tools: noopTools() },
+      tools: { registry: { list: () => [] } as never, scheduler: { executeAll: async () => [] } as never },
+    },
+    agentLoopFactory: createAgentLoopSidecarRuntimeFactory({
+      connect: () => loopbackConnection(),
+      uuid: deterministicIds(),
+    }),
+  });
+  const iterator = session.submit({ type: "text", text: "stop after one delta" }, {
+    turnId: "closing-sidecar-turn",
+  })[Symbol.asyncIterator]();
+  while (true) {
+    const next = await iterator.next();
+    assert.equal(next.done, false);
+    if (next.value?.type === "model_event" && next.value.event.type === "text_delta") break;
+  }
+
+  await iterator.return?.(undefined as never);
+  assert.equal(providerClosed, true);
+});
+
+test("production sidecar budget module stops before host tool side effects and persists one status", async () => {
+  let toolExecutions = 0;
+  const transcript = new InMemoryTranscriptWriter();
+  const model: ModelInvokerPort = {
+    async prepare({ request }) {
+      return { request, provider: request.provider, model: request.model };
+    },
+    async *stream() {
+      yield { type: "request_started", provider: "host-provider", model: "host-model" } as const;
+      yield { type: "message_start", role: "assistant" } as const;
+      yield { type: "tool_call_end", toolCall: { id: "write-1", name: "write", input: {} } } as const;
+      yield { type: "usage", usage: { inputTokens: 10, outputTokens: 2 } } as const;
+      yield { type: "message_end", finishReason: "tool_call" } as const;
+    },
+  };
+  const tools: ToolPort = {
+    list: () => [{
+      name: "write",
+      description: "write",
+      kind: "custom",
+      inputSchema: { type: "object" },
+      isReadOnly: () => false,
+      isConcurrencySafe: () => false,
+      execute: async () => ({ content: [] }),
+    }],
+    async executeAll() {
+      toolExecutions += 1;
+      return [];
+    },
+  };
+  const session = createAgentSession({
+    sessionId: "sidecar-budget-session",
+    config: config(),
+    transcript,
+    dependencies: {
+      router: {} as never,
+      ports: {
+        model,
+        tools,
+        budget: {
+          estimateRequestInput: () => 10,
+          estimateUsageCost: async () => 1,
+        },
+      },
+      tools: { registry: { list: () => [] } as never, scheduler: { executeAll: async () => [] } as never },
+    },
+    agentLoopFactory: createAgentLoopSidecarRuntimeFactory({
+      connect: () => loopbackConnection(),
+      uuid: deterministicIds(),
+    }),
+  });
+
+  const events = [];
+  for await (const event of session.submit({ type: "text", text: "write" }, {
+    turnId: "sidecar-budget-turn",
+    maxBudgetUsd: 0.5,
+  })) events.push(event);
+
+  assert.equal(toolExecutions, 0);
+  assert.equal(events.find((event) => event.type === "turn_failed")?.type, "turn_failed");
+  const completed = events.find((event) => event.type === "turn_completed");
+  assert.equal(completed?.type === "turn_completed" && completed.result.stopReason, "max_budget");
+  const statuses = transcript.entries.filter((entry) => entry.type === "agent_status_message");
+  assert.equal(statuses.length, 1);
+  assert.equal(statuses[0]?.type === "agent_status_message" && statuses[0].event, "max_budget_reached");
+});
+
+test("production sidecar does not acknowledge a status event when durable persistence fails", async () => {
+  const transcript = new InMemoryTranscriptWriter();
+  transcript.recordAgentStatusMessage = async () => {
+    throw new Error("status persistence failed");
+  };
+  const model: ModelInvokerPort = {
+    async prepare({ request }) {
+      return { request, provider: request.provider, model: request.model };
+    },
+    async *stream() {
+      yield { type: "request_started", provider: "host-provider", model: "host-model" } as const;
+      yield { type: "message_start", role: "assistant" } as const;
+      yield { type: "usage", usage: { inputTokens: 10, outputTokens: 2 } } as const;
+      yield { type: "message_end", finishReason: "stop" } as const;
+    },
+  };
+  const session = createAgentSession({
+    sessionId: "sidecar-status-failure-session",
+    config: config(),
+    transcript,
+    dependencies: {
+      router: {} as never,
+      ports: {
+        model,
+        tools: noopTools(),
+        budget: { estimateUsageCost: async () => 1 },
+      },
+      tools: { registry: { list: () => [] } as never, scheduler: { executeAll: async () => [] } as never },
+    },
+    agentLoopFactory: createAgentLoopSidecarRuntimeFactory({
+      connect: () => loopbackConnection(),
+      uuid: deterministicIds(),
+    }),
+  });
+
+  const events = [];
+  for await (const event of session.submit({ type: "text", text: "persist status" }, {
+      turnId: "sidecar-status-failure-turn",
+      maxBudgetUsd: 0.5,
+  })) events.push(event);
+
+  const completed = events.find((event) => event.type === "turn_completed");
+  assert.equal(completed?.type === "turn_completed" && completed.result.type, "error");
+  assert.equal(events.some((event) => event.type === "turn_completed" && event.result.type === "success"), false);
+});
+
+test("production sidecar turn module drains and acknowledges live steer exactly once", async () => {
+  const transcript = new InMemoryTranscriptWriter();
+  let modelRequests = 0;
+  let session: ReturnType<typeof createAgentSession>;
+  const model: ModelInvokerPort = {
+    async prepare({ request }) {
+      return { request, provider: request.provider, model: request.model };
+    },
+    async *stream() {
+      modelRequests += 1;
+      if (modelRequests === 1) {
+        assert.deepEqual(await session.steer({
+          turnId: "sidecar-steer-turn",
+          itemId: "steer-1",
+          message: {
+            role: "user",
+            content: [{ type: "text", text: "revise through the host mailbox" }],
+            metadata: { purpose: "mid_turn_steer", queueItemId: "steer-1" },
+          },
+        }), { accepted: true });
+      }
+      yield { type: "message_start", role: "assistant" } as const;
+      yield { type: "text_delta", text: modelRequests === 1 ? "first" : "revised" } as const;
+      yield { type: "message_end", finishReason: "stop" } as const;
+    },
+  };
+  session = createAgentSession({
+    sessionId: "sidecar-steer-session",
+    config: config(),
+    transcript,
+    dependencies: {
+      router: {} as never,
+      ports: { model, tools: noopTools() },
+      tools: { registry: { list: () => [] } as never, scheduler: { executeAll: async () => [] } as never },
+    },
+    agentLoopFactory: createAgentLoopSidecarRuntimeFactory({
+      connect: () => loopbackConnection(),
+      uuid: deterministicIds(),
+    }),
+  });
+
+  const events = [];
+  for await (const event of session.submit({ type: "text", text: "draft" }, {
+    turnId: "sidecar-steer-turn",
+  })) events.push(event);
+
+  assert.equal(modelRequests, 2);
+  assert.equal(events.filter((event) => event.type === "steer_applied").length, 1);
+  assert.equal(events.filter((event) => event.type === "turn_continued").length, 1);
+  const durableSteers = transcript.entries.filter((entry) =>
+    entry.type === "durable_message" && entry.message.metadata?.queueItemId === "steer-1");
+  assert.equal(durableSteers.length, 1);
+});
+
+test("production sidecar persists compaction before the compacted model request", async () => {
+  const transcript = new InMemoryTranscriptWriter();
+  const observedMessages: string[][] = [];
+  const model: ModelInvokerPort = {
+    async prepare({ request }) {
+      observedMessages.push(request.messages.flatMap((message) => message.content.flatMap((block) =>
+        block.type === "text" ? [block.text] : [])));
+      return { request, provider: request.provider, model: request.model };
+    },
+    async *stream() {
+      yield { type: "message_start", role: "assistant" } as const;
+      yield { type: "text_delta", text: "done" } as const;
+      yield { type: "message_end", finishReason: "stop" } as const;
+    },
+  };
+  const compactedMessages = [{
+    role: "assistant" as const,
+    content: [{ type: "text" as const, text: "durable compact summary" }],
+  }];
+  const session = createAgentSession({
+    sessionId: "sidecar-compaction-session",
+    config: { ...config(), maxContextTokens: 1_000 },
+    transcript,
+    dependencies: {
+      router: {} as never,
+      ports: { model, tools: noopTools() },
+      tools: { registry: { list: () => [] } as never, scheduler: { executeAll: async () => [] } as never },
+      context: {
+        prepareForModel: async (input) => ({
+          messages: input.messages,
+          systemPromptParts: [],
+          tools: input.tools,
+          diagnostics: [],
+          boundaries: [],
+        }),
+        tryAutoCompact: async () => ({
+          type: "compacted" as const,
+          tier: "full" as const,
+          messages: compactedMessages,
+          snapshot: {
+            tokens: 20,
+            maxContextTokens: 1_000,
+            warningRatio: 0.8,
+            blockingRatio: 0.9,
+            state: "ok" as const,
+            ratio: 0.02,
+          },
+          result: {
+            compactionId: "compact-sidecar-1",
+            trigger: "auto" as const,
+            preTokens: 800,
+            postTokens: 20,
+            messagesSummarized: 1,
+            boundaryMarker: { role: "assistant" as const, content: [{ type: "text" as const, text: "boundary" }] },
+            messagesToKeep: [],
+            attachments: [],
+            hookResults: [],
+            diagnostics: [],
+          },
+        }),
+      },
+    },
+    agentLoopFactory: createAgentLoopSidecarRuntimeFactory({
+      connect: () => loopbackConnection(),
+      uuid: deterministicIds(),
+    }),
+  });
+
+  const events = [];
+  for await (const event of session.submit({ type: "text", text: "compact this" }, {
+    turnId: "sidecar-compaction-turn",
+  })) events.push(event);
+
+  assert.ok(observedMessages[0]?.includes("durable compact summary"));
+  assert.equal(events.some((event) => event.type === "turn_failed"), false);
+  assert.equal(transcript.entries.filter((entry) => entry.type === "control_boundary").length, 1);
+  assert.equal(transcript.entries.filter((entry) => entry.type === "compaction_completed").length, 1);
+});
+
+test("production sidecar advertises elicitation availability without serializing the channel", async () => {
+  const exposedTools: string[][] = [];
+  const executePayloads: Array<Record<string, unknown>> = [];
+  const model: ModelInvokerPort = {
+    async prepare({ request }) {
+      exposedTools.push((request.tools ?? []).map((tool) => tool.name));
+      return { request, provider: request.provider, model: request.model };
+    },
+    async *stream() {
+      yield { type: "message_start", role: "assistant" } as const;
+      yield { type: "text_delta", text: "done" } as const;
+      yield { type: "message_end", finishReason: "stop" } as const;
+    },
+  };
+  const askTool = {
+    name: "ask_user_question",
+    description: "ask",
+    kind: "custom" as const,
+    inputSchema: { type: "object" as const },
+    isReadOnly: () => true,
+    isConcurrencySafe: () => false,
+    requiresUserInteraction: () => true,
+    execute: async () => ({ content: [] }),
+  };
+  const tools: ToolPort = { list: () => [askTool], executeAll: async () => [] };
+  const connectionFactory = () => {
+    const connection = loopbackConnection();
+    return {
+      ...connection,
+      send(message: unknown) {
+        const request = message as Record<string, unknown>;
+        if (request.method === "execute") executePayloads.push(structuredClone(request.payload as Record<string, unknown>));
+        return connection.send(message);
+      },
+    };
+  };
+  const session = createAgentSession({
+    sessionId: "sidecar-elicitation-session",
+    config: config(),
+    dependencies: {
+      router: {} as never,
+      ports: { model, tools },
+      tools: { registry: { list: () => [] } as never, scheduler: { executeAll: async () => [] } as never },
+      elicitation: { async askUser() { return { type: "cancelled" as const }; } },
+    },
+    agentLoopFactory: createAgentLoopSidecarRuntimeFactory({
+      connect: connectionFactory,
+      uuid: deterministicIds(),
+    }),
+  });
+
+  for await (const _event of session.submit({ type: "text", text: "ask if needed" }, {
+    turnId: "sidecar-elicitation-turn",
+    canPrompt: false,
+    canElicit: true,
+  })) {
+    // Drain the complete production sidecar turn.
+  }
+
+  assert.ok(exposedTools[0]?.includes("ask_user_question"));
+  assert.deepEqual(executePayloads[0]?.interactionCapabilities, { elicitationAvailable: true });
+  assert.equal(JSON.stringify(executePayloads[0]).includes("askUser"), false);
+
+  const withoutChannelTools: string[][] = [];
+  const noChannelSession = createAgentSession({
+    sessionId: "sidecar-no-elicitation-session",
+    config: config(),
+    dependencies: {
+      router: {} as never,
+      ports: {
+        model: {
+          async prepare({ request }) {
+            withoutChannelTools.push((request.tools ?? []).map((tool) => tool.name));
+            return { request, provider: request.provider, model: request.model };
+          },
+          async *stream() {
+            yield { type: "message_start", role: "assistant" } as const;
+            yield { type: "message_end", finishReason: "stop" } as const;
+          },
+        },
+        tools,
+      },
+      tools: { registry: { list: () => [] } as never, scheduler: { executeAll: async () => [] } as never },
+    },
+    agentLoopFactory: createAgentLoopSidecarRuntimeFactory({
+      connect: () => loopbackConnection(),
+      uuid: deterministicIds(),
+    }),
+  });
+  for await (const _event of noChannelSession.submit({ type: "text", text: "no channel" }, {
+    turnId: "sidecar-no-elicitation-turn",
+    canPrompt: false,
+    canElicit: true,
+  })) {
+    // Drain the complete production sidecar turn.
+  }
+  assert.equal(withoutChannelTools[0]?.includes("ask_user_question"), false);
+});
+
 test("sidecar connection factory receives only transport turn facts", async () => {
   const seen: Array<Record<string, unknown>> = [];
   const session = createAgentSession({
@@ -138,6 +580,86 @@ test("sidecar connection factory receives only transport turn facts", async () =
     // Drain protocol events.
   }
   assert.equal(seen.length, 1);
+});
+
+test("sidecar execute wire preserves AgentLoop turn limits and model configuration", async () => {
+  const executeRequests: Array<Record<string, unknown>> = [];
+  const runtimeConfig: AgentRuntimeConfig = {
+    ...config(),
+    appendSystemPrompt: "append instructions",
+    planModeInstructions: "plan instructions",
+    thinking: { enabled: true, mode: "high", preserve: true },
+    toolChoice: "auto",
+    maxContextMessages: 14,
+    stopOnStructuredOutput: true,
+    jsonSelfCorrect: true,
+    isSubagent: true,
+    metadata: { subagentId: "child-1", subagentType: "general-purpose" },
+  };
+  const session = createAgentSession({
+    sessionId: "wire-config-session",
+    config: runtimeConfig,
+    dependencies: {
+      router: {} as never,
+      ports: { model: noopModel(), tools: noopTools() },
+      tools: { registry: { list: () => [] } as never, scheduler: { executeAll: async () => [] } as never },
+    },
+    agentLoopFactory: createAgentLoopSidecarRuntimeFactory({
+      connect: () => {
+        const connection = loopbackConnection();
+        return {
+          ...connection,
+          send(message: unknown) {
+            const request = message as Record<string, unknown>;
+            if (request.method === "execute") executeRequests.push(structuredClone(request));
+            return connection.send(message);
+          },
+        };
+      },
+      uuid: deterministicIds(),
+    }),
+  });
+
+  for await (const _event of session.submit({ type: "text", text: "preserve wire configuration" }, {
+    turnId: "wire-config-turn",
+    maxTurns: 7,
+    maxBudgetUsd: 1.5,
+    taskBudgetUsd: 4,
+    initialTaskBudgetSpentUsd: 0.25,
+    canElicit: true,
+    modelOverride: {
+      provider: "override-provider",
+      model: "override-model",
+      speed: 2,
+      thinking: { enabled: true, mode: "medium" },
+    },
+  })) {
+    // Drain the turn; this test inspects the execute request at the transport boundary.
+  }
+
+  assert.equal(executeRequests.length, 1);
+  const payload = executeRequests[0]?.payload as Record<string, unknown>;
+  assert.deepEqual(payload.modelOverride, {
+    provider: "override-provider",
+    model: "override-model",
+    speed: 2,
+    thinking: { enabled: true, mode: "medium" },
+  });
+  assert.equal(payload.maxTurns, 7);
+  assert.equal(payload.maxBudgetUsd, 1.5);
+  assert.equal(payload.taskBudgetUsd, 4);
+  assert.equal(payload.initialTaskBudgetSpentUsd, 0.25);
+  assert.equal(payload.canElicit, true);
+  const agent = payload.agent as Record<string, unknown>;
+  assert.equal(agent.appendSystemPrompt, "append instructions");
+  assert.equal(agent.planModeInstructions, "plan instructions");
+  assert.deepEqual(agent.thinking, { enabled: true, mode: "high", preserve: true });
+  assert.equal(agent.toolChoice, "auto");
+  assert.equal(agent.maxContextMessages, 14);
+  assert.equal(agent.stopOnStructuredOutput, true);
+  assert.equal(agent.jsonSelfCorrect, true);
+  assert.equal(agent.isSubagent, true);
+  assert.deepEqual(agent.metadata, { subagentId: "child-1", subagentType: "general-purpose" });
 });
 
 test("sidecar known terminal keeps host tool checkpoint state and current attachment authorization", async () => {
@@ -472,27 +994,24 @@ test("sidecar host owns tool-driven plan mode across callbacks and turns", async
       list: () => [enterPlanTool, exitPlanTool, writeTool],
       async executeAll(calls, context) {
         return Promise.all(calls.map(async (call) => {
-          // Native ToolPort callers perform permission preflight here. The
-          // sidecar's host port does the same preflight through the permission
-          // module before it invokes this host capability.
-          if (kind === "native") {
-            const tool = [enterPlanTool, exitPlanTool, writeTool].find((candidate) => candidate.name === call.name);
-            assert.ok(tool);
-            const decision = await permission.decide(tool, call.input, context, call.id);
-            if (decision.type !== "allow") {
-              const message = decision.type === "ask"
-                ? "Permission is required to run write_file."
-                : decision.message;
-              return {
-                type: "error" as const,
-                toolCallId: call.id,
-                toolName: call.name,
-                error: { code: "permission_denied" as const, message },
-                content: [{ type: "text" as const, text: message }],
-                startedAt: "2026-09-12T00:00:00.000Z",
-                completedAt: "2026-09-12T00:00:00.001Z",
-              };
-            }
+          // This ToolPort represents the host execution boundary in both
+          // modes, so it remains the single permission-enforcement owner.
+          const tool = [enterPlanTool, exitPlanTool, writeTool].find((candidate) => candidate.name === call.name);
+          assert.ok(tool);
+          const decision = await permission.decide(tool, call.input, context, call.id);
+          if (decision.type !== "allow") {
+            const message = decision.type === "ask"
+              ? "Permission is required to run write_file."
+              : decision.message;
+            return {
+              type: "error" as const,
+              toolCallId: call.id,
+              toolName: call.name,
+              error: { code: "permission_denied" as const, message },
+              content: [{ type: "text" as const, text: message }],
+              startedAt: "2026-09-12T00:00:00.000Z",
+              completedAt: "2026-09-12T00:00:00.001Z",
+            };
           }
           const requestedMode = call.name === "enter_plan_mode"
             ? "plan"
@@ -766,7 +1285,7 @@ test("sidecar factory maps an unknown terminal to a failure without publishing a
   if (terminalEntry?.type === "agent_loop_operation_terminal") {
     assert.equal(terminalEntry.outcome, "result_unknown");
   }
-  assert.deepEqual(observations, ["stream_accepted", "result_unknown_fail_closed"]);
+  assert.deepEqual(observations, ["handshake_completed", "stream_accepted", "result_unknown_fail_closed"]);
 });
 
 test("sidecar omits context host methods when composition supplies its no-op context port", async () => {
@@ -881,6 +1400,7 @@ test("sidecar factory delegates result_unknown reconciliation to the host operat
   assert.equal(terminals.length, 1);
   assert.equal(terminals[0]?.result?.type, "success");
   assert.deepEqual(observations, [
+    { type: "handshake_completed", moduleId: "test-sidecar", capabilitiesVersion: "1" },
     { type: "stream_accepted", resumeSupported: false },
     { type: "result_unknown_resolved", source: "sidecar_final", outcome: "completed" },
   ]);
@@ -1145,8 +1665,10 @@ test("sidecar factory resumes an accepted stream on an explicit reconnectable tr
   assert.equal(terminals.length, 1);
   assert.equal(terminals[0]?.result?.type, "success");
   assert.deepEqual(observations, [
+    { type: "handshake_completed", moduleId: "test-sidecar", capabilitiesVersion: "2.0" },
     { type: "stream_accepted", resumeSupported: true },
     { type: "reconnect_started", attempt: 1, lastAppliedSequence: 0 },
+    { type: "handshake_completed", moduleId: "test-sidecar", capabilitiesVersion: "2.0" },
     { type: "reconnect_succeeded", attempt: 1 },
   ]);
   assert.deepEqual(
@@ -1211,6 +1733,7 @@ test("sidecar factory reconciles a process-restarted stream without replaying ex
     ["result_unknown", "completed"],
   );
   assert.deepEqual(observations, [
+    { type: "handshake_completed", moduleId: "test-sidecar", capabilitiesVersion: "2.0" },
     { type: "stream_accepted", resumeSupported: true },
     { type: "reconnect_started", attempt: 1, lastAppliedSequence: 0 },
     { type: "sidecar_instance_restarted" },
@@ -1249,8 +1772,11 @@ test("sidecar transport observes a replayed pending module call without dispatch
   assert.equal(responses[0]?.ok, false);
   assert.equal(events.filter((event) => event.type === "turn_completed").length, 1);
   assert.deepEqual(observations, [
+    { type: "handshake_completed", moduleId: "test-sidecar", capabilitiesVersion: "2.0" },
     { type: "stream_accepted", resumeSupported: true },
+    { type: "module_call_received", module: "context" },
     { type: "reconnect_started", attempt: 1, lastAppliedSequence: -1 },
+    { type: "handshake_completed", moduleId: "test-sidecar", capabilitiesVersion: "2.0" },
     { type: "reconnect_succeeded", attempt: 1 },
     { type: "pending_module_call_replayed", module: "context" },
     { type: "cached_module_response_replayed", module: "context" },
@@ -1606,6 +2132,7 @@ test("sidecar host capability calls reconstruct plan/todo and host execution ser
 
 test("sidecar context compaction uses the host default before routing and preserves a routed override", async () => {
   const inputs: Array<Record<string, unknown>> = [];
+  const evaluatedRequests: Array<Record<string, unknown>> = [];
   const factory = createAgentLoopSidecarRuntimeFactory({
     connect: () => compactionContextConnection(),
     uuid: deterministicIds(),
@@ -1615,7 +2142,23 @@ test("sidecar context compaction uses the host default before routing and preser
     config: { ...config(), maxContextTokens: 128_000 },
     dependencies: {
       router: {} as never,
-      ports: { model: noopModel(), tools: noopTools() },
+      ports: {
+        model: noopModel(),
+        tools: noopTools(),
+        budget: {
+          async evaluateRequestBudget(request, options) {
+            evaluatedRequests.push({ request: structuredClone(request), options: { ...options, signal: undefined } });
+            return {
+              tokens: 240,
+              maxContextTokens: options.maxContextTokens,
+              warningRatio: 0.8,
+              blockingRatio: 0.9,
+              state: "ok",
+              ratio: 240 / options.maxContextTokens,
+            };
+          },
+        },
+      },
       tools: { registry: { list: () => [] } as never, scheduler: { executeAll: async () => [] } as never },
       context: {
         async prepareForModel() {
@@ -1623,9 +2166,13 @@ test("sidecar context compaction uses the host default before routing and preser
         },
         async tryAutoCompact(input) {
           inputs.push(input as unknown as Record<string, unknown>);
+          const snapshot = await input.budgetEvaluator?.([{
+            role: "user",
+            content: [{ type: "text", text: "candidate" }],
+          }]);
           return {
             type: "skipped" as const,
-            snapshot: {
+            snapshot: snapshot ?? {
               tokens: 0,
               maxContextTokens: input.maxContextTokens ?? 0,
               warningRatio: 0,
@@ -1651,6 +2198,15 @@ test("sidecar context compaction uses the host default before routing and preser
   assert.equal(inputs[1]?.maxContextTokens, 32_000);
   assert.equal(inputs[0]?.sessionId, "compaction-host-session");
   assert.equal(inputs[0]?.turnId, "compaction-host-turn");
+  assert.equal(evaluatedRequests.length, 2);
+  assert.equal((evaluatedRequests[0]?.request as Record<string, unknown>).systemPrompt, "S".repeat(256));
+  assert.equal(((evaluatedRequests[0]?.request as Record<string, unknown>).tools as unknown[]).length, 1);
+  assert.deepEqual((evaluatedRequests[0]?.request as Record<string, unknown>).messages, [{
+    role: "user",
+    content: [{ type: "text", text: "candidate" }],
+  }]);
+  assert.equal((evaluatedRequests[0]?.options as Record<string, unknown>).maxContextTokens, 128_000);
+  assert.equal((evaluatedRequests[1]?.options as Record<string, unknown>).maxContextTokens, 32_000);
 });
 
 test("sidecar agent tool delegates through the host-owned one-shot subagent port", async () => {
@@ -1940,7 +2496,7 @@ function lookupTool() {
 }
 
 function builtSidecarPath(): string {
-  return fileURLToPath(new URL("../../../src/cli/pilotdeck-agent-loop-sidecar.js", import.meta.url));
+  return resolve(process.cwd(), "dist/src/cli/pilotdeck-agent-loop-sidecar.js");
 }
 
 async function drain(values: AsyncIterable<unknown>): Promise<void> {
@@ -2036,6 +2592,7 @@ function planTodoFenceConnection(moduleResponses: Array<Record<string, unknown>>
         responses.push(moduleCall("stream-host-model", "model", {
           operation: "stream",
           preparationId: "host-prepare",
+          request: { provider: "host-provider", model: "host-model", messages: [] },
         }));
         return;
       }
@@ -2212,6 +2769,14 @@ function compactionContextConnection() {
         responses.push(moduleCall("pre-route-compact", {
           messages: [],
           reservedOutputTokens: 8192,
+          budgetRequest: {
+            provider: "host-provider",
+            model: "host-model",
+            systemPrompt: "S".repeat(256),
+            tools: [{ name: "large_tool", description: "T".repeat(256), inputSchema: { type: "object" } }],
+            maxOutputTokens: 8192,
+            messages: [],
+          },
           budgetProjection: { stage: "pre_route", trigger: "auto", reservedOutputTokens: 8192 },
         }));
         return;
@@ -2221,6 +2786,14 @@ function compactionContextConnection() {
         responses.push(moduleCall("routed-compact", {
           messages: [],
           maxContextTokens: 32_000,
+          budgetRequest: {
+            provider: "routed-provider",
+            model: "routed-model",
+            systemPrompt: "S".repeat(256),
+            tools: [{ name: "large_tool", description: "T".repeat(256), inputSchema: { type: "object" } }],
+            maxOutputTokens: 8192,
+            messages: [],
+          },
           budgetProjection: { stage: "routed", trigger: "auto", maxContextTokens: 32_000 },
         }));
         return;

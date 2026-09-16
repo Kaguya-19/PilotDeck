@@ -18,7 +18,8 @@
       "type": "object",
       "properties": {
         "contextOverride": { "$ref": "#/$defs/contextOverride" },
-        "hostModules": { "$ref": "#/$defs/hostModules" }
+        "hostModules": { "$ref": "#/$defs/hostModules" },
+        "interactionCapabilities": { "$ref": "#/$defs/interactionCapabilities" }
       }
     },
     "hostModules": {
@@ -33,7 +34,31 @@
             "methods": {
               "type": "array",
               "uniqueItems": true,
-              "items": { "enum": ["prepare", "stream"] }
+              "items": { "enum": ["prepare", "stream", "stream_next", "close_stream"] }
+            }
+          }
+        },
+        "budget": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["methods"],
+          "properties": {
+            "methods": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "enum": ["estimate_request_input", "evaluate_request_budget", "estimate_usage_cost"] }
+            }
+          }
+        },
+        "turn": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["methods"],
+          "properties": {
+            "methods": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "enum": ["drain_steer", "drain_or_close_steer", "persist_compaction"] }
             }
           }
         },
@@ -101,6 +126,13 @@
         }
       }
     },
+    "interactionCapabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "elicitationAvailable": { "type": "boolean" }
+      }
+    },
     "contextOverride": {
       "type": "object",
       "additionalProperties": false,
@@ -155,7 +187,7 @@
         "operationId": { "$ref": "#/$defs/id" },
         "requestId": { "$ref": "#/$defs/id" },
         "idempotencyKey": { "$ref": "#/$defs/id" },
-        "module": { "enum": ["model", "capability", "permission", "checkpoint", "context", "lifecycle", "event"] },
+        "module": { "enum": ["model", "budget", "turn", "capability", "permission", "checkpoint", "context", "lifecycle", "event"] },
         "payload": { "$ref": "#/$defs/payload" }
       }
     },

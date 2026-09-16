@@ -153,6 +153,7 @@ test("AgentLoop capability adapters expose consumer-specific ports and retain a 
   assert.ok(Object.isFrozen(capabilities.subagent));
   assert.equal(capabilities.permission, permission);
   assert.equal(capabilities.interaction.elicitation, elicitation);
+  assert.equal(capabilities.interaction.elicitationAvailable, true);
   assert.equal(capabilities.planMode.planFileManager, planFileManager);
   assert.equal(capabilities.planMode.planTodoManager, planTodoManager);
   assert.equal(capabilities.subagent.oneShot, oneShot);

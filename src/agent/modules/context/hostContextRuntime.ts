@@ -1,4 +1,5 @@
 import { projectCompactionBudget } from "../../../context/index.js";
+import { snapshotCanonicalModelRequest } from "../../../model/index.js";
 import type {
   AgentContextCaptureTurnInput,
   AgentContextPrepareInput,
@@ -83,11 +84,19 @@ export function createHostContextRuntime(
 
 function serializeContextInput(operation: HostContextModuleMethod, input: object): Record<string, unknown> {
   const source = input as Record<string, unknown>;
-  const { abortSignal: _abortSignal, budgetEvaluator: _budgetEvaluator, ...serializable } = source;
+  const {
+    abortSignal: _abortSignal,
+    budgetEvaluator: _budgetEvaluator,
+    budgetStage: _budgetStage,
+    ...serializable
+  } = source;
   if (operation === "try_auto_compact") {
+    const projection = projectCompactionBudget(input as CompactionAutoCompactInput);
+    const { request, ...budgetProjection } = projection;
     return {
       ...serializable,
-      budgetProjection: projectCompactionBudget(input as CompactionAutoCompactInput),
+      ...(request ? { budgetRequest: snapshotCanonicalModelRequest(request) } : {}),
+      budgetProjection,
     };
   }
   return serializable;

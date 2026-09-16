@@ -105,7 +105,7 @@ test("a partially persisted guidance batch applies only durable messages and ret
         model: "test-model",
         provider: "test-provider",
       };
-      for (const guidance of input.drainSteerMessages?.() ?? []) {
+      for (const guidance of await input.drainSteerMessages?.() ?? []) {
         await input.onDurableMessage?.(guidance.message);
         input.onSteerApplied?.(guidance.itemId);
         yield {

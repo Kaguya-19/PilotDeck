@@ -72,3 +72,34 @@ test("seedReadState restores text-file write eligibility only when the observed 
     await (await import("node:fs/promises")).rm(cwd, { recursive: true, force: true });
   }
 });
+
+test("seedReadState rejects unsupported and out-of-workspace files", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "pilotdeck-seed-read-safety-"));
+  const outside = await mkdtemp(join(tmpdir(), "pilotdeck-seed-read-outside-"));
+  const binaryPath = join(cwd, "fixture.png");
+  const outsidePath = join(outside, "outside.txt");
+  try {
+    await Promise.all([
+      writeFile(binaryPath, Buffer.from([0, 1, 2, 3])),
+      writeFile(outsidePath, "outside\n", "utf8"),
+    ]);
+    const loop = loopFor(cwd);
+    const binaryMtime = Math.floor((await stat(binaryPath)).mtimeMs);
+    const outsideMtime = Math.floor((await stat(outsidePath)).mtimeMs);
+
+    await assert.rejects(
+      loop.seedReadState("fixture.png", binaryMtime),
+      (error: Error & { code?: string }) => error.code === "invalid_tool_input",
+    );
+    await assert.rejects(
+      loop.seedReadState(outsidePath, outsideMtime),
+      /outside the PilotDeck workspace/,
+    );
+  } finally {
+    const { rm } = await import("node:fs/promises");
+    await Promise.all([
+      rm(cwd, { recursive: true, force: true }),
+      rm(outside, { recursive: true, force: true }),
+    ]);
+  }
+});

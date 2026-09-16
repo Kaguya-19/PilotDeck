@@ -362,29 +362,33 @@ export class TurnRunner {
         });
         let runResult: TurnRunnerResult | undefined;
         let turnCompletedEvent: Extract<AgentEvent, { type: "turn_completed" }> | undefined;
-        while (true) {
-          const next = await generator.next();
-          if (next.done) {
-            runResult = next.value;
-            break;
+        try {
+          while (true) {
+            const next = await generator.next();
+            if (next.done) {
+              runResult = next.value;
+              break;
+            }
+            const event = next.value;
+            if (event.type === "tool_result") {
+              artifactCollector?.observeToolResult(event.result);
+            }
+            if (event.type === "file_artifacts") {
+              continue;
+            }
+            if (event.type === "turn_completed") {
+              turnCompletedEvent = event;
+              continue;
+            }
+            if (event.type === "turn_failed" && !hasRecordedVisibleFailureStatus) {
+              const status = await this.recordTurnFailureStatus(options, event.error);
+              hasRecordedVisibleFailureStatus = true;
+              yield this.toAgentStatusEvent(options, status);
+            }
+            yield event;
           }
-          const event = next.value;
-          if (event.type === "tool_result") {
-            artifactCollector?.observeToolResult(event.result);
-          }
-          if (event.type === "file_artifacts") {
-            continue;
-          }
-          if (event.type === "turn_completed") {
-            turnCompletedEvent = event;
-            continue;
-          }
-          if (event.type === "turn_failed" && !hasRecordedVisibleFailureStatus) {
-            const status = await this.recordTurnFailureStatus(options, event.error);
-            hasRecordedVisibleFailureStatus = true;
-            yield this.toAgentStatusEvent(options, status);
-          }
-          yield event;
+        } finally {
+          await generator.return(undefined as never);
         }
 
         const unappliedSteers = await closeSteerMailbox();
@@ -496,6 +500,8 @@ export class TurnRunner {
       sessionId: options.sessionId,
       turnId: options.turnId,
       event: status.event,
+      kind: status.kind,
+      text: status.text,
       detail: status.detail,
     };
   }

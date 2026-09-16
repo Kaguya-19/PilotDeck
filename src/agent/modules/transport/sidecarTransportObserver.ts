@@ -5,6 +5,12 @@ import type { ModuleCallRequest, ModuleOutcome } from "../protocol.js";
  * These are intentionally neither Session events nor a status-query API.
  */
 export type AgentLoopSidecarTransportObservation =
+  | Readonly<{ type: "handshake_completed"; moduleId: string; capabilitiesVersion: string }>
+  | Readonly<{
+      type: "module_call_received";
+      module: ModuleCallRequest["module"];
+      operation?: string;
+    }>
   | Readonly<{ type: "stream_accepted"; resumeSupported: boolean }>
   | Readonly<{ type: "reconnect_started"; attempt: number; lastAppliedSequence: number }>
   | Readonly<{ type: "reconnect_succeeded"; attempt: number }>

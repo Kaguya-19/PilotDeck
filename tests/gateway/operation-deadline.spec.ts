@@ -83,7 +83,125 @@ test("Gateway does not admit a session turn after timeout fires during asynchron
   assert.deepEqual(abortReasons, ["timeout:admission-timeout-run"]);
 });
 
-function fakeSession(submissions: AgentSubmitOptions[], abortReasons: string[] = []): AgentSession {
+test("Gateway persists a timeout status before publishing it to the stream", async () => {
+  const order: string[] = [];
+  const router = new SessionRouter({
+    idleSweepIntervalMs: 0,
+    createSession: () => fakeSession([], [], async () => {
+      order.push("persist:start");
+      await delay(10);
+      order.push("persist:done");
+    }),
+  });
+  const gateway = new InProcessGateway(router, {
+    uuid: () => "durable-timeout-run",
+    resolveTurnModelSelection: async () => {
+      await delay(25);
+      return { source: "default" as const };
+    },
+  });
+
+  for await (const event of gateway.submitTurn({
+    sessionKey: "durable-timeout-session",
+    channelKey: "test",
+    message: "persist timeout before publishing",
+    timeoutMs: 1,
+  })) {
+    if (event.type === "agent_status") order.push("stream:status");
+    if (event.type === "error") order.push("stream:error");
+  }
+
+  assert.deepEqual(order, ["persist:start", "persist:done", "stream:status", "stream:error"]);
+});
+
+test("Gateway aborts at the deadline without waiting for the timeout status writer", async () => {
+  const abortReasons: string[] = [];
+  let releaseStatus!: () => void;
+  let statusStarted!: () => void;
+  const statusGate = new Promise<void>((resolve) => { releaseStatus = resolve; });
+  const statusWriting = new Promise<void>((resolve) => { statusStarted = resolve; });
+  let releaseSubmit!: () => void;
+  const submitGate = new Promise<void>((resolve) => { releaseSubmit = resolve; });
+  const session = {
+    async *submit() {
+      await submitGate;
+    },
+    abort(reason?: string) {
+      abortReasons.push(reason ?? "");
+      releaseSubmit();
+    },
+    async recordAgentStatusMessage() {
+      statusStarted();
+      await statusGate;
+    },
+    snapshot() {
+      return { sessionId: "session", messages: [], usage: {}, status: "idle", permissionDenials: [] };
+    },
+  } as unknown as AgentSession;
+  const gateway = new InProcessGateway(new SessionRouter({
+    idleSweepIntervalMs: 0,
+    createSession: () => session,
+  }), { uuid: () => "stalled-status-run" });
+
+  let completed = false;
+  const pending = collect(gateway.submitTurn({
+    sessionKey: "stalled-status-session",
+    channelKey: "test",
+    message: "abort before durable status completes",
+    timeoutMs: 1,
+  })).finally(() => { completed = true; });
+
+  await statusWriting;
+  assert.deepEqual(abortReasons, ["timeout:stalled-status-run"]);
+  assert.equal(completed, false);
+  releaseStatus();
+  const events = await pending;
+  assert.deepEqual(events.filter((event) => event.type === "agent_status").map((event) => event.event), ["turn_timeout"]);
+  assert.deepEqual(events.filter((event) => event.type === "error").map((event) => event.code), ["turn_timeout"]);
+});
+
+test("Gateway returns turn_timeout when durable timeout status persistence fails", async () => {
+  const abortReasons: string[] = [];
+  let releaseSubmit!: () => void;
+  const submitGate = new Promise<void>((resolve) => { releaseSubmit = resolve; });
+  const session = {
+    async *submit() {
+      await submitGate;
+    },
+    abort(reason?: string) {
+      abortReasons.push(reason ?? "");
+      releaseSubmit();
+    },
+    async recordAgentStatusMessage() {
+      throw new Error("status storage unavailable");
+    },
+    snapshot() {
+      return { sessionId: "session", messages: [], usage: {}, status: "idle", permissionDenials: [] };
+    },
+  } as unknown as AgentSession;
+  const gateway = new InProcessGateway(new SessionRouter({
+    idleSweepIntervalMs: 0,
+    createSession: () => session,
+  }), { uuid: () => "failed-status-run" });
+
+  const events = await collect(gateway.submitTurn({
+    sessionKey: "failed-status-session",
+    channelKey: "test",
+    message: "return timeout even when status persistence fails",
+    timeoutMs: 1,
+  }));
+
+  assert.deepEqual(abortReasons, ["timeout:failed-status-run"]);
+  assert.equal(events.some((event) => event.type === "agent_status"), false);
+  assert.deepEqual(events.filter((event) => event.type === "error").map((event) => event.code), ["turn_timeout"]);
+  assert.equal(events.some((event) => event.type === "turn_completed"), false);
+});
+
+function fakeSession(
+  submissions: AgentSubmitOptions[],
+  abortReasons: string[] = [],
+  recordStatus: () => void | Promise<void> = () => {},
+): AgentSession {
   return {
     async *submit(_input: AgentInput, options: AgentSubmitOptions = {}) {
       submissions.push(options);
@@ -109,7 +227,9 @@ function fakeSession(submissions: AgentSubmitOptions[], abortReasons: string[] =
     abort(reason?: string) {
       abortReasons.push(reason ?? "");
     },
-    async recordAgentStatusMessage() {},
+    async recordAgentStatusMessage() {
+      await recordStatus();
+    },
     snapshot() {
       return {
         sessionId: "session",

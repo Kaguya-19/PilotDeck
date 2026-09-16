@@ -77,6 +77,10 @@ export function resolveSidecarTurnCompositionHandlers(
   });
   return createSidecarModuleHandlerRegistry({
     ...(factory.model ? { model: factory.model({ port: input.modules.model, turn: Object.freeze({ ...identity, projectPath: input.config.cwd }) }) } : {}),
+    ...(factory.budget && input.modules.budget
+      ? { budget: factory.budget({ port: input.modules.budget, turn: identity }) }
+      : {}),
+    ...(factory.turn ? { turn: factory.turn({ turn: identity }) } : {}),
     ...(factory.capability ? { capability: factory.capability({ port: input.modules.capability, turn: identity }) } : {}),
     ...(factory.permission && input.modules.permission
       ? { permission: factory.permission({ port: input.modules.permission, turn: Object.freeze({ sessionId: identity.sessionId, turnId: identity.turnId, ...(identity.abortSignal ? { abortSignal: identity.abortSignal } : {}) }) }) }

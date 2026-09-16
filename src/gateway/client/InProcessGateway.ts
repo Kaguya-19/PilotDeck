@@ -887,8 +887,8 @@ export class InProcessGateway implements Gateway {
 
     const queue = new AsyncQueue<GatewayEvent>();
     this.turnEventCoordinator.start(input.sessionKey, runId, (event) => queue.enqueue(event));
-    const emitGatewayFailureStatus = (status: GatewayRecordAgentStatusMessageInput["status"]): Promise<void> => {
-      const recorded = this.recordGatewayStatusMessage({
+    const emitGatewayFailureStatus = async (status: GatewayRecordAgentStatusMessageInput["status"]): Promise<void> => {
+      await this.recordGatewayStatusMessage({
         sessionKey: input.sessionKey,
         turnId: runId,
         projectKey: input.projectKey,
@@ -902,7 +902,6 @@ export class InProcessGateway implements Gateway {
       };
       this.turnEventCoordinator.record(input.sessionKey, statusEvent);
       queue.enqueue(statusEvent);
-      return recorded;
     };
 
     if (input.workspaceCwd && this.options.setSessionCwd) {
@@ -911,6 +910,7 @@ export class InProcessGateway implements Gateway {
 
     const telemetryContext = this.turnTelemetryContextResolver.resolve(input);
     let timeoutHandle: NodeJS.Timeout | undefined;
+    let timeoutSettlement: Promise<void> | undefined;
     let timedOut = false;
     let uploadedAttachmentLease: ResolvedUploadedAttachments | undefined;
 
@@ -949,16 +949,41 @@ export class InProcessGateway implements Gateway {
         });
         const operationDeadline = operationDeadlineForTimeout(input.timeoutMs, this.now);
         if (input.timeoutMs !== undefined && Number.isFinite(input.timeoutMs) && input.timeoutMs > 0) {
-          timeoutHandle = setTimeout(() => {
+          const settleTimeout = async (): Promise<void> => {
             timedOut = true;
             const message = `Turn exceeded the ${input.timeoutMs}ms timeout.`;
-            void emitGatewayFailureStatus(createGatewayFailureStatus({
+            const timeoutStatus = createGatewayFailureStatus({
               event: "turn_timeout",
               code: "turn_timeout",
               message,
               userHint: "The turn exceeded its wall-clock limit. Retry with a smaller task or increase the timeout.",
               detail: { timeoutMs: input.timeoutMs },
-            }));
+            });
+            this.interactionCoordinator.rejectPendingTurn(input.sessionKey, "turn_timeout");
+            try {
+              session.abort(`timeout:${runId}`);
+            } catch {
+              // Persistence and publication below still settle the timed-out
+              // operation when an injected session cannot abort cleanly.
+            }
+            try {
+              await this.recordAgentStatusMessage({
+                sessionKey: input.sessionKey,
+                turnId: runId,
+                projectKey: input.projectKey,
+                status: timeoutStatus,
+              });
+              const statusEvent: GatewayEvent = {
+                type: "agent_status",
+                runId,
+                event: timeoutStatus.event,
+                detail: timeoutStatus.detail,
+              };
+              this.turnEventCoordinator.record(input.sessionKey, statusEvent);
+              queue.enqueue(statusEvent);
+            } catch (error) {
+              console.warn("[pilotdeck] failed to persist gateway timeout status:", error);
+            }
             const gatewayEvent: GatewayEvent = {
               type: "error",
               runId,
@@ -969,14 +994,13 @@ export class InProcessGateway implements Gateway {
             };
             this.turnEventCoordinator.record(input.sessionKey, gatewayEvent);
             queue.enqueue(gatewayEvent);
-            this.interactionCoordinator.rejectPendingTurn(input.sessionKey, "turn_timeout");
             queue.close();
-            try {
-              session.abort(`timeout:${runId}`);
-            } catch {
-              // The queue is already closed, so a faulty abort implementation
-              // cannot defeat the hard turn timeout.
-            }
+          };
+          timeoutHandle = setTimeout(() => {
+            timeoutSettlement = settleTimeout().catch((error) => {
+              console.warn("[pilotdeck] failed to settle gateway timeout:", error);
+              queue.close();
+            });
           }, input.timeoutMs);
         }
         const permissionSettings = readPermissionSettings();
@@ -1100,6 +1124,7 @@ export class InProcessGateway implements Gateway {
             } : {}),
           },
         )) {
+          if (timedOut) break;
           if (!this.turnCompletionFence.isCurrent(input.sessionKey, turnCompletion)) {
             break;
           }
@@ -1237,6 +1262,7 @@ export class InProcessGateway implements Gateway {
             console.warn("[pilotdeck] failed to release uploaded attachment lease:", error);
           }
         }
+        if (timedOut && timeoutSettlement) await timeoutSettlement;
         queue.close();
       }
     })();

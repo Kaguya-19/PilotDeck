@@ -69,7 +69,15 @@ export type AgentEvent = { timeline?: TimelinePosition; streamBoundary?: StreamB
     }
   | { type: "context_budget"; sessionId: string; turnId: string; snapshot: TokenBudgetSnapshot }
   | { type: "warning"; sessionId: string; turnId: string; code: string; message: string; metadata?: Record<string, unknown> }
-  | { type: "agent_status"; sessionId: string; turnId: string; event: string; detail?: Record<string, unknown> }
+  | {
+      type: "agent_status";
+      sessionId: string;
+      turnId: string;
+      event: string;
+      kind?: "status" | "error";
+      text?: string;
+      detail?: Record<string, unknown>;
+    }
   | {
       type: "token_cap_adjusted";
       sessionId: string;

@@ -23,7 +23,7 @@ PilotDeck；宿主产品的 session、turn、permission、tool、checkpoint、SO
 4. [Module Communication SOP](pilotdeck-module-communication-sop.zh.md)
 
    规范身份字段、operation/attempt 状态、终态、取消、deadline、重试、恢复、profile
-   和 transport-independent adapter 约定。当前文档版本为 v0.7，协议版本为 v2.0。
+   和 transport-independent adapter 约定。当前文档版本为 v0.8，协议版本为 v2.0。
 
 5. [Module Protocol v2 Schema](pilotdeck-module-protocol-v2.schema.json)
 
@@ -67,6 +67,8 @@ PilotDeck；宿主产品的 session、turn、permission、tool、checkpoint、SO
 宿主 Session/Turn/Run
         |
         +-- context module  -> 宿主 ContextRuntime
+        +-- budget module   -> 宿主 ModelBudgetPort/token policy
+        +-- turn module     -> 宿主 steer mailbox/compaction persistence
         +-- capability      -> 宿主 ToolRuntime/PermissionRuntime
         +-- model           -> 宿主 Model provider
         +-- checkpoint      -> 宿主持久化和恢复逻辑
@@ -121,6 +123,22 @@ ports，不接受 `AgentRuntimeDependencies`、Router、registry 或 scheduler�
 plan、subagent 和 lifecycle 都是独立可选 port。默认 factory 不再构造假的 native tool bag；未提供
 `AuxiliaryModelPort` 时 sidecar 不会回退到 Router `stream`。
 
+budget、turn 与 interaction 的 sidecar 边界同样只传能力和可序列化状态：`budget` module 由 session
+composition 投影 `ModelBudgetPort`，`turn` module 把 live steer drain 和 compaction commit 回调到 host；
+`interactionCapabilities.elicitationAvailable` 只传布尔 availability。Router、steer mailbox、elicitation
+channel、Session writer 和 callback 对象都不进入 wire。durable owner 分别仍是 host model/token policy、
+`AgentTurnInbox`/Session transcript 与 `TurnRunner.onCompactPersisted`。
+
+model module 优先通过 `stream_next` 逐批拉取 canonical events，并在 generator 提前结束或 abort 时用
+`close_stream` 释放 host-owned provider iterator；未广告新方法时才回退到 deprecated batched `stream`。每个
+`preparationId` 只绑定一个 iterator，module-call cache 保证 reconnect 重放同一 pull 时不重复推进；turn dispose
+负责关闭仍存活的 iterator，不把 provider stream state 放进 sidecar 或 Session durable state。
+
+compaction wire 只携带 canonical request template 与 `budgetStage`。host 将 candidate messages 替换进该 template，
+再用 active turn 的 `ModelBudgetPort`、abort signal、有效 context limit 和 reserved output tokens 重建 request-level
+snapshot；未广告 budget capability 时才保留 message-only fallback。`seedReadState` 则由 native/sidecar runner 共同
+调用共享 helper，更新 host-owned read/write seed snapshot，下一 turn 仍经既有 seed projection 进入 sidecar。
+
 `AgentTurnCapabilities.ts` 是纯 consumer view；native 的宽 dependency bag、Router 与 scheduler adapter
 只在 `nativeAgentTurnCapabilitiesAdapter.ts` 中保留为 deprecated compatibility facade。AgentLoop 不读取
 `PreparedModelInvocation.opaque`，也不引用 Router 类型；legacy Router decision/materialization 仅由该
@@ -138,7 +156,7 @@ goal、subagent、permission 或 auxiliary-model 聚合逻辑。
 
 sidecar transport 只拥有连接、replay、identity 与 terminal settlement。`SidecarConnectionFactoryInput` 只包含
 `SidecarTransportTurn`、seed projection 与 `SidecarTransportContext`，不能取得任何 model/tool/permission/context port。
-`SidecarModuleComposition` 按 model、capability、permission、planTodo、context、lifecycle、event 分开注入；每个 custom handler
+`SidecarModuleComposition` 按 model、budget、turn、capability、permission、planTodo、context、lifecycle、event 分开注入；每个 custom handler
 factory 仅收到自身 module port 和裁剪后的 turn view。`SidecarTransportContext` 单独传递 session-owned operation ledger 与被动 telemetry，
 不再把这些 transport state 藏进 capability aggregate。`sidecarTurnComposition` 负责每 turn
 的 PermissionMode、Plan/Todo handler、capability-result observer 和可替换 module handler registry；默认
@@ -197,10 +215,13 @@ normalization 规则隐藏 semantic diff。
 
 ## 当前验收状态
 
-- PilotDeck native vs sidecar 与真实 Gateway surface：default-sidecar 和 Gateway 的 `core-resilience` 均为 20/20 当前复核通过，
-  且无 semantic diff、oracle failure 或 `BLOCKED`。P0.2 的 read-file permission input、cancel terminal ordering、mixed-permission
-  oracle 和 write-snapshot projection 已闭合；Gateway 适配层同样在 terminal 前 drain 已受理的 module call。命令与 trace 证据见
-  [DSH 风格模块化 Roadmap](trd/04-dsh-modularization-roadmap.zh.md)。
+- PilotDeck native vs sidecar 的正式 Gateway gate 为 45 个场景。sidecar adapter 必须通过
+  `PILOTDECK_AGENT_LOOP_TRANSPORT=stdio` 进入 deployment profile 和
+  `createAgentLoopSidecarRuntimeFactory`，并在原始 trace 中留下 transport selection、handshake/binding 和预期
+  host module call 证据；任一证据缺失均为 `BLOCKED`。旧 adapter 自建 runner 或注入测试 factory 的结果已废止，
+  不能作为生产 sidecar 验收。
+- budget、elicitation、live steer、durable compaction、full-request budget、seed read state 与 live model stream 已加入生产路径专项场景。mock model/tool 只是正式 host
+  dispatcher 的确定性依赖，不是外部 provider 或完整 deployment E2E。
 - `auto_compact` 已纳入 context host-module method；sidecar 只有在 capabilities 广告 `try_auto_compact` 时才启用该 consumer，未广告时保留原有 fallback。
 - `plan_todo` 已作为可选 capability host-module method 闭合；Session projection 是唯一 durable truth，sidecar 只持有按 active session/turn 校验后的 cache，不能演变为 generic workflow registry。
 - `lifecycle.dispatch` 已作为可选 host-module method 闭合；host 继续拥有 plugin registry、turn environment 和 teardown，sidecar 仅消费 hook dispatch result。
