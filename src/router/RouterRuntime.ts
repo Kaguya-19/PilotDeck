@@ -122,6 +122,10 @@ export type RouterRuntimeDeps = {
   judgeInvoker?: RouterJudgeInvocationPort;
   /** Optional orchestration admission provider; native config policy is used when omitted. */
   orchestrationPolicy?: RouterOrchestrationPolicy;
+  /** Optional Gateway-host restriction applied before provider invocation. */
+  isModelAllowed?: (model: RouterModelRef) => boolean;
+  /** Optional throwing admission hook used when callers need a precise error code. */
+  assertModelAllowed?: (model: RouterModelRef) => void;
 };
 
 export type InvalidateStickyResult = {
@@ -151,6 +155,7 @@ export type RouterRuntime = {
    */
   invalidateSticky(sessionId: string): InvalidateStickyResult;
   observeUsage(sessionId: string, usage: import("../model/index.js").CanonicalUsage | undefined): void;
+  estimateUsageCost(usage: import("../model/index.js").CanonicalUsage | undefined, provider: string, model: string): number | undefined;
   stats: RouterStatsPort;
   shutdown(): Promise<void>;
 };
@@ -160,6 +165,29 @@ export function createRouterRuntime(
   deps: RouterRuntimeDeps,
 ): RouterRuntime {
   const enabled = config.enabled !== false;
+  const isModelAllowed = deps.isModelAllowed ?? (() => true);
+
+  function assertModelAllowed(model: RouterModelRef): void {
+    deps.assertModelAllowed?.(model);
+    if (isModelAllowed(model)) return;
+    throw new RouterRuntimeError(
+      "MODEL_POLICY_DENIED",
+      `Gateway model policy denies ${model.provider}/${model.model}.`,
+      { provider: model.provider, model: model.model },
+    );
+  }
+
+  function isManagedModelAllowed(
+    policy: RouterExecuteContext["managedModelPolicy"],
+    model: RouterModelRef,
+  ): boolean {
+    if (!policy) return true;
+    const matches = (selector: string) => selector === "*"
+      || selector === `${model.provider}/*`
+      || selector === `${model.provider}/${model.model}`;
+    if (policy.deny.some(matches)) return false;
+    return policy.allow.length === 0 || policy.allow.some(matches);
+  }
   const statsConfig = {
     ...config.stats,
     enabled: enabled && (config.stats?.enabled ?? false),
@@ -537,7 +565,27 @@ export function createRouterRuntime(
     request: CanonicalModelRequest,
     ctx: RouterExecuteContext,
   ): AsyncIterable<CanonicalModelEvent> {
-    if (!enabled) {
+    const requestedAttempt: RouterModelRef = {
+      id: `${decision.provider}/${decision.model}`,
+      provider: decision.provider,
+      model: decision.model,
+    };
+    assertModelAllowed(requestedAttempt);
+    if (!isManagedModelAllowed(ctx.managedModelPolicy, requestedAttempt)) {
+      throw new RouterRuntimeError(
+        "SDK_MANAGED_MODEL_DENIED",
+        `SDK managedSettings.models denies model ${requestedAttempt.provider}/${requestedAttempt.model}.`,
+        { provider: requestedAttempt.provider, model: requestedAttempt.model },
+      );
+    }
+    const isExecutionModelAllowed = (model: RouterModelRef) =>
+      isModelAllowed(model) && isManagedModelAllowed(ctx.managedModelPolicy, model);
+    const sessionFallbackAttempts = (ctx.fallbackModels ?? []).map((model) => ({
+      id: `${model.provider}/${model.model}`,
+      provider: model.provider,
+      model: model.model,
+    })).filter(isExecutionModelAllowed);
+    if (!enabled && sessionFallbackAttempts.length === 0) {
       const routedCachePlan = request.cachePlan &&
         (request.cachePlan.provider === undefined || request.cachePlan.provider === decision.provider) &&
         (request.cachePlan.model === undefined || request.cachePlan.model === decision.model)
@@ -575,18 +623,17 @@ export function createRouterRuntime(
     }
 
     const startedAt = (deps.now?.() ?? new Date()).toISOString();
-    const fallbackPlan = fallbackPolicy.plan(decision.scenarioType);
+    // SDK fallbacks are scoped to this session execution and must also work
+    // for explicit model selections, where project fallback policy is skipped.
+    const fallbackPlan = sessionFallbackAttempts.length > 0
+      ? { attempts: sessionFallbackAttempts }
+      : fallbackPolicy.plan(decision.scenarioType);
     const baseRequest = requestMaterializer.materialize(decision, request);
     const requiredModalities = collectRequiredInputModalities(baseRequest.messages);
-    const requestedAttempt: RouterModelRef = {
-      id: `${decision.provider}/${decision.model}`,
-      provider: decision.provider,
-      model: decision.model,
-    };
     const candidateAttempts: RouterModelRef[] = [
       requestedAttempt,
       ...fallbackPlan.attempts,
-    ].filter((attempt, index, all) =>
+    ].filter(isExecutionModelAllowed).filter((attempt, index, all) =>
       all.findIndex((candidate) =>
         candidate.provider === attempt.provider && candidate.model === attempt.model
       ) === index
@@ -1004,6 +1051,9 @@ export function createRouterRuntime(
     observeUsage(sessionId, usage) {
       if (!enabled) return;
       usageObserver.observeSessionUsage(sessionId, usage);
+    },
+    estimateUsageCost(usage, provider, model) {
+      return stats.estimateCost?.(usage, provider, model);
     },
     stats,
     async shutdown() {

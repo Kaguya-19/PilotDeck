@@ -162,7 +162,7 @@ test("local gateway records file history and restores it from a legacy-compatibl
       canPrompt: false,
     }));
   } finally {
-    first.dispose();
+    await first.dispose();
   }
 
   const persisted = await readTranscript(storage.transcriptPath);
@@ -192,7 +192,7 @@ test("local gateway records file history and restores it from a legacy-compatibl
       canPrompt: false,
     }));
   } finally {
-    second.dispose();
+    await second.dispose();
   }
 
   assert.deepEqual(restoredMessageIds, [firstTurnId]);

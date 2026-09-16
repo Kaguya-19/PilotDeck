@@ -2,6 +2,7 @@ import type { CanonicalMessage } from "../../model/index.js";
 import type { AgentTurnResult } from "../../agent/protocol/result.js";
 import type {
   AgentControlBoundaryTranscriptEntry,
+  AgentFileSnapshotRecordedTranscriptEntry,
   AgentStatusMessageTranscriptEntry,
   AgentTranscriptEntry,
   FileHistorySnapshotRecord,
@@ -43,6 +44,11 @@ export type AgentTranscriptWriter = {
   ): void | Promise<void>;
   recordTurnResult(sessionId: string, turnId: string, result: AgentTurnResult): void | Promise<void>;
   recordSessionMetadata?(sessionId: string, turnId: string, metadata: SessionMetadataValue): void | Promise<void>;
+  recordFileSnapshot?(
+    sessionId: string,
+    turnId: string,
+    snapshot: Omit<AgentFileSnapshotRecordedTranscriptEntry, "type" | "sessionId" | "turnId" | "sequence" | "createdAt" | "entryId" | "parentEntryId">,
+  ): void | Promise<void>;
   recordControlBoundary?(
     sessionId: string,
     turnId: string,
@@ -57,4 +63,6 @@ export type AgentTranscriptWriter = {
   ): void | Promise<void>;
   recordEntry?(entry: AgentTranscriptEntry): void | Promise<void>;
   snapshotState?(): AgentTranscriptWriterState;
+  /** Stop accepting writes and wait for any in-flight append to finish. */
+  close?(): Promise<void>;
 };

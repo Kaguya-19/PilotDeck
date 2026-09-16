@@ -33,6 +33,8 @@ export class ToolRegistry {
   private readonly toolsByName = new Map<string, PilotDeckToolDefinition>();
   private readonly aliases = new Map<string, string>();
   private readonly unavailable = new Map<string, ToolUnavailableDiagnostic>();
+  /** Deferred tools remain executable only after search_tools reveals them. */
+  private readonly hidden = new Set<string>();
   private readonly registrations = new Map<string, ToolRegistrationImpl>();
 
   private readonly parent?: ToolRegistry;
@@ -99,9 +101,14 @@ export class ToolRegistry {
   }
 
   list(): PilotDeckToolDefinition[] {
+    return this.listAll().filter((tool) => !this.hidden.has(tool.name));
+  }
+
+  /** Includes deferred tools so host setup can validate and reveal them. */
+  listAll(): PilotDeckToolDefinition[] {
     if (this.registryState !== "active") return [];
     const visible = new Map<string, PilotDeckToolDefinition>();
-    for (const tool of this.parent?.list() ?? []) {
+    for (const tool of this.parent?.listAll() ?? []) {
       if (this.isVisible(tool)) visible.set(tool.name, tool);
     }
     for (const tool of this.toolsByName.values()) {
@@ -109,6 +116,23 @@ export class ToolRegistry {
       else visible.delete(tool.name);
     }
     return [...visible.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  hide(name: string): boolean {
+    const tool = this.get(name);
+    if (!tool) return false;
+    this.hidden.add(tool.name);
+    return true;
+  }
+
+  reveal(name: string): boolean {
+    const realName = this.aliases.get(name) ?? name;
+    return this.hidden.delete(realName);
+  }
+
+  isHidden(name: string): boolean {
+    const realName = this.aliases.get(name) ?? name;
+    return this.hidden.has(realName);
   }
 
   markUnavailable(diagnostic: ToolUnavailableDiagnostic, aliases: readonly string[] = []): void {
@@ -177,6 +201,9 @@ export class ToolRegistry {
     for (const { diagnostic, aliases } of this.listUnavailableEntries()) {
       copy.markUnavailable(diagnostic, aliases);
     }
+    for (const name of this.hidden) {
+      copy.hidden.add(name);
+    }
     return copy;
   }
 
@@ -222,6 +249,16 @@ export class ToolRegistry {
     });
     this.registrations.set(tool.name, registration);
     return registration;
+  }
+
+  /**
+   * Register a local definition or replace the existing local definition.
+   * An inherited definition is shadowed without mutating the parent registry.
+   */
+  registerOrReplace(tool: PilotDeckToolDefinition): ToolRegistration {
+    return this.toolsByName.has(tool.name)
+      ? this.replace(tool)
+      : this.register(tool);
   }
 
   /** Dispose local registrations without affecting a parent registry. */

@@ -215,6 +215,7 @@ export { createGrepTool, type CreateGrepToolOptions, type GrepInput } from "./bu
 export {
   createExecuteCodeTool,
   type CreateExecuteCodeToolOptions,
+  type ExecuteCodeHelperToolName,
   type ExecuteCodeOutput,
   type ExecuteCodeStatus,
   type ExecuteCodeToolCallLogEntry,
@@ -262,6 +263,31 @@ export {
   type AskUserQuestionOutput,
 } from "./builtin/askUserQuestion.js";
 export {
+  REQUEST_USER_INPUT_TOOL_NAME,
+  createRequestUserInputTool,
+  type RequestUserInputInput,
+  type RequestUserInputOutput,
+} from "./builtin/requestUserInput.js";
+export {
+  REQUEST_USER_CHOICE_TOOL_NAME,
+  createRequestUserChoiceTool,
+  type RequestUserChoiceInput,
+  type RequestUserChoiceOption,
+  type RequestUserChoiceOutput,
+} from "./builtin/requestUserChoice.js";
+export {
+  REQUEST_USER_CONFIRMATION_TOOL_NAME,
+  createRequestUserConfirmationTool,
+  type RequestUserConfirmationInput,
+  type RequestUserConfirmationOutput,
+} from "./builtin/requestUserConfirmation.js";
+export {
+  REQUEST_USER_FORM_TOOL_NAME,
+  createRequestUserFormTool,
+  type RequestUserFormInput,
+  type RequestUserFormOutput,
+} from "./builtin/requestUserForm.js";
+export {
   createElicitationChannelFromAnswerer,
   InMemoryElicitationChannel,
   type PilotDeckElicitationAnswer,
@@ -271,6 +297,18 @@ export {
   type PilotDeckElicitationQuestion,
   type PilotDeckElicitationRequest,
 } from "./elicitation/PilotDeckElicitationChannel.js";
+export type {
+  PilotDeckUserDialogChannel,
+  PilotDeckUserConfirmationAnswer,
+  PilotDeckUserConfirmationRequest,
+  PilotDeckUserDialogChoice,
+  PilotDeckUserFormAnswer,
+  PilotDeckUserFormRequest,
+  PilotDeckUserInputAnswer,
+  PilotDeckUserInputRequest,
+  PilotDeckUserSelectAnswer,
+  PilotDeckUserSelectRequest,
+} from "./dialog/PilotDeckUserDialogChannel.js";
 export { validateHtmlPreview } from "./elicitation/validateHtmlPreview.js";
 export {
   createWebFetchTool,

@@ -10,6 +10,7 @@ import type { AgentTranscriptEntry } from "../transcript/TranscriptEntry.js";
 import { SessionMetadataStore } from "../metadata/SessionMetadataStore.js";
 import {
   createAgentProjectSessionStorage,
+  readAgentProjectSessionTranscript,
   type AgentProjectSessionStorage,
   type AgentProjectSessionStorageOptions,
 } from "../storage/ProjectSessionStorage.js";
@@ -32,15 +33,18 @@ import { replayTranscriptEntries } from "../transcript/TranscriptReplay.js";
 export type ResumeSessionDependencyExtension = (
   storage: AgentProjectSessionStorage,
   entries: readonly AgentTranscriptEntry[],
-) => Partial<
-  Pick<
-    AgentRuntimeDependencies,
-    "context" | "promptContributions" | "fileHistory" | "subagentTranscript" | "elicitation" | "ownedElicitation" | "eventEmitter" | "drainEvents" | "planFileManager" | "planTodoManager" | "goalManager"
-  >
->;
+) => Partial<Pick<
+  AgentRuntimeDependencies,
+  "context" | "promptContributions" | "fileHistory" | "fileUpdateNotifier" | "subagentTranscript" | "elicitation" | "ownedElicitation" | "userDialog" | "eventEmitter" | "drainEvents" | "planFileManager" | "planTodoManager" | "goalManager" | "subagentComposition"
+>> | Promise<Partial<Pick<
+  AgentRuntimeDependencies,
+  "context" | "promptContributions" | "fileHistory" | "fileUpdateNotifier" | "subagentTranscript" | "elicitation" | "ownedElicitation" | "userDialog" | "eventEmitter" | "drainEvents" | "planFileManager" | "planTodoManager" | "goalManager" | "subagentComposition"
+>>>;
 
-export type ResumeAgentSessionOptions = Omit<CreateAgentSessionOptions, "transcript" | "projectStorage"> & {
-  projectStorage: Omit<AgentProjectSessionStorageOptions, "sessionId" | "now">;
+export type ResumeAgentSessionOptions = Omit<CreateAgentSessionOptions, "transcript" | "projectStorage" | "storage"> & {
+  /** Gateway-resolved storage takes precedence over the historical layout. */
+  storage?: AgentProjectSessionStorage;
+  projectStorage?: Omit<AgentProjectSessionStorageOptions, "sessionId" | "now">;
   /** @see `ResumeSessionDependencyExtension`. */
   extendDependencies?: ResumeSessionDependencyExtension;
   /** @internal Allows lifecycle tests to inject a failing restore backend. */
@@ -56,8 +60,8 @@ export type ResumeAgentSessionResult = {
 };
 
 export async function resumeAgentSession(options: ResumeAgentSessionOptions): Promise<ResumeAgentSessionResult> {
-  const storage = (options.__storageFactory ?? createAgentProjectSessionStorage)({
-    ...options.projectStorage,
+  const storage = options.storage ?? (options.__storageFactory ?? createAgentProjectSessionStorage)({
+    ...requireProjectStorage(options.projectStorage),
     sessionId: options.sessionId,
     now: options.dependencies.now,
   });
@@ -67,20 +71,23 @@ export async function resumeAgentSession(options: ResumeAgentSessionOptions): Pr
 
     const replay = replayTranscriptEntries(readResult.entries);
 
-    const extension = options.extendDependencies?.(storage, readResult.entries) ?? {};
+    const extension = await Promise.resolve(options.extendDependencies?.(storage, readResult.entries) ?? {});
     const dependencies: typeof options.dependencies = {
       ...options.dependencies,
       ...(extension.context ? { context: extension.context } : {}),
       ...(extension.promptContributions ? { promptContributions: extension.promptContributions } : {}),
       ...(extension.fileHistory ? { fileHistory: extension.fileHistory } : {}),
+      ...(extension.fileUpdateNotifier ? { fileUpdateNotifier: extension.fileUpdateNotifier } : {}),
       ...(extension.subagentTranscript ? { subagentTranscript: extension.subagentTranscript } : {}),
       ...(extension.elicitation ? { elicitation: extension.elicitation } : {}),
       ...(extension.ownedElicitation !== undefined ? { ownedElicitation: extension.ownedElicitation } : {}),
+      ...(extension.userDialog ? { userDialog: extension.userDialog } : {}),
       ...(extension.eventEmitter ? { eventEmitter: extension.eventEmitter } : {}),
       ...(extension.drainEvents ? { drainEvents: extension.drainEvents } : {}),
       ...(extension.planFileManager ? { planFileManager: extension.planFileManager } : {}),
       ...(extension.planTodoManager ? { planTodoManager: extension.planTodoManager } : {}),
       ...(extension.goalManager ? { goalManager: extension.goalManager } : {}),
+      ...(extension.subagentComposition ? { subagentComposition: extension.subagentComposition } : {}),
     };
 
     const created = await createAgentSessionWithStorageAsync({
@@ -126,4 +133,13 @@ export async function resumeAgentSession(options: ResumeAgentSessionOptions): Pr
     }
     throw error;
   }
+}
+
+function requireProjectStorage(
+  storage: ResumeAgentSessionOptions["projectStorage"],
+): Omit<AgentProjectSessionStorageOptions, "sessionId" | "now"> {
+  if (!storage) {
+    throw new Error("resumeAgentSession requires storage or projectStorage.");
+  }
+  return storage;
 }

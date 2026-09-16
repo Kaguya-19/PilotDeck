@@ -4,7 +4,11 @@ import {
   discoverSkillPaths,
   type DiscoveredPluginPath,
 } from "../discovery/discoverLocalPlugins.js";
-import { loadPluginFromPath, loadSkillFromPath } from "../loading/PluginLoader.js";
+import {
+  loadPluginFromPath,
+  loadPluginOutputStylesFromPath,
+  loadSkillFromPath,
+} from "../loading/PluginLoader.js";
 import { loadPluginHooks } from "../loading/PluginHookLoader.js";
 import type { LoadedPluginCommand } from "../loading/PluginCommandLoader.js";
 import type { PilotDeckLoadedPlugin } from "../protocol/plugin.js";
@@ -14,6 +18,7 @@ import type { PilotDeckHooksSettings } from "../../hooks/protocol/settings.js";
 import type { PilotDeckToolDefinition } from "../../../tool/protocol/types.js";
 import { renderSkillContent } from "../../skills/renderSkillContent.js";
 import type { RouterContribution } from "../../contributions/RouterContribution.js";
+import type { PilotDeckCustomRouter } from "../../../router/customRouter/customRouter.js";
 
 /**
  * Static MCP server contribution shape callers can rely on. Manifests load
@@ -75,6 +80,8 @@ export type PluginSkillContribution = {
   description?: string;
   /** Absolute path to the resolved SKILL.md. */
   path: string;
+  /** Parsed Markdown body retained with the immutable plugin generation. */
+  content?: string;
   namespace?: string;
 };
 
@@ -100,6 +107,77 @@ export type PluginPromptContribution = {
   namespace: string;
   content: string;
 };
+
+export type OutputStyleContribution = {
+  name: string;
+  description?: string;
+  content: string;
+  path: string;
+  plugin?: string;
+  source?: PilotDeckLoadedPlugin["source"];
+};
+
+/** Read-only contribution view over a fixed plugin generation. */
+export class PluginRuntimeView {
+  constructor(private readonly plugins: readonly PilotDeckLoadedPlugin[]) {}
+
+  snapshot(): PilotDeckLoadedPlugin[] {
+    return [...this.plugins];
+  }
+
+  mcpServers(): Record<string, unknown> {
+    return collectMcpServers(this.plugins);
+  }
+
+  getAllMcpInstructions(): PilotDeckMcpInstructionEntry[] {
+    return collectMcpInstructions(this.plugins);
+  }
+
+  snapshotContributions(): PluginContributionSnapshot {
+    return createContributionSnapshot({ generation: 0, plugins: this.plugins });
+  }
+
+  listOutputStyles(): OutputStyleContribution[] {
+    return this.plugins
+      .flatMap((plugin) => (plugin.outputStyles ?? []).map((style) => toOutputStyle(plugin, style)))
+      .sort((left, right) => left.name.localeCompare(right.name));
+  }
+
+  getOutputStyle(name: string): OutputStyleContribution | undefined {
+    return this.listOutputStyles().find((style) => style.name === name);
+  }
+
+  getAllCommands(): PluginCommandContribution[] {
+    return collectCommandContributions(this.plugins);
+  }
+
+  getAllSkills(): PluginSkillContribution[] {
+    return collectSkillContributions(this.plugins);
+  }
+
+  lookupRouter(extensionId: string): PilotDeckCustomRouter | undefined {
+    return collectPluginRouterContributions(this.plugins)
+      .find((entry) => entry.contribution.id === extensionId)
+      ?.contribution.createCustomRouter();
+  }
+
+  async loadSkillPrompt(extensionId: string): Promise<string | undefined> {
+    const plugins = sortByResolutionPriority([...this.plugins]);
+    for (const plugin of plugins) {
+      const prompt = plugin.promptContributions?.find((entry) => entry.name === extensionId);
+      if (prompt) return prompt.content;
+    }
+    for (const plugin of plugins) {
+      const skill = plugin.skills?.find((entry) => entry.name === extensionId || entry.name.endsWith(`:${extensionId}`));
+      if (skill) return renderSkillContent(skill.content, skill.path);
+    }
+    for (const plugin of plugins) {
+      const command = plugin.commands?.find((entry) => entry.name === extensionId || entry.name.endsWith(`:${extensionId}`));
+      if (command) return command.content;
+    }
+    return undefined;
+  }
+}
 
 export type PluginSessionContributionSnapshot = Readonly<{
   generation: number;
@@ -159,6 +237,7 @@ export type PluginContributionLease = {
 
 export class PluginRuntime {
   private readonly registry = new PluginRegistry();
+  private readonly outputStyleRegistry = new Map<string, OutputStyleContribution>();
   private refreshPromise?: Promise<PluginRefreshResult>;
   private disposalPromise?: Promise<void>;
   private disposalRequested = false;
@@ -167,6 +246,10 @@ export class PluginRuntime {
 
   snapshot(): PilotDeckLoadedPlugin[] {
     return this.registry.list();
+  }
+
+  createView(additional: readonly PilotDeckLoadedPlugin[] = []): PluginRuntimeView {
+    return new PluginRuntimeView([...this.registry.list(), ...additional]);
   }
 
   get lifecycleState() {
@@ -246,11 +329,16 @@ export class PluginRuntime {
     });
   }
 
-  acquireSessionContributions(): PluginSessionContributionLease {
+  acquireSessionContributions(
+    additionalPlugins: readonly PilotDeckLoadedPlugin[] = [],
+  ): PluginSessionContributionLease {
     const lease = this.registry.acquire();
     return {
       generation: lease.generation,
-      contributions: createSessionContributionSnapshot(lease),
+      contributions: createSessionContributionSnapshot({
+        generation: lease.generation,
+        plugins: [...lease.plugins, ...additionalPlugins],
+      }),
       release: () => lease.release(),
     };
   }
@@ -279,6 +367,64 @@ export class PluginRuntime {
       contributions: createContributionSnapshot(lease),
       release: () => lease.release(),
     };
+  }
+
+  listOutputStyles(): OutputStyleContribution[] {
+    return [...this.outputStyleRegistry.values()]
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map((style) => ({ ...style }));
+  }
+
+  getOutputStyle(name: string): OutputStyleContribution | undefined {
+    const style = this.outputStyleRegistry.get(name);
+    return style ? { ...style } : undefined;
+  }
+
+  /**
+   * Refresh only output-style files. Other plugin contributions stay in the
+   * existing registry, so a style reload cannot change hooks, commands, MCP,
+   * skills, or routers for an active project runtime.
+   */
+  async reloadOutputStyles(): Promise<{ changed: string[] }> {
+    const paths = resolvePluginDirectories({
+      projectRoot: this.options.projectRoot,
+      pilotHome: this.options.pilotHome,
+    });
+    const discovered = await discoverPluginPaths([
+      { path: paths.globalPluginsDir, source: "global" },
+      { path: paths.projectPluginsDir, source: "project" },
+    ]);
+    const next = new Map<string, OutputStyleContribution>();
+    for (const plugin of this.options.builtinPlugins ?? []) {
+      for (const style of plugin.outputStyles ?? []) {
+        next.set(style.name, toOutputStyle(plugin, style));
+      }
+    }
+    for (const plugin of discovered) {
+      try {
+        const loaded = await loadPluginOutputStylesFromPath(plugin.path, plugin.source);
+        for (const style of loaded.outputStyles) {
+          next.set(style.name, {
+            name: style.name,
+            description: typeof style.frontmatter.description === "string" ? style.frontmatter.description : undefined,
+            content: style.content,
+            path: style.path,
+            plugin: loaded.name,
+            source: loaded.source,
+          });
+        }
+      } catch {
+        // A malformed style is omitted from the new registry; unrelated
+        // plugin contributions remain available and are not reloaded.
+      }
+    }
+    const changed = [...new Set([
+      ...this.outputStyleRegistry.keys(),
+      ...next.keys(),
+    ])].filter((key) => JSON.stringify(this.outputStyleRegistry.get(key)) !== JSON.stringify(next.get(key)));
+    this.outputStyleRegistry.clear();
+    for (const [key, style] of next) this.outputStyleRegistry.set(key, style);
+    return { changed };
   }
 
   getAllCommands(): PluginCommandContribution[] {
@@ -348,7 +494,7 @@ export class PluginRuntime {
       projectRoot: this.options.projectRoot,
       pilotHome: this.options.pilotHome,
     });
-    const [discovered, discoveredSkills] = await Promise.all([
+    const [discovered, discoveredSkills, loadedBuiltins] = await Promise.all([
       discoverPluginPaths([
         { path: paths.globalPluginsDir, source: "global" },
         { path: paths.projectPluginsDir, source: "project" },
@@ -360,6 +506,11 @@ export class PluginRuntime {
         { path: paths.globalSkillsDir, source: "global" },
         { path: paths.projectSkillsDir, source: "project" },
       ]),
+      Promise.all(
+        (this.options.builtinPlugins ?? []).map((plugin) =>
+          loadPluginFromPath(plugin.path, "builtin").catch(() => plugin),
+        ),
+      ),
     ]);
     const [pluginAttempts, skillAttempts] = await Promise.all([
       Promise.all(
@@ -399,7 +550,7 @@ export class PluginRuntime {
       };
     }
     const plugins = [
-      ...enabledBuiltinPlugins(this.options.builtinPlugins ?? [], this.options.builtinPluginsEnabled ?? {}),
+      ...enabledBuiltinPlugins(loadedBuiltins, this.options.builtinPluginsEnabled ?? {}),
       ...attempts.flatMap((attempt) => attempt.plugin ? [attempt.plugin] : []),
     ];
     const replacement = this.registry.replaceAll(plugins);
@@ -411,6 +562,12 @@ export class PluginRuntime {
       // its own release. New sessions must select the published generation
       // instead of waiting for an unrelated active session to finish.
       void retirement.catch(() => undefined);
+    }
+    this.outputStyleRegistry.clear();
+    for (const plugin of plugins) {
+      for (const style of plugin.outputStyles ?? []) {
+        this.outputStyleRegistry.set(style.name, toOutputStyle(plugin, style));
+      }
     }
     return {
       generation: replacement.generation,
@@ -568,6 +725,20 @@ function toCommandContribution(
   };
 }
 
+function toOutputStyle(
+  plugin: PilotDeckLoadedPlugin,
+  style: LoadedPluginCommand,
+): OutputStyleContribution {
+  return {
+    name: style.name,
+    description: typeof style.frontmatter.description === "string" ? style.frontmatter.description : undefined,
+    content: style.content,
+    path: style.path,
+    plugin: plugin.name,
+    source: plugin.source,
+  };
+}
+
 /**
  * Select one immutable command body per model-facing command name. Plugin
  * discovery order is not a command-resolution policy: project overrides
@@ -598,6 +769,7 @@ function toSkillContribution(
     name: skill.name,
     description: typeof skill.frontmatter.description === "string" ? skill.frontmatter.description : undefined,
     path: skill.path,
+    content: skill.content,
     namespace: plugin.name,
   };
 }
@@ -711,7 +883,7 @@ function cloneToolDefinition(tool: PilotDeckToolDefinition): PilotDeckToolDefini
   };
 }
 
-function collectSkillContributions(plugins: PilotDeckLoadedPlugin[]): PluginSkillContribution[] {
+function collectSkillContributions(plugins: readonly PilotDeckLoadedPlugin[]): PluginSkillContribution[] {
   const selected = new Map<string, { contribution: PluginSkillContribution; priority: number }>();
   for (const plugin of plugins) {
     const priority = sourcePriority(plugin.source);

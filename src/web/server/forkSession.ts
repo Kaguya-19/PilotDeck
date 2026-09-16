@@ -7,12 +7,16 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { cp, mkdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { platform } from "node:process";
 import type { CanonicalContentBlock, CanonicalMessage } from "../../model/index.js";
 import { parseAgentRunMode } from "../../agent/protocol/input.js";
 import {
   createProjectSessionForkPort,
   readAgentProjectSessionPersistence,
+  sanitizeSessionIdForPath,
+  type AgentProjectSessionStorage,
   type ProjectSessionForkPort,
   type ProjectSessionStorageProvider,
 } from "../../session/index.js";
@@ -30,6 +34,8 @@ export type ForkWebSessionOptions = {
   storageProvider?: ProjectSessionStorageProvider;
   /** Explicit application/test override for the selected durable fork transaction. */
   sessionForkPort?: ProjectSessionForkPort;
+  /** @deprecated Use storageProvider plus sessionForkPort. */
+  storageForSession?: (sessionId: string) => AgentProjectSessionStorage;
   now?: () => Date;
 };
 
@@ -91,13 +97,14 @@ type ForkPoint = {
 function findForkPoint(
   entries: AgentTranscriptEntry[],
   fromEntryId: string,
+  preserveAcceptedInput = false,
 ): ForkPoint {
   const target = entries.find((entry) => entry.entryId === fromEntryId);
   if (!target) {
     throw new ForkSessionError("fork_entry_not_found", `Transcript entry not found: ${fromEntryId}`);
   }
 
-  if (target.type === "accepted_input") {
+  if (target.type === "accepted_input" && !preserveAcceptedInput) {
     return {
       target,
       acceptedInput: target,
@@ -213,25 +220,65 @@ function retargetEntriesToSession(
   entries: AgentTranscriptEntry[],
   options: {
     sessionId: string;
+    sourceStorage?: AgentProjectSessionStorage;
+    targetStorage?: AgentProjectSessionStorage;
   },
 ): AgentTranscriptEntry[] {
   return entries.map((entry) => {
-    if (entry.type === "accepted_input") {
-      return markTranscriptEntryAsForkCarryover({ ...entry, sessionId: options.sessionId }, entry.sessionId);
+    const retargeted = options.sourceStorage && options.targetStorage
+      ? retargetLegacyAuxiliaryPaths(entry, options.sourceStorage, options.targetStorage)
+      : entry;
+    if (retargeted.type === "accepted_input") {
+      return markTranscriptEntryAsForkCarryover({ ...retargeted, sessionId: options.sessionId }, entry.sessionId);
     }
     if (
-      entry.type === "assistant_message" ||
-      entry.type === "tool_result_message" ||
-      entry.type === "durable_message"
+      retargeted.type === "assistant_message" ||
+      retargeted.type === "tool_result_message" ||
+      retargeted.type === "durable_message"
     ) {
-      const retargeted = { ...entry, sessionId: options.sessionId };
-      return markTranscriptEntryAsForkCarryover(retargeted, entry.sessionId);
+      return markTranscriptEntryAsForkCarryover({ ...retargeted, sessionId: options.sessionId }, entry.sessionId);
     }
     return {
-      ...entry,
+      ...retargeted,
       sessionId: options.sessionId,
     };
   });
+}
+
+function retargetLegacyAuxiliaryPaths(
+  entry: AgentTranscriptEntry,
+  sourceStorage: AgentProjectSessionStorage,
+  targetStorage: AgentProjectSessionStorage,
+): AgentTranscriptEntry {
+  const sourceSessionDir = dirname(sourceStorage.subagentsDir);
+  const targetSessionDir = dirname(targetStorage.subagentsDir);
+  const retargetBlock = (block: CanonicalContentBlock): CanonicalContentBlock => {
+    if (block.type !== "tool_result_reference" && block.type !== "media_reference") return block;
+    const absolute = resolve(block.path);
+    const relativePath = relative(sourceStorage.toolResultsDir, absolute);
+    if (relativePath && !relativePath.startsWith("..") && !isAbsolute(relativePath)) {
+      return { ...block, path: resolve(targetStorage.toolResultsDir, relativePath) };
+    }
+    const sessionRelative = relative(sourceSessionDir, absolute);
+    return sessionRelative && !sessionRelative.startsWith("..") && !isAbsolute(sessionRelative)
+      ? { ...block, path: resolve(targetSessionDir, sessionRelative) }
+      : block;
+  };
+  if (entry.type === "accepted_input") {
+    return { ...entry, messages: entry.messages.map((message) => ({ ...message, content: message.content.map(retargetBlock) })) };
+  }
+  if (entry.type === "assistant_message" || entry.type === "tool_result_message" || entry.type === "durable_message") {
+    return { ...entry, message: { ...entry.message, content: entry.message.content.map(retargetBlock) } };
+  }
+  if (entry.type === "subagent_started") {
+    const sourceSafeId = sanitizeSessionIdForPath(entry.sessionId);
+    const targetSafeId = sanitizeSessionIdForPath(basename(targetStorage.transcriptPath).replace(/\.jsonl$/, ""));
+    const parts = entry.transcriptRelativePath.split(/[\\/]/);
+    return parts[0] === sourceSafeId
+      ? { ...entry, transcriptRelativePath: [targetSafeId, ...parts.slice(1)].join("/") }
+      : entry;
+  }
+  return entry;
 }
 
 export class ForkSessionError extends Error {
@@ -249,17 +296,21 @@ export async function forkWebSession(
   options: ForkWebSessionOptions,
 ): Promise<WebForkSessionResult> {
   const effectiveProjectRoot = input.projectKey ?? options.projectRoot;
-  const { entries } = await readAgentProjectSessionPersistence({
-    projectRoot: effectiveProjectRoot,
-    pilotHome: options.pilotHome,
-    sessionId: input.sessionKey,
-    ...(options.storageProvider ? { storageProvider: options.storageProvider } : {}),
-  });
+  const sourceStorage = options.storageForSession?.(input.sessionKey);
+  const { entries } = sourceStorage
+    ? await sourceStorage.restore()
+    : await readAgentProjectSessionPersistence({
+        projectRoot: effectiveProjectRoot,
+        pilotHome: options.pilotHome,
+        sessionId: input.sessionKey,
+        ...(options.storageProvider ? { storageProvider: options.storageProvider } : {}),
+      });
   if (entries.length === 0) {
     throw new ForkSessionError("fork_empty_transcript", "Cannot fork an empty session transcript.");
   }
 
-  const forkPoint = findForkPoint(entries, input.fromEntryId);
+  const forkPoint = findForkPoint(entries, input.fromEntryId, input.resumeAt === true);
+  validateResumeDropsTurn(entries, forkPoint, input.resumeDropsTurn);
   const forkAcceptedInput = forkPoint.acceptedInput;
   if (!forkPoint.preserveTarget && hasUnsupportedPrefillContent(forkAcceptedInput)) {
     throw new ForkSessionError(
@@ -275,8 +326,11 @@ export async function forkWebSession(
   const carriedMessageCount = countCarriedUserAssistantMessages(preservedSourceEntries);
 
   const newSessionKey = newWebSessionKey();
+  const targetStorage = options.storageForSession?.(newSessionKey);
   const preserved = retargetEntriesToSession(preservedSourceEntries, {
     sessionId: newSessionKey,
+    sourceStorage,
+    targetStorage,
   });
   const lastPreserved = preserved[preserved.length - 1];
   const lastEntryId = lastPreserved?.entryId ?? null;
@@ -311,9 +365,11 @@ export async function forkWebSession(
     },
   };
 
-  const sessionForkPort = options.sessionForkPort ?? createProjectSessionForkPort({
-    ...(options.storageProvider ? { storageProvider: options.storageProvider } : {}),
-  });
+  const sessionForkPort = options.sessionForkPort ?? (sourceStorage && targetStorage
+    ? createLegacyStorageForkPort(sourceStorage, targetStorage, preservedSourceEntries)
+    : createProjectSessionForkPort({
+        ...(options.storageProvider ? { storageProvider: options.storageProvider } : {}),
+      }));
   await sessionForkPort.fork({
     projectRoot: effectiveProjectRoot,
     pilotHome: options.pilotHome,
@@ -329,4 +385,105 @@ export async function forkWebSession(
     ...(forkRunMode ? { runMode: forkRunMode } : {}),
     ...(forkMode ? { mode: forkMode } : {}),
   };
+}
+
+function createLegacyStorageForkPort(
+  sourceStorage: AgentProjectSessionStorage,
+  targetStorage: AgentProjectSessionStorage,
+  sourceEntries: readonly AgentTranscriptEntry[],
+): ProjectSessionForkPort {
+  return {
+    async fork(input) {
+      await targetStorage.copyTranscriptSidechains?.({
+        sourceStorage,
+        sourceTranscriptEntries: sourceEntries,
+        transformEntry: (entry) => retargetLegacyAuxiliaryPaths(entry, sourceStorage, targetStorage),
+      });
+      await targetStorage.copyFileHistoryBackups?.({ sourceStorage, sourceTranscriptEntries: sourceEntries });
+      await targetStorage.copyToolResultArtifacts?.({ sourceStorage, sourceTranscriptEntries: sourceEntries });
+      if (targetStorage.replaceTranscript) {
+        await targetStorage.replaceTranscript(input.entries);
+        return;
+      }
+      if (targetStorage.externalTranscriptStore) {
+        throw new ForkSessionError("fork_unsupported_storage", "The configured session storage does not support atomic fork creation.");
+      }
+      await forkNativeStorage(sourceStorage, targetStorage, input.entries);
+    },
+  };
+}
+
+async function forkNativeStorage(
+  sourceStorage: AgentProjectSessionStorage,
+  targetStorage: AgentProjectSessionStorage,
+  entries: readonly AgentTranscriptEntry[],
+): Promise<void> {
+  const targetSessionDir = dirname(targetStorage.subagentsDir);
+  const temporaryPath = `${targetStorage.transcriptPath}.${randomUUID()}.fork.tmp`;
+  const exists = async (path: string) => stat(path).then(() => true).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return false;
+    throw error;
+  });
+  if (await exists(targetStorage.transcriptPath) || await exists(targetSessionDir)) {
+    throw new ForkSessionError("fork_target_exists", "Fork target session already exists.");
+  }
+  let createdTargetDir = false;
+  try {
+    await mkdir(targetStorage.chatDir, { recursive: true, mode: 0o700 });
+    await mkdir(targetSessionDir, { recursive: false, mode: 0o700 });
+    createdTargetDir = true;
+    for (const [source, target] of [
+      [sourceStorage.toolResultsDir, targetStorage.toolResultsDir],
+      [sourceStorage.fileHistoryDir, targetStorage.fileHistoryDir],
+      [sourceStorage.subagentsDir, targetStorage.subagentsDir],
+    ] as const) {
+      if (await exists(source)) await cp(source, target, { recursive: true, force: true });
+    }
+    await writeFile(
+      temporaryPath,
+      entries.map((entry) => `${JSON.stringify(entry)}\n`).join(""),
+      { encoding: "utf8", mode: 0o600, flag: "wx" },
+    );
+    await rename(temporaryPath, targetStorage.transcriptPath);
+  } catch (error) {
+    await rm(temporaryPath, { force: true }).catch(() => undefined);
+    if (createdTargetDir) await rm(targetSessionDir, { recursive: true, force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
+/**
+ * Validate Claude's optional resume-drops-turn guard before writing the fork.
+ * The guard is deliberately fail-closed: every chain entry after the kept
+ * fork point must belong to the one accepted-input turn named by the caller.
+ * This prevents silently discarding a queued user message or another
+ * side-effecting append that the caller may not have observed.
+ */
+function validateResumeDropsTurn(
+  entries: AgentTranscriptEntry[],
+  forkPoint: ForkPoint,
+  resumeDropsTurn: string | undefined,
+): void {
+  if (resumeDropsTurn === undefined) return;
+  const prefix = "Resume rejected by --resume-drops-turn: ";
+  const droppedPrompt = entries.find((entry) => entry.entryId === resumeDropsTurn);
+  if (!droppedPrompt || droppedPrompt.type !== "accepted_input") {
+    throw new ForkSessionError(
+      "resume_drops_turn_invalid",
+      `${prefix}the supplied UUID is not an accepted-input entry.`,
+    );
+  }
+  if (droppedPrompt.sequence <= forkPoint.target.sequence) {
+    throw new ForkSessionError(
+      "resume_drops_turn_invalid",
+      `${prefix}the dropped turn must occur after the resume point.`,
+    );
+  }
+  const discarded = entries.filter((entry) => entry.sequence > forkPoint.target.sequence);
+  if (discarded.length === 0 || discarded.some((entry) => entry.turnId !== droppedPrompt.turnId)) {
+    throw new ForkSessionError(
+      "resume_drops_turn_mismatch",
+      `${prefix}entries after the resume point are not attributable solely to the requested turn.`,
+    );
+  }
 }

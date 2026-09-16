@@ -6,6 +6,11 @@ import type { ModelInvokerPort, PreparedModelInvocation } from "../protocol.js";
 export type RouterModelInvokerAdapterOptions = {
   isMainAgent?: boolean;
   projectPath?: string;
+  fallbackModels?: ReadonlyArray<{ provider: string; model: string }>;
+  managedModelPolicy?: {
+    allow: readonly string[];
+    deny: readonly string[];
+  };
   materialize?: (decision: RouterDecision, request: CanonicalModelRequest) => CanonicalModelRequest;
 };
 
@@ -52,6 +57,8 @@ export function createRouterModelInvokerPort(
         turnId: context.turnId,
         projectPath: options.projectPath,
         abortSignal: context.abortSignal,
+        fallbackModels: options.fallbackModels,
+        managedModelPolicy: options.managedModelPolicy,
       });
     },
   };

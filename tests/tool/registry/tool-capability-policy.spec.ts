@@ -71,6 +71,19 @@ test("tool registrations are exact handles and owned views dispose without affec
   assert.equal(parent.has("replaceable"), false);
 });
 
+test("local upsert shadows inherited tools without mutating the parent", () => {
+  const parent = new ToolRegistry();
+  const inherited = createTool("read_skill");
+  parent.register(inherited);
+  const view = parent.createScopedView(createToolCapabilityPolicy({ allowedTools: ["*"] }));
+  const scoped = { ...inherited, description: "scoped skill loader" };
+
+  view.registerOrReplace(scoped);
+
+  assert.equal(view.get("read_skill"), scoped);
+  assert.equal(parent.get("read_skill"), inherited);
+});
+
 test("subagent policy uses capability requirements instead of tool-name exclusions", () => {
   const parent = new ToolRegistry();
   parent.register(createTool("always_on_name_without_requirement"));

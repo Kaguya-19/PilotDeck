@@ -182,6 +182,8 @@ export class AgentSessionRuntimeBundle {
         {
           isMainAgent: !this.options.config.isSubagent,
           projectPath: this.options.config.cwd,
+          fallbackModels: this.options.config.fallbackModels,
+          managedModelPolicy: this.options.config.managedModelPolicy,
         },
       );
       const toolPort = this.options.dependencies.ports?.tools ?? createToolSchedulerPort(
@@ -232,7 +234,10 @@ export class AgentSessionRuntimeBundle {
         ...(scopedLifecycle ? { lifecycle: createLifecycleDispatchPort(scopedLifecycle) } : {}),
         eventEmitter: emitter,
         auxiliaryModel: this.options.dependencies.ports?.auxiliaryModel,
-        interaction: { elicitation: scopedElicitation },
+        interaction: {
+          elicitation: scopedElicitation,
+          userDialog: this.options.dependencies.userDialog,
+        },
         planMode: {
           planFileManager: this.options.dependencies.planFileManager,
           planTodoManager: this.options.dependencies.planTodoManager,

@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { resolveDefaultCommandShell } from "../../runtime/commandShell.js";
 
 /** Host-independent request for one detached shell task. */
 export type DetachedShellRequest = {
@@ -99,12 +100,14 @@ export function createNodeDetachedShellPort(
     async start(request) {
       let child: ChildProcess;
       try {
-        child = spawnShell(request.command, {
+        const shell = resolveDefaultCommandShell({ env: request.env });
+        child = spawnShell(shell.shell, shell.args(request.command), {
           cwd: request.cwd,
           env: request.env,
-          shell: true,
           stdio: ["ignore", "pipe", "pipe"],
-          detached: true,
+          detached: process.platform !== "win32",
+          windowsHide: process.platform === "win32",
+          windowsVerbatimArguments: shell.windowsVerbatimArguments,
         });
       } catch (error) {
         throw error;
@@ -114,14 +117,27 @@ export function createNodeDetachedShellPort(
       child.stdout?.on("data", (chunk: Buffer | string) => request.onStdout?.(chunk));
       child.stderr?.on("data", (chunk: Buffer | string) => request.onStderr?.(chunk));
       child.on("error", (error) => request.onError?.(error));
+      let exited = false;
       const exit = new Promise<DetachedShellExit>((resolve) => {
-        child.on("exit", (exitCode, exitSignal) => resolve({ exitCode, exitSignal }));
+        child.on("exit", (exitCode, exitSignal) => {
+          exited = true;
+          resolve({ exitCode, exitSignal });
+        });
       });
 
       return {
         pid: typeof child.pid === "number" ? child.pid : undefined,
         exit,
         terminate(signal) {
+          if (exited) return;
+          if (process.platform !== "win32" && child.pid) {
+            try {
+              process.kill(-child.pid, signal);
+              return;
+            } catch {
+              // Fall back to the process handle when no detached group remains.
+            }
+          }
           try {
             child.kill(signal);
           } catch {

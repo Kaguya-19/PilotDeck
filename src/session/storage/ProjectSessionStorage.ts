@@ -13,6 +13,19 @@ import {
   type SessionProjectionCheckpointStore,
 } from "../projection/checkpoint/index.js";
 import { JsonlTranscriptWriter } from "../transcript/JsonlTranscriptWriter.js";
+import type {
+  AgentSubagentCompletedTranscriptEntry,
+  AgentSubagentStartedTranscriptEntry,
+  AgentTranscriptEntry,
+} from "../transcript/TranscriptEntry.js";
+import {
+  readTranscript as readTranscriptFile,
+  type AgentTranscriptReadResult,
+  type ReadTranscriptOptions,
+} from "../transcript/TranscriptReader.js";
+import type { AgentTranscriptWriter, AgentTranscriptWriterState } from "../transcript/TranscriptWriter.js";
+import type { FileHistoryBackupStorage } from "../filesystem/types.js";
+import type { ToolResultArtifactStorage } from "../artifacts/ToolResultArtifactStorage.js";
 import {
   nodeProjectSessionStorageProvider,
   type ProjectSessionStorageKind,
@@ -48,11 +61,104 @@ export type ProjectSessionSidechainStorageInput = {
   now?: () => Date;
 };
 
+type AsyncTranscriptMethod<T> = T extends (...args: infer Args) => unknown
+  ? (...args: Args) => Promise<void>
+  : never;
+
+/**
+ * Native session transcript contract. JSONL is the default implementation,
+ * while Gateway hosts may provide an equivalent durable writer backed by an
+ * asynchronous database or object store.
+ */
+export type AgentProjectTranscriptWriter = Omit<AgentTranscriptWriter,
+  | "recordAcceptedInput"
+  | "recordDurableMessage"
+  | "recordAgentStatusMessage"
+  | "recordFileArtifacts"
+  | "recordTurnResult"
+  | "recordSessionMetadata"
+  | "recordFileSnapshot"
+  | "recordControlBoundary"
+> & {
+  recordAcceptedInput: AsyncTranscriptMethod<AgentTranscriptWriter["recordAcceptedInput"]>;
+  recordDurableMessage: AsyncTranscriptMethod<AgentTranscriptWriter["recordDurableMessage"]>;
+  recordAgentStatusMessage: AsyncTranscriptMethod<NonNullable<AgentTranscriptWriter["recordAgentStatusMessage"]>>;
+  recordFileArtifacts: AsyncTranscriptMethod<NonNullable<AgentTranscriptWriter["recordFileArtifacts"]>>;
+  recordTurnResult: AsyncTranscriptMethod<AgentTranscriptWriter["recordTurnResult"]>;
+  recordSessionMetadata: AsyncTranscriptMethod<NonNullable<AgentTranscriptWriter["recordSessionMetadata"]>>;
+  recordFileSnapshot: AsyncTranscriptMethod<NonNullable<AgentTranscriptWriter["recordFileSnapshot"]>>;
+  recordControlBoundary: AsyncTranscriptMethod<NonNullable<AgentTranscriptWriter["recordControlBoundary"]>>;
+  restoreState(maxSequence: number, lastEntryId: string | null): void;
+  forSubagent(subagentId: string, now?: () => Date): AgentProjectSubagentTranscriptHandle;
+  relativeSubagentPath(subagentId: string): string;
+  recordSubagentStarted(
+    sessionId: string,
+    turnId: string,
+    args: Omit<AgentSubagentStartedTranscriptEntry, "type" | "sessionId" | "turnId" | "sequence" | "createdAt" | "entryId" | "parentEntryId" | "promptPreview" | "promptTruncated"> & { prompt: string },
+  ): Promise<void>;
+  recordSubagentCompleted(
+    sessionId: string,
+    turnId: string,
+    args: Omit<AgentSubagentCompletedTranscriptEntry, "type" | "sessionId" | "turnId" | "sequence" | "createdAt" | "entryId" | "parentEntryId" | "summaryPreview" | "summaryTruncated"> & { summary: string },
+  ): Promise<void>;
+  snapshotState(): AgentTranscriptWriterState;
+};
+
+export type AgentProjectSubagentTranscriptHandle = {
+  subagentId: string;
+  writer: AgentProjectTranscriptWriter;
+  transcriptPath: string;
+};
+
+export type AgentProjectTranscriptReader = (
+  options?: ReadTranscriptOptions,
+) => Promise<AgentTranscriptReadResult>;
+
+export type AgentProjectTranscriptPathReader = (
+  transcriptPath: string,
+  options?: ReadTranscriptOptions,
+) => Promise<AgentTranscriptReadResult>;
+
+export type AgentProjectTranscriptReplacement = Readonly<{
+  transactionId: string;
+  replacementTurnId: string;
+  entries: readonly AgentTranscriptEntry[];
+  owner?: Readonly<{ instanceId: string; pid: number }>;
+}>;
+
+/**
+ * Copies the sidechain transcript payloads referenced by a parent transcript
+ * during a session fork. The caller supplies the exact source primary entries
+ * and an auxiliary-path transform so storage backends do not need to own the
+ * Web fork policy.
+ */
+export type AgentProjectTranscriptSidechainFork = Readonly<{
+  sourceStorage: AgentProjectSessionStorage;
+  sourceTranscriptEntries: readonly AgentTranscriptEntry[];
+  transformEntry: (entry: AgentTranscriptEntry) => AgentTranscriptEntry;
+}>;
+
+/** Copies the file-history backup blobs referenced by a parent transcript fork. */
+export type AgentProjectFileHistoryFork = Readonly<{
+  sourceStorage: AgentProjectSessionStorage;
+  sourceTranscriptEntries: readonly AgentTranscriptEntry[];
+}>;
+
+/** Copies the oversized tool-result payloads referenced by a transcript fork. */
+export type AgentProjectToolResultArtifactFork = Readonly<{
+  sourceStorage: AgentProjectSessionStorage;
+  sourceTranscriptEntries: readonly AgentTranscriptEntry[];
+}>;
+
 export type AgentProjectSessionStorage = {
   chatDir: string;
   transcriptPath: string;
   projectionCheckpointPath: string;
   toolResultsDir: string;
+  /** Optional host-owned payload store for oversized tool results and media. */
+  toolResultArtifactStorage?: ToolResultArtifactStorage;
+  /** Optional host-owned cleanup of every oversized tool-result payload for this session. */
+  deleteToolResultArtifacts?: () => Promise<void>;
   /**
    * Per-session directory for file-history backups (C4 / F5). Backups land
    * at `<fileHistoryDir>/<sha16(filePath)>@v<version>` and survive process
@@ -60,6 +166,10 @@ export type AgentProjectSessionStorage = {
    * `trackEdit`.
    */
   fileHistoryDir: string;
+  /** Optional host-owned backup blobs used by the native FileHistoryStore. */
+  fileHistoryBackupStorage?: FileHistoryBackupStorage;
+  /** Optional host-owned cleanup of every backup blob for this session. */
+  deleteFileHistoryBackups?: () => Promise<void>;
   /**
    * Per-session directory for subagent sidechain transcripts (C3 §6.3).
    * Each forked subagent gets its own `<subagentId>.jsonl` here.
@@ -74,6 +184,32 @@ export type AgentProjectSessionStorage = {
   projectionCheckpointStore: SessionProjectionCheckpointStore;
   projectionCheckpointBinding: SessionProjectionCheckpointBinding;
   transcript: JsonlTranscriptWriter;
+  /** @deprecated Use persistence.load(). */
+  readTranscript?: AgentProjectTranscriptReader;
+  /** @deprecated Use a provider-created sidechain persistence backend. */
+  readTranscriptAtPath?: AgentProjectTranscriptPathReader;
+  /** @deprecated Compatibility capability for external transcript stores. */
+  transcriptExists?: () => Promise<boolean>;
+  /** @deprecated Compatibility capability for external transcript stores. */
+  deleteTranscript?: () => Promise<void>;
+  /** @deprecated Compatibility capability for deleting a primary transcript and sidechains. */
+  deleteSessionTranscripts?: () => Promise<void>;
+  /** @deprecated Compatibility capability for atomic transcript replacement. */
+  replaceTranscript?: (entries: readonly AgentTranscriptEntry[]) => Promise<void>;
+  /** @deprecated Compatibility capability for transactional replacement. */
+  prepareTranscriptReplacement?: (replacement: AgentProjectTranscriptReplacement) => Promise<void>;
+  /** @deprecated Compatibility capability for transactional replacement. */
+  finalizeTranscriptReplacement?: (input: { transactionId: string; action: "commit" | "rollback" }) => Promise<void>;
+  /** @deprecated Compatibility capability for replacement recovery. */
+  recoverTranscriptReplacements?: () => Promise<void>;
+  /** @deprecated Compatibility capability for sidechain fork copies. */
+  copyTranscriptSidechains?: (input: AgentProjectTranscriptSidechainFork) => Promise<void>;
+  /** @deprecated Compatibility capability for file-history fork copies. */
+  copyFileHistoryBackups?: (input: AgentProjectFileHistoryFork) => Promise<void>;
+  /** @deprecated Compatibility capability for tool-result fork copies. */
+  copyToolResultArtifacts?: (input: AgentProjectToolResultArtifactFork) => Promise<void>;
+  /** @deprecated True when transcript bytes are not available at transcriptPath. */
+  externalTranscriptStore?: boolean;
   /**
    * Creates an independently sequenced one-shot child storage from this
    * storage's selected backend. The parent remains the composition owner;
@@ -106,6 +242,15 @@ export function sanitizeSessionIdForPath(sessionId: string): string {
   // keys like `tui:project=/Users/foo:default` produce a single flat file.
   const illegal = process.platform === "win32" ? /[\\/:<>"|?*]+/g : /[\\/]+/g;
   return sessionId.replace(illegal, "-").replace(/^-+|-+$/g, "") || "session";
+}
+
+/** Reads a native session transcript through its configured host backend. */
+export async function readAgentProjectSessionTranscript(
+  storage: AgentProjectSessionStorage,
+  options: ReadTranscriptOptions = {},
+): Promise<AgentTranscriptReadResult> {
+  await storage.recoverTranscriptReplacements?.();
+  return storage.readTranscript?.(options) ?? readTranscriptFile(storage.transcriptPath, options);
 }
 
 export function createAgentProjectSessionStorage(
@@ -238,6 +383,8 @@ function createProjectSessionStorage(
       subagentTranscriptPath,
       eventStore: events,
     }),
+    readTranscript: (readOptions) => readTranscriptFile(transcriptPath, readOptions),
+    readTranscriptAtPath: (path, readOptions) => readTranscriptFile(path, readOptions),
     createSidechainStorage: (input) => createSubagentProjectSessionStorage({
       ...options,
       sessionId: input.sessionId,

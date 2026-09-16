@@ -1,6 +1,7 @@
 import type { CanonicalMessage, CanonicalModelEvent, CanonicalModelRequest } from "../../model/index.js";
 import type {
   PilotDeckElicitationChannel,
+  PilotDeckUserDialogChannel,
   PilotDeckToolAuditRecorder,
   PilotDeckFileUpdateNotifier,
   PilotDeckToolFileHistorySink,
@@ -34,6 +35,7 @@ export type AgentRuntimePorts = {
   /** Optional explicit authorization policy for host/sidecar tool composition. */
   authorization?: ToolAuthorizationPort;
   metadata?: import("../loop/AgentTurnCapabilities.js").ModelMetadataPort;
+  budget?: import("../loop/AgentTurnCapabilities.js").ModelBudgetPort;
   /** Optional routing policy view used by AgentLoop after model execution is selected. */
   routing?: Pick<AgentRouterRuntime, "materializeRequest" | "invalidateSticky"> & {
     /** @deprecated Use auxiliaryModel for secondary model calls. */
@@ -41,6 +43,15 @@ export type AgentRuntimePorts = {
   };
   /** Optional secondary model client for tool and subagent calls. */
   auxiliaryModel?: import("../loop/AgentTurnCapabilities.js").AuxiliaryModelPort;
+};
+
+/** Native-only customization for one dynamic subagent definition. */
+export type SubagentCompositionPort = {
+  createContext?(definition: import("../sub/builtinSubagentTypes.js").SubagentDefinition): AgentContextRuntime | undefined;
+  configureTools?(
+    definition: import("../sub/builtinSubagentTypes.js").SubagentDefinition,
+    registry: ToolRegistry,
+  ): void;
 };
 
 /**
@@ -55,6 +66,7 @@ export type AgentRouterRuntime = Pick<RouterRuntime, "stream" | "decide" | "exec
   materializeRequest?: RouterRuntime["materializeRequest"];
   observeUsage?: RouterRuntime["observeUsage"];
   invalidateSticky?: RouterRuntime["invalidateSticky"];
+  estimateUsageCost?: (usage: import("../../model/index.js").CanonicalUsage | undefined, provider: string, model: string) => number | undefined;
 };
 
 /**
@@ -177,6 +189,29 @@ export type AgentRuntimeDependencies = {
   subagentProviders?: SubagentProviderRegistry;
   /** Composition-bound one-shot delegation consumer for the `agent` tool. */
   oneShotSubagentPort?: OneShotSubagentPort;
+  /** Native composition seam for SDK-defined child context and tool views. */
+  subagentComposition?: SubagentCompositionPort;
+  /** Native composition hook for detached SDK AgentDefinitions. Never crosses the sidecar protocol. */
+  backgroundSubagents?: {
+    launch(input: {
+      sessionId: string;
+      turnId: string;
+      subagentId: string;
+      subagentType: string;
+      run(signal: AbortSignal): Promise<unknown>;
+    }): { taskId: string } | Promise<{ taskId: string }>;
+  };
+  /** Native-only host boundary for detached read-only AgentDefinition observers. */
+  observerSubagents?: {
+    launch(input: {
+      sessionId: string;
+      turnId: string;
+      observedSubagentId: string;
+      observerSubagentId: string;
+      observerSubagentType: string;
+      run(signal: AbortSignal): Promise<unknown>;
+    }): void | Promise<void>;
+  };
   /** Whether the current session scope owns provider teardown. */
   ownedSubagentProvider?: boolean;
   /**
@@ -187,6 +222,8 @@ export type AgentRuntimeDependencies = {
   elicitation?: PilotDeckElicitationChannel;
   /** Whether the current session scope owns and disposes the elicitation channel. */
   ownedElicitation?: boolean;
+  /** Optional Gateway-owned generic dialog channel for explicitly enabled SDK tools. */
+  userDialog?: PilotDeckUserDialogChannel;
   /**
    * File-history sink — wired into the per-tool runtime context so
    * `edit_file` / `write_file` (C4) snapshot the file before mutation.
@@ -200,7 +237,7 @@ export type AgentRuntimeDependencies = {
    */
   fileUpdateNotifier?: PilotDeckFileUpdateNotifier;
   /**
-   * Plan file manager — resolves the project-local `.pilotdeck/plans`
+   * Plan file manager — resolves the current writable plan directory
    * directory and reads explicitly submitted plan documents for
    * `enter_plan_mode` / `exit_plan_mode`. Absent in headless / test runtimes.
    */

@@ -170,6 +170,10 @@ export function createWriteFileTool(options: CreateWriteFileToolOptions = {}): P
         allowOverwrite: true,
         workspaceRoot: resolved.root,
       });
+      await context.fileHistory?.markEditCommitted?.(
+        resolved.absolutePath,
+        context.messageId ?? context.turnId,
+      );
       invalidateReadFileState(context, resolved.absolutePath);
       recordWriteSnapshot(context, resolved.absolutePath, input.content, write.mtimeMs);
 

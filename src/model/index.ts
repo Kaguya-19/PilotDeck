@@ -123,6 +123,7 @@ export type {
   ModelDefinition,
   ModelProtocol,
   ProviderConfig,
+  ProviderCredentialSource,
   ProviderRetryConfig,
   SpeedMapping,
 } from "./protocol/canonical.js";

@@ -249,7 +249,7 @@ test("AgentLoop budget view preserves TokenAccountingRuntime method binding", ()
       scheduler: { executeAll: async () => [] },
     },
   });
-  assert.equal(capabilities.model.budget?.estimateRequestInput({} as never), 1);
+  assert.equal(capabilities.model.budget?.estimateRequestInput?.({} as never), 1);
 });
 
 test("AgentLoop capability composition supplies a no-op context port when no runtime is provided", async () => {

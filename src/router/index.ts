@@ -107,6 +107,7 @@ export {
 } from "./retry/zeroUsageRetry.js";
 export {
   TokenStatsCollector,
+  type RouterCostSource,
   type RouterStatsAggregate,
   type RouterStatsRecord,
 } from "./stats/TokenStatsCollector.js";

@@ -1,4 +1,4 @@
-import { basename, dirname, extname, relative, resolve } from "node:path";
+import { basename, dirname, extname, isAbsolute, relative, resolve } from "node:path";
 import type {
   CanonicalContentBlock,
   CanonicalMessage,
@@ -9,6 +9,7 @@ import type {
   CanonicalToolResultReferenceBlock,
 } from "../../model/index.js";
 import { flattenToolResultBlockText } from "../../model/index.js";
+import type { ToolResultArtifactStorage } from "../../session/artifacts/ToolResultArtifactStorage.js";
 import { countTokens } from "./tokenizer.js";
 import { createNodeToolResultSpillPort, type ToolResultSpillPort } from "./ToolResultSpillPort.js";
 
@@ -56,6 +57,8 @@ export type ToolResultBudgetOptions = {
   maxResultSizeTokens?: number;
   previewBytes?: number;
   toolResultsDir: string;
+  /** Optional durable host store; local files remain a read-only materialization cache. */
+  artifactStorage?: ToolResultArtifactStorage;
   state?: ToolResultBudgetState;
   /** Context-owned storage provider for oversized tool-result bodies and aliases. */
   spillPort?: ToolResultSpillPort;
@@ -80,6 +83,7 @@ export class ToolResultBudget {
   private readonly maxResultSizeTokens: number;
   private readonly previewBytes: number;
   private readonly toolResultsDir: string;
+  private readonly artifactStorage?: ToolResultArtifactStorage;
   private readonly state: ToolResultBudgetState;
   private readonly spillPort: ToolResultSpillPort;
 
@@ -88,12 +92,41 @@ export class ToolResultBudget {
     this.maxResultSizeTokens = options.maxResultSizeTokens ?? DEFAULT_MAX_RESULT_SIZE_TOKENS;
     this.previewBytes = options.previewBytes ?? PREVIEW_SIZE_BYTES;
     this.toolResultsDir = resolve(options.toolResultsDir);
+    this.artifactStorage = options.artifactStorage;
     this.state = options.state ?? createToolResultBudgetState();
     this.spillPort = options.spillPort ?? createNodeToolResultSpillPort();
   }
 
   getState(): ToolResultBudgetState {
     return this.state;
+  }
+
+  /**
+   * Restore Gateway-local read caches for references in a resumed transcript.
+   * The canonical reference remains the source of truth; this only makes the
+   * existing native `read_file` and media materialization paths work after a
+   * Gateway process starts on an empty local cache.
+   */
+  async hydrateReferences(messages: readonly CanonicalMessage[]): Promise<void> {
+    if (!this.artifactStorage) return;
+    const hydrated = new Set<string>();
+    for (const message of messages) {
+      for (const block of message.content) {
+        if (block.type !== "tool_result_reference" && block.type !== "media_reference") continue;
+        const path = this.managedArtifactPath(block.path);
+        if (!path || hydrated.has(path)) continue;
+        hydrated.add(path);
+        const bytes = await this.artifactStorage.read(basename(path));
+        // Keep the historical missing-payload behavior: the reference stays
+        // inspectable and provider materialization reports a normal failure.
+        if (!bytes) continue;
+        await this.materializeArtifact(path, bytes);
+        if (block.type === "tool_result_reference" && block.readFilePath) {
+          const aliasPath = this.resolveManagedReadFileAlias(block.readFilePath);
+          if (aliasPath) await this.materializeArtifact(aliasPath, bytes);
+        }
+      }
+    }
   }
 
   async applyToMessage(
@@ -199,7 +232,7 @@ export class ToolResultBudget {
     const isJson = looksLikeJson(flat);
     const ext = isJson ? "json" : "txt";
     const path = resolve(this.toolResultsDir, `${replacementKey}.${ext}`);
-    await this.spillPort.writeTextIfAbsent(path, flat);
+    await this.persistArtifact(path, flat);
     const readFilePath = await this.createReadFileAlias(path, ext);
 
     const preview = headTailPreview(flat, this.previewBytes);
@@ -274,6 +307,32 @@ export class ToolResultBudget {
     };
   }
 
+  private async persistArtifact(path: string, content: string): Promise<void> {
+    if (this.artifactStorage) {
+      await this.artifactStorage.write(basename(path), Buffer.from(content, "utf8"));
+    }
+    await this.spillPort.writeTextIfAbsent(path, content);
+  }
+
+  private async materializeArtifact(path: string, bytes: Uint8Array): Promise<void> {
+    await this.spillPort.writeTextIfAbsent(path, new TextDecoder().decode(bytes));
+  }
+
+  private managedArtifactPath(path: string): string | undefined {
+    const candidate = resolve(path);
+    const rel = relative(this.toolResultsDir, candidate);
+    if (!rel || rel.startsWith("..") || isAbsolute(rel) || dirname(rel) !== ".") return undefined;
+    return candidate;
+  }
+
+  private resolveManagedReadFileAlias(readFilePath: string): string | undefined {
+    const { refsDir, workspaceRoot } = this.resolveReadFileAliasLocation();
+    const candidate = resolve(workspaceRoot, readFilePath);
+    const rel = relative(refsDir, candidate);
+    if (!rel || rel.startsWith("..") || isAbsolute(rel) || dirname(rel) !== ".") return undefined;
+    return candidate;
+  }
+
   private async maybeReplaceMedia(
     block: CanonicalContentBlock,
     index: number,
@@ -294,7 +353,7 @@ export class ToolResultBudget {
     const ext = extensionForMedia(mediaType, mimeType);
     const id = `${scopedToolResultKey(toolCallId, options.turnId)}-${mediaType}-${index}-${hashString(block.data).slice(0, 12)}`;
     const path = resolve(this.toolResultsDir, `${id}.${ext}`);
-    await this.spillPort.writeTextIfAbsent(path, block.data);
+    await this.persistArtifact(path, block.data);
 
     const record: MediaReplacementRecord = {
       id,

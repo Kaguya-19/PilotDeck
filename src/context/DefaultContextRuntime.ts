@@ -46,6 +46,8 @@ export type { RuntimeContextSurface } from "./RuntimeContextSurface.js";
 
 export type DefaultContextRuntimeOptions = {
   extension?: ExtensionResolver;
+  /** Defaults false so ordinary custom system prompts keep their current contract. */
+  includeExtensionsWithCustomSystemPrompt?: boolean;
   promptAssembler?: PromptAssembler;
   promptContributions?: PromptContributionRegistry;
   messageProjector?: MessageProjector;
@@ -97,6 +99,7 @@ const DEFAULT_TRUNCATE_SECOND_RATIO = 0.25;
 const DEFAULT_MEMORY_RETRIEVAL_TIMEOUT_MS = 30_000;
 export class DefaultContextRuntime implements ContextRuntime {
   private readonly extension: ExtensionResolver;
+  private readonly includeExtensionsWithCustomSystemPrompt: boolean;
   private readonly promptAssembler: PromptAssembler;
   private readonly promptContributions?: PromptContributionRegistry;
   private readonly messageProjector: MessageProjector;
@@ -121,6 +124,7 @@ export class DefaultContextRuntime implements ContextRuntime {
 
   constructor(options: DefaultContextRuntimeOptions = {}) {
     this.extension = options.extension ?? new NullExtensionResolver();
+    this.includeExtensionsWithCustomSystemPrompt = options.includeExtensionsWithCustomSystemPrompt ?? false;
     this.promptAssembler = options.promptAssembler ?? new PromptAssembler(this.extension);
     this.promptContributions = options.promptContributions;
     this.messageProjector = options.messageProjector ?? new MessageProjector();
@@ -213,6 +217,7 @@ export class DefaultContextRuntime implements ContextRuntime {
       tools: effectiveTools,
       customSystemPrompt: input.customSystemPrompt,
       appendSystemPrompt: input.appendSystemPrompt,
+      includeExtensionsWithCustomSystemPrompt: this.includeExtensionsWithCustomSystemPrompt,
       includeUserContextInSystemPrompt: runtimeContextSurface === "system_prompt",
       now: this.now,
     });

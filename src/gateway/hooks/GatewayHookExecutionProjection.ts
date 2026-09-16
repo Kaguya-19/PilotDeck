@@ -7,6 +7,8 @@ export type GatewayHookExecutionProjectionOptions = {
   emit: (event: GatewayEvent) => boolean;
 };
 
+export type GatewaySdkHookExecutionProjectionOptions = GatewayHookExecutionProjectionOptions;
+
 /**
  * Project one session's volatile hook lifecycle into its active Gateway turn.
  *
@@ -44,5 +46,31 @@ export function toGatewayHookExecutionStatus(
       outcome: event.outcome,
       ...(event.exitCode !== undefined ? { exitCode: event.exitCode } : {}),
     },
+  };
+}
+
+/** SDK-only projection preserving the public hook event vocabulary and payload. */
+export function createGatewaySdkHookExecutionProjection(
+  options: GatewaySdkHookExecutionProjectionOptions,
+): (event: PilotDeckHookExecutionEvent) => void {
+  return (event) => {
+    if (event.sessionId !== options.sessionKey) return;
+    options.emit(event.type === "started"
+      ? {
+          type: "hook_started",
+          hookName: event.hookName,
+          hookEvent: event.hookEvent,
+        }
+      : {
+          type: "hook_response",
+          hookName: event.hookName,
+          hookEvent: event.hookEvent,
+          stdout: event.stdout,
+          stderr: event.stderr,
+          ...(event.exitCode !== undefined ? { exitCode: event.exitCode } : {}),
+          outcome: event.outcome,
+          ...(event.asyncInvocationId ? { asyncInvocationId: event.asyncInvocationId } : {}),
+          ...(event.asyncTimeoutMs !== undefined ? { asyncTimeoutMs: event.asyncTimeoutMs } : {}),
+        });
   };
 }

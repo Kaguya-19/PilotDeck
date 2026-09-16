@@ -38,14 +38,24 @@ export function createAgentTurnCapabilities(
   const rawTools = dependencies.ports?.tools
     ?? (registry && scheduler ? createToolSchedulerPort(registry, scheduler) : undefined);
   if (!rawTools) throw new TypeError("AgentLoop composition requires a tool execution port.");
-  const budget = dependencies.tokenAccounting
-    ? Object.freeze({
-        estimateRequestInput: (request: CanonicalModelRequest) =>
-          dependencies.tokenAccounting!.estimateRequestInput.call(dependencies.tokenAccounting, request),
-        evaluateRequestBudget: (request: CanonicalModelRequest, options: Parameters<TokenAccountingRuntime["evaluateRequestBudget"]>[1]) =>
-          dependencies.tokenAccounting!.evaluateRequestBudget.call(dependencies.tokenAccounting, request, options),
-      })
-    : undefined;
+  const budget = dependencies.ports?.budget ?? (
+    dependencies.tokenAccounting || dependencies.router?.estimateUsageCost
+      ? Object.freeze({
+          ...(dependencies.tokenAccounting?.estimateRequestInput ? {
+            estimateRequestInput: (request: CanonicalModelRequest) =>
+              dependencies.tokenAccounting!.estimateRequestInput.call(dependencies.tokenAccounting, request),
+          } : {}),
+          ...(dependencies.tokenAccounting?.evaluateRequestBudget ? {
+            evaluateRequestBudget: (request: CanonicalModelRequest, options: Parameters<TokenAccountingRuntime["evaluateRequestBudget"]>[1]) =>
+              dependencies.tokenAccounting!.evaluateRequestBudget.call(dependencies.tokenAccounting, request, options),
+          } : {}),
+          ...(dependencies.router?.estimateUsageCost ? {
+            estimateUsageCost: (usage: Parameters<NonNullable<typeof dependencies.router.estimateUsageCost>>[0], provider: string, model: string) =>
+              dependencies.router!.estimateUsageCost!.call(dependencies.router, usage, provider, model),
+          } : {}),
+        })
+      : undefined
+  );
   const metadata = dependencies.ports?.metadata ?? Object.freeze({
     getModelMaxContextTokens: dependencies.getModelMaxContextTokens,
     getModelMaxOutputTokens: dependencies.getModelMaxOutputTokens,
@@ -100,6 +110,7 @@ export function createAgentTurnCapabilities(
     sidecarOperationLedger: dependencies.sidecarOperationLedger,
     auditRecorder: dependencies.auditRecorder,
     elicitation: dependencies.elicitation,
+    userDialog: dependencies.userDialog,
     fileHistory: dependencies.fileHistory,
     fileUpdateNotifier: dependencies.fileUpdateNotifier,
     planFileManager: dependencies.planFileManager,

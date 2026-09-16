@@ -49,11 +49,13 @@ export function createSubagentRuntimeComposition(
   });
   const parentScope = parentDependencies.scope ?? ownedParentScope!;
   const inherited = parentScope.services;
+  const contextOverride = parentDependencies.subagentComposition?.createContext?.(options.definition);
   const childDepth = (options.parentConfig.subagentDepth ?? 0) + 1;
   const maxSubagentDepth = options.parentConfig.maxSubagentDepth ?? 1;
   const registry = parentDependencies.tools.registry.createScopedView(
     createToolCapabilityPolicy({
       allowedTools: options.definition.allowedTools,
+      disallowedTools: options.definition.disallowedTools,
       // The child may receive the continuable consumer only when the same
       // depth contract that governs the legacy `agent` tool permits another
       // descendant. Its local registration (installed by the native host)
@@ -74,9 +76,11 @@ export function createSubagentRuntimeComposition(
       toolRegistry: registry,
       toolRuntime,
       toolScheduler: scheduler,
+      ...(contextOverride ? { context: contextOverride } : {}),
     }, {
       name: `subagent:${options.subagentId}`,
       ownedToolRegistry: true,
+      ownedContext: contextOverride !== undefined,
       blockedServices: ["elicitation"],
     });
   } catch (error) {
@@ -110,6 +114,7 @@ export function createSubagentRuntimeComposition(
     subagentTranscript: parentDependencies.subagentTranscript,
     subagentProvider: parentDependencies.subagentProvider,
     subagentProviders: parentDependencies.subagentProviders,
+    subagentComposition: parentDependencies.subagentComposition,
     ownedSubagentProvider: false,
     ownedElicitation: false,
     ownedLifecycle: false,
@@ -144,13 +149,14 @@ export function buildSubagentRuntimeConfig(
   >,
 ): AgentRuntimeConfig {
   const parent = options.parentConfig;
-  const selected = options.resolvedModel
+  const explicitModel = options.resolvedModel ?? options.definition.modelOverride;
+  const selected = explicitModel
     ? {
-        ...(parent.subagentModel?.provider === options.resolvedModel.provider
-          && parent.subagentModel.model === options.resolvedModel.model
+        ...(parent.subagentModel?.provider === explicitModel.provider
+          && parent.subagentModel.model === explicitModel.model
           ? parent.subagentModel
           : {}),
-        ...options.resolvedModel,
+        ...explicitModel,
       }
     : parent.subagentModel;
   const {
@@ -158,7 +164,10 @@ export function buildSubagentRuntimeConfig(
     maxOutputTokens: _parentMaxOutputTokens,
     ...parentWithoutTokenCaps
   } = parent;
-  const subagentSystem = buildSubagentSystemPrompt(options.definition);
+  const subagentSystem = [
+    buildSubagentSystemPrompt(options.definition),
+    options.definition.criticalSystemReminder,
+  ].filter((value): value is string => Boolean(value?.trim())).join("\n\n");
   const filteredParentSystem = applySystemPromptFilters(
     parent.systemPrompt ?? "",
     options.definition,
@@ -176,9 +185,11 @@ export function buildSubagentRuntimeConfig(
         }
       : {}),
     runMode: isReadOnlySession(options.definition, parent) ? "ask" : parent.runMode,
+    permissionMode: options.definition.permissionMode ?? parent.permissionMode,
     isSubagent: true,
     permissionContext: {
       ...parent.permissionContext,
+      mode: options.definition.permissionMode ?? parent.permissionContext.mode,
       rules: {
         allow: parent.permissionContext.rules.allow,
         deny: parent.permissionContext.rules.deny,

@@ -71,6 +71,14 @@ export class GatewaySessionPermissionRuleSetRegistry implements GatewaySessionPe
     return this.entries.get(sessionKey)?.rules.allow ?? [];
   }
 
+  /** Mutates an already-retained session rule set without creating fallback state. */
+  updateAskRules(sessionKey: string, update: (rules: PermissionRule[]) => void): boolean {
+    const entry = this.entries.get(sessionKey);
+    if (!entry) return false;
+    update(entry.rules.ask);
+    return true;
+  }
+
   closeSession(sessionKey: string): void {
     const entry = this.entries.get(sessionKey);
     if (!entry) return;

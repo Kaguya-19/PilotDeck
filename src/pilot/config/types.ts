@@ -265,6 +265,7 @@ export type PilotConfigSnapshot = {
 
 export type PilotConfigLoadOptions = {
   env?: Record<string, string | undefined>;
+  configPath?: string;
   projectRoot?: string;
   version?: number;
 };

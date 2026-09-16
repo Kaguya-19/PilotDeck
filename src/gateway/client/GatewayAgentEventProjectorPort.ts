@@ -5,6 +5,7 @@ import type { GatewayEvent } from "../protocol/types.js";
 export type GatewayAgentEventProjectionInput = {
   event: AgentEvent;
   runId: string;
+  forwardSubagentText?: boolean;
 };
 
 /**

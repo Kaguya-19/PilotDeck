@@ -21,12 +21,14 @@ import type {
   PilotDeckFileUpdateNotifier,
   PilotDeckToolAuditRecorder,
   PilotDeckToolFileHistorySink,
+  PilotDeckToolDefinition,
+  PilotDeckUserDialogChannel,
 } from "../../tool/index.js";
 import type { PlanFileManager } from "../../tool/builtin/planFile.js";
 import type { PlanTodoPort } from "../../plan-todo/runtime/PlanTodoPort.js";
 import type { GoalPort } from "../../goal/protocol/types.js";
 import type { ModelInvokerPort, PreparedModelInvocation, ToolAuthorizationPort, ToolPort } from "../modules/protocol.js";
-import type { CanonicalModelEvent, CanonicalModelRequest } from "../../model/index.js";
+import type { CanonicalModelEvent, CanonicalModelRequest, CanonicalUsage } from "../../model/index.js";
 import type { AgentLoopOperationLedger } from "../modules/transport/operationLedger.js";
 
 const AGENT_TURN_CAPABILITIES = Symbol("pilotdeck.agent-turn-capabilities");
@@ -74,6 +76,7 @@ export type SidecarAgentTurnCapabilityComposition = {
   sidecarOperationLedger?: AgentLoopOperationLedger;
   auditRecorder?: PilotDeckToolAuditRecorder;
   elicitation?: PilotDeckElicitationChannel;
+  userDialog?: PilotDeckUserDialogChannel;
   fileHistory?: PilotDeckToolFileHistorySink;
   fileUpdateNotifier?: PilotDeckFileUpdateNotifier;
   planFileManager?: PlanFileManager;
@@ -99,10 +102,12 @@ export type ModelMetadataPort = Readonly<{
 }>;
 
 /** Token estimation and budget evaluation consumed by compaction logic. */
-export type ModelBudgetPort = Pick<
+export type ModelBudgetPort = Partial<Pick<
   TokenAccountingRuntime,
   "estimateRequestInput" | "evaluateRequestBudget"
->;
+>> & Readonly<{
+  estimateUsageCost?: (usage: CanonicalUsage | undefined, provider: string, model: string) => number | undefined;
+}>;
 
 /** Secondary model client for tools and subagent helpers. */
 export type AuxiliaryModelPort = Readonly<{
@@ -175,6 +180,7 @@ export type PermissionPort = PermissionDecisionPort;
 
 export type InteractionPort = Readonly<{
   elicitation?: PilotDeckElicitationChannel;
+  userDialog?: PilotDeckUserDialogChannel;
 }>;
 
 export type PlanModePort = Readonly<{
@@ -189,8 +195,13 @@ export type SubagentPort = Readonly<{
 /** @deprecated Use the consumer-specific AgentTurnCapabilities ports. */
 export type AgentTurnToolCapabilities = {
   port: ToolPort;
+  /** @deprecated Use port.list(). */
+  registry?: AgentRuntimeDependenciesCompatibilityToolRegistry;
+  /** @deprecated Use port.execute(). */
+  scheduler?: AgentRuntimeDependenciesCompatibilityToolScheduler;
   auditRecorder?: PilotDeckToolAuditRecorder;
   elicitation?: PilotDeckElicitationChannel;
+  userDialog?: PilotDeckUserDialogChannel;
   fileHistory?: PilotDeckToolFileHistorySink;
   fileUpdateNotifier?: PilotDeckFileUpdateNotifier;
   planFileManager?: PlanFileManager;
@@ -198,6 +209,14 @@ export type AgentTurnToolCapabilities = {
   goalManager?: GoalPort;
   permission?: PermissionDecisionPort;
   oneShotSubagentPort?: OneShotSubagentPort;
+};
+
+type AgentRuntimeDependenciesCompatibilityToolRegistry = {
+  list(): readonly PilotDeckToolDefinition[];
+};
+
+type AgentRuntimeDependenciesCompatibilityToolScheduler = {
+  executeAll(...args: never[]): Promise<unknown>;
 };
 
 const NOOP_CONTEXT = Symbol("pilotdeck.agent-turn-noop-context");
@@ -257,7 +276,10 @@ export function createSidecarAgentTurnCapabilities(
     fileUpdateNotifier: dependencies.fileUpdateNotifier,
   });
   const metadata: ModelMetadataPort = dependencies.ports.metadata ?? Object.freeze({});
-  const interaction = Object.freeze({ elicitation: dependencies.elicitation });
+  const interaction = Object.freeze({
+    elicitation: dependencies.elicitation,
+    userDialog: dependencies.userDialog,
+  });
   const planMode = Object.freeze({
     planFileManager: dependencies.planFileManager,
     planTodoManager: dependencies.planTodoManager,
@@ -267,6 +289,7 @@ export function createSidecarAgentTurnCapabilities(
     port: toolExecution,
     auditRecorder: dependencies.auditRecorder,
     elicitation: dependencies.elicitation,
+    userDialog: dependencies.userDialog,
     fileHistory: dependencies.fileHistory,
     fileUpdateNotifier: dependencies.fileUpdateNotifier,
     planFileManager: dependencies.planFileManager,

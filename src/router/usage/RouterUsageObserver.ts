@@ -7,7 +7,8 @@ import { TokenStatsCollector, type RouterStatsRecord } from "../stats/TokenStats
 export type RouterUsageObservation = RouterStatsRecord;
 
 /** Compatibility-facing stats surface; provider internals remain replaceable. */
-export type RouterStatsPort = Pick<TokenStatsCollector, "observe" | "snapshot" | "flush" | "dispose">;
+export type RouterStatsPort = Pick<TokenStatsCollector, "observe" | "snapshot" | "flush" | "dispose"> &
+  Partial<Pick<TokenStatsCollector, "estimateCost" | "sessionSnapshot" | "modelUsageSnapshot">>;
 
 /**
  * DSH-style Definition for route usage state and accounting side effects.

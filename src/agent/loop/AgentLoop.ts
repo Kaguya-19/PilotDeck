@@ -1,4 +1,5 @@
 import { setTimeout as sleep } from "node:timers/promises";
+import { stat } from "node:fs/promises";
 import {
   applyModelEventToAssembler,
   assembleAssistantMessage,
@@ -44,7 +45,7 @@ import type {
   TokenCalibrationBaseline,
   TokenBudgetSnapshot,
 } from "../../context/index.js";
-import { actualInputTokensFromUsage } from "../../context/index.js";
+import { actualInputTokensFromUsage, countTokens } from "../../context/index.js";
 import type { PermissionMode, PermissionRule, PermissionRuleSet } from "../../permission/index.js";
 import type { AgentControlBoundaryTranscriptEntry } from "../../session/transcript/TranscriptEntry.js";
 import type { AgentSteerMessage } from "../session/SteerMailbox.js";
@@ -73,6 +74,17 @@ import {
 import { buildAskModeAgentToolSchema } from "../../tool/builtin/agent.js";
 import { repairToolName } from "../../model/streaming/repairToolName.js";
 import { requestFingerprint } from "../../model/streaming/requestFingerprint.js";
+import { resolvePilotDeckWorkspacePath } from "../../tool/builtin/filesystem/pathSafety.js";
+import { readTextFile } from "../../tool/builtin/filesystem/readTextFile.js";
+import { recordWriteSnapshot } from "../../tool/builtin/filesystem/writeSnapshots.js";
+import {
+  hasBinaryExtension,
+  isBlockedDevicePath,
+  isImagePath,
+  isNotebookPath,
+  isPdfPath,
+} from "../../tool/builtin/filesystem/fileTypeSafety.js";
+import { PilotDeckToolRuntimeError } from "../../tool/protocol/errors.js";
 import {
   createAgentStatusDetail,
   createVisibleErrorStatusDetail,
@@ -128,6 +140,12 @@ export type AgentLoopInput = {
   turnId: string;
   messages: CanonicalMessage[];
   maxTurns?: number;
+  /** Gateway-owned USD ceiling for this submitted turn. */
+  maxBudgetUsd?: number;
+  /** Gateway-owned USD ceiling shared by every turn in an SDK session. */
+  taskBudgetUsd?: number;
+  /** Amount already charged to `taskBudgetUsd` before this turn. */
+  initialTaskBudgetSpentUsd?: number;
   runMode?: AgentRunMode;
   permissionMode?: PermissionMode;
   allowedReadFiles?: string[];
@@ -136,6 +154,8 @@ export type AgentLoopInput = {
   /** Allow model-visible plan mode tools for this turn. */
   allowPlanModeTools?: boolean;
   canPrompt?: boolean;
+  /** SDK-only opt-in for native elicitation when permission prompts stay disabled. */
+  canElicit?: boolean;
   permissionRules?: Partial<PermissionRuleSet>;
   modelOverride?: import("../protocol/input.js").AgentModelOverride;
   abortSignal?: AbortSignal;
@@ -180,6 +200,12 @@ export class AgentLoop {
   private readonly capabilities: AgentTurnCapabilities;
   private readonly modelPort: ModelInvokerPort;
   private readonly toolPort: ToolPort;
+  /** Populated only while one serialized AgentSession turn is running. */
+  private activeBudget?: {
+    turnSpentUsd: number;
+    taskBudgetUsd?: number;
+    initialTaskBudgetSpentUsd: number;
+  };
 
   /**
    * @deprecated Compose AgentTurnCapabilities outside AgentLoop. Native
@@ -195,16 +221,15 @@ export class AgentLoop {
 
   constructor(
     private readonly config: AgentRuntimeConfig,
-    capabilities: AgentTurnCapabilities,
+    capabilities: AgentTurnCapabilities | AgentTurnCapabilityComposition,
     seedState?: AgentLoopSeedState,
   ) {
     this.readFileState = cloneReadFileStateMap(seedState?.readFileState);
     this.writeSnapshots = cloneWriteSnapshotMap(seedState?.writeSnapshots);
     this.allowedReadFiles = new Set(seedState?.allowedReadFiles ?? []);
-    if (!isAgentTurnCapabilities(capabilities)) {
-      throw new TypeError("AgentLoop requires an AgentTurnCapabilities view.");
-    }
-    this.capabilities = capabilities;
+    this.capabilities = isAgentTurnCapabilities(capabilities)
+      ? capabilities
+      : createAgentTurnCapabilities(config, capabilities);
     this.modelPort = this.capabilities.model.execution;
     this.toolPort = this.capabilities.toolExecution;
   }
@@ -215,6 +240,69 @@ export class AgentLoop {
       writeSnapshots: cloneWriteSnapshotMap(this.writeSnapshots),
       allowedReadFiles: [...this.allowedReadFiles],
     };
+  }
+
+  /**
+   * Seed the native file-read state after a caller has retained a prior Read
+   * outside the model context. This is an explicit SDK/Gateway control only;
+   * normal AgentLoop construction and turns leave the state untouched.
+   */
+  async seedReadState(filePath: string, mtimeMs: number): Promise<{ applied: boolean }> {
+    const pathContext = {
+      cwd: this.config.cwd,
+      permissionMode: this.config.permissionMode,
+      permissionContext: this.config.permissionContext,
+      allowedReadFiles: [...this.allowedReadFiles],
+    } as PilotDeckToolRuntimeContext;
+    const resolved = resolvePilotDeckWorkspacePath(filePath, pathContext, {
+      mustExist: true,
+      allowRegisteredReadFiles: true,
+    });
+    if (!resolved.ok) {
+      throw new PilotDeckToolRuntimeError(resolved.error.code, resolved.error.message, resolved.error.details);
+    }
+    if (
+      isBlockedDevicePath(resolved.absolutePath)
+      || hasBinaryExtension(resolved.absolutePath)
+      || isImagePath(resolved.absolutePath)
+      || isPdfPath(resolved.absolutePath)
+      || isNotebookPath(resolved.absolutePath)
+    ) {
+      throw new PilotDeckToolRuntimeError(
+        "invalid_tool_input",
+        "seedReadState supports only text files previously read by read_file.",
+      );
+    }
+
+    const expectedMtimeMs = Math.floor(mtimeMs);
+    const beforeRead = await stat(resolved.absolutePath);
+    if (!beforeRead.isFile()) {
+      throw new PilotDeckToolRuntimeError("file_conflict", `${resolved.absolutePath} is not a regular file.`);
+    }
+    if (Math.floor(beforeRead.mtimeMs) !== expectedMtimeMs) {
+      return { applied: false };
+    }
+
+    const content = await readTextFile(resolved.absolutePath);
+    const afterRead = await stat(resolved.absolutePath);
+    if (!afterRead.isFile()) {
+      throw new PilotDeckToolRuntimeError("file_conflict", `${resolved.absolutePath} is not a regular file.`);
+    }
+    if (Math.floor(afterRead.mtimeMs) !== expectedMtimeMs) {
+      return { applied: false };
+    }
+
+    this.readFileState.set(`${resolved.absolutePath}::text::1::all::`, {
+      mtimeMs: expectedMtimeMs,
+      kind: "text",
+    });
+    recordWriteSnapshot(
+      { writeSnapshots: this.writeSnapshots } as PilotDeckToolRuntimeContext,
+      resolved.absolutePath,
+      content,
+      expectedMtimeMs,
+    );
+    return { applied: true };
   }
 
   async *run(input: AgentLoopInput): AsyncGenerator<AgentEvent, AgentLoopRunResult, unknown> {
@@ -228,6 +316,16 @@ export class AgentLoop {
     let messages = [...input.messages];
     let turnCount = 1;
     let usage: CanonicalUsage = {};
+    const tracksBudget = input.maxBudgetUsd !== undefined || input.taskBudgetUsd !== undefined;
+    let spentBudgetUsd = input.initialTaskBudgetSpentUsd ?? 0;
+    let turnSpentBudgetUsd = 0;
+    this.activeBudget = tracksBudget
+      ? {
+          turnSpentUsd: 0,
+          taskBudgetUsd: input.taskBudgetUsd,
+          initialTaskBudgetSpentUsd: input.initialTaskBudgetSpentUsd ?? 0,
+        }
+      : undefined;
     let permissionDenials: AgentPermissionDenial[] = [];
     let structuredOutput: unknown;
     let finalMessage: CanonicalMessage | undefined;
@@ -764,7 +862,6 @@ export class AgentLoop {
       }
 
       const assembled = assembleAssistantMessage(assembler);
-      usage = mergeUsage(usage, assembled.usage);
       // A fallback, media downgrade, or interrupted-stream continuation can
       // change request contents without changing the route. Calibrate only
       // against the exact request whose usage the provider reported.
@@ -782,8 +879,82 @@ export class AgentLoop {
         assistantMessage = repaired.message;
         toolCalls = repaired.toolCalls;
       }
+      const budgetUsage = !tracksBudget
+        ? assembled.usage
+        : this.resolveBudgetUsage(assembled.usage, requestInputEstimate, assistantMessage);
+      usage = mergeUsage(usage, budgetUsage);
       finalMessage = assistantMessage;
       expireConsumedTransientPrompts();
+
+      const budgetProvider = executedRequest?.provider ?? prepared.provider;
+      const budgetModel = executedRequest?.model ?? prepared.model;
+      const invocationCostUsd = this.estimateUsageCost(budgetUsage, budgetProvider, budgetModel);
+      if (invocationCostUsd !== undefined) {
+        spentBudgetUsd += invocationCostUsd;
+        turnSpentBudgetUsd += invocationCostUsd;
+        if (this.activeBudget) this.activeBudget.turnSpentUsd = turnSpentBudgetUsd;
+      }
+      const maxTurnBudgetReached = input.maxBudgetUsd !== undefined && turnSpentBudgetUsd >= input.maxBudgetUsd;
+      const taskBudgetReached = input.taskBudgetUsd !== undefined && spentBudgetUsd >= input.taskBudgetUsd;
+      if (maxTurnBudgetReached || taskBudgetReached) {
+        // A completed model request may cross a budget ceiling. Stop before
+        // recovery, tool execution, or another model request can add cost or
+        // create side effects. The normal, no-budget path is unchanged.
+        const taskBudgetIsTerminal = taskBudgetReached && !maxTurnBudgetReached;
+        const limit = taskBudgetIsTerminal ? input.taskBudgetUsd! : input.maxBudgetUsd!;
+        const errorCode = taskBudgetIsTerminal ? "agent_task_budget_reached" : "agent_max_budget_reached";
+        const budgetName = taskBudgetIsTerminal ? "taskBudget.total" : "maxBudgetUsd";
+        const error = agentError(
+          errorCode,
+          `Reached Gateway-owned ${budgetName} ($${limit.toFixed(6)}) after spending $${spentBudgetUsd.toFixed(6)}.`,
+          {
+            ...(input.maxBudgetUsd !== undefined ? { maxBudgetUsd: input.maxBudgetUsd } : {}),
+            ...(input.taskBudgetUsd !== undefined ? { taskBudgetUsd: input.taskBudgetUsd } : {}),
+            spentBudgetUsd,
+            turnSpentBudgetUsd,
+            lastInvocationCostUsd: invocationCostUsd,
+            provider: budgetProvider,
+            model: budgetModel,
+          },
+          taskBudgetIsTerminal
+            ? "Increase taskBudget.total or start a new SDK session with a larger budget."
+            : "Increase maxBudgetUsd or start a new turn with a larger budget.",
+        );
+        const safeMessage = safeFinalTextMessage(
+          assistantMessage,
+          assembled.hasPartialTextToolCall || assembled.hasTextFallbackToolCalls,
+          toolCalls,
+        );
+        finalMessage = safeMessage;
+        if (safeMessage) {
+          messages.push(safeMessage);
+          yield { type: "assistant_message", sessionId: input.sessionId, turnId: input.turnId, message: safeMessage };
+          await input.onDurableMessage?.(safeMessage);
+        }
+        await this.dispatchLifecycle(input, "StopFailure", { error: error.message });
+        yield { type: "stop_failure", sessionId: input.sessionId, turnId: input.turnId, error: error.message };
+        yield await emitStatus({
+          event: taskBudgetIsTerminal ? "task_budget_reached" : "max_budget_reached",
+          kind: "error",
+          text: error.message,
+          detail: error.details as Record<string, unknown>,
+        });
+        const result = this.createTurnResult(input, {
+          type: "error",
+          stopReason: taskBudgetIsTerminal ? "task_budget" : "max_budget",
+          usage,
+          permissionDenials,
+          turns: turnCount,
+          startedAt,
+          finalMessage,
+          structuredOutput,
+          errors: [error],
+        });
+        yield { type: "turn_failed", sessionId: input.sessionId, turnId: input.turnId, error };
+        await captureTurn(true);
+        yield { type: "turn_completed", sessionId: input.sessionId, turnId: input.turnId, result };
+        return { result, messages };
+      }
 
       const streamInterruption = assembled.error?.streamInterruption;
       if (streamInterruption) {
@@ -2080,11 +2251,13 @@ export class AgentLoop {
     const contextRuntime = this.capabilities.contextPreparation;
     const planTodo = this.capabilities.planMode.planTodoManager?.forSession(input.sessionId);
     const canPrompt = input.canPrompt ?? this.config.permissionContext.canPrompt;
+    const canElicit = input.canElicit === true && this.capabilities.interaction.elicitation !== undefined;
     const promptBlockedToolNames = canPrompt
       ? new Set<string>()
       : new Set(
           this.toolPort.list()
-            .filter((tool) => requiresPromptCapability(tool, {}))
+            .filter((tool) => requiresPromptCapability(tool, {})
+              && !(canElicit && tool.name === "ask_user_question"))
             .map((tool) => tool.name),
         );
     let toolDefinitions = this.toolPort.list()
@@ -2117,7 +2290,11 @@ export class AgentLoop {
       tools,
       maxMessages: this.config.maxContextMessages,
       customSystemPrompt: this.config.systemPrompt,
-      appendSystemPrompt: planTodo?.buildPromptAddendum(),
+      appendSystemPrompt: joinSystemPromptAddenda(
+        this.config.appendSystemPrompt,
+        this.config.permissionMode === "plan" ? this.config.planModeInstructions : undefined,
+        planTodo?.buildPromptAddendum(),
+      ),
       abortSignal: input.abortSignal,
     });
 
@@ -2176,6 +2353,48 @@ export class AgentLoop {
     };
   }
 
+  private estimateUsageCost(
+    usage: CanonicalUsage | undefined,
+    provider: string,
+    model: string,
+  ): number | undefined {
+    const routerEstimate = this.capabilities.model.budget?.estimateUsageCost?.(usage, provider, model);
+    if (typeof routerEstimate === "number" && Number.isFinite(routerEstimate) && routerEstimate >= 0) {
+      return routerEstimate;
+    }
+    const nativeCost = usage?.nativeCost;
+    return typeof nativeCost === "number" && Number.isFinite(nativeCost) && nativeCost >= 0
+      ? nativeCost
+      : undefined;
+  }
+
+  /**
+   * Provider usage is preferred. When a budgeted invocation has no usage
+   * payload, reuse the existing token-accounting estimator so the Gateway
+   * still has a conservative cost basis before it permits another action.
+   */
+  private resolveBudgetUsage(
+    usage: CanonicalUsage | undefined,
+    estimatedInputTokens: number | undefined,
+    assistantMessage: CanonicalMessage,
+  ): CanonicalUsage | undefined {
+    if (usage && Object.values(usage).some((value) => typeof value === "number" && Number.isFinite(value))) {
+      return usage;
+    }
+    const responseText = assistantMessage.content.map((block) => {
+      if (block.type === "text" || block.type === "thinking") return block.text;
+      if (block.type === "tool_call") return typeof block.input === "string" ? block.input : JSON.stringify(block.input ?? {});
+      return "";
+    }).join("\n");
+    const outputTokens = countTokens(responseText);
+    if (estimatedInputTokens === undefined && outputTokens === 0) return usage;
+    return {
+      ...(estimatedInputTokens !== undefined ? { inputTokens: estimatedInputTokens } : {}),
+      ...(outputTokens > 0 ? { outputTokens } : {}),
+      totalTokens: (estimatedInputTokens ?? 0) + outputTokens,
+    };
+  }
+
   private createBudgetEvaluator(
     input: AgentLoopInput,
     options: {
@@ -2187,8 +2406,9 @@ export class AgentLoop {
     },
   ): ((candidateMessages: CanonicalMessage[]) => Promise<TokenBudgetSnapshot>) | undefined {
     const tokenAccounting = this.capabilities.model.budget;
+    const evaluateRequestBudget = tokenAccounting?.evaluateRequestBudget;
     const maxContextTokens = options.maxContextTokens;
-    if (!tokenAccounting || !maxContextTokens) {
+    if (!evaluateRequestBudget || !maxContextTokens) {
       return undefined;
     }
     return async (candidateMessages) => {
@@ -2212,7 +2432,7 @@ export class AgentLoop {
               model: options.prepared.model,
             };
       }
-      const snapshot = await tokenAccounting.evaluateRequestBudget(candidateRequest, {
+      const snapshot = await evaluateRequestBudget.call(tokenAccounting, candidateRequest, {
         maxContextTokens,
         reservedOutputTokens: options.reservedOutputTokens,
         signal: input.abortSignal,
@@ -2464,6 +2684,7 @@ export class AgentLoop {
       runMode: this.config.runMode ?? "agent",
       permissionMode: this.config.permissionMode,
       permissionContext,
+      canElicit: input.canElicit === true && this.capabilities.interaction.elicitation !== undefined,
       auditRecorder: this.capabilities.toolExecution.auditRecorder,
       now: this.now,
       env: buildTurnEnvironment(
@@ -2473,12 +2694,29 @@ export class AgentLoop {
         input.turnId,
       ),
       maxResultBytes: this.config.maxResultBytes,
+      ...(this.config.includeToolProgress === true && this.capabilities.events.emit
+        ? {
+            progress: (event: import("../../tool/index.js").PilotDeckToolProgressEvent) => {
+              this.capabilities.events.emit?.({
+                type: "tool_progress",
+                sessionId: input.sessionId,
+                turnId: input.turnId,
+                toolCallId: event.toolCallId,
+                toolName: event.toolName,
+                message: event.message,
+                ...(event.metadata ? { metadata: event.metadata } : {}),
+                createdAt: event.createdAt,
+              });
+            },
+          }
+        : {}),
       // Tools that need a secondary model call (e.g. `agent` subagents in
       // fallback mode, `web_fetch` extraction) get a thin adapter that
       // funnels into the router's stream so subagents inherit fallback /
       // zero-usage retry.
       ...(auxiliaryModel ? { model: auxiliaryModel } : {}),
       elicitation: this.capabilities.interaction.elicitation,
+      userDialog: this.capabilities.interaction.userDialog,
       fileHistory: this.capabilities.toolExecution.fileHistory,
       subagentDepth: this.config.subagentDepth ?? 0,
       ...(this.capabilities.subagent.oneShot ? {
@@ -2703,6 +2941,15 @@ export class AgentLoop {
       sessionId: input.sessionId,
       turnId: input.turnId,
       completedAt: this.now().toISOString(),
+      ...(this.activeBudget ? {
+        budget: {
+          turnSpentUsd: this.activeBudget.turnSpentUsd,
+          ...(this.activeBudget.taskBudgetUsd !== undefined ? {
+            taskBudgetUsd: this.activeBudget.taskBudgetUsd,
+            taskSpentUsd: this.activeBudget.initialTaskBudgetSpentUsd + this.activeBudget.turnSpentUsd,
+          } : {}),
+        },
+      } : {}),
     };
   }
 
@@ -3205,6 +3452,7 @@ function mergeUsage(first: CanonicalUsage, second: CanonicalUsage | undefined): 
     cacheReadTokens: add(first.cacheReadTokens, second.cacheReadTokens),
     cacheWriteTokens: add(first.cacheWriteTokens, second.cacheWriteTokens),
     totalTokens: add(first.totalTokens, second.totalTokens),
+    nativeCost: add(first.nativeCost, second.nativeCost),
   };
 }
 
@@ -3332,7 +3580,7 @@ export function modelFailureAction(error: CanonicalModelError | undefined): {
   }
   if (error.code === "timeout") {
     if (error.settingsFix?.configPath === "model.providers.<id>.retry.streamIdleTimeoutMs") {
-      const hint = `Increase streamIdleTimeoutMs for${providerLabel} in Settings → Model Provider → Advanced, or check local network/proxy and provider status.`;
+      const hint = `Increase streamIdleTimeoutMs for${providerLabel} in Settings → Advanced, or check local network/proxy and provider status.`;
       return modelFailureActionResult(hint, "network", "streamIdleTimeout", { provider: error.provider ?? "the provider" });
     }
     const hint = `Increase timeoutMs for${providerLabel} in Settings → Model Provider → Advanced, or check local network/proxy and provider status.`;
@@ -3692,6 +3940,12 @@ function clampOutputToModelCap(requested: number, modelMaxOutputTokens: number |
     return Math.min(next, Math.floor(modelMaxOutputTokens));
   }
   return next;
+}
+
+/** Combine the SDK session addendum with the existing turn-local addendum. */
+function joinSystemPromptAddenda(...values: Array<string | undefined>): string | undefined {
+  const parts = values.filter((value): value is string => typeof value === "string" && value.trim().length > 0);
+  return parts.length > 0 ? parts.join("\n\n") : undefined;
 }
 
 function tokenCalibrationKey(provider: string, model: string): string {

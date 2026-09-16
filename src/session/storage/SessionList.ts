@@ -20,7 +20,7 @@ export type ListProjectSessionsOptions = SessionCatalogListInput;
 export type { SessionInfo } from "../catalog/SessionCatalogPort.js";
 
 export async function listProjectSessions(options: ListProjectSessionsOptions): Promise<SessionInfo[]> {
-  const chatDir = getPilotProjectChatDir(options.projectRoot, options.pilotHome);
+  const chatDir = options.chatDir ?? getPilotProjectChatDir(options.projectRoot, options.pilotHome);
   let names: string[];
   try {
     names = await readdir(chatDir);

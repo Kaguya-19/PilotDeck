@@ -10,7 +10,7 @@ export type SessionFileHistoryBundleOptions = {
   sessionKey: string;
   storage: Pick<
     AgentProjectSessionStorage,
-    "fileHistoryDir" | "transcript" | "projections"
+    "fileHistoryDir" | "fileHistoryBackupStorage" | "transcript" | "projections"
   >;
   now: () => Date;
 };
@@ -26,6 +26,7 @@ export class SessionFileHistoryBundle {
     const fileHistory = new FileHistoryStore({
       backupDir: this.options.storage.fileHistoryDir,
       now: this.options.now,
+      backupStorage: this.options.storage.fileHistoryBackupStorage,
       onSnapshotRecorded: (snapshot, snapshotKind) =>
         this.options.storage.transcript.recordFileHistorySnapshot(
           this.options.sessionKey,
@@ -41,7 +42,10 @@ export class SessionFileHistoryBundle {
       requireSessionProjectionValue<FileHistorySnapshotProjectionResult>(
         projectionSnapshot,
         FILE_HISTORY_PROJECTION_NAMES.snapshots,
-      ),
+      ).flatMap((entry) => {
+        const timestamp = entry.timestamp ?? entry.snapshotTimestamp;
+        return timestamp ? [{ ...entry, timestamp }] : [];
+      }),
     );
     return fileHistory;
   }

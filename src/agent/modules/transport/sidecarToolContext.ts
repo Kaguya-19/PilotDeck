@@ -92,6 +92,7 @@ export function createSidecarToolContextBuilder(options: {
         ...(config.maxResultBytes ? { maxResultBytes: config.maxResultBytes } : {}),
         ...(ports.model ? { model: ports.model } : {}),
         ...(ports.interaction?.elicitation ? { elicitation: ports.interaction.elicitation } : {}),
+        ...(ports.interaction?.userDialog ? { userDialog: ports.interaction.userDialog } : {}),
         ...(ports.toolExecution?.fileHistory ? { fileHistory: ports.toolExecution.fileHistory } : {}),
         ...(config.subagentDepth !== undefined ? { subagentDepth: config.subagentDepth } : {}),
         ...(includeOneShotSubagent && ports.subagent?.oneShot

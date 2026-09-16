@@ -9,6 +9,7 @@ import {
 } from "../agent/index.js";
 import type {
   GatewayEvent,
+  GatewaySessionSdkConfig,
   GatewaySessionContext,
   InProcessGateway,
 } from "../gateway/index.js";
@@ -28,6 +29,10 @@ import {
   type ProjectSessionRuntimeBundleResult,
 } from "./ProjectSessionRuntimeBundle.js";
 import type { GatewaySubagentContinuations } from "./GatewaySubagentRuntimeBundle.js";
+import type { PilotDeckLoadedPlugin } from "../extension/index.js";
+import type { PilotDeckHookEvent } from "../extension/hooks/protocol/events.js";
+import type { GatewayUserDialogStore } from "../gateway/user-dialog/GatewayUserDialogStore.js";
+import type { ResolvedGatewayOrganizationPolicy } from "./createLocalGateway.js";
 
 /**
  * The session-facing subset of a published project generation.
@@ -48,6 +53,28 @@ export type ProjectSessionFactoryOptions<Runtime extends ProjectSessionFactoryRu
   }): ProjectSessionPermissionRuleSet;
   getSessionOverride(sessionKey: string): SessionConfigOverride | undefined;
   getGateway(): InProcessGateway | undefined;
+  getSdkSessionConfig(sessionKey: string, runtime: Runtime): GatewaySessionSdkConfig | undefined;
+  getSdkSessionPlugins(sessionKey: string): readonly PilotDeckLoadedPlugin[];
+  getSdkOutputStyleContent(sessionKey: string, runtime: Runtime): string | undefined;
+  getSdkMcpServers(sessionKey: string): Readonly<Record<string, unknown>>;
+  getSdkThinking(sessionKey: string): AgentRuntimeConfig["thinking"] | undefined;
+  userDialogStore?: GatewayUserDialogStore;
+  registerSdkConfigChangeHandler(
+    sessionKey: string,
+    handler: (payload: { changedPaths: string[]; changeClasses: string[] }) => void,
+  ): () => void;
+  registerSessionHookHandler(
+    sessionKey: string,
+    handler: (event: PilotDeckHookEvent, payload: Record<string, unknown>) => void,
+  ): () => void;
+  organizationToolPolicy?: { allow: readonly string[]; deny: readonly string[] };
+  organizationPolicy?: ResolvedGatewayOrganizationPolicy;
+  createStorage(input: {
+    runtime: Runtime;
+    sessionKey: string;
+    now: () => Date;
+  }): ReturnType<typeof createAgentProjectSessionStorage>
+    | Promise<ReturnType<typeof createAgentProjectSessionStorage>>;
   permissionMode: AgentRuntimeConfig["permissionMode"];
   additionalWorkingDirectories?: string[];
   mcpRuntimeFactory?: McpRuntimeFactory;
@@ -90,17 +117,25 @@ export class ProjectSessionFactory<Runtime extends ProjectSessionFactoryRuntime>
 
   async createSession(context: GatewaySessionContext) {
     const prepared = await this.prepare(context);
+    const storage = await this.options.createStorage({
+      runtime: prepared.runtime,
+      sessionKey: context.sessionKey,
+      now: this.options.now,
+    });
     try {
       const resumed = await resumeAgentSession({
         sessionId: context.sessionKey,
         config: prepared.agentConfig,
         dependencies: prepared.baseDependencies,
-        projectStorage: prepared.runtime.projectStorage,
+        storage,
         extendDependencies: prepared.extendDependencies,
         ownedToolRegistry: true,
         __configure: this.composeDisposer(prepared, prepared.configureContinuableSubagents),
         sessionTitleProvider: prepared.sessionTitleProvider,
         sessionTitleGenerator: prepared.sessionTitleGenerator,
+        promptSuggestionGenerator: this.options.getSdkSessionConfig(context.sessionKey, prepared.runtime)?.promptSuggestions === true
+          ? prepared.promptSuggestionGenerator
+          : undefined,
         inputProcessor: prepared.inputProcessor,
         collectFileArtifacts: this.options.shouldCollectFileArtifacts(prepared.runtime),
         agentLoopFactory: this.options.agentLoopFactory,
@@ -116,10 +151,10 @@ export class ProjectSessionFactory<Runtime extends ProjectSessionFactoryRuntime>
   async recreateSession(context: GatewaySessionContext, previousSession: AgentSession) {
     const prepared = await this.prepare(context);
     const previous = previousSession.snapshotForRuntimeReload();
-    const storage = createAgentProjectSessionStorage({
-      ...prepared.runtime.projectStorage,
-      sessionId: context.sessionKey,
-      now: prepared.baseDependencies.now,
+    const storage = await this.options.createStorage({
+      runtime: prepared.runtime,
+      sessionKey: context.sessionKey,
+      now: this.options.now,
     });
     try {
       const readResult = await storage.restore();
@@ -141,6 +176,9 @@ export class ProjectSessionFactory<Runtime extends ProjectSessionFactoryRuntime>
         __configure: this.composeDisposer(prepared, prepared.configureContinuableSubagents),
         sessionTitleProvider: prepared.sessionTitleProvider,
         sessionTitleGenerator: prepared.sessionTitleGenerator,
+        promptSuggestionGenerator: this.options.getSdkSessionConfig(context.sessionKey, prepared.runtime)?.promptSuggestions === true
+          ? prepared.promptSuggestionGenerator
+          : undefined,
         inputProcessor: prepared.inputProcessor,
         collectFileArtifacts: this.options.shouldCollectFileArtifacts(prepared.runtime),
         agentLoopFactory: this.options.agentLoopFactory,
@@ -171,13 +209,40 @@ export class ProjectSessionFactory<Runtime extends ProjectSessionFactoryRuntime>
       ? {
           permissionBus: gateway.getPermissionBus(),
           elicitationBus: gateway.getElicitationBus(),
+          userDialogBus: gateway.getUserDialogBus(),
           interactionReconnect: gateway.getInteractionReconnectPort(),
           emit: (event: GatewayEvent) => gateway.emitForSession(context.sessionKey, event),
+          registerAsyncHook: (input: {
+            hookName: string;
+            hookEvent: string;
+            invocationId: string;
+            timeoutMs?: number;
+            includeHookEvents: boolean;
+          }) => gateway.registerAsyncHook({
+            sessionKey: context.sessionKey,
+            ...input,
+          }),
+          registerConfigChangeHandler: (handler: (
+            payload: { changedPaths: string[]; changeClasses: string[] },
+          ) => void) =>
+            this.options.registerSdkConfigChangeHandler(context.sessionKey, handler),
+          registerSessionHookHandler: (handler: (
+            event: PilotDeckHookEvent,
+            payload: Record<string, unknown>,
+          ) => void) => this.options.registerSessionHookHandler(context.sessionKey, handler),
         }
       : undefined;
     const prepared = await new ProjectSessionRuntimeBundle({
       context,
       runtime,
+      sdkSessionConfig: this.options.getSdkSessionConfig(context.sessionKey, runtime),
+      sdkSessionPlugins: this.options.getSdkSessionPlugins(context.sessionKey),
+      sdkOutputStyleContent: this.options.getSdkOutputStyleContent(context.sessionKey, runtime),
+      sdkMcpServers: this.options.getSdkMcpServers(context.sessionKey),
+      sdkThinking: this.options.getSdkThinking(context.sessionKey),
+      userDialogStore: this.options.userDialogStore,
+      organizationToolPolicy: this.options.organizationToolPolicy,
+      organizationPolicy: this.options.organizationPolicy,
       acquireRuntimeLease: () => this.options.acquireRuntimeLease(runtime),
       acquirePermissionRuleSet: () => this.options.acquirePermissionRuleSet({
         sessionKey: context.sessionKey,
@@ -241,8 +306,8 @@ function mergeSessionDependencies(
   extension: Partial<
     Pick<
       AgentRuntimeDependencies,
-      "context" | "promptContributions" | "fileHistory" | "subagentTranscript" | "elicitation" | "eventEmitter" | "drainEvents" | "planFileManager" | "planTodoManager" | "goalManager"
-      | "ownedElicitation" | "interactionReconnect"
+      "context" | "promptContributions" | "fileHistory" | "fileUpdateNotifier" | "subagentTranscript" | "elicitation" | "userDialog" | "eventEmitter" | "drainEvents" | "planFileManager" | "planTodoManager" | "goalManager"
+      | "ownedElicitation" | "interactionReconnect" | "subagentComposition"
     >
   >,
 ): CreateAgentSessionOptions["dependencies"] {
@@ -251,10 +316,13 @@ function mergeSessionDependencies(
     ...(extension.context ? { context: extension.context } : {}),
     ...(extension.promptContributions ? { promptContributions: extension.promptContributions } : {}),
     ...(extension.fileHistory ? { fileHistory: extension.fileHistory } : {}),
+    ...(extension.fileUpdateNotifier ? { fileUpdateNotifier: extension.fileUpdateNotifier } : {}),
     ...(extension.subagentTranscript ? { subagentTranscript: extension.subagentTranscript } : {}),
     ...(extension.elicitation ? { elicitation: extension.elicitation } : {}),
+    ...(extension.userDialog ? { userDialog: extension.userDialog } : {}),
     ...(extension.ownedElicitation !== undefined ? { ownedElicitation: extension.ownedElicitation } : {}),
     ...(extension.interactionReconnect ? { interactionReconnect: extension.interactionReconnect } : {}),
+    ...(extension.subagentComposition ? { subagentComposition: extension.subagentComposition } : {}),
     ...(extension.eventEmitter ? { eventEmitter: extension.eventEmitter } : {}),
     ...(extension.drainEvents ? { drainEvents: extension.drainEvents } : {}),
     ...(extension.planFileManager ? { planFileManager: extension.planFileManager } : {}),

@@ -300,6 +300,10 @@ export function createEditNotebookTool(
         workspaceRoot: resolved.root,
       }, fs);
       const fileStat = await fs.stat(resolved.absolutePath);
+      await context.fileHistory?.markEditCommitted?.(
+        resolved.absolutePath,
+        context.messageId ?? context.turnId,
+      );
       invalidateReadFileState(context, resolved.absolutePath);
       recordWriteSnapshot(context, resolved.absolutePath, updatedContent, Math.floor(fileStat.mtimeMs));
 

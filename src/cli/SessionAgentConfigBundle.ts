@@ -1,10 +1,13 @@
 import type { SessionConfigOverride } from "../always-on/runtime/SessionConfigOverrides.js";
 import type { AgentRuntimeConfig } from "../agent/index.js";
+import type { SubagentDefinition } from "../agent/sub/builtinSubagentTypes.js";
 import type { ModelRuntime, MultimodalConstraints } from "../model/index.js";
-import { createDefaultPermissionContext, type PermissionRuleSet } from "../permission/index.js";
+import { createDefaultPermissionContext, permissionEntryToRule, type PermissionRuleSet } from "../permission/index.js";
 import type { PilotConfigSnapshot } from "../pilot/config/types.js";
 import type { InteractionProfile } from "../interaction/index.js";
 import type { PilotDeckRuntimeProfile } from "./PilotDeckRuntimeProfile.js";
+import type { GatewaySessionSdkConfig } from "../gateway/protocol/types.js";
+import type { ResolvedGatewayOrganizationPolicy } from "./createLocalGateway.js";
 
 export type SessionAgentConfigRuntime = {
   projectRoot: string;
@@ -17,10 +20,13 @@ export type SessionAgentConfigRuntime = {
 export type SessionAgentConfigBundleOptions = {
   runtime: SessionAgentConfigRuntime;
   sessionOverride?: SessionConfigOverride;
+  sdkSessionConfig?: GatewaySessionSdkConfig;
+  sdkThinking?: AgentRuntimeConfig["thinking"];
   permissionRules: PermissionRuleSet;
   interaction: Pick<InteractionProfile, "canPrompt">;
   permissionMode: AgentRuntimeConfig["permissionMode"];
   additionalWorkingDirectories?: string[];
+  organizationPolicy?: ResolvedGatewayOrganizationPolicy;
   env: Record<string, string | undefined>;
 };
 
@@ -37,12 +43,21 @@ export class SessionAgentConfigBundle {
   compose(): AgentRuntimeConfig {
     const { runtime, sessionOverride, permissionRules } = this.options;
     const agent = runtime.snapshot.config.agent;
-    const permissionMode = sessionOverride?.permissionMode ?? this.options.permissionMode;
+    const sdk = this.options.sdkSessionConfig;
+    const organizationPermissions = this.options.organizationPolicy?.permissions;
+    const permissionMode = organizationPermissions?.defaultMode
+      ?? sdk?.managedPermissions?.defaultMode
+      ?? (sdk?.permissionMode === "dontAsk"
+        ? "default"
+        : sessionOverride?.permissionMode ?? this.options.permissionMode);
     const cwd = sessionOverride?.cwd ?? runtime.projectRoot;
+    const requestedModel = resolveSdkModel(sdk?.settings?.agent?.model, agent.model);
+    const organizationSettings = this.options.organizationPolicy?.settings;
+    const sessionSubagents = sdk?.settings?.agent?.subagents;
 
     let modelMultimodal: MultimodalConstraints | undefined;
     try {
-      modelMultimodal = runtime.model.getMultimodal(agent.model.provider, agent.model.model);
+      modelMultimodal = runtime.model.getMultimodal(requestedModel.provider, requestedModel.model);
     } catch {
       // Model or provider not found: retain the text-only compatibility path.
     }
@@ -50,17 +65,23 @@ export class SessionAgentConfigBundle {
     let maxContextTokens: number | undefined;
     let maxOutputTokens: number | undefined;
     try {
-      const caps = runtime.model.getCapabilities(agent.model.provider, agent.model.model);
-      maxContextTokens = agent.maxContextTokens ?? caps.maxContextTokens;
+      const caps = runtime.model.getCapabilities(requestedModel.provider, requestedModel.model);
+      maxContextTokens = sdk?.settings?.agent?.maxContextTokens ?? agent.maxContextTokens ?? caps.maxContextTokens;
       maxOutputTokens = caps.maxOutputTokens;
     } catch {
-      maxContextTokens = agent.maxContextTokens;
+      maxContextTokens = sdk?.settings?.agent?.maxContextTokens ?? agent.maxContextTokens;
     }
     maxOutputTokens = readPositiveIntegerEnv(this.options.env.PILOTDECK_MAX_OUTPUT_TOKENS)
+      ?? sdk?.settings?.agent?.maxOutputTokens
       ?? agent.maxOutputTokens
       ?? maxOutputTokens;
 
-    const subagentModel = agent.subagents?.default;
+    maxContextTokens = capNumber(maxContextTokens, organizationSettings?.maxContextTokens);
+    maxOutputTokens = capNumber(maxOutputTokens, organizationSettings?.maxOutputTokens);
+
+    const subagentModel = sessionSubagents && Object.prototype.hasOwnProperty.call(sessionSubagents, "default")
+      ? (sessionSubagents.default === null ? undefined : resolveSdkModel(sessionSubagents.default, requestedModel))
+      : agent.subagents?.default;
     let subagentRuntimeModel: AgentRuntimeConfig["subagentModel"];
     if (subagentModel) {
       let subagentModelMultimodal: MultimodalConstraints | undefined;
@@ -96,33 +117,161 @@ export class SessionAgentConfigBundle {
     }
 
     return {
-      provider: agent.model.provider,
-      model: agent.model.model,
+      provider: requestedModel.provider,
+      model: requestedModel.model,
+      ...(resolveFallbackModel(sdk, requestedModel, organizationSettings?.enforcedSessionSettings?.agent?.fallbackModel)
+        ? { fallbackModels: [resolveFallbackModel(sdk, requestedModel, organizationSettings?.enforcedSessionSettings?.agent?.fallbackModel)!] }
+        : {}),
+      ...(sdk?.managedModels ? { managedModelPolicy: structuredClone(sdk.managedModels) } : {}),
+      ...(sdk?.agentProgressSummaries === true ? { includeToolProgress: true } : {}),
       modelMultimodal,
       cwd,
       permissionMode,
+      ...(sdk?.systemPrompt !== undefined ? { systemPrompt: sdk.systemPrompt } : {}),
+      ...(sdk?.appendSystemPrompt !== undefined ? { appendSystemPrompt: sdk.appendSystemPrompt } : {}),
+      ...(sdk?.planModeInstructions !== undefined ? { planModeInstructions: sdk.planModeInstructions } : {}),
+      ...(sdk?.toolAliases ? { toolAliases: { ...sdk.toolAliases } } : {}),
+      ...(sdk?.outputFormat ? { stopOnStructuredOutput: true } : {}),
+      ...(sdk?.agents ? { subagentDefinitions: toSdkSubagentDefinitions(sdk.agents, this.options.organizationPolicy?.limits?.maxTurns) } : {}),
       jsonSelfCorrect: true,
       ...(subagentRuntimeModel ? { subagentModel: subagentRuntimeModel } : {}),
-      subagentTimeoutMs: agent.subagents?.timeoutMs,
-      maxSubagentDepth: agent.subagents?.maxDepth,
+      subagentTimeoutMs: capNumber(
+        sessionSubagents?.timeoutMs ?? agent.subagents?.timeoutMs,
+        organizationSettings?.maxSubagentTimeoutMs,
+      ),
+      maxSubagentDepth: capSubagentDepth(
+        sessionSubagents?.maxDepth ?? agent.subagents?.maxDepth,
+        this.options.organizationPolicy?.limits?.maxSubagentDepth,
+      ),
       maxContextTokens,
       maxOutputTokens,
       runtimeContextSurface: runtime.profile.runtimeContextSurface,
-      thinking: agent.thinking,
+      thinking: capThinking(
+        organizationSettings?.enforcedSessionSettings?.agent?.thinking
+          ?? this.options.sdkThinking
+          ?? sdk?.settings?.agent?.thinking
+          ?? agent.thinking,
+        organizationSettings?.maxThinkingTokens,
+      ),
       permissionContext: createDefaultPermissionContext({
         cwd,
         mode: permissionMode,
-        canPrompt: this.options.interaction.canPrompt,
+        canPrompt: this.options.interaction.canPrompt
+          && organizationPermissions?.canPrompt !== false
+          && sdk?.managedPermissions?.canPrompt !== false
+          && sdk?.permissionMode !== "dontAsk",
+        policyCanPrompt: organizationPermissions?.canPrompt === false || sdk?.managedPermissions?.canPrompt === false
+          ? false
+          : undefined,
+        acceptEdits: sdk?.permissionMode === "acceptEdits",
         bypassAvailable: sessionOverride?.bypassAvailable ?? true,
-        additionalWorkingDirectories: this.options.additionalWorkingDirectories,
+        additionalWorkingDirectories: [...new Set([
+          ...(this.options.additionalWorkingDirectories ?? []),
+          ...(sdk?.additionalWorkingDirectories ?? []),
+        ])],
         rules: {
           allow: permissionRules.allow,
-          deny: permissionRules.deny,
-          ask: permissionRules.ask,
+          deny: [
+            ...toPolicyRules(organizationPermissions?.deny, "deny"),
+            ...toPolicyRules(sdk?.managedPermissions?.deny, "deny"),
+            ...permissionRules.deny,
+          ],
+          ask: [
+            ...toPolicyRules(organizationPermissions?.ask, "ask"),
+            ...toPolicyRules(sdk?.managedPermissions?.ask, "ask"),
+            ...permissionRules.ask,
+          ],
         },
       }),
     };
   }
+}
+
+function toSdkSubagentDefinitions(
+  agents: NonNullable<GatewaySessionSdkConfig["agents"]>,
+  maxTurnsCap?: number,
+): Record<string, SubagentDefinition> {
+  return Object.fromEntries(Object.entries(agents).map(([id, agent]) => {
+    const modelOverride = agent.model ? resolveSdkModel(agent.model, { provider: "", model: "" }) : undefined;
+    const mcpServers = agent.mcpServers as Record<string, import("../gateway/protocol/types.js").GatewayMcpServerConfig> | undefined;
+    return [id, {
+      id,
+      description: agent.description,
+      systemPromptSuffix: agent.prompt,
+      allowedTools: agent.tools ? [...agent.tools] : ["*"],
+      ...(agent.disallowedTools?.length ? { disallowedTools: [...agent.disallowedTools] } : {}),
+      omitProjectInstructions: false,
+      omitGitStatus: false,
+      isReadOnly: agent.permissionMode === "plan",
+      ...(modelOverride?.provider && modelOverride.model ? { modelOverride } : {}),
+      ...(agent.maxTurns !== undefined || maxTurnsCap !== undefined
+        ? { maxTurns: maxTurnsCap === undefined ? agent.maxTurns : Math.min(agent.maxTurns ?? maxTurnsCap, maxTurnsCap) }
+        : {}),
+      ...(agent.effort !== undefined ? { effort: agent.effort } : {}),
+      ...(agent.permissionMode !== undefined ? { permissionMode: agent.permissionMode } : {}),
+      ...(mcpServers ? { mcpServers: structuredClone(mcpServers) } : {}),
+      ...(agent.skills !== undefined ? { skills: agent.skills === "all" ? "all" : [...agent.skills] } : {}),
+      ...(agent.memory !== undefined ? { memory: agent.memory } : {}),
+      ...(agent.initialPrompt !== undefined ? { initialPrompt: agent.initialPrompt } : {}),
+      ...(agent.background === true ? { background: true } : {}),
+      ...(agent.observer !== undefined ? { observer: agent.observer } : {}),
+      ...(agent.observerMessage?.trim() ? { observerMessage: agent.observerMessage.trim() } : {}),
+      ...(agent.criticalSystemReminder_EXPERIMENTAL !== undefined
+        ? { criticalSystemReminder: agent.criticalSystemReminder_EXPERIMENTAL }
+        : {}),
+    }];
+  }));
+}
+
+function resolveSdkModel(
+  requested: string | null | undefined,
+  fallback: { provider: string; model: string },
+): { provider: string; model: string } {
+  if (!requested) return fallback;
+  const slash = requested.indexOf("/");
+  if (slash <= 0 || slash === requested.length - 1) return fallback;
+  return { provider: requested.slice(0, slash), model: requested.slice(slash + 1) };
+}
+
+function resolveFallbackModel(
+  sdk: GatewaySessionSdkConfig | undefined,
+  parent: { provider: string; model: string },
+  enforced: string | null | undefined,
+): { provider: string; model: string } | undefined {
+  const value = enforced !== undefined
+    ? enforced
+    : sdk?.fallbackModel ?? sdk?.settings?.agent?.fallbackModel;
+  if (value === null || value === undefined) return undefined;
+  return resolveSdkModel(value, parent);
+}
+
+function capNumber(value: number | undefined, cap: number | undefined): number | undefined {
+  if (cap === undefined) return value;
+  return value === undefined ? cap : Math.min(value, cap);
+}
+
+function capSubagentDepth(value: number | undefined, cap: number | undefined): number | undefined {
+  if (cap === undefined) return value;
+  return Math.min(value ?? 1, cap);
+}
+
+function capThinking(
+  value: AgentRuntimeConfig["thinking"] | undefined,
+  cap: number | undefined,
+): AgentRuntimeConfig["thinking"] | undefined {
+  if (cap === undefined || value?.enabled !== true) return value;
+  if (cap === 0) return { enabled: false, mode: "off" };
+  return { ...value, budgetTokens: value.budgetTokens === undefined ? cap : Math.min(value.budgetTokens, cap) };
+}
+
+function toPolicyRules(
+  entries: readonly string[] | undefined,
+  behavior: "deny" | "ask",
+) {
+  return (entries ?? []).map((entry) => ({
+    ...permissionEntryToRule(entry, "deny", "policy"),
+    behavior,
+  }));
 }
 
 function readPositiveIntegerEnv(value: string | undefined): number | undefined {

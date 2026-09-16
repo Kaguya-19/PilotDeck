@@ -82,6 +82,12 @@ export type GatewaySessionHistoryBundleOptions = {
   transactionOwner: ReplacementTransactionOwner;
   /** Application-selected backend shared with session creation and resume. */
   storageProvider?: ProjectSessionStorageProvider;
+  /** Resolves the same host-owned storage used by session creation/resume. */
+  resolveStorage?: (input: {
+    projectRoot: string;
+    sessionId: string;
+    now: () => Date;
+  }) => AgentProjectSessionStorage;
   sessionForkPort?: ProjectSessionForkPort;
   sessionReplacementPort?: ProjectSessionReplacementPort;
   /** Application-owned admission point shared with other short-lived session writers. */
@@ -111,57 +117,83 @@ export class GatewaySessionHistoryBundle {
     this.writeCoordinator = options.writeCoordinator ?? new ProjectSessionWriteCoordinator();
   }
 
-  readSessionMessages(input: WebReadSessionMessagesInput): Promise<WebReadSessionMessagesResult> {
+  async readSessionMessages(input: WebReadSessionMessagesInput): Promise<WebReadSessionMessagesResult> {
+    const projectRoot = this.projectRoot(input.projectKey);
+    const storage = this.resolveStorage(projectRoot, input.sessionKey);
+    await storage?.recoverTranscriptReplacements?.();
     return this.providers.readSessionMessages(input, {
-      projectRoot: this.projectRoot(input.projectKey),
+      projectRoot,
       pilotHome: this.options.pilotHome,
       sessionCatalog: this.options.sessionCatalog,
-      storageProvider: this.options.storageProvider,
+      ...(storage ? { storage } : { storageProvider: this.options.storageProvider }),
       maxContextTokens: this.options.maxContextTokens,
       maxOutputTokens: this.options.maxOutputTokens,
       now: this.options.now,
     });
   }
 
-  readSubagentMessages(input: WebReadSubagentMessagesInput): Promise<WebReadSubagentMessagesResult> {
+  async readSubagentMessages(input: WebReadSubagentMessagesInput): Promise<WebReadSubagentMessagesResult> {
+    const projectRoot = this.projectRoot(input.projectKey);
+    const storage = this.resolveStorage(projectRoot, input.parentSessionId ?? input.sessionKey);
+    await storage?.recoverTranscriptReplacements?.();
     return this.providers.readSubagentMessages(input, {
-      projectRoot: this.projectRoot(input.projectKey),
+      projectRoot,
       pilotHome: this.options.pilotHome,
       sessionCatalog: this.options.sessionCatalog,
-      storageProvider: this.options.storageProvider,
+      ...(storage ? { storage } : { storageProvider: this.options.storageProvider }),
       now: this.options.now,
     });
   }
 
-  forkSession(input: WebForkSessionInput): Promise<WebForkSessionResult> {
+  async forkSession(input: WebForkSessionInput): Promise<WebForkSessionResult> {
+    const projectRoot = this.projectRoot(input.projectKey);
+    const sourceStorage = this.resolveStorage(projectRoot, input.sessionKey);
+    await sourceStorage?.recoverTranscriptReplacements?.();
     return this.providers.forkSession(input, {
-      projectRoot: this.projectRoot(input.projectKey),
+      projectRoot,
       pilotHome: this.options.pilotHome,
-      storageProvider: this.options.storageProvider,
-      sessionForkPort: this.options.sessionForkPort,
+      ...(this.options.resolveStorage
+        ? { storageForSession: (sessionId: string) => this.options.resolveStorage!({ projectRoot, sessionId, now: this.options.now }) }
+        : {
+            storageProvider: this.options.storageProvider,
+            sessionForkPort: this.options.sessionForkPort,
+          }),
       now: this.options.now,
     });
   }
 
-  replaceLastTurn(input: WebReplaceLastTurnInput): Promise<WebReplaceLastTurnResult> {
+  async replaceLastTurn(input: WebReplaceLastTurnInput): Promise<WebReplaceLastTurnResult> {
+    const projectRoot = this.projectRoot(input.projectKey);
+    const storage = this.resolveStorage(projectRoot, input.sessionKey);
+    await storage?.recoverTranscriptReplacements?.();
     return this.providers.replaceLastTurn(input, {
-      projectRoot: this.projectRoot(input.projectKey),
+      projectRoot,
       pilotHome: this.options.pilotHome,
-      storageProvider: this.options.storageProvider,
-      sessionReplacementPort: this.options.sessionReplacementPort,
+      ...(storage
+        ? { storage }
+        : {
+            storageProvider: this.options.storageProvider,
+            sessionReplacementPort: this.options.sessionReplacementPort,
+          }),
       now: this.options.now,
       transactionOwner: this.options.transactionOwner,
     });
   }
 
-  finalizeLastTurnReplacement(
+  async finalizeLastTurnReplacement(
     input: WebFinalizeLastTurnReplacementInput,
   ): Promise<WebFinalizeLastTurnReplacementResult> {
+    const projectRoot = this.projectRoot(input.projectKey);
+    const storage = this.resolveStorage(projectRoot, input.sessionKey);
     return this.providers.finalizeLastTurnReplacement(input, {
-      projectRoot: this.projectRoot(input.projectKey),
+      projectRoot,
       pilotHome: this.options.pilotHome,
-      storageProvider: this.options.storageProvider,
-      sessionReplacementPort: this.options.sessionReplacementPort,
+      ...(storage
+        ? { storage }
+        : {
+            storageProvider: this.options.storageProvider,
+            sessionReplacementPort: this.options.sessionReplacementPort,
+          }),
       now: this.options.now,
     });
   }
@@ -181,13 +213,13 @@ export class GatewaySessionHistoryBundle {
     projectRoot: string,
     input: GatewayRecordAgentStatusMessageInput,
   ): Promise<{ recorded: boolean }> {
-    const storage = this.providers.createStorage({
-      projectRoot,
-      pilotHome: this.options.pilotHome,
-      sessionId: input.sessionKey,
-      now: this.options.now,
-      storageProvider: this.options.storageProvider,
-    });
+    const storage = this.resolveStorage(projectRoot, input.sessionKey) ?? this.providers.createStorage({
+        projectRoot,
+        pilotHome: this.options.pilotHome,
+        sessionId: input.sessionKey,
+        now: this.options.now,
+        storageProvider: this.options.storageProvider,
+      });
     let recordError: unknown;
     try {
       await storage.restore();
@@ -212,5 +244,9 @@ export class GatewaySessionHistoryBundle {
 
   private projectRoot(projectKey: string | undefined): string {
     return projectKey ? projectKey : this.options.fallbackProjectRoot;
+  }
+
+  private resolveStorage(projectRoot: string, sessionId: string): AgentProjectSessionStorage | undefined {
+    return this.options.resolveStorage?.({ projectRoot, sessionId, now: this.options.now });
   }
 }

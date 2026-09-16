@@ -35,6 +35,8 @@ export type ProjectRouterRuntimeBundleOptions = {
   sessionState?: RouterSessionStatePort;
   /** Selects the project-scoped, volatile provider-health policy. */
   createProviderHealth?: (input: { now: () => number }) => RouterProviderHealthPort;
+  isModelAllowed?: NonNullable<Parameters<typeof createRouterRuntime>[1]["isModelAllowed"]>;
+  assertModelAllowed?: NonNullable<Parameters<typeof createRouterRuntime>[1]["assertModelAllowed"]>;
 };
 
 /**
@@ -76,6 +78,8 @@ export class ProjectRouterRuntimeBundle {
       telemetry: this.options.telemetry,
       ...(this.options.sessionState ? { sessionState: this.options.sessionState } : {}),
       providerHealth,
+      ...(this.options.isModelAllowed ? { isModelAllowed: this.options.isModelAllowed } : {}),
+      ...(this.options.assertModelAllowed ? { assertModelAllowed: this.options.assertModelAllowed } : {}),
     });
     this.router = router;
     return { tokenAccounting, router };

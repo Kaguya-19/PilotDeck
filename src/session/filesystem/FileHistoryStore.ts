@@ -37,6 +37,7 @@
  * recorded as an `intentional_difference` in the parity table).
  */
 
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { getBackupFileName } from "./backupNaming.js";
@@ -45,12 +46,18 @@ import { restoreBackup } from "./restoreBackup.js";
 import type {
   FileHistoryBackup,
   FileHistoryDiffStats,
+  FileHistoryExpectedFileState,
   FileHistorySnapshot,
   FileHistoryState,
+  FileHistoryBackupStorage,
 } from "./types.js";
 import type { FileHistorySnapshotRecord } from "../transcript/TranscriptEntry.js";
 
-export type FileHistorySnapshotRecordedEntry = FileHistorySnapshotRecord;
+export type FileHistorySnapshotRecordedEntry = Omit<FileHistorySnapshotRecord, "timestamp"> & {
+  timestamp?: string;
+  snapshotTimestamp?: string;
+  createdAt?: string;
+};
 
 export type FileHistoryStoreOptions = {
   /** Absolute path under which `<sha16>@v<version>` files live. */
@@ -63,11 +70,13 @@ export type FileHistoryStoreOptions = {
   now?: () => Date;
   /** Optional sink for `file_snapshot_recorded` transcript entries (F12). */
   onSnapshotRecorded?: (
-    entry: FileHistorySnapshotRecordedEntry,
+    entry: FileHistorySnapshotRecord,
     kind: "create" | "update",
   ) => void | Promise<void>;
   /** Optional warning sink for oversize / missing backups. */
   warn?: (message: string) => void;
+  /** Optional host-owned backup blob storage. */
+  backupStorage?: FileHistoryBackupStorage;
 };
 
 export class FileHistoryStore {
@@ -81,6 +90,7 @@ export class FileHistoryStore {
   > & {
     onSnapshotRecorded?: FileHistoryStoreOptions["onSnapshotRecorded"];
     warn?: FileHistoryStoreOptions["warn"];
+    backupStorage?: FileHistoryBackupStorage;
   };
 
   /**
@@ -98,6 +108,7 @@ export class FileHistoryStore {
       now: options.now ?? (() => new Date()),
       onSnapshotRecorded: options.onSnapshotRecorded,
       warn: options.warn,
+      backupStorage: options.backupStorage,
     };
   }
 
@@ -132,6 +143,7 @@ export class FileHistoryStore {
         backupDir: this.options.backupDir,
         maxFileBytes: this.options.maxFileBytes,
         now: this.options.now,
+        backupStorage: this.options.backupStorage,
       });
       if (result.oversize) {
         this.options.warn?.(
@@ -190,6 +202,7 @@ export class FileHistoryStore {
           backupDir: this.options.backupDir,
           maxFileBytes: this.options.maxFileBytes,
           now: this.options.now,
+          backupStorage: this.options.backupStorage,
         });
         if (result.oversize) {
           this.options.warn?.(
@@ -210,14 +223,40 @@ export class FileHistoryStore {
   }
 
   /**
+   * Records the state produced by a successful PilotDeck file mutation.
+   * Rewind compares this fingerprint with the current file before restoring
+   * its backup, so it cannot silently overwrite an external edit.
+   */
+  async markEditCommitted(filePath: string, messageId: string): Promise<void> {
+    return this.run(async () => {
+      const absPath = path.resolve(filePath);
+      const snapshot = this.findSnapshot(messageId);
+      if (!snapshot?.trackedFileBackups[absPath]) return;
+      snapshot.expectedFileStates ??= {};
+      snapshot.expectedFileStates[absPath] = await readExpectedFileState(absPath);
+      await this.recordTranscript(snapshot, "update");
+    });
+  }
+
+  async getConflictPaths(messageId: string): Promise<string[]> {
+    return this.run(async () => {
+      const snapshot = this.findSnapshot(messageId);
+      if (!snapshot) throw new Error(`No snapshot for messageId ${messageId}`);
+      return await this.findConflictPaths(snapshot);
+    });
+  }
+
+  /**
    * F8 + F9 — find the matching snapshot and restore every tracked file.
    */
-  async rewind(messageId: string): Promise<{ filesChanged: string[]; missing: string[] }> {
+  async rewind(messageId: string): Promise<{ filesChanged: string[]; missing: string[]; conflicts: string[] }> {
     return this.run(async () => {
       const snapshot = this.findSnapshot(messageId);
       if (!snapshot) {
         throw new Error(`No snapshot for messageId ${messageId}`);
       }
+      const conflicts = await this.findConflictPaths(snapshot);
+      if (conflicts.length > 0) return { filesChanged: [], missing: [], conflicts };
       const filesChanged: string[] = [];
       const missing: string[] = [];
       for (const [absPath, backup] of Object.entries(snapshot.trackedFileBackups)) {
@@ -225,6 +264,7 @@ export class FileHistoryStore {
           filePath: absPath,
           backup,
           backupDir: this.options.backupDir,
+          backupStorage: this.options.backupStorage,
         });
         if (result.outcome === "missing") {
           missing.push(absPath);
@@ -235,7 +275,7 @@ export class FileHistoryStore {
         }
         filesChanged.push(absPath);
       }
-      return { filesChanged, missing };
+      return { filesChanged, missing, conflicts: [] };
     });
   }
 
@@ -256,7 +296,7 @@ export class FileHistoryStore {
 
     for (const [absPath, backup] of Object.entries(snapshot.trackedFileBackups)) {
       const before = backup.backupFileName
-        ? await safeReadText(path.join(this.options.backupDir, backup.backupFileName))
+        ? await this.readBackupText(backup.backupFileName)
         : null;
       const after = await safeReadText(absPath);
       if (before === null && after === null) continue;
@@ -305,7 +345,13 @@ export class FileHistoryStore {
       const snapshot: FileHistorySnapshot = {
         messageId: entry.messageId,
         trackedFileBackups,
-        timestamp: new Date(entry.timestamp),
+        ...(entry.expectedFileStates ? { expectedFileStates: { ...entry.expectedFileStates } } : {}),
+        timestamp: new Date(
+          entry.timestamp
+            ?? ("snapshotTimestamp" in entry ? entry.snapshotTimestamp : undefined)
+            ?? ("createdAt" in entry ? entry.createdAt : undefined)
+            ?? 0,
+        ),
       };
       if (existingIdx >= 0) {
         this.state.snapshots[existingIdx] = snapshot;
@@ -360,7 +406,7 @@ export class FileHistoryStore {
 
   private async recordTranscript(snapshot: FileHistorySnapshot, kind: "create" | "update"): Promise<void> {
     if (!this.options.onSnapshotRecorded) return;
-    const entry: FileHistorySnapshotRecordedEntry = {
+    const entry: FileHistorySnapshotRecord = {
       messageId: snapshot.messageId,
       trackedFileBackups: Object.fromEntries(
         Object.entries(snapshot.trackedFileBackups).map(([file, backup]) => [
@@ -373,9 +419,21 @@ export class FileHistoryStore {
           },
         ]),
       ),
+      ...(snapshot.expectedFileStates && Object.keys(snapshot.expectedFileStates).length > 0
+        ? { expectedFileStates: { ...snapshot.expectedFileStates } }
+        : {}),
       timestamp: snapshot.timestamp.toISOString(),
     };
     await this.options.onSnapshotRecorded(entry, kind);
+  }
+
+  private async findConflictPaths(snapshot: FileHistorySnapshot): Promise<string[]> {
+    const conflicts: string[] = [];
+    for (const [filePath, expected] of Object.entries(snapshot.expectedFileStates ?? {})) {
+      const actual = await readExpectedFileState(filePath);
+      if (!sameExpectedFileState(actual, expected)) conflicts.push(filePath);
+    }
+    return conflicts;
   }
 
   /** F13 — drop the oldest snapshots when over `maxSnapshots`. */
@@ -390,12 +448,15 @@ export class FileHistoryStore {
           Object.values(s.trackedFileBackups).some((b) => b.backupFileName === backup.backupFileName),
         );
         if (stillReferenced) continue;
-        const target = path.join(this.options.backupDir, backup.backupFileName);
         try {
-          await fs.unlink(target);
+          if (this.options.backupStorage) {
+            await this.options.backupStorage.delete(backup.backupFileName);
+          } else {
+            await fs.unlink(path.join(this.options.backupDir, backup.backupFileName));
+          }
         } catch (err) {
           if (!isNotFoundError(err)) {
-            this.options.warn?.(`file-history: failed to evict ${target}: ${(err as Error).message}`);
+            this.options.warn?.(`file-history: failed to evict ${backup.backupFileName}: ${(err as Error).message}`);
           }
         }
       }
@@ -410,12 +471,44 @@ export class FileHistoryStore {
     );
     return next;
   }
+
+  private async readBackupText(backupFileName: string): Promise<string | null> {
+    if (!this.options.backupStorage) {
+      return safeReadText(path.join(this.options.backupDir, backupFileName));
+    }
+    const bytes = await this.options.backupStorage.read(backupFileName);
+    return bytes ? new TextDecoder().decode(bytes) : null;
+  }
 }
 
 function isNotFoundError(err: unknown): boolean {
   return Boolean(
     err && typeof err === "object" && (err as NodeJS.ErrnoException).code === "ENOENT",
   );
+}
+
+async function readExpectedFileState(filePath: string): Promise<FileHistoryExpectedFileState> {
+  try {
+    const [stat, content] = await Promise.all([fs.stat(filePath), fs.readFile(filePath)]);
+    if (!stat.isFile()) return { exists: false };
+    return {
+      exists: true,
+      sha256: createHash("sha256").update(content).digest("hex"),
+      ...(process.platform !== "win32" ? { mode: stat.mode & 0o777 } : {}),
+    };
+  } catch (error) {
+    if (isNotFoundError(error)) return { exists: false };
+    throw error;
+  }
+}
+
+function sameExpectedFileState(
+  left: FileHistoryExpectedFileState,
+  right: FileHistoryExpectedFileState,
+): boolean {
+  if (left.exists !== right.exists) return false;
+  if (!left.exists || !right.exists) return true;
+  return left.sha256 === right.sha256 && left.mode === right.mode;
 }
 
 async function safeReadText(p: string): Promise<string | null> {

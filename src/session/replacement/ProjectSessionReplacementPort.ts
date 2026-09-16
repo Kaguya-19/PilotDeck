@@ -13,6 +13,8 @@ export type ProjectSessionReplacementOwner = {
 export type ProjectSessionReplacementPrepareInput = {
   projectRoot: string;
   pilotHome: string;
+  /** Native compatibility path already resolved by the application storage owner. */
+  chatDir?: string;
   sessionId: string;
   transactionId: string;
   replacementTurnId: string;
@@ -27,6 +29,8 @@ export type ProjectSessionReplacementPrepareInput = {
 export type ProjectSessionReplacementFinalizeInput = {
   projectRoot: string;
   pilotHome: string;
+  /** Native compatibility path already resolved by the application storage owner. */
+  chatDir?: string;
   sessionId: string;
   transactionId: string;
   action: "commit" | "rollback";

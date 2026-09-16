@@ -51,6 +51,27 @@ function fakeShell(): {
   };
 }
 
+async function awaitDetachedExit(
+  exit: DetachedShellHandle["exit"],
+  timeoutMs = 5_000,
+): Promise<Awaited<DetachedShellHandle["exit"]>> {
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      exit,
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => {
+          reject(new Error(`detached shell did not exit within ${timeoutMs}ms`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  }
+}
+
 test("background task runtime consumes a detached shell provider", async () => {
   const fake = fakeShell();
   const runtime = new BackgroundTaskRuntime({ shell: fake.port });
@@ -457,7 +478,7 @@ test("macOS sandboxed detached shell denies read-only writes and permits workspa
   });
 
   const denied = await readOnly.start({ command: "touch read-only.txt", cwd: root });
-  const deniedExit = await denied.exit;
+  const deniedExit = await awaitDetachedExit(denied.exit);
   assert.notEqual(deniedExit.exitCode, 0);
   assert.equal(existsSync(join(root, "read-only.txt")), false);
 
@@ -466,7 +487,7 @@ test("macOS sandboxed detached shell denies read-only writes and permits workspa
     resolvePolicy: ({ workspaceRoot }) => ({ mode: "workspace-write", workspaceRoot }),
   });
   const allowed = await workspaceWrite.start({ command: "touch workspace-write.txt", cwd: root });
-  const allowedExit = await allowed.exit;
+  const allowedExit = await awaitDetachedExit(allowed.exit);
   assert.equal(allowedExit.exitCode, 0);
   assert.equal(existsSync(join(root, "workspace-write.txt")), true);
 });

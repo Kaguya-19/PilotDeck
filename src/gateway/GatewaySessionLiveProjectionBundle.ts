@@ -12,7 +12,10 @@ import type {
   BackgroundTaskCompletionSubscription,
 } from "../task/index.js";
 import type { GatewayEvent } from "./protocol/types.js";
-import { createGatewayHookExecutionProjection } from "./hooks/GatewayHookExecutionProjection.js";
+import {
+  createGatewayHookExecutionProjection,
+  createGatewaySdkHookExecutionProjection,
+} from "./hooks/GatewayHookExecutionProjection.js";
 import { createGatewayBackgroundTaskCompletionProjection } from "./tasks/GatewayBackgroundTaskCompletionProjection.js";
 
 /** The narrow hook-event surface consumed by one session live projection. */
@@ -49,6 +52,7 @@ export type GatewaySessionLiveProjectionBundleOptions = {
   scope: GatewaySessionLiveProjectionScope;
   sessionKey: string;
   hookExecutionEvents: GatewayHookExecutionEventSource;
+  hookEventFormat?: "agent_status" | "sdk";
   backgroundTaskCompletionEvents: GatewayBackgroundTaskCompletionEventSource;
   emit: (event: GatewayEvent) => boolean;
 };
@@ -73,7 +77,9 @@ export class GatewaySessionLiveProjectionBundle {
     let taskSubscription: BackgroundTaskCompletionSubscription | undefined;
     let projectionSubscription: AgentScopeLiveEventSubscription | undefined;
     try {
-      const hookProjection = createGatewayHookExecutionProjection({
+      const hookProjection = (this.options.hookEventFormat === "sdk"
+        ? createGatewaySdkHookExecutionProjection
+        : createGatewayHookExecutionProjection)({
         sessionKey: this.options.sessionKey,
         emit: this.options.emit,
       });

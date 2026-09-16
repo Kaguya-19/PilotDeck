@@ -25,6 +25,7 @@ import {
 } from "../context/index.js";
 import type { LifecycleRuntime } from "../lifecycle/index.js";
 import type { RouterRuntime } from "../router/index.js";
+import type { ToolResultArtifactStorage } from "../session/index.js";
 
 export type SessionContextRuntimeBundleOptions = {
   sessionKey: string;
@@ -32,7 +33,10 @@ export type SessionContextRuntimeBundleOptions = {
   projectRoot: string;
   pilotHome: string;
   toolResultsDir: string;
+  toolResultArtifactStorage?: ToolResultArtifactStorage;
   extension: ExtensionResolver;
+  /** Preserve the selected extension catalog when a scoped agent replaces the base prompt. */
+  includeExtensionsWithCustomSystemPrompt?: boolean;
   instructionStorage: InstructionStoragePort;
   toolResultSpill: ToolResultSpillPort;
   model: Pick<RouterRuntime, "stream">;
@@ -73,6 +77,7 @@ export class SessionContextRuntimeBundle {
   compose(): SessionContextRuntimeBundleResult {
     const toolResultBudget = new ToolResultBudget({
       toolResultsDir: this.options.toolResultsDir,
+      artifactStorage: this.options.toolResultArtifactStorage,
       spillPort: this.options.toolResultSpill,
     });
     const tokenBudget = new TokenBudgetManager();
@@ -141,6 +146,7 @@ export class SessionContextRuntimeBundle {
       return {
         context: new DefaultContextRuntime({
           extension: this.options.extension,
+          includeExtensionsWithCustomSystemPrompt: this.options.includeExtensionsWithCustomSystemPrompt,
           promptContributions,
           promptCacheCoordinator,
           runtimeContextSurface: this.options.runtimeContextSurface,

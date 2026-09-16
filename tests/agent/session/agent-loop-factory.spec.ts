@@ -90,7 +90,8 @@ test("createAgentSession can run a turn through an injected AgentLoop transport"
   const events = [];
   for await (const event of session.submit({ type: "text", text: "hello" }, { turnId: "turn-sidecar" })) {
     if (event.type === "turn_completed") {
-      assert.equal(transcript.entries.at(-1)?.type, "turn_result");
+      assert.equal(transcript.entries.some((entry) => entry.type === "turn_result"), true);
+      assert.equal(transcript.entries.at(-1)?.type, "session_metadata");
     }
     events.push(event);
   }

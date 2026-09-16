@@ -17,6 +17,7 @@ export type ToolCapabilityPolicy = {
 
 export type CreateToolCapabilityPolicyOptions = {
   allowedTools: readonly string[];
+  disallowedTools?: readonly string[];
   runtimeCapabilities?: readonly PilotDeckToolRuntimeCapability[];
 };
 
@@ -25,10 +26,14 @@ export function createToolCapabilityPolicy(
 ): ToolCapabilityPolicy {
   const allowedTools = new Set(options.allowedTools);
   const allowAll = allowedTools.has("*");
+  const disallowedTools = new Set(options.disallowedTools ?? []);
   const runtimeCapabilities = new Set(options.runtimeCapabilities ?? []);
 
   return {
     evaluate(tool) {
+      if (disallowedTools.has(tool.name)) {
+        return { allowed: false, reason: "tool_not_allowed" };
+      }
       if (!allowAll && !allowedTools.has(tool.name)) {
         return { allowed: false, reason: "tool_not_allowed" };
       }

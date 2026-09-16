@@ -14,6 +14,7 @@ import type { SessionMetadataStore } from "../../session/metadata/SessionMetadat
 import type { SessionMetadataValue } from "../../session/transcript/TranscriptEntry.js";
 import type { SessionTitleGenerator } from "../../session/title/SessionTitleGenerator.js";
 import type { SessionTitlePort } from "../../session/title/SessionTitlePort.js";
+import type { PromptSuggestionGenerator } from "../../session/prompt/PromptSuggestionGenerator.js";
 import { createVisibleErrorStatusDetail } from "../../status/agentStatus.js";
 import { FileArtifactCollector, type FileArtifact } from "../../session/artifacts/index.js";
 import type { AgentSteerMessage } from "../session/SteerMailbox.js";
@@ -27,6 +28,12 @@ export type TurnRunnerOptions = {
   /** Host-owned execution identity forwarded unchanged to the loop provider. */
   execution?: Pick<import("../modules/protocol.js").AgentExecutionContext, "runId" | "operationId" | "idempotencyKey" | "operationDeadline">;
   maxTurns?: number;
+  /** Gateway-owned USD ceiling for this submitted turn. */
+  maxBudgetUsd?: number;
+  /** Gateway-owned USD ceiling shared by every turn in an SDK session. */
+  taskBudgetUsd?: number;
+  /** Amount already charged to `taskBudgetUsd` before this turn. */
+  initialTaskBudgetSpentUsd?: number;
   runMode?: AgentRunMode;
   permissionMode?: PermissionMode;
   allowedReadFiles?: string[];
@@ -35,11 +42,13 @@ export type TurnRunnerOptions = {
   /** Allow model-visible plan mode tools for this turn. */
   allowPlanModeTools?: boolean;
   canPrompt?: boolean;
+  canElicit?: boolean;
   permissionRules?: Partial<PermissionRuleSet>;
   abortSignal?: AbortSignal;
   /** Synthetic messages appended after user input; stored with metadata.synthetic flag. */
   syntheticMessages?: CanonicalMessage[];
   modelOverride?: AgentModelOverride;
+  modelSelection?: NonNullable<SessionMetadataValue["modelSelection"]>;
   openSteerMailbox?: () => void;
   drainSteerMessages?: () => AgentSteerMessage[];
   drainOrCloseSteerMailbox?: () => { messages: AgentSteerMessage[]; closed: boolean };
@@ -68,7 +77,8 @@ export type TurnRunnerRuntimeReloadSnapshot = {
   metadata?: SessionMetadataValue;
 };
 
-export type AgentLoopRunner = Pick<AgentLoop, "run" | "snapshotFileState">;
+export type AgentLoopRunner = Pick<AgentLoop, "run" | "snapshotFileState"> &
+  Partial<Pick<AgentLoop, "seedReadState">>;
 
 export type TurnRunnerDependencies = {
   metadataStore?: SessionMetadataStore;
@@ -76,6 +86,8 @@ export type TurnRunnerDependencies = {
   sessionTitleProvider?: SessionTitlePort;
   /** @deprecated Use sessionTitleProvider. */
   sessionTitleGenerator?: SessionTitleGenerator;
+  /** Optional Gateway-owned generator for SDK promptSuggestions. */
+  promptSuggestionGenerator?: PromptSuggestionGenerator;
   autoGenerateSessionTitle?: boolean;
   eventRecorder?: AgentSessionEventRecorder;
 };
@@ -93,6 +105,7 @@ type PendingSessionTitle = {
 const SESSION_LISTING_PROMPT_MAX_CHARS = 1_200;
 
 export class TurnRunner {
+  private disposed = false;
   private pendingSessionTitle: PendingSessionTitle | undefined;
   readonly sessionEventRecorder: AgentSessionEventRecorder;
 
@@ -133,13 +146,7 @@ export class TurnRunner {
     yield { type: "turn_started", sessionId: options.sessionId, turnId: options.turnId };
     const loopAbortController = new AbortController();
     const unlinkLoopAbort = linkAbortSignal(options.abortSignal, loopAbortController);
-    const artifactCollector = this.runtimeContext.collectFileArtifacts === false
-      ? undefined
-      : await FileArtifactCollector.start({
-          cwd: this.runtimeContext.cwd,
-          allowedInputPaths: options.allowedReadFiles,
-          now: this.now,
-        }).catch(() => undefined);
+    let artifactCollector: FileArtifactCollector | undefined;
     try {
       const unacknowledgedSteers = new Map<string, AgentSteerMessage>();
       const trackDrainedSteers = (steers: AgentSteerMessage[]): AgentSteerMessage[] => {
@@ -204,6 +211,16 @@ export class TurnRunner {
 
       await this.persistListingPromptMetadata(options, accepted.messages);
       yield { type: "input_accepted", sessionId: options.sessionId, turnId: options.turnId, messages: accepted.messages };
+
+      // Acknowledge durable input before scanning the workspace. The baseline
+      // still completes before hooks/model/tools can mutate any files.
+      artifactCollector = this.runtimeContext.collectFileArtifacts === false
+        ? undefined
+        : await FileArtifactCollector.start({
+            cwd: this.runtimeContext.cwd,
+            allowedInputPaths: options.allowedReadFiles,
+            now: this.now,
+          }).catch(() => undefined);
 
       const prompt = inputToPromptText(options.input);
       const userPromptHooks = await this.lifecycle?.dispatch({
@@ -272,12 +289,16 @@ export class TurnRunner {
           messages,
           execution: options.execution,
           maxTurns: options.maxTurns,
+          maxBudgetUsd: options.maxBudgetUsd,
+          taskBudgetUsd: options.taskBudgetUsd,
+          initialTaskBudgetSpentUsd: options.initialTaskBudgetSpentUsd,
           runMode: options.runMode,
           permissionMode: options.permissionMode,
           allowedReadFiles: options.allowedReadFiles,
           basePermissionMode: options.basePermissionMode,
           allowPlanModeTools: options.allowPlanModeTools,
           canPrompt: options.canPrompt,
+          canElicit: options.canElicit,
           permissionRules: options.permissionRules,
           modelOverride: options.modelOverride,
           abortSignal: loopAbortController.signal,
@@ -373,8 +394,12 @@ export class TurnRunner {
         }
         for (const event of unappliedSteers) yield event;
         await this.sessionEventRecorder.completeTurn(runResult.result);
-        if (turnCompletedEvent) yield turnCompletedEvent;
+        const suggestion = await this.generatePromptSuggestion(options, prompt, runResult.result);
+        if (suggestion) {
+          yield { type: "prompt_suggestion", sessionId: options.sessionId, turnId: options.turnId, suggestion };
+        }
         await this.finalizeSessionMetadata(options, sessionTitle);
+        if (turnCompletedEvent) yield turnCompletedEvent;
         return runResult;
       } catch (error) {
         const unappliedSteers = await closeSteerMailbox();
@@ -410,6 +435,15 @@ export class TurnRunner {
 
   snapshotFileState(): AgentLoopSeedState {
     return this.loop.snapshotFileState();
+  }
+
+  async seedReadState(filePath: string, mtimeMs: number): Promise<{ applied: boolean }> {
+    if (!this.loop.seedReadState) {
+      throw Object.assign(new Error("seedReadState is unavailable for this AgentLoop runner."), {
+        code: "CAPABILITY_UNAVAILABLE",
+      });
+    }
+    return this.loop.seedReadState(filePath, mtimeMs);
   }
 
   private createErrorResult(options: TurnRunnerOptions, error: ReturnType<typeof agentError>): AgentTurnResult {
@@ -466,12 +500,22 @@ export class TurnRunner {
     };
   }
 
+  /** Invalidate background work before the session transcript is removed/replaced. */
+  async dispose(): Promise<void> {
+    this.disposed = true;
+    this.pendingSessionTitle?.controller.abort("session_closed");
+    this.pendingSessionTitle?.cleanup();
+    // A provider may ignore cancellation. Do not wait for its network request;
+    // the completion guard below prevents it from ever saving a late title.
+    await this.transcript.close?.();
+  }
+
   private maybeGenerateSessionTitle(
     options: TurnRunnerOptions,
     acceptedMessages: CanonicalMessage[],
     messageSequences: readonly number[] = [],
   ): PendingSessionTitle | undefined {
-    if (this.turnDependencies.autoGenerateSessionTitle !== true) {
+    if (this.disposed || this.turnDependencies.autoGenerateSessionTitle !== true) {
       return undefined;
     }
     const metadataStore = this.turnDependencies.metadataStore;
@@ -510,6 +554,7 @@ export class TurnRunner {
         signal: controller.signal,
       })
         .then(async (title) => {
+          if (this.disposed || controller.signal.aborted) return;
           pending.title = title;
           if (title) {
             const snap = metadataStore.getSnapshot();
@@ -566,8 +611,32 @@ export class TurnRunner {
     options: TurnRunnerOptions,
     pending?: PendingSessionTitle,
   ): Promise<void> {
-    await this.flushReadySessionTitle(options, pending);
+    // Title completion saves its own metadata. It must not hold the session
+    // slot after the reply finishes; later turns can continue while it runs.
+    pending?.cleanup();
     await this.turnDependencies.metadataStore?.reappendTail(options.turnId).catch(() => {});
+  }
+
+  private async generatePromptSuggestion(
+    options: TurnRunnerOptions,
+    userPrompt: string,
+    result: AgentTurnResult,
+  ): Promise<string | null> {
+    const generate = this.turnDependencies.promptSuggestionGenerator;
+    if (!generate || result.type !== "success" || options.abortSignal?.aborted) return null;
+    const assistantResponse = result.finalMessage?.content
+      .filter((block) => block.type === "text")
+      .map((block) => (block.type === "text" ? block.text : ""))
+      .join("\n")
+      .trim();
+    if (!assistantResponse) return null;
+    return await generate({
+      userPrompt,
+      assistantResponse,
+      sessionId: options.sessionId,
+      turnId: options.turnId,
+      signal: options.abortSignal ?? new AbortController().signal,
+    });
   }
 
   private async persistListingPromptMetadata(
@@ -579,12 +648,15 @@ export class TurnRunner {
 
     const snapshot = metadataStore.getSnapshot();
     const prompt = allHumanText(acceptedMessages);
-    if (!prompt) return;
+    if (!prompt && !options.modelSelection) return;
 
-    const boundedPrompt = prompt.slice(0, SESSION_LISTING_PROMPT_MAX_CHARS);
+    const boundedPrompt = prompt?.slice(0, SESSION_LISTING_PROMPT_MAX_CHARS);
     await metadataStore.record(options.turnId, {
-      ...(snapshot.firstPrompt ? {} : { firstPrompt: boundedPrompt }),
-      lastPrompt: boundedPrompt,
+      ...(boundedPrompt ? {
+        ...(snapshot.firstPrompt ? {} : { firstPrompt: boundedPrompt }),
+        lastPrompt: boundedPrompt,
+      } : {}),
+      ...(options.modelSelection ? { modelSelection: { ...options.modelSelection } } : {}),
       updatedAt: this.now().toISOString(),
     }).catch(() => {});
   }
@@ -596,6 +668,8 @@ function isVisibleFailureStatus(status: AgentStatusMessageInput): boolean {
 
 function acceptedInputMetadata(options: TurnRunnerOptions): Record<string, unknown> | undefined {
   const metadata: Record<string, unknown> = {};
+  // Save alongside input so a crash before the metadata snapshot cannot lose the choice.
+  if (options.modelSelection) metadata.modelSelection = { ...options.modelSelection };
   if (options.permissionMode) {
     metadata.permissionMode = options.permissionMode;
   }

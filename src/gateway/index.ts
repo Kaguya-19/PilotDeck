@@ -5,6 +5,14 @@ export {
   type GatewaySessionCatalogStorage,
 } from "./GatewaySessionCatalog.js";
 export {
+  createGatewayAsyncTranscriptStorageAdapter,
+  type CreateGatewayAsyncTranscriptStorageAdapterOptions,
+  type GatewayAsyncTranscriptKey,
+  type GatewayAsyncTranscriptProjectKey,
+  type GatewayAsyncTranscriptSession,
+  type GatewayAsyncTranscriptStore,
+} from "./storage/AsyncTranscriptStorageAdapter.js";
+export {
   SessionRouter,
   type GatewaySessionContext,
   type GatewaySessionFactory,
@@ -104,6 +112,11 @@ export { RemoteGateway, createRemoteGateway } from "./client/RemoteGateway.js";
 export { connectRemoteGatewayIfAvailable, probeGatewayServer, type ProbeGatewayServerOptions } from "./client/probeServer.js";
 export { startGatewayServer, type GatewayServer, type GatewayServerOptions } from "./server/GatewayServer.js";
 export {
+  createEmbeddedGatewayEndpoint,
+  type CreateEmbeddedGatewayEndpointOptions,
+  type EmbeddedGatewayEndpoint,
+} from "./server/EmbeddedGatewayEndpoint.js";
+export {
   ensureGatewayAuthToken,
   readGatewayAuthToken,
   resolveGatewayTokenPath,
@@ -118,6 +131,11 @@ export type {
   GatewayChannelKey,
   GatewayCronController,
   GatewayElicitationResponseInput,
+  GatewayUserDialogResponseInput,
+  GatewayUserDialogRequestEvent,
+  GatewayRecoveredUserDialog,
+  GatewayListUserDialogsInput,
+  GatewayListUserDialogsResult,
   GatewayError,
   GatewayEvent,
   GatewayReconnectInteractionInput,
@@ -129,6 +147,12 @@ export type {
   GatewayServerInfo,
   GatewaySessionInfo,
   GatewaySubmitTurnInput,
+  GatewaySessionSdkConfig,
+  GatewayToolSandboxPolicy,
+  GatewaySessionSandboxPolicy,
+  GatewayAsyncHookResultInput,
+  GatewayAsyncHookResult,
+  GatewayAsyncHookResultOutput,
   GatewayCancelSteerInput,
   GatewayCancelSteerResult,
   GatewaySteerTurnInput,
@@ -148,6 +172,44 @@ export type {
   SessionModelInput,
   SessionModelSetInput,
   SessionModelResult,
+  GatewayMcpServerStatusInput,
+  GatewayMcpServerStatusResult,
+  GatewayMcpServerConfig,
+  GatewaySetMcpServersInput,
+  GatewayMcpSetServersResult,
+  GatewayMcpServerControlInput,
+  GatewayMcpServerToggleInput,
+  GatewayMcpPermissionModeOverrideInput,
+  GatewayMcpPermissionModeOverrideResult,
+  GatewayProjectFileReadInput,
+  GatewayProjectFileReadResult,
+  GatewaySetPermissionModeInput,
+  GatewayApplyFlagSettingsInput,
+  GatewayApplyFlagSettingsResult,
+  GatewayUpdateSettingsInput,
+  GatewayUpdateSettingsResult,
+  GatewayResolvedSettingsSource,
+  GatewayResolvedSettingsDiagnostic,
+  GatewayResolvedSettingsResult,
+  GatewayThinkingConfig,
+  GatewaySetSessionThinkingInput,
+  GatewayUsageSnapshotInput,
+  GatewayUsageSnapshotResult,
+  GatewayModelUsageRole,
+  GatewayModelUsage,
+  GatewayModelUsageSnapshotInput,
+  GatewayModelUsageSnapshotResult,
+  GatewayRewindFilesInput,
+  GatewayRewindFilesResult,
+  GatewaySeedReadStateInput,
+  GatewaySeedReadStateResult,
+  GatewaySupportedAgentsResult,
+  GatewaySessionMetadataInput,
+  GatewaySessionTranscriptMessage,
+  GatewaySessionTranscriptArchive,
+  GatewayExportSessionTranscriptInput,
+  GatewayRestoreSessionTranscriptInput,
+  GatewayRestoreSessionTranscriptResult,
   UploadedAttachmentRef,
   ListSessionsInput,
   ListSessionsResult,
@@ -190,6 +252,36 @@ export {
   type GatewaySessionPermissionRuleSetLease,
 } from "./permission/GatewaySessionPermissionRuleSetRegistry.js";
 export { AsyncQueue } from "./util/AsyncQueue.js";
+export { GatewayUserDialogBus } from "./user-dialog/GatewayUserDialogBus.js";
+export { GatewayUserDialogChannel } from "./user-dialog/GatewayUserDialogChannel.js";
+export type {
+  GatewayStoredUserDialog,
+  GatewayStoredUserDialogAnswer,
+  GatewayStoredUserDialogLeaseClaim,
+  GatewayStoredUserDialogOwnerClaim,
+  GatewayStoredUserDialogResult,
+  GatewayUserDialogStore,
+  GatewayUserDialogStoreKey,
+} from "./user-dialog/GatewayUserDialogStore.js";
+export {
+  FileGatewayUserDialogStore,
+  type FileGatewayUserDialogStoreOptions,
+} from "./user-dialog/FileGatewayUserDialogStore.js";
+export {
+  HttpGatewayUserDialogStore,
+  createGatewayUserDialogStoreHttpHandler,
+  startGatewayUserDialogStoreHttpServer,
+  type HttpGatewayUserDialogStoreOptions,
+  type GatewayUserDialogStoreHttpHandler,
+  type GatewayUserDialogStoreHttpHandlerOptions,
+  type GatewayUserDialogStoreHttpServer,
+  type GatewayUserDialogStoreHttpServerOptions,
+} from "./user-dialog/HttpGatewayUserDialogStore.js";
+export {
+  createGatewayUserDialogJournal,
+  GatewayUserDialogJournal,
+  type GatewayUserDialogJournalOptions,
+} from "./user-dialog/GatewayUserDialogJournal.js";
 export type {
   UploadArtifactLease,
   UploadArtifactLeaseProvider,

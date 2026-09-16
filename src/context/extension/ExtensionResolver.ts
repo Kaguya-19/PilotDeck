@@ -21,6 +21,8 @@ export type ContributedSkill = {
   description?: string;
   /** Absolute path to the resolved SKILL.md selected by the runtime. */
   path: string;
+  /** Parsed Markdown body when the provider can retain it in the snapshot. */
+  content?: string;
   namespace?: string;
 };
 

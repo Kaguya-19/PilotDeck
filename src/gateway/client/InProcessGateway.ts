@@ -1,11 +1,18 @@
 import { randomUUID } from "node:crypto";
-import { resolve } from "node:path";
+import { readFile, realpath, stat } from "node:fs/promises";
+import { isAbsolute, resolve } from "node:path";
 import { parseAgentRunMode } from "../../agent/protocol/input.js";
 import type { AgentEvent, AgentInput } from "../../agent/index.js";
+import { SUBAGENT_DEFINITIONS } from "../../agent/sub/builtinSubagentTypes.js";
 import {
   type CanonicalMessage,
 } from "../../model/index.js";
 import type { SessionRouter } from "../SessionRouter.js";
+import { isPilotDeckHookEvent } from "../../extension/hooks/protocol/events.js";
+import {
+  GatewayUserDialogBus,
+  type GatewayUserDialogChange,
+} from "../user-dialog/GatewayUserDialogBus.js";
 import {
   type GatewaySessionPermissionGrantPort,
 } from "../permission/GatewaySessionPermissionRuleSetRegistry.js";
@@ -17,6 +24,15 @@ import type {
   GatewayActiveTurnSnapshot,
   GatewayActiveTurnSnapshotInput,
   GatewayElicitationResponseInput,
+  GatewayListUserDialogsInput,
+  GatewayListUserDialogsResult,
+  GatewayRecoveredUserDialog,
+  GatewayUserDialogClaimInput,
+  GatewayUserDialogClaimResult,
+  GatewayUserDialogReleaseInput,
+  GatewayUserDialogReleaseResult,
+  GatewayUserDialogRequestEvent,
+  GatewayUserDialogResponseInput,
   GatewayEvent,
   GatewayPermissionDecisionInput,
   GatewayRecordAgentStatusMessageInput,
@@ -60,6 +76,35 @@ import type {
   SessionModelInput,
   SessionModelSetInput,
   SessionModelResult,
+  GatewaySetSessionThinkingInput,
+  GatewayRewindFilesInput,
+  GatewayRewindFilesResult,
+  GatewaySeedReadStateInput,
+  GatewaySeedReadStateResult,
+  GatewaySessionSdkConfig,
+  GatewaySetMcpServersInput,
+  GatewayMcpSetServersResult,
+  GatewayMcpServerControlInput,
+  GatewayMcpServerToggleInput,
+  GatewayMcpPermissionModeOverrideInput,
+  GatewayMcpPermissionModeOverrideResult,
+  GatewayApplyFlagSettingsInput,
+  GatewayApplyFlagSettingsResult,
+  GatewayUpdateSettingsInput,
+  GatewayUpdateSettingsResult,
+  GatewayResolvedSettingsResult,
+  GatewayOutputStylesListInput,
+  GatewayOutputStylesListResult,
+  GatewaySetOutputStyleInput,
+  GatewaySetOutputStyleResult,
+  GatewayReloadOutputStylesInput,
+  GatewayReloadOutputStylesResult,
+  GatewayUsageSnapshotInput,
+  GatewayUsageSnapshotResult,
+  GatewayModelUsageSnapshotInput,
+  GatewayModelUsageSnapshotResult,
+  GatewayAsyncHookResult,
+  GatewayAsyncHookResultInput,
 } from "../protocol/types.js";
 import type {
   InteractionConnectionBinding,
@@ -139,16 +184,32 @@ import type { GatewayElicitationBus } from "../elicitation/GatewayElicitationBus
 import type { GatewayPermissionBus } from "../permission/GatewayPermissionBus.js";
 import type { ResolvedUploadedAttachments, UploadedAttachmentResolverPort } from "../dialog/UploadedAttachmentResolverPort.js";
 import { listProjectFiles } from "../dialog/projectFiles.js";
+import { isPathWithinRoot } from "../../tool/builtin/filesystem/pathSafety.js";
+import { RouterRuntimeError } from "../../router/index.js";
 
 export { mapAgentEvent } from "./GatewayAgentEventProjector.js";
 
 const PLAN_COMMAND_USAGE = "用法：/plan <任务>\n例如：/plan 设计一个新功能";
 const COMPACT_COMMAND_USAGE = "用法：/compact";
 const DEFAULT_REPLACEMENT_TRANSACTION_TIMEOUT_MS = 60_000;
+const DEFAULT_ABORT_TURN_TIMEOUT_MS = 30_000;
+const DEFAULT_ASYNC_HOOK_TIMEOUT_MS = 60_000;
+const ASYNC_HOOK_OUTCOME_RETENTION_MS = 5 * 60_000;
+const DEFAULT_USER_DIALOG_LEASE_MS = 30_000;
+const MIN_USER_DIALOG_LEASE_MS = 1_000;
+const MAX_USER_DIALOG_LEASE_MS = 5 * 60_000;
+
+/** A configured host ceiling also supplies the default when callers omit it. */
+function capGatewayTurnLimit(value: number | undefined, cap: number | undefined): number | undefined {
+  if (cap === undefined) return value;
+  return value === undefined ? cap : Math.min(value, cap);
+}
 
 export type InProcessGatewayOptions = {
   /** Absolute command used by the model to install bundled FunASR assets. */
   funasrInstallCommand?: string;
+  /** Maximum time to wait for an aborted turn to finish unwinding. */
+  abortTurnTimeoutMs?: number;
   /** Attachment turn-composition consumer wired by application composition. */
   attachmentTurnComposer?: GatewayAttachmentTurnComposerPort;
   /** Compatibility fallback for direct Gateway callers that do not compose a turn composer. */
@@ -182,6 +243,83 @@ export type InProcessGatewayOptions = {
   sessionModelGet?: (input: SessionModelInput) => Promise<SessionModelResult>;
   sessionModelSet?: (input: SessionModelSetInput) => Promise<SessionModelResult>;
   sessionModelClear?: (input: SessionModelInput) => Promise<void>;
+  projectFileRead?: (input: import("../protocol/types.js").GatewayProjectFileReadInput) => Promise<import("../protocol/types.js").GatewayProjectFileReadResult | null>;
+  renameSession?: (input: import("../protocol/types.js").GatewaySessionMetadataInput) => Promise<{ updated: boolean }>;
+  tagSession?: (input: import("../protocol/types.js").GatewaySessionMetadataInput) => Promise<{ updated: boolean }>;
+  deleteSession?: (input: { sessionKey: string; projectKey?: string }) => Promise<void>;
+  exportSessionTranscript?: (
+    input: import("../protocol/types.js").GatewayExportSessionTranscriptInput,
+  ) => Promise<import("../protocol/types.js").GatewaySessionTranscriptArchive>;
+  restoreSessionTranscript?: (
+    input: import("../protocol/types.js").GatewayRestoreSessionTranscriptInput,
+  ) => Promise<import("../protocol/types.js").GatewayRestoreSessionTranscriptResult>;
+  deleteEphemeralSession?: (input: { sessionKey: string; projectKey?: string }) => Promise<boolean>;
+  mcpServerStatus?: (input: import("../protocol/types.js").GatewayMcpServerStatusInput) => Promise<import("../protocol/types.js").GatewayMcpServerStatusResult>;
+  setMcpServers?: (input: GatewaySetMcpServersInput) => Promise<GatewayMcpSetServersResult>;
+  reconnectMcpServer?: (input: GatewayMcpServerControlInput) => Promise<void>;
+  toggleMcpServer?: (input: GatewayMcpServerToggleInput) => Promise<void>;
+  setMcpPermissionModeOverride?: (input: GatewayMcpPermissionModeOverrideInput) => Promise<GatewayMcpPermissionModeOverrideResult>;
+  setPermissionMode?: (input: import("../protocol/types.js").GatewaySetPermissionModeInput) => Promise<{ applied: boolean }>;
+  clearPermissionMode?: (input: { sessionKey: string; projectKey?: string }) => Promise<void>;
+  applyFlagSettings?: (input: GatewayApplyFlagSettingsInput) => Promise<GatewayApplyFlagSettingsResult>;
+  updateSettings?: (input: GatewayUpdateSettingsInput) => Promise<GatewayUpdateSettingsResult>;
+  resolveSettings?: () => Promise<GatewayResolvedSettingsResult>;
+  setSessionThinking?: (input: GatewaySetSessionThinkingInput) => Promise<{ applied: boolean }>;
+  outputStylesList?: (input: GatewayOutputStylesListInput) => Promise<GatewayOutputStylesListResult>;
+  setOutputStyle?: (input: GatewaySetOutputStyleInput) => Promise<GatewaySetOutputStyleResult>;
+  reloadOutputStyles?: (input?: GatewayReloadOutputStylesInput) => Promise<GatewayReloadOutputStylesResult>;
+  usageSnapshot?: (input: GatewayUsageSnapshotInput) => Promise<GatewayUsageSnapshotResult>;
+  modelUsageSnapshot?: (input: GatewayModelUsageSnapshotInput) => Promise<GatewayModelUsageSnapshotResult>;
+  rewindFiles?: (input: GatewayRewindFilesInput) => Promise<GatewayRewindFilesResult>;
+  stopBackgroundTask?: (
+    input: import("../protocol/types.js").GatewayStopBackgroundTaskInput,
+  ) => Promise<import("../protocol/types.js").GatewayStopBackgroundTaskResult>;
+  backgroundTasks?: (
+    input: import("../protocol/types.js").GatewayBackgroundTasksInput,
+  ) => Promise<import("../protocol/types.js").GatewayBackgroundTasksResult>;
+  setSdkSessionConfig?: (
+    sessionKey: string,
+    config: GatewaySessionSdkConfig,
+    projectKey?: string,
+  ) => Promise<{ changed: boolean }> | { changed: boolean };
+  assertSdkModelAllowed?: (
+    sessionKey: string,
+    model?: { provider: string; model: string },
+    projectKey?: string,
+  ) => void;
+  sdkSessionDefaults?: boolean;
+  turnLimits?: {
+    maxTurns?: number;
+    maxBudgetUsd?: number;
+  };
+  taskBudgetSnapshot?: (input: {
+    sessionKey: string;
+    projectKey?: string;
+  }) => Promise<{ totalUsd: number; spentUsd: number } | undefined> | { totalUsd: number; spentUsd: number } | undefined;
+  recordTaskBudgetSpend?: (input: {
+    sessionKey: string;
+    projectKey?: string;
+    runId: string;
+    turnSpentUsd: number;
+  }) => Promise<void> | void;
+  listRecoveredUserDialogs?: (
+    input: GatewayListUserDialogsInput,
+  ) => Promise<GatewayRecoveredUserDialog[]> | GatewayRecoveredUserDialog[];
+  acknowledgeRecoveredUserDialog?: (input: {
+    sessionKey: string;
+    projectKey?: string;
+    requestId: string;
+  }) => Promise<boolean> | boolean;
+  recoverUserDialog?: (input: GatewayUserDialogResponseInput) => Promise<boolean> | boolean;
+  listHostedUserDialogs?: (input: GatewayListUserDialogsInput) => Promise<GatewayUserDialogRequestEvent[]> | GatewayUserDialogRequestEvent[];
+  claimHostedUserDialog?: (input: GatewayUserDialogClaimInput) => Promise<GatewayUserDialogClaimResult> | GatewayUserDialogClaimResult;
+  releaseHostedUserDialog?: (input: GatewayUserDialogReleaseInput) => Promise<boolean> | boolean;
+  submitHostedUserDialogAnswer?: (input: GatewayUserDialogResponseInput) => Promise<boolean> | boolean;
+  onUserDialogChange?: (change: GatewayUserDialogChange) => void;
+  clearRecoveredUserDialogs?: (input: {
+    sessionKey: string;
+    projectKey?: string;
+  }) => Promise<void> | void;
   resolveUploadedAttachments?: UploadedAttachmentResolverPort["resolve"];
   resolveTurnModelSelection?: (input: GatewaySubmitTurnInput) => Promise<{
     selection?: import("../protocol/types.js").ExplicitModelSelection;
@@ -267,6 +405,44 @@ export type InProcessGatewayOptions = {
   telemetry?: TelemetryClient;
 };
 
+function validateGatewayTurnLimits(limits: InProcessGatewayOptions["turnLimits"]): void {
+  if (!limits) return;
+  if (limits.maxTurns !== undefined && (
+    !Number.isSafeInteger(limits.maxTurns) || limits.maxTurns <= 0
+  )) {
+    throw new DialogGatewayError(
+      "INVALID_GATEWAY_TURN_LIMIT",
+      "turnLimits.maxTurns must be a positive safe integer.",
+    );
+  }
+  if (limits.maxBudgetUsd !== undefined && (
+    !Number.isFinite(limits.maxBudgetUsd) || limits.maxBudgetUsd <= 0
+  )) {
+    throw new DialogGatewayError(
+      "INVALID_GATEWAY_TURN_LIMIT",
+      "turnLimits.maxBudgetUsd must be a positive finite number.",
+    );
+  }
+}
+
+type PendingAsyncHook = {
+  invocationId: string;
+  sessionKey: string;
+  runId: string;
+  hookName: string;
+  hookEvent: string;
+  expiresAt: number;
+  includeHookEvents: boolean;
+  timeout?: ReturnType<typeof setTimeout>;
+  delivery?: Promise<GatewayAsyncHookResult>;
+};
+
+type AsyncHookOutcome = {
+  sessionKey: string;
+  status: "delivered" | "expired";
+  timeout?: ReturnType<typeof setTimeout>;
+};
+
 export class InProcessGateway implements Gateway {
   private readonly now: () => Date;
   private readonly uuid: () => string;
@@ -280,12 +456,29 @@ export class InProcessGateway implements Gateway {
   private readonly permissionModes: GatewaySessionPermissionModePort;
   private readonly turnCompletionFence: GatewayTurnCompletionFencePort;
   private readonly manualCompactionCoordinator: GatewayManualCompactionCoordinatorPort;
+  private readonly pendingAsyncHooks = new Map<string, PendingAsyncHook>();
+  private readonly asyncHookOutcomes = new Map<string, AsyncHookOutcome>();
+  private readonly userDialogBus: GatewayUserDialogBus;
+  /** Project identity used only to scope observational dialog notifications. */
+  private readonly dialogProjectKeys = new Map<string, string>();
   constructor(
     private readonly router: SessionRouter,
     private readonly options: InProcessGatewayOptions = {},
   ) {
     this.now = options.now ?? (() => new Date());
     this.uuid = options.uuid ?? randomUUID;
+    this.userDialogBus = new GatewayUserDialogBus({
+      now: this.now,
+      uuid: this.uuid,
+      onChange: (change) => {
+        const projectKey = this.dialogProjectKeys.get(change.sessionKey);
+        options.onUserDialogChange?.({
+          ...change,
+          ...(projectKey ? { projectKey } : {}),
+        });
+      },
+    });
+    validateGatewayTurnLimits(options.turnLimits);
     this.attachmentTurnComposer = options.attachmentTurnComposer ?? new GatewayAttachmentTurnComposer({
       ...(options.attachmentResolver ? { attachmentResolver: options.attachmentResolver } : {}),
     });
@@ -321,10 +514,7 @@ export class InProcessGateway implements Gateway {
     this.interactionCoordinator = options.interactionCoordinator
       ?? new GatewayInteractionCoordinator({
         permissionGrants: options.permissionGrants,
-        onElicitationDelivered: (sessionKey, requestId) => {
-          options.dispatchHookForSession?.(sessionKey, "ElicitationResult", { requestId, delivered: true });
-        },
-    });
+      });
     this.permissionModes = options.permissionModes ?? new GatewaySessionPermissionModeRegistry();
     this.turnCompletionFence = options.turnCompletionFence ?? new GatewayTurnCompletionFence();
     this.manualCompactionCoordinator = options.manualCompactionCoordinator
@@ -338,6 +528,10 @@ export class InProcessGateway implements Gateway {
    */
   getElicitationBus(): GatewayElicitationBus {
     return this.interactionCoordinator.getElicitationBus();
+  }
+
+  getUserDialogBus(): GatewayUserDialogBus {
+    return this.userDialogBus;
   }
 
   /**
@@ -379,6 +573,44 @@ export class InProcessGateway implements Gateway {
     return this.turnEventCoordinator.emit(sessionKey, event);
   }
 
+  /**
+   * Registers an SDK HTTP-hook marker against the currently active turn.
+   * This is a default-absent protocol adapter: ordinary native hooks never
+   * allocate a deferred record or change their lifecycle behavior.
+   */
+  registerAsyncHook(input: {
+    sessionKey: string;
+    hookName: string;
+    hookEvent: string;
+    invocationId: string;
+    timeoutMs?: number;
+    includeHookEvents: boolean;
+  }): void {
+    const runId = this.router.activeTurnRunId(input.sessionKey);
+    if (!runId || !input.invocationId.trim()) return;
+    const existing = this.pendingAsyncHooks.get(input.invocationId);
+    if (existing) {
+      if (existing.sessionKey === input.sessionKey && existing.runId === runId) return;
+      throw new DialogGatewayError(
+        "ASYNC_HOOK_INVOCATION_CONFLICT",
+        "Async hook invocation id is already owned by another active turn.",
+      );
+    }
+    const timeoutMs = Math.max(1, input.timeoutMs ?? DEFAULT_ASYNC_HOOK_TIMEOUT_MS);
+    const pending: PendingAsyncHook = {
+      invocationId: input.invocationId,
+      sessionKey: input.sessionKey,
+      runId,
+      hookName: input.hookName,
+      hookEvent: input.hookEvent,
+      expiresAt: Date.now() + timeoutMs,
+      includeHookEvents: input.includeHookEvents,
+    };
+    pending.timeout = setTimeout(() => this.expireAsyncHook(pending), timeoutMs);
+    pending.timeout.unref?.();
+    this.pendingAsyncHooks.set(pending.invocationId, pending);
+  }
+
   broadcastRetryProgress(detail: {
     sessionId: string;
     attempt: number;
@@ -404,6 +636,7 @@ export class InProcessGateway implements Gateway {
   }
 
   async *submitTurn(input: GatewaySubmitTurnInput): AsyncIterable<GatewayEvent> {
+    if (input.projectKey) this.dialogProjectKeys.set(input.sessionKey, input.projectKey);
     if (input.interactionBinding) {
       const reconnect = this.interactionCoordinator.reconnectForTurn(
         input.sessionKey,
@@ -425,6 +658,16 @@ export class InProcessGateway implements Gateway {
         type: "error",
         code: "INVALID_PERMISSION_MODE",
         message: invalidPermission,
+        recoverable: true,
+      };
+      return;
+    }
+    const invalidMaxBudget = validateGatewayMaxBudget(input);
+    if (invalidMaxBudget) {
+      yield {
+        type: "error",
+        code: "INVALID_MAX_BUDGET_USD",
+        message: invalidMaxBudget,
         recoverable: true,
       };
       return;
@@ -458,6 +701,18 @@ export class InProcessGateway implements Gateway {
       return;
     }
     input = plannedInput;
+    if (input.sdkPermissionMode) {
+      // Older SDK callers may send the adapter mode as a turn field. Fold it
+      // into the same session-config path so the runtime has one ownership
+      // boundary and native permission mode remains untouched.
+      input = {
+        ...input,
+        sdkSessionConfig: {
+          ...(input.sdkSessionConfig ?? {}),
+          permissionMode: input.sdkPermissionMode,
+        },
+      };
+    }
 
     const runId = input.runId ?? this.uuid();
     const replacementClaim = this.turnReplacementCoordinator.claimForSubmit(input.sessionKey, runId);
@@ -486,6 +741,94 @@ export class InProcessGateway implements Gateway {
       };
       return;
     }
+    if (input.sdkSessionConfig) {
+      if (!this.options.setSdkSessionConfig) {
+        this.turnReplacementCoordinator.releaseSubmitClaim(input.sessionKey, runId);
+        yield {
+          type: "error",
+          runId,
+          code: "CAPABILITY_UNAVAILABLE",
+          message: "sdk_session_config is unavailable.",
+          recoverable: true,
+        };
+        return;
+      }
+      if (this.router.hasActiveTurn(input.sessionKey)) {
+        this.turnReplacementCoordinator.releaseSubmitClaim(input.sessionKey, runId);
+        yield {
+          type: "error",
+          runId,
+          code: "SESSION_BUSY",
+          message: "Cannot change SDK session configuration while a turn is active.",
+          recoverable: true,
+        };
+        return;
+      }
+      try {
+        validateSdkSessionConfig(input.sdkSessionConfig);
+        const configUpdate = await this.options.setSdkSessionConfig(input.sessionKey, input.sdkSessionConfig, input.projectKey);
+        if (configUpdate.changed) await this.router.close(input.sessionKey);
+      } catch (error) {
+        this.turnReplacementCoordinator.releaseSubmitClaim(input.sessionKey, runId);
+        yield {
+          type: "error",
+          runId,
+          code: error instanceof DialogGatewayError ? error.code : "INVALID_SDK_SESSION_CONFIG",
+          message: error instanceof Error ? error.message : String(error),
+          recoverable: true,
+        };
+        return;
+      }
+    }
+    const explicitModel = input.modelSelection?.mode === "model"
+      ? input.modelSelection
+      : input.modelOverride;
+    if (this.options.assertSdkModelAllowed) {
+      try {
+        this.options.assertSdkModelAllowed(input.sessionKey, explicitModel, input.projectKey);
+      } catch (error) {
+        this.turnReplacementCoordinator.releaseSubmitClaim(input.sessionKey, runId);
+        yield {
+          type: "error",
+          runId,
+          code: error instanceof DialogGatewayError ? error.code : "INVALID_SDK_SESSION_CONFIG",
+          message: error instanceof Error ? error.message : String(error),
+          recoverable: true,
+        };
+        return;
+      }
+    }
+    let taskBudget: { totalUsd: number; spentUsd: number } | undefined;
+    if (this.options.taskBudgetSnapshot) {
+      taskBudget = await this.options.taskBudgetSnapshot({
+        sessionKey: input.sessionKey,
+        projectKey: input.projectKey,
+      });
+      if (taskBudget && taskBudget.spentUsd >= taskBudget.totalUsd) {
+        this.turnReplacementCoordinator.releaseSubmitClaim(input.sessionKey, runId);
+        const message = `Reached Gateway-owned taskBudget.total ($${taskBudget.totalUsd.toFixed(6)}) after spending $${taskBudget.spentUsd.toFixed(6)}.`;
+        yield {
+          type: "error",
+          runId,
+          code: "agent_task_budget_reached",
+          message,
+          recoverable: false,
+          userHint: "Increase taskBudget.total or start a new SDK session with a larger budget.",
+        };
+        yield { type: "turn_completed", runId, usage: {}, finishReason: "task_budget" };
+        return;
+      }
+    } else if (input.sdkSessionConfig?.taskBudget) {
+      this.turnReplacementCoordinator.releaseSubmitClaim(input.sessionKey, runId);
+      yield {
+        type: "error",
+        runId,
+        code: "CAPABILITY_UNAVAILABLE",
+        message: "Gateway task-budget accounting is unavailable.",
+        recoverable: true,
+      };
+      return;
+    }
     if (!this.router.beginTurn(input.sessionKey, runId)) {
       this.turnReplacementCoordinator.releaseSubmitClaim(input.sessionKey, runId);
       const message = `Session ${input.sessionKey} already has an active turn.`;
@@ -507,6 +850,25 @@ export class InProcessGateway implements Gateway {
         message,
         recoverable: true,
         userHint,
+      };
+      return;
+    }
+
+    try {
+      await this.options.clearRecoveredUserDialogs?.({
+        sessionKey: input.sessionKey,
+        projectKey: input.projectKey,
+      });
+    } catch (error) {
+      this.router.endTurn(input.sessionKey, runId);
+      this.turnReplacementCoordinator.releaseSubmitClaim(input.sessionKey, runId);
+      yield {
+        type: "error",
+        runId,
+        code: "gateway_dialog_recovery_cleanup_failed",
+        message: error instanceof Error ? error.message : String(error),
+        recoverable: true,
+        userHint: "Retry the turn after the Gateway storage is available.",
       };
       return;
     }
@@ -542,6 +904,16 @@ export class InProcessGateway implements Gateway {
     let timedOut = false;
     let uploadedAttachmentLease: ResolvedUploadedAttachments | undefined;
 
+    const timingStart = performance.now();
+    let timingPrevious = timingStart;
+    const timingStages: Record<string, number> = {};
+    const markTiming = (stage: string) => {
+      const current = performance.now();
+      timingStages[stage] = Math.round(current - timingPrevious);
+      timingPrevious = current;
+    };
+    let completedEventAt: number | undefined;
+
     // Background pump: agent events → queue.
     const pump = (async () => {
       try {
@@ -557,10 +929,13 @@ export class InProcessGateway implements Gateway {
             // turn over a transient yaml read error.
           }
         }
+        markTiming("configMs");
         const session = await this.router.getOrCreate({
           sessionKey: input.sessionKey,
           projectKey: input.projectKey,
           channelKey: input.channelKey,
+          allowedTools: input.allowedTools,
+          disallowedTools: input.disallowedTools,
         });
         const operationDeadline = operationDeadlineForTimeout(input.timeoutMs, this.now);
         if (input.timeoutMs !== undefined && Number.isFinite(input.timeoutMs) && input.timeoutMs > 0) {
@@ -595,7 +970,8 @@ export class InProcessGateway implements Gateway {
           }, input.timeoutMs);
         }
         const permissionSettings = readPermissionSettings();
-        const inputMode = normalizeGatewayModeForLegacyInput((input as { mode?: unknown }).mode);
+        const inputMode = normalizeGatewayModeForLegacyInput((input as { mode?: unknown }).mode)
+          ?? this.permissionModes.get(input.sessionKey);
         const runMode = normalizeGatewayRunMode((input as { runMode?: unknown }).runMode)
           ?? (inputMode === "plan" ? "plan" : "agent");
         const livePermissionMode = this.permissionModes.get(input.sessionKey);
@@ -642,10 +1018,14 @@ export class InProcessGateway implements Gateway {
         }));
         const modelSelection = this.options.resolveTurnModelSelection
           ? await this.options.resolveTurnModelSelection(input)
-          : input.modelOverride
-            ? { selection: input.modelOverride, source: "turn" as const }
-            : { source: "default" as const };
+          : input.modelSelection?.mode === "auto"
+            ? { source: "router" as const }
+            : input.modelSelection?.mode === "model" || input.modelOverride
+              ? { selection: input.modelSelection?.mode === "model" ? input.modelSelection : input.modelOverride, source: "turn" as const }
+              : { source: "default" as const };
+        markTiming("selectionMs");
         let lastEmittedModel: string | undefined;
+        let actualRequestModel: string | undefined;
         if (modelSelection.selection) {
           const event: GatewayEvent = {
             type: "model_selection_changed",
@@ -670,17 +1050,24 @@ export class InProcessGateway implements Gateway {
           agentInput,
           {
             turnId: runId,
+            modelSelection: input.modelSelection,
             execution: {
               runId,
               operationId: runId,
               ...(operationDeadline ? { operationDeadline } : {}),
             },
-            maxTurns: input.maxTurns,
+            maxTurns: capGatewayTurnLimit(input.maxTurns, this.options.turnLimits?.maxTurns),
+            maxBudgetUsd: capGatewayTurnLimit(input.maxBudgetUsd, this.options.turnLimits?.maxBudgetUsd),
+            ...(taskBudget ? {
+              taskBudgetUsd: taskBudget.totalUsd,
+              initialTaskBudgetSpentUsd: taskBudget.spentUsd,
+            } : {}),
             runMode,
             permissionMode,
             basePermissionMode,
             allowPlanModeTools,
             canPrompt: input.canPrompt,
+            canElicit: input.canElicit,
             allowedReadFiles,
             permissionRules: {
               ...persistedRules,
@@ -720,6 +1107,23 @@ export class InProcessGateway implements Gateway {
           }
           if (event.type === "input_accepted") {
             await this.turnReplacementCoordinator.commitAcceptedInput(input.sessionKey, runId);
+            markTiming("acceptanceMs");
+            const totalMs = Math.round(performance.now() - timingStart);
+            if (totalMs >= 200) console.info("[gateway:turn-timing]", JSON.stringify({
+              sessionKey: input.sessionKey, runId, phase: "accepted", totalMs, ...timingStages,
+            }));
+          }
+          if (event.type === "turn_completed") completedEventAt = performance.now();
+          if (event.type === "model_event" && event.event.type === "request_started") {
+            actualRequestModel = event.event.model;
+          }
+          if (event.type === "turn_completed" && event.result.budget?.taskBudgetUsd !== undefined) {
+            await this.options.recordTaskBudgetSpend?.({
+              sessionKey: input.sessionKey,
+              projectKey: input.projectKey,
+              runId,
+              turnSpentUsd: event.result.budget.turnSpentUsd,
+            });
           }
           if (event.type === "model_event" && event.event.type === "request_started"
             && lastEmittedModel !== `${event.event.provider}\0${event.event.model}`) {
@@ -734,7 +1138,17 @@ export class InProcessGateway implements Gateway {
             queue.enqueue(selectionEvent);
             lastEmittedModel = `${event.event.provider}\0${event.event.model}`;
           }
-          for (const gatewayEvent of this.agentEventProjector.project({ event, runId })) {
+          for (const gatewayEvent of this.agentEventProjector.project({
+            event,
+            runId,
+            forwardSubagentText: input.sdkSessionConfig?.forwardSubagentText === true,
+          })) {
+            if (gatewayEvent.type === "assistant_text_delta" && actualRequestModel) {
+              gatewayEvent.model = actualRequestModel;
+            }
+            if (gatewayEvent.type === "input_accepted" && input.modelSelection) {
+              gatewayEvent.modelSelection = { ...input.modelSelection };
+            }
             if (gatewayEvent.type === "context_budget") {
               this.recordGatewayStatusMessage({
                 sessionKey: input.sessionKey,
@@ -768,19 +1182,35 @@ export class InProcessGateway implements Gateway {
         });
         if (this.turnCompletionFence.isCurrent(input.sessionKey, turnCompletion)) {
           const message = error instanceof Error ? error.message : String(error);
+          const managedModelDenied = (error instanceof DialogGatewayError || error instanceof RouterRuntimeError)
+            && error.code === "SDK_MANAGED_MODEL_DENIED";
+          // Gateway embedding hosts may reject a model/provider before an
+          // AgentLoop or provider request exists. Keep the host policy code
+          // intact instead of flattening it into an operational failure so a
+          // remote SDK can distinguish a denied configuration from a retry.
+          const organizationPolicyDenied = (error instanceof DialogGatewayError || error instanceof RouterRuntimeError)
+            && error.code.startsWith("GATEWAY_ORGANIZATION_");
+          const code = managedModelDenied || organizationPolicyDenied
+            ? error.code
+            : "gateway_submit_failed";
+          const userHint = managedModelDenied
+            ? "Adjust the SDK session configuration or model selection, then retry."
+            : organizationPolicyDenied
+              ? "The Gateway host policy denied this configuration. Select an allowed model or contact the Gateway administrator."
+            : "PilotDeck failed before the agent turn could finish. Retry this message; if it repeats, check the gateway logs.";
           await emitGatewayFailureStatus(createGatewayFailureStatus({
-            event: "gateway_submit_failed",
-            code: "gateway_submit_failed",
+            event: code,
+            code,
             message,
-            userHint: "PilotDeck failed before the agent turn could finish. Retry this message; if it repeats, check the gateway logs.",
+            userHint,
           }));
           const gatewayEvent: GatewayEvent = {
             type: "error",
             runId,
-            code: "gateway_submit_failed",
+            code,
             message,
             recoverable: false,
-            userHint: "PilotDeck failed before the agent turn could finish. Retry this message; if it repeats, check the gateway logs.",
+            userHint,
           };
           this.turnEventCoordinator.record(input.sessionKey, gatewayEvent);
           queue.enqueue(gatewayEvent);
@@ -812,6 +1242,12 @@ export class InProcessGateway implements Gateway {
       this.turnEventCoordinator.retainTerminal(input.sessionKey, runId);
       this.interactionCoordinator.rejectPendingTurn(input.sessionKey, "turn_ended");
       this.router.endTurn(input.sessionKey, runId);
+      if (completedEventAt !== undefined) {
+        const releaseMs = Math.round(performance.now() - completedEventAt);
+        if (releaseMs >= 200) console.info("[gateway:turn-timing]", JSON.stringify({
+          sessionKey: input.sessionKey, runId, phase: "released", releaseMs,
+        }));
+      }
       if (timedOut) {
         // The timed-out AgentSession is never safe to reuse. Do not await a
         // misbehaving tool here: the hard timeout must release the Cron run.
@@ -870,6 +1306,110 @@ export class InProcessGateway implements Gateway {
     });
   }
 
+  async submitAsyncHookResult(input: GatewayAsyncHookResultInput): Promise<GatewayAsyncHookResult> {
+    if (!input.sessionKey?.trim() || !input.invocationId?.trim()) {
+      throw new DialogGatewayError("INVALID_ASYNC_HOOK_RESULT", "sessionKey and invocationId are required.");
+    }
+    const prior = this.asyncHookOutcomes.get(input.invocationId);
+    if (prior) {
+      if (prior.sessionKey !== input.sessionKey) return { invocationId: input.invocationId, status: "unknown" };
+      return {
+        invocationId: input.invocationId,
+        status: prior.status === "delivered" ? "duplicate" : "expired",
+      };
+    }
+    const pending = this.pendingAsyncHooks.get(input.invocationId);
+    if (!pending || pending.sessionKey !== input.sessionKey) {
+      return { invocationId: input.invocationId, status: "unknown" };
+    }
+    if (Date.now() >= pending.expiresAt) {
+      this.expireAsyncHook(pending);
+      return { invocationId: input.invocationId, status: "expired" };
+    }
+    if (pending.delivery) {
+      const settled = await pending.delivery;
+      return {
+        invocationId: input.invocationId,
+        status: settled.status === "delivered" ? "duplicate" : settled.status,
+      };
+    }
+    const context = deferredHookContext(input.output, pending.hookEvent);
+    pending.delivery = this.deliverAsyncHookContext(pending, context);
+    try {
+      return await pending.delivery;
+    } finally {
+      pending.delivery = undefined;
+    }
+  }
+
+  private async deliverAsyncHookContext(
+    pending: PendingAsyncHook,
+    context: string,
+  ): Promise<GatewayAsyncHookResult> {
+    const result = context
+      ? await this.steerTurn({
+          sessionKey: pending.sessionKey,
+          runId: pending.runId,
+          itemId: `async-hook:${pending.invocationId}`,
+          message: context,
+        })
+      : { accepted: this.router.activeTurnRunId(pending.sessionKey) === pending.runId };
+    if (!result.accepted) {
+      this.expireAsyncHook(pending);
+      return { invocationId: pending.invocationId, status: "expired" };
+    }
+    this.settleAsyncHook(pending, "delivered");
+    if (pending.includeHookEvents) {
+      this.emitForSession(pending.sessionKey, {
+        type: "hook_async_result",
+        invocationId: pending.invocationId,
+        hookName: pending.hookName,
+        hookEvent: pending.hookEvent,
+        status: "delivered",
+      });
+    }
+    return { invocationId: pending.invocationId, status: "delivered" };
+  }
+
+  private expireAsyncHook(pending: PendingAsyncHook): void {
+    if (this.pendingAsyncHooks.get(pending.invocationId) !== pending) return;
+    this.settleAsyncHook(pending, "expired");
+    if (pending.includeHookEvents) {
+      this.emitForSession(pending.sessionKey, {
+        type: "hook_async_result",
+        invocationId: pending.invocationId,
+        hookName: pending.hookName,
+        hookEvent: pending.hookEvent,
+        status: "expired",
+      });
+    }
+  }
+
+  private settleAsyncHook(pending: PendingAsyncHook, status: AsyncHookOutcome["status"]): void {
+    if (this.pendingAsyncHooks.get(pending.invocationId) === pending) {
+      this.pendingAsyncHooks.delete(pending.invocationId);
+    }
+    if (pending.timeout) clearTimeout(pending.timeout);
+    const previous = this.asyncHookOutcomes.get(pending.invocationId);
+    if (previous?.timeout) clearTimeout(previous.timeout);
+    const outcome: AsyncHookOutcome = { sessionKey: pending.sessionKey, status };
+    outcome.timeout = setTimeout(() => {
+      if (this.asyncHookOutcomes.get(pending.invocationId) === outcome) {
+        this.asyncHookOutcomes.delete(pending.invocationId);
+      }
+    }, ASYNC_HOOK_OUTCOME_RETENTION_MS);
+    outcome.timeout.unref?.();
+    this.asyncHookOutcomes.set(pending.invocationId, outcome);
+  }
+
+  private expireAsyncHooksForTurn(sessionKey: string, runId: string): void {
+    for (const pending of this.pendingAsyncHooks.values()) {
+      if (pending.sessionKey === sessionKey && pending.runId === runId) {
+        this.expireAsyncHook(pending);
+      }
+    }
+  }
+
   async abortTurn(input: { sessionKey: string; runId?: string; reason?: string }): Promise<void> {
     const reason = input.reason ?? (input.runId ? `aborted:${input.runId}` : "aborted");
     await this.router.abort(input.sessionKey, reason);
@@ -895,10 +1435,24 @@ export class InProcessGateway implements Gateway {
     return { sessionKey: `${input.channelKey}:${projectKey}s_${suffix}` };
   }
 
+  async closeProjectSessions(input: { projectKey: string; resume?: boolean }): Promise<{ sessionKeys: string[] }> {
+    if (!input.projectKey?.trim()) throw new Error("projectKey is required.");
+    const projectKey = resolve(input.projectKey);
+    if (input.resume) { this.router.resumeProject(projectKey); return { sessionKeys: [] }; }
+    const sessionKeys = await this.router.closeProject(projectKey);
+    for (const key of sessionKeys) {
+      this.interactionCoordinator.closeSession(key, "project_closed");
+      this.permissionModes.clear(key);
+      this.dialogProjectKeys.delete(key);
+    }
+    return { sessionKeys };
+  }
+
   async closeSession(input: { sessionKey: string; reason?: string }): Promise<void> {
     await this.router.close(input.sessionKey);
     this.interactionCoordinator.closeSession(input.sessionKey, input.reason ?? "session_closed");
     this.permissionModes.clear(input.sessionKey);
+    this.dialogProjectKeys.delete(input.sessionKey);
   }
 
   /**
@@ -941,6 +1495,37 @@ export class InProcessGateway implements Gateway {
       ...(this.options.sessionModelGet ? ["session_model_get" as const] : []),
       ...(this.options.sessionModelSet ? ["session_model_set" as const] : []),
       ...(this.options.sessionModelClear ? ["session_model_clear" as const] : []),
+      ...(this.options.deleteSession || this.options.deleteEphemeralSession ? ["delete_session" as const] : []),
+      ...(this.options.exportSessionTranscript && this.options.restoreSessionTranscript
+        ? ["session_transcript_archive" as const]
+        : []),
+      ...(this.options.mcpServerStatus ? ["mcp_server_status" as const] : []),
+      ...(this.options.setMcpServers ? ["set_mcp_servers" as const] : []),
+      ...(this.options.reconnectMcpServer ? ["mcp_server_reconnect" as const] : []),
+      ...(this.options.toggleMcpServer ? ["mcp_server_toggle" as const] : []),
+      ...(this.options.setMcpPermissionModeOverride ? ["set_mcp_permission_mode_override" as const] : []),
+      ...(this.options.projectFileRead || this.options.listProjects ? ["project_file_read" as const] : []),
+      "set_permission_mode" as const,
+      ...(this.options.applyFlagSettings ? ["apply_flag_settings" as const] : []),
+      ...(this.options.updateSettings ? ["update_settings" as const] : []),
+      ...(this.options.resolveSettings ? ["resolve_settings" as const] : []),
+      ...(this.options.setSessionThinking ? ["set_session_thinking" as const] : []),
+      ...(this.options.outputStylesList ? ["output_styles_list" as const] : []),
+      ...(this.options.setOutputStyle ? ["set_output_style" as const] : []),
+      ...(this.options.reloadOutputStyles ? ["reload_output_styles" as const] : []),
+      ...(this.options.usageSnapshot ? ["usage_snapshot" as const] : []),
+      ...(this.options.modelUsageSnapshot ? ["model_usage_snapshot" as const] : []),
+      "async_hook_result" as const,
+      "user_dialog_list" as const,
+      ...(this.options.rewindFiles ? ["rewind_files" as const] : []),
+      ...(this.options.stopBackgroundTask ? ["background_task_stop" as const] : []),
+      ...(this.options.backgroundTasks ? ["background_tasks" as const] : []),
+      "seed_read_state" as const,
+      ...(this.options.setSdkSessionConfig ? ["sdk_session_config" as const] : []),
+      ...(this.options.setSdkSessionConfig && this.options.sdkSessionDefaults
+        ? ["sdk_session_defaults" as const]
+        : []),
+      "supported_agents" as const,
     ] as GatewayServerInfo["capabilities"];
     return {
       mode: "in_process",
@@ -996,6 +1581,251 @@ export class InProcessGateway implements Gateway {
     }
   }
 
+  async renameSession(
+    input: import("../protocol/types.js").GatewaySessionMetadataInput,
+  ): Promise<{ updated: boolean }> {
+    if (!this.options.renameSession) {
+      throw new DialogGatewayError("CAPABILITY_UNAVAILABLE", "rename_session is unavailable.");
+    }
+    return this.options.renameSession(input);
+  }
+
+  async tagSession(
+    input: import("../protocol/types.js").GatewaySessionMetadataInput,
+  ): Promise<{ updated: boolean }> {
+    if (!this.options.tagSession) {
+      throw new DialogGatewayError("CAPABILITY_UNAVAILABLE", "tag_session is unavailable.");
+    }
+    return this.options.tagSession(input);
+  }
+
+  async deleteSession(input: { sessionKey: string; projectKey?: string }): Promise<void> {
+    if (this.options.deleteEphemeralSession && await this.options.deleteEphemeralSession(input)) {
+      this.dialogProjectKeys.delete(input.sessionKey);
+      return;
+    }
+    if (!this.options.deleteSession) {
+      throw new DialogGatewayError("CAPABILITY_UNAVAILABLE", "delete_session is unavailable.");
+    }
+    await this.options.deleteSession(input);
+    this.dialogProjectKeys.delete(input.sessionKey);
+  }
+
+  async exportSessionTranscript(
+    input: import("../protocol/types.js").GatewayExportSessionTranscriptInput,
+  ): Promise<import("../protocol/types.js").GatewaySessionTranscriptArchive> {
+    if (!this.options.exportSessionTranscript) {
+      throw new DialogGatewayError("CAPABILITY_UNAVAILABLE", "export_session_transcript is unavailable.");
+    }
+    return this.options.exportSessionTranscript(input);
+  }
+
+  async restoreSessionTranscript(
+    input: import("../protocol/types.js").GatewayRestoreSessionTranscriptInput,
+  ): Promise<import("../protocol/types.js").GatewayRestoreSessionTranscriptResult> {
+    if (!this.options.restoreSessionTranscript) {
+      throw new DialogGatewayError("CAPABILITY_UNAVAILABLE", "restore_session_transcript is unavailable.");
+    }
+    return this.options.restoreSessionTranscript(input);
+  }
+
+  async projectFileRead(input: import("../protocol/types.js").GatewayProjectFileReadInput): Promise<import("../protocol/types.js").GatewayProjectFileReadResult | null> {
+    if (this.options.projectFileRead) return this.options.projectFileRead(input);
+    if (!this.options.listProjects) throw new DialogGatewayError("CAPABILITY_UNAVAILABLE", "project_file_read is unavailable.");
+    const projects = await this.listProjects();
+    const projectRoot = projects.projects.find((project) => resolve(project.projectKey) === resolve(input.projectKey))?.projectKey;
+    if (!projectRoot) throw new DialogGatewayError("PROJECT_NOT_FOUND", `Unknown projectKey: ${input.projectKey}`);
+    const root = await realpath(projectRoot).catch(() => { throw new DialogGatewayError("PROJECT_NOT_FOUND", `Project does not exist: ${input.projectKey}`); });
+    const absolute = resolve(root, input.path);
+    if (!isPathWithinRoot(absolute, root)) throw new DialogGatewayError("PATH_NOT_ALLOWED", "File path is outside the project workspace.");
+    const canonical = await realpath(absolute).catch(() => undefined);
+    if (!canonical || !isPathWithinRoot(canonical, root)) throw new DialogGatewayError("PATH_NOT_ALLOWED", "File path resolves outside the project workspace.");
+    const info = await stat(canonical).catch(() => undefined);
+    if (!info?.isFile()) return null;
+    const maxBytes = Math.max(1, Math.min(input.maxBytes ?? 1_000_000, 10_000_000));
+    const buffer = await readFile(canonical);
+    return input.encoding === "base64"
+      ? { path: input.path, content: buffer.subarray(0, maxBytes).toString("base64"), encoding: "base64" }
+      : { path: input.path, content: buffer.subarray(0, maxBytes).toString("utf8"), encoding: "utf-8" };
+  }
+
+  async mcpServerStatus(input: import("../protocol/types.js").GatewayMcpServerStatusInput): Promise<import("../protocol/types.js").GatewayMcpServerStatusResult> {
+    if (!this.options.mcpServerStatus) throw new DialogGatewayError("CAPABILITY_UNAVAILABLE", "mcp_server_status is unavailable.");
+    return this.options.mcpServerStatus(input);
+  }
+
+  async setMcpServers(input: GatewaySetMcpServersInput): Promise<GatewayMcpSetServersResult> {
+    if (!this.options.setMcpServers) throw new DialogGatewayError("CAPABILITY_UNAVAILABLE", "set_mcp_servers is unavailable.");
+    if (!input.sessionKey?.trim()) throw new DialogGatewayError("INVALID_SESSION_KEY", "sessionKey is required.");
+    if (this.router.hasActiveTurn(input.sessionKey)) throw new DialogGatewayError("SESSION_BUSY", "Cannot change MCP servers while a turn is active.");
+    const result = await this.options.setMcpServers(input);
+    await this.router.close(input.sessionKey);
+    return result;
+  }
+
+  async reconnectMcpServer(input: GatewayMcpServerControlInput): Promise<void> {
+    if (!this.options.reconnectMcpServer) throw new DialogGatewayError("CAPABILITY_UNAVAILABLE", "mcp_server_reconnect is unavailable.");
+    if (!input.sessionKey?.trim() || !input.serverName?.trim()) throw new DialogGatewayError("INVALID_MCP_SERVER", "sessionKey and serverName are required.");
+    if (this.router.hasActiveTurn(input.sessionKey)) throw new DialogGatewayError("SESSION_BUSY", "Cannot reconnect MCP while a turn is active.");
+    await this.options.reconnectMcpServer(input);
+    await this.router.close(input.sessionKey);
+  }
+
+  async toggleMcpServer(input: GatewayMcpServerToggleInput): Promise<void> {
+    if (!this.options.toggleMcpServer) throw new DialogGatewayError("CAPABILITY_UNAVAILABLE", "mcp_server_toggle is unavailable.");
+    if (!input.sessionKey?.trim() || !input.serverName?.trim()) throw new DialogGatewayError("INVALID_MCP_SERVER", "sessionKey and serverName are required.");
+    if (this.router.hasActiveTurn(input.sessionKey)) throw new DialogGatewayError("SESSION_BUSY", "Cannot toggle MCP while a turn is active.");
+    await this.options.toggleMcpServer(input);
+    await this.router.close(input.sessionKey);
+  }
+
+  async setMcpPermissionModeOverride(input: GatewayMcpPermissionModeOverrideInput): Promise<GatewayMcpPermissionModeOverrideResult> {
+    if (!this.options.setMcpPermissionModeOverride) throw new DialogGatewayError("CAPABILITY_UNAVAILABLE", "set_mcp_permission_mode_override is unavailable.");
+    if (!input.sessionKey?.trim() || !input.serverName?.trim()) throw new DialogGatewayError("INVALID_MCP_SERVER", "sessionKey and serverName are required.");
+    if (input.mode !== null && input.mode !== "default" && input.mode !== "auto") {
+      throw new DialogGatewayError("INVALID_MCP_PERMISSION_MODE", `Unsupported MCP permission mode: ${input.mode}`);
+    }
+    if (this.router.hasActiveTurn(input.sessionKey)) throw new DialogGatewayError("SESSION_BUSY", "Cannot change MCP permission mode while a turn is active.");
+    const result = await this.options.setMcpPermissionModeOverride(input);
+    await this.router.close(input.sessionKey);
+    return result;
+  }
+
+  async setPermissionMode(input: import("../protocol/types.js").GatewaySetPermissionModeInput): Promise<{ applied: boolean }> {
+    if (input.mode !== "default" && input.mode !== "plan" && input.mode !== "bypassPermissions") {
+      throw new DialogGatewayError("INVALID_PERMISSION_MODE", `Unsupported permission mode: ${input.mode}`);
+    }
+    if (this.router.hasActiveTurn(input.sessionKey)) throw new DialogGatewayError("SESSION_BUSY", "Cannot change permission mode during an active turn.");
+    this.permissionModes.set(input.sessionKey, input.mode);
+    if (this.options.setPermissionMode) return this.options.setPermissionMode(input);
+    return { applied: true };
+  }
+
+  async clearPermissionMode(input: { sessionKey: string; projectKey?: string }): Promise<void> {
+    if (this.router.hasActiveTurn(input.sessionKey)) throw new DialogGatewayError("SESSION_BUSY", "Cannot clear permission mode during an active turn.");
+    this.permissionModes.clear(input.sessionKey);
+    await this.options.clearPermissionMode?.(input);
+  }
+
+  async applyFlagSettings(input: GatewayApplyFlagSettingsInput): Promise<GatewayApplyFlagSettingsResult> {
+    if (!this.options.applyFlagSettings) throw new DialogGatewayError("CAPABILITY_UNAVAILABLE", "apply_flag_settings is unavailable.");
+    if (!input.sessionKey?.trim()) throw new DialogGatewayError("INVALID_SESSION_KEY", "sessionKey is required.");
+    if (!input.settings || typeof input.settings !== "object" || Array.isArray(input.settings)) {
+      throw new DialogGatewayError("INVALID_FLAG_SETTINGS", "settings must be an object.");
+    }
+    if (this.router.hasActiveTurn(input.sessionKey)) throw new DialogGatewayError("SESSION_BUSY", "Cannot apply flag settings during an active turn.");
+    validateSdkFlagSettings(input.settings);
+    const result = await this.options.applyFlagSettings(input);
+    if (result.applied.length > 0 || result.cleared.length > 0) await this.router.close(input.sessionKey);
+    return result;
+  }
+
+  async updateSettings(input: GatewayUpdateSettingsInput): Promise<GatewayUpdateSettingsResult> {
+    if (!this.options.updateSettings) throw new DialogGatewayError("CAPABILITY_UNAVAILABLE", "update_settings is unavailable.");
+    if (input.source !== "localSettings") throw new DialogGatewayError("INVALID_SETTINGS_SOURCE", "Only localSettings is supported.");
+    if (!input.settings || typeof input.settings !== "object" || Array.isArray(input.settings)) {
+      throw new DialogGatewayError("INVALID_LOCAL_SETTINGS", "settings must be an object.");
+    }
+    return this.options.updateSettings(input);
+  }
+
+  async resolveSettings(): Promise<GatewayResolvedSettingsResult> {
+    if (!this.options.resolveSettings) throw new DialogGatewayError("CAPABILITY_UNAVAILABLE", "resolve_settings is unavailable.");
+    return this.options.resolveSettings();
+  }
+
+  async setSessionThinking(input: GatewaySetSessionThinkingInput): Promise<{ applied: boolean }> {
+    if (!this.options.setSessionThinking) throw new DialogGatewayError("CAPABILITY_UNAVAILABLE", "set_session_thinking is unavailable.");
+    if (!input.sessionKey?.trim()) throw new DialogGatewayError("INVALID_SESSION_KEY", "sessionKey is required.");
+    if (this.router.hasActiveTurn(input.sessionKey)) throw new DialogGatewayError("SESSION_BUSY", "Cannot change thinking while a turn is active.");
+    validateThinkingConfig(input.thinking);
+    const result = await this.options.setSessionThinking(input);
+    await this.router.close(input.sessionKey);
+    return result;
+  }
+
+  async outputStylesList(input: GatewayOutputStylesListInput): Promise<GatewayOutputStylesListResult> {
+    if (!this.options.outputStylesList) throw new DialogGatewayError("CAPABILITY_UNAVAILABLE", "output_styles_list is unavailable.");
+    return this.options.outputStylesList(input);
+  }
+
+  async setOutputStyle(input: GatewaySetOutputStyleInput): Promise<GatewaySetOutputStyleResult> {
+    if (!this.options.setOutputStyle) throw new DialogGatewayError("CAPABILITY_UNAVAILABLE", "set_output_style is unavailable.");
+    if (!input.sessionKey?.trim()) throw new DialogGatewayError("INVALID_SESSION_KEY", "sessionKey is required.");
+    if (this.router.hasActiveTurn(input.sessionKey)) throw new DialogGatewayError("SESSION_BUSY", "Cannot change output style during an active turn.");
+    if (input.name !== null && !input.name.trim()) throw new DialogGatewayError("INVALID_OUTPUT_STYLE", "name must be non-empty or null.");
+    return this.options.setOutputStyle(input);
+  }
+
+  async reloadOutputStyles(input: GatewayReloadOutputStylesInput = {}): Promise<GatewayReloadOutputStylesResult> {
+    if (!this.options.reloadOutputStyles) throw new DialogGatewayError("CAPABILITY_UNAVAILABLE", "reload_output_styles is unavailable.");
+    return this.options.reloadOutputStyles(input);
+  }
+
+  async usageSnapshot(input: GatewayUsageSnapshotInput): Promise<GatewayUsageSnapshotResult> {
+    if (!this.options.usageSnapshot) throw new DialogGatewayError("CAPABILITY_UNAVAILABLE", "usage_snapshot is unavailable.");
+    return this.options.usageSnapshot(input);
+  }
+
+  async modelUsageSnapshot(input: GatewayModelUsageSnapshotInput): Promise<GatewayModelUsageSnapshotResult> {
+    if (!this.options.modelUsageSnapshot) throw new DialogGatewayError("CAPABILITY_UNAVAILABLE", "model_usage_snapshot is unavailable.");
+    return this.options.modelUsageSnapshot(input);
+  }
+
+  async rewindFiles(input: GatewayRewindFilesInput): Promise<GatewayRewindFilesResult> {
+    if (!this.options.rewindFiles) throw new DialogGatewayError("CAPABILITY_UNAVAILABLE", "rewind_files is unavailable.");
+    if (!input.sessionKey?.trim()) throw new DialogGatewayError("INVALID_SESSION_KEY", "sessionKey is required.");
+    if (!input.userMessageId?.trim()) throw new DialogGatewayError("INVALID_MESSAGE_ID", "userMessageId is required.");
+    if (this.router.hasActiveTurn(input.sessionKey)) throw new DialogGatewayError("SESSION_BUSY", "Cannot rewind files while a turn is active.");
+    return this.options.rewindFiles(input);
+  }
+
+  async stopBackgroundTask(input: import("../protocol/types.js").GatewayStopBackgroundTaskInput): Promise<import("../protocol/types.js").GatewayStopBackgroundTaskResult> {
+    if (!this.options.stopBackgroundTask) throw new DialogGatewayError("CAPABILITY_UNAVAILABLE", "background_task_stop is unavailable.");
+    if (!input.sessionKey?.trim()) throw new DialogGatewayError("INVALID_SESSION_KEY", "sessionKey is required.");
+    if (!input.taskId?.trim()) throw new DialogGatewayError("INVALID_TASK_ID", "taskId is required.");
+    return this.options.stopBackgroundTask(input);
+  }
+
+  async backgroundTasks(input: import("../protocol/types.js").GatewayBackgroundTasksInput): Promise<import("../protocol/types.js").GatewayBackgroundTasksResult> {
+    if (!this.options.backgroundTasks) throw new DialogGatewayError("CAPABILITY_UNAVAILABLE", "background_tasks is unavailable.");
+    if (!input.sessionKey?.trim()) throw new DialogGatewayError("INVALID_SESSION_KEY", "sessionKey is required.");
+    return this.options.backgroundTasks(input);
+  }
+
+  async seedReadState(input: GatewaySeedReadStateInput): Promise<GatewaySeedReadStateResult> {
+    if (!input.sessionKey?.trim()) throw new DialogGatewayError("INVALID_SESSION_KEY", "sessionKey is required.");
+    if (!input.path?.trim()) throw new DialogGatewayError("INVALID_FILE_PATH", "path is required.");
+    if (!Number.isFinite(input.mtime) || !Number.isInteger(input.mtime) || input.mtime < 0) {
+      throw new DialogGatewayError("INVALID_FILE_MTIME", "mtime must be a non-negative integer in milliseconds.");
+    }
+    if (this.router.hasActiveTurn(input.sessionKey)) throw new DialogGatewayError("SESSION_BUSY", "Cannot seed file read state while a turn is active.");
+    if (input.workspaceCwd && this.options.setSessionCwd) this.options.setSessionCwd(input.sessionKey, input.workspaceCwd);
+    if (input.sdkSessionConfig) {
+      if (!this.options.setSdkSessionConfig) throw new DialogGatewayError("CAPABILITY_UNAVAILABLE", "sdk_session_config is unavailable.");
+      validateSdkSessionConfig(input.sdkSessionConfig);
+      const configUpdate = await this.options.setSdkSessionConfig(input.sessionKey, input.sdkSessionConfig, input.projectKey);
+      if (configUpdate.changed) await this.router.close(input.sessionKey);
+    }
+    return this.router.seedReadState({
+      sessionKey: input.sessionKey,
+      projectKey: input.projectKey,
+      channelKey: input.channelKey ?? "api_server",
+    }, { path: input.path, mtime: input.mtime });
+  }
+
+  async supportedAgents(): Promise<import("../protocol/types.js").GatewaySupportedAgentsResult> {
+    return {
+      agents: Object.values(SUBAGENT_DEFINITIONS).map((agent) => ({
+        name: agent.id,
+        description: agent.description,
+        tools: [...agent.allowedTools],
+        readOnly: agent.isReadOnly,
+        ...(agent.effort ? { effort: agent.effort } : {}),
+      })),
+    };
+  }
+
   private async resolveUploadedAttachments(input: GatewaySubmitTurnInput): Promise<ResolvedUploadedAttachments> {
     if (!input.projectKey) throw new DialogGatewayError("PROJECT_NOT_FOUND", "projectKey is required for uploaded attachments.");
     if (!this.options.resolveUploadedAttachments) throw new DialogGatewayError("CAPABILITY_UNAVAILABLE", "Uploaded attachments are unavailable.");
@@ -1044,7 +1874,152 @@ export class InProcessGateway implements Gateway {
   }
 
   async respondElicitation(input: GatewayElicitationResponseInput): Promise<{ delivered: boolean }> {
-    return this.interactionCoordinator.respondElicitation(input);
+    const result = this.interactionCoordinator.respondElicitation(input);
+    if (result.delivered) {
+      this.options.dispatchHookForSession?.(input.sessionKey, "ElicitationResult", {
+        requestId: input.requestId,
+        delivered: true,
+      });
+    }
+    return result;
+  }
+
+  async respondUserDialog(input: GatewayUserDialogResponseInput): Promise<{
+    delivered: boolean;
+    recovered?: true;
+    reason?: "gateway_restarted";
+  }> {
+    if (!input.sessionKey?.trim() || !input.requestId?.trim()) {
+      throw new DialogGatewayError("INVALID_USER_DIALOG_RESPONSE", "sessionKey and requestId are required.");
+    }
+    if (!input.result || (input.result.behavior !== "answered" && input.result.behavior !== "cancelled")) {
+      throw new DialogGatewayError("INVALID_USER_DIALOG_RESPONSE", "result.behavior must be answered or cancelled.");
+    }
+    if (input.result.behavior === "answered" && input.result.value === undefined) {
+      throw new DialogGatewayError("INVALID_USER_DIALOG_RESPONSE", "answered user dialog results require a value.");
+    }
+    if (input.result.behavior === "cancelled" && input.result.reason !== undefined && typeof input.result.reason !== "string") {
+      throw new DialogGatewayError("INVALID_USER_DIALOG_RESPONSE", "cancelled user dialog reason must be a string.");
+    }
+    if (input.leaseId !== undefined && (typeof input.leaseId !== "string" || !input.leaseId.trim())) {
+      throw new DialogGatewayError("INVALID_USER_DIALOG_RESPONSE", "leaseId must be a non-empty string when provided.");
+    }
+    // A configured host dialog protocol owns the cross-Gateway lease and
+    // answer handoff, including when this is the Gateway that owns the local
+    // AgentLoop. Do not let its in-process bus bypass a remote renderer lease.
+    const hosted = await this.options.submitHostedUserDialogAnswer?.(input);
+    if (hosted) return { delivered: true };
+    const entry = this.userDialogBus.peek(input.sessionKey, input.requestId);
+    if (!entry) {
+      const recovered = await this.options.recoverUserDialog?.(input);
+      if (recovered) return { delivered: true, recovered: true, reason: "gateway_restarted" };
+      const acknowledged = await this.options.acknowledgeRecoveredUserDialog?.({
+        sessionKey: input.sessionKey,
+        projectKey: input.projectKey,
+        requestId: input.requestId,
+      });
+      return acknowledged ? { delivered: false, reason: "gateway_restarted" } : { delivered: false };
+    }
+    if (input.result.behavior === "answered" && !entry.accepts(input.result.value)) {
+      throw new DialogGatewayError(
+        "INVALID_USER_DIALOG_RESPONSE",
+        `answered ${entry.dialogKind} dialog result does not match the pending dialog contract.`,
+      );
+    }
+    const consumed = this.userDialogBus.consumeForResponse(
+      input.sessionKey,
+      input.requestId,
+      input.leaseId?.trim(),
+      input.result.behavior,
+    );
+    if (!consumed.entry) {
+      if (consumed.reason === "lease_required") {
+        throw new DialogGatewayError(
+          "USER_DIALOG_LEASE_REQUIRED",
+          `User dialog ${input.requestId} is currently claimed by another renderer.`,
+        );
+      }
+      return { delivered: false };
+    }
+    // `listUserDialogs()` may have inspected the journal while this live
+    // request was pending. Drop that process-local restart projection as the
+    // live response settles, otherwise a stale terminal copy can outlive the
+    // journal removal performed by the channel.
+    await this.options.acknowledgeRecoveredUserDialog?.({
+      sessionKey: input.sessionKey,
+      projectKey: input.projectKey,
+      requestId: input.requestId,
+    });
+    consumed.entry.resolve(input.result.behavior === "answered"
+      ? { type: "answered", value: input.result.value }
+      : { type: "cancelled", ...(input.result.reason ? { reason: input.result.reason } : {}) });
+    return { delivered: true };
+  }
+
+  async listUserDialogs(input: GatewayListUserDialogsInput): Promise<GatewayListUserDialogsResult> {
+    if (!input.sessionKey?.trim()) {
+      throw new DialogGatewayError("INVALID_USER_DIALOG_LIST", "sessionKey is required.");
+    }
+    const live = this.userDialogBus.list(input.sessionKey);
+    const liveRequestIds = new Set(live.map((dialog) => dialog.requestId));
+    const hosted = await this.options.listHostedUserDialogs?.(input) ?? [];
+    const hostedRequestIds = new Set(hosted.map((dialog) => dialog.requestId));
+    const recovered = await this.options.listRecoveredUserDialogs?.(input) ?? [];
+    // A journal is written before the live event is published. While this
+    // process still owns that pending request, it is not restart recovery
+    // state and must not be projected a second time as terminal.
+    return {
+      dialogs: [
+        ...live.filter((dialog) => !hostedRequestIds.has(dialog.requestId)),
+        ...hosted,
+        ...recovered.filter((dialog) => (
+          !liveRequestIds.has(dialog.request.requestId)
+          && !hostedRequestIds.has(dialog.request.requestId)
+        )),
+      ],
+    };
+  }
+
+  async claimUserDialog(input: GatewayUserDialogClaimInput): Promise<GatewayUserDialogClaimResult> {
+    if (!input.sessionKey?.trim() || !input.requestId?.trim()) {
+      throw new DialogGatewayError("INVALID_USER_DIALOG_CLAIM", "sessionKey and requestId are required.");
+    }
+    if (input.leaseId !== undefined && (typeof input.leaseId !== "string" || !input.leaseId.trim())) {
+      throw new DialogGatewayError("INVALID_USER_DIALOG_CLAIM", "leaseId must be a non-empty string when provided.");
+    }
+    const ttlMs = input.ttlMs ?? DEFAULT_USER_DIALOG_LEASE_MS;
+    if (!Number.isSafeInteger(ttlMs) || ttlMs < MIN_USER_DIALOG_LEASE_MS || ttlMs > MAX_USER_DIALOG_LEASE_MS) {
+      throw new DialogGatewayError(
+        "INVALID_USER_DIALOG_CLAIM",
+        `ttlMs must be a safe integer between ${MIN_USER_DIALOG_LEASE_MS} and ${MAX_USER_DIALOG_LEASE_MS}.`,
+      );
+    }
+    const hosted = await this.options.claimHostedUserDialog?.(input);
+    if (hosted && (hosted.claimed || hosted.reason !== "not_pending")) return hosted;
+    const claim = this.userDialogBus.claim(
+      input.sessionKey,
+      input.requestId,
+      ttlMs,
+      input.leaseId?.trim(),
+    );
+    if (claim.claimed) {
+      return { claimed: true, leaseId: claim.lease.leaseId, expiresAt: claim.lease.expiresAt };
+    }
+    if (claim.reason === "claimed") {
+      return { claimed: false, reason: "claimed", ...(claim.expiresAt ? { expiresAt: claim.expiresAt } : {}) };
+    }
+    return hosted ?? { claimed: false, reason: "not_pending" };
+  }
+
+  async releaseUserDialog(input: GatewayUserDialogReleaseInput): Promise<GatewayUserDialogReleaseResult> {
+    if (!input.sessionKey?.trim() || !input.requestId?.trim() || !input.leaseId?.trim()) {
+      throw new DialogGatewayError("INVALID_USER_DIALOG_RELEASE", "sessionKey, requestId, and leaseId are required.");
+    }
+    if (this.userDialogBus.release(input.sessionKey, input.requestId, input.leaseId.trim())) {
+      return { released: true };
+    }
+    const hosted = await this.options.releaseHostedUserDialog?.(input);
+    return { released: hosted ?? false };
   }
 
   async permissionDecide(input: GatewayPermissionDecisionInput): Promise<{ delivered: boolean }> {
@@ -1270,6 +2245,404 @@ function validateGatewayPermissionModes(input: GatewaySubmitTurnInput): string |
     return `Invalid basePermissionMode: ${String(baseMode)}.`;
   }
   return undefined;
+}
+
+function validateGatewayMaxBudget(input: GatewaySubmitTurnInput): string | undefined {
+  const value = input.maxBudgetUsd;
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return "maxBudgetUsd must be a positive finite number.";
+  }
+  return undefined;
+}
+
+function validateThinkingConfig(
+  thinking: import("../protocol/types.js").GatewayThinkingConfig | null,
+): void {
+  if (thinking === null) return;
+  if (!thinking || typeof thinking !== "object" || typeof thinking.enabled !== "boolean") {
+    throw new DialogGatewayError("INVALID_THINKING_CONFIG", "thinking must be null or an object with an enabled boolean.");
+  }
+  const modes = new Set(["default", "off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+  if (thinking.mode !== undefined && !modes.has(thinking.mode)) {
+    throw new DialogGatewayError("INVALID_THINKING_CONFIG", `Unsupported thinking mode: ${String(thinking.mode)}.`);
+  }
+  if (thinking.budgetTokens !== undefined
+    && (!Number.isInteger(thinking.budgetTokens) || thinking.budgetTokens < 0)) {
+    throw new DialogGatewayError("INVALID_THINKING_CONFIG", "budgetTokens must be a non-negative integer.");
+  }
+}
+
+function validateSdkFlagSettings(settings: Record<string, unknown>): void {
+  for (const [key, value] of Object.entries(settings)) {
+    if (key === "effortLevel") {
+      if (value !== null && value !== "low" && value !== "medium" && value !== "high") {
+        throw new DialogGatewayError("INVALID_FLAG_SETTINGS", "effortLevel must be low, medium, high, or null.");
+      }
+      continue;
+    }
+    if (key === "permissions") {
+      if (value === null) continue;
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        throw new DialogGatewayError("INVALID_FLAG_SETTINGS", "permissions must be an object or null.");
+      }
+      const entries = Object.entries(value as Record<string, unknown>);
+      for (const [permissionKey, permissionValue] of entries) {
+        if (permissionKey !== "defaultMode") {
+          throw new DialogGatewayError("UNSUPPORTED_FLAG_SETTING", `permissions.${permissionKey} has no PilotDeck session equivalent.`);
+        }
+        if (permissionValue !== null
+          && permissionValue !== "default"
+          && permissionValue !== "plan"
+          && permissionValue !== "bypassPermissions") {
+          throw new DialogGatewayError("UNSUPPORTED_FLAG_SETTING", `permissions.defaultMode=${String(permissionValue)} is not supported.`);
+        }
+      }
+      continue;
+    }
+    throw new DialogGatewayError("UNSUPPORTED_FLAG_SETTING", `${key} has no PilotDeck session equivalent.`);
+  }
+}
+
+function validateSdkSessionConfig(config: GatewaySessionSdkConfig): void {
+  if (!config || typeof config !== "object") {
+    throw new DialogGatewayError("INVALID_SDK_SESSION_CONFIG", "sdkSessionConfig must be an object.");
+  }
+  if (config.systemPrompt !== undefined && typeof config.systemPrompt !== "string") {
+    throw new DialogGatewayError("INVALID_SDK_SESSION_CONFIG", "systemPrompt must be a string.");
+  }
+  if (config.persistSession !== undefined && config.persistSession !== false) {
+    throw new DialogGatewayError("INVALID_SDK_SESSION_CONFIG", "persistSession must be false when specified.");
+  }
+  if (config.appendSystemPrompt !== undefined && typeof config.appendSystemPrompt !== "string") {
+    throw new DialogGatewayError("INVALID_SDK_SESSION_CONFIG", "appendSystemPrompt must be a string.");
+  }
+  if (config.planModeInstructions !== undefined && typeof config.planModeInstructions !== "string") {
+    throw new DialogGatewayError("INVALID_SDK_SESSION_CONFIG", "planModeInstructions must be a string.");
+  }
+  if (config.outputStyle !== undefined
+    && (typeof config.outputStyle !== "string" || !config.outputStyle.trim())) {
+    throw new DialogGatewayError("INVALID_SDK_SESSION_CONFIG", "outputStyle must be a non-empty string.");
+  }
+  if (config.permissionMode !== undefined
+    && config.permissionMode !== "acceptEdits" && config.permissionMode !== "dontAsk") {
+    throw new DialogGatewayError("INVALID_SDK_SESSION_CONFIG", "permissionMode must be acceptEdits or dontAsk.");
+  }
+  if (config.managedPermissions !== undefined) {
+    const managed = config.managedPermissions;
+    if (!managed || typeof managed !== "object" || Array.isArray(managed)
+      || Object.keys(managed as Record<string, unknown>).some((key) =>
+        key !== "deny" && key !== "ask" && key !== "defaultMode" && key !== "canPrompt",
+      )
+      || !Array.isArray(managed.deny)
+      || !Array.isArray(managed.ask)
+      || managed.deny.some((entry) => typeof entry !== "string" || !entry.trim())
+      || managed.ask.some((entry) => typeof entry !== "string" || !entry.trim())
+      || (managed.defaultMode !== undefined && managed.defaultMode !== "plan")
+      || (managed.canPrompt !== undefined && managed.canPrompt !== false)) {
+      throw new DialogGatewayError(
+        "UNSUPPORTED_SDK_MANAGED_SETTING",
+        "managedPermissions may contain deny/ask entries, defaultMode=plan, and canPrompt=false only.",
+      );
+    }
+  }
+  if (config.managedModels !== undefined) {
+    const managed = config.managedModels;
+    const validSelector = (value: unknown): value is string => typeof value === "string"
+      && (value === "*" || /^[^/*\s]+\/(?:\*|[^/*\s]+)$/.test(value));
+    if (!managed || typeof managed !== "object" || Array.isArray(managed)
+      || !Array.isArray(managed.allow) || !Array.isArray(managed.deny)
+      || managed.allow.some((entry) => !validSelector(entry))
+      || managed.deny.some((entry) => !validSelector(entry))) {
+      throw new DialogGatewayError(
+        "INVALID_SDK_MANAGED_SETTINGS",
+        "managedModels selectors must be *, provider/*, or provider/model.",
+      );
+    }
+  }
+  if (config.includeHookEvents !== undefined && typeof config.includeHookEvents !== "boolean") {
+    throw new DialogGatewayError("INVALID_SDK_SESSION_CONFIG", "includeHookEvents must be a boolean.");
+  }
+  if (config.agentProgressSummaries !== undefined && typeof config.agentProgressSummaries !== "boolean") {
+    throw new DialogGatewayError("INVALID_SDK_SESSION_CONFIG", "agentProgressSummaries must be a boolean.");
+  }
+  if (config.forwardSubagentText !== undefined && typeof config.forwardSubagentText !== "boolean") {
+    throw new DialogGatewayError("INVALID_SDK_SESSION_CONFIG", "forwardSubagentText must be a boolean.");
+  }
+  if (config.sandbox !== undefined
+    && (!config.sandbox || typeof config.sandbox !== "object" || Array.isArray(config.sandbox)
+      || Object.keys(config.sandbox as Record<string, unknown>).some((key) => key !== "type" && key !== "filesystem" && key !== "network" && key !== "process")
+      || (config.sandbox.type !== undefined && config.sandbox.type !== "tool_policy")
+      || (config.sandbox.filesystem !== undefined
+        && config.sandbox.filesystem !== "read_only"
+        && config.sandbox.filesystem !== "deny")
+      || (config.sandbox.network !== undefined && config.sandbox.network !== "deny")
+      || (config.sandbox.process !== undefined && config.sandbox.process !== "deny")
+      || (config.sandbox.filesystem === undefined
+        && config.sandbox.network === undefined
+        && config.sandbox.process === undefined))) {
+    throw new DialogGatewayError(
+      "INVALID_SDK_SESSION_CONFIG",
+      "sandbox must contain supported tool_policy restrictions.",
+    );
+  }
+  if (config.userDialogKinds !== undefined
+    && (!Array.isArray(config.userDialogKinds)
+      || config.userDialogKinds.length === 0
+      || config.userDialogKinds.some((kind) => kind !== "input" && kind !== "select" && kind !== "confirm" && kind !== "form")
+      || new Set(config.userDialogKinds).size !== config.userDialogKinds.length)) {
+    throw new DialogGatewayError(
+      "INVALID_SDK_SESSION_CONFIG",
+      "userDialogKinds must be a non-empty unique array containing only input, select, confirm, or form.",
+    );
+  }
+  if (config.taskBudget !== undefined
+    && (typeof config.taskBudget !== "object" || config.taskBudget === null
+      || !Number.isFinite(config.taskBudget.total) || config.taskBudget.total <= 0)) {
+    throw new DialogGatewayError("INVALID_SDK_SESSION_CONFIG", "taskBudget.total must be a positive finite USD amount.");
+  }
+  if (config.taskBudget?.scope !== undefined
+    && config.taskBudget.scope !== "session" && config.taskBudget.scope !== "project") {
+    throw new DialogGatewayError("INVALID_SDK_SESSION_CONFIG", "taskBudget.scope must be session or project when provided.");
+  }
+  if (config.taskBudget?.projectRetentionMs !== undefined
+    && (!Number.isSafeInteger(config.taskBudget.projectRetentionMs) || config.taskBudget.projectRetentionMs <= 0)) {
+    throw new DialogGatewayError(
+      "INVALID_SDK_SESSION_CONFIG",
+      "taskBudget.projectRetentionMs must be a positive safe integer in milliseconds.",
+    );
+  }
+  if (config.taskBudget?.projectRetentionMs !== undefined && config.taskBudget.scope !== "project") {
+    throw new DialogGatewayError(
+      "INVALID_SDK_SESSION_CONFIG",
+      "taskBudget.projectRetentionMs requires taskBudget.scope to be project.",
+    );
+  }
+  if (config.settings !== undefined) {
+    if (!config.settings || typeof config.settings !== "object" || Array.isArray(config.settings)) {
+      throw new DialogGatewayError("INVALID_SDK_SETTINGS", "settings must be an object.");
+    }
+    if (Object.keys(config.settings).some((key) => key !== "agent")) {
+      throw new DialogGatewayError("UNSUPPORTED_SDK_SETTING", "Only settings.agent is supported by the SDK session overlay.");
+    }
+    const agent = config.settings.agent;
+    if (agent !== undefined) {
+      if (!agent || typeof agent !== "object" || Array.isArray(agent)
+        || Object.keys(agent).some((key) => key !== "model" && key !== "fallbackModel" && key !== "maxContextTokens" && key !== "maxOutputTokens" && key !== "thinking" && key !== "subagents")) {
+        throw new DialogGatewayError("INVALID_SDK_SETTINGS", "settings.agent contains unsupported fields.");
+      }
+      if (agent.model !== undefined && agent.model !== null
+        && (typeof agent.model !== "string" || !agent.model.trim())) {
+        throw new DialogGatewayError("INVALID_SDK_SETTINGS", "settings.agent.model must be a non-empty model id or null.");
+      }
+      if (agent.fallbackModel !== undefined && agent.fallbackModel !== null
+        && (typeof agent.fallbackModel !== "string" || !agent.fallbackModel.trim())) {
+        throw new DialogGatewayError("INVALID_SDK_SETTINGS", "settings.agent.fallbackModel must be a non-empty model id or null.");
+      }
+      for (const key of ["maxContextTokens", "maxOutputTokens"] as const) {
+        const value = agent[key];
+        if (value !== undefined && (!Number.isInteger(value) || value <= 0)) {
+          throw new DialogGatewayError("INVALID_SDK_SETTINGS", `settings.agent.${key} must be a positive integer.`);
+        }
+      }
+      if (agent.thinking !== undefined) {
+        if (!agent.thinking || typeof agent.thinking !== "object" || Array.isArray(agent.thinking)
+          || typeof agent.thinking.enabled !== "boolean"
+          || Object.keys(agent.thinking).some((key) => key !== "enabled" && key !== "budgetTokens")
+          || (agent.thinking.budgetTokens !== undefined
+            && (!Number.isInteger(agent.thinking.budgetTokens) || agent.thinking.budgetTokens < 0))) {
+          throw new DialogGatewayError(
+            "INVALID_SDK_SETTINGS",
+            "settings.agent.thinking must contain enabled and an optional non-negative integer budgetTokens.",
+          );
+        }
+      }
+      if (agent.subagents !== undefined && (
+        !agent.subagents || typeof agent.subagents !== "object" || Array.isArray(agent.subagents)
+        || Object.keys(agent.subagents).some((key) => key !== "default" && key !== "timeoutMs" && key !== "maxDepth")
+        || (agent.subagents.default !== undefined && agent.subagents.default !== null
+          && (typeof agent.subagents.default !== "string" || !agent.subagents.default.trim()))
+        || (agent.subagents.timeoutMs !== undefined
+          && (!Number.isInteger(agent.subagents.timeoutMs) || agent.subagents.timeoutMs <= 0))
+        || (agent.subagents.maxDepth !== undefined
+          && (!Number.isSafeInteger(agent.subagents.maxDepth) || agent.subagents.maxDepth < 0))
+      )) {
+        throw new DialogGatewayError(
+          "INVALID_SDK_SETTINGS",
+          "settings.agent.subagents supports a non-empty default model id, positive integer timeoutMs, and non-negative safe integer maxDepth.",
+        );
+      }
+    }
+  }
+  if (config.settingSources !== undefined
+    && (!Array.isArray(config.settingSources)
+      || config.settingSources.length === 0
+      || config.settingSources.some((source) => source !== "managed" && source !== "user" && source !== "project" && source !== "local")
+      || new Set(config.settingSources).size !== config.settingSources.length)) {
+    throw new DialogGatewayError(
+      "INVALID_SDK_SETTING_SOURCES",
+      "settingSources must be a non-empty unique array containing only managed, user, project, or local.",
+    );
+  }
+  if (config.additionalWorkingDirectories !== undefined) {
+    if (!Array.isArray(config.additionalWorkingDirectories)
+      || config.additionalWorkingDirectories.some((path) => typeof path !== "string" || !isAbsolute(path))) {
+      throw new DialogGatewayError(
+        "INVALID_SDK_SESSION_CONFIG",
+        "additionalWorkingDirectories must contain absolute paths.",
+      );
+    }
+  }
+  if (config.toolAliases !== undefined) {
+    if (typeof config.toolAliases !== "object" || Array.isArray(config.toolAliases)
+      || Object.entries(config.toolAliases).some(([from, to]) => !from.trim() || typeof to !== "string" || !to.trim())) {
+      throw new DialogGatewayError("INVALID_SDK_SESSION_CONFIG", "toolAliases must be a non-empty string-to-string map.");
+    }
+  }
+  if (config.outputFormat !== undefined) {
+    if (config.outputFormat.type !== "json_schema" || !isSdkJsonSchema(config.outputFormat.schema)) {
+      throw new DialogGatewayError(
+        "INVALID_SDK_SESSION_CONFIG",
+        "outputFormat must be a json_schema object using PilotDeck's JSON-schema subset.",
+      );
+    }
+  }
+  if (config.agents !== undefined) {
+    if (!config.agents || typeof config.agents !== "object" || Array.isArray(config.agents)) {
+      throw new DialogGatewayError("INVALID_SDK_SESSION_CONFIG", "agents must be an object.");
+    }
+    for (const [name, agent] of Object.entries(config.agents)) {
+      if (!name.trim() || !agent || typeof agent !== "object" || Array.isArray(agent)
+        || !agent.description?.trim() || !agent.prompt?.trim()
+        || (agent.model !== undefined && (typeof agent.model !== "string" || !agent.model.trim()))
+        || (agent.tools !== undefined && (!Array.isArray(agent.tools) || agent.tools.some((tool) => !tool.trim())))
+        || (agent.disallowedTools !== undefined && (!Array.isArray(agent.disallowedTools) || agent.disallowedTools.some((tool) => !tool.trim())))
+        || (agent.maxTurns !== undefined && (!Number.isInteger(agent.maxTurns) || agent.maxTurns <= 0))
+        || (agent.background !== undefined && typeof agent.background !== "boolean")
+        || (agent.observer !== undefined && (typeof agent.observer !== "string" || !agent.observer.trim()))
+        || (agent.observerMessage !== undefined && typeof agent.observerMessage !== "string")
+        || (agent.observerMessage?.trim() && !agent.observer)
+        || (agent.effort !== undefined && !["low", "medium", "high"].includes(agent.effort))
+        || (agent.permissionMode !== undefined && !["default", "plan", "bypassPermissions"].includes(agent.permissionMode))) {
+        throw new DialogGatewayError("INVALID_SDK_SESSION_CONFIG", `Agent ${name || "<unnamed>"} is invalid.`);
+      }
+    }
+    for (const [name, agent] of Object.entries(config.agents)) {
+      if (!agent.observer) continue;
+      if (agent.observer === name || !config.agents[agent.observer]) {
+        throw new DialogGatewayError(
+          "INVALID_SDK_SESSION_CONFIG",
+          `Agent ${name} observer must reference a distinct configured AgentDefinition.`,
+        );
+      }
+    }
+  }
+  if (config.skills !== undefined && config.skills !== "all") {
+    if (!Array.isArray(config.skills)
+      || config.skills.length === 0
+      || config.skills.some((skill) => typeof skill !== "string" || !skill.trim())
+      || new Set(config.skills).size !== config.skills.length) {
+      throw new DialogGatewayError(
+        "INVALID_SDK_SESSION_CONFIG",
+        "skills must be all or a non-empty array of unique skill names.",
+      );
+    }
+  }
+  if (config.plugins !== undefined) {
+    if (!Array.isArray(config.plugins)
+      || config.plugins.length === 0
+      || config.plugins.some((plugin) => !plugin || plugin.type !== "local"
+        || typeof plugin.path !== "string" || !plugin.path.trim() || !isAbsolute(plugin.path))
+      || new Set(config.plugins.map((plugin) => plugin.path)).size !== config.plugins.length) {
+      throw new DialogGatewayError(
+        "INVALID_SDK_SESSION_CONFIG",
+        "plugins must be a non-empty array of distinct absolute Gateway-local plugin paths.",
+      );
+    }
+  }
+  if (config.hooks !== undefined) {
+    if (!config.hooks || typeof config.hooks !== "object" || Array.isArray(config.hooks)) {
+      throw new DialogGatewayError("INVALID_SDK_SESSION_CONFIG", "hooks must be an object.");
+    }
+    let url: URL;
+    try {
+      url = new URL(config.hooks.url);
+    } catch {
+      throw new DialogGatewayError("INVALID_SDK_SESSION_CONFIG", "hooks.url must be an absolute HTTP(S) URL.");
+    }
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      throw new DialogGatewayError("INVALID_SDK_SESSION_CONFIG", "hooks.url must use http: or https:.");
+    }
+    if (config.hooks.headers !== undefined
+      && (typeof config.hooks.headers !== "object" || Array.isArray(config.hooks.headers)
+        || Object.entries(config.hooks.headers).some(([name, value]) => !name.trim() || typeof value !== "string"))) {
+      throw new DialogGatewayError("INVALID_SDK_SESSION_CONFIG", "hooks.headers must be a string-to-string map.");
+    }
+    if (!config.hooks.events || typeof config.hooks.events !== "object" || Array.isArray(config.hooks.events)
+      || Object.entries(config.hooks.events).some(([event, matchers]) => !isPilotDeckHookEvent(event)
+        || !Array.isArray(matchers)
+        || matchers.some((matcher) => !matcher || typeof matcher !== "object" || Array.isArray(matcher)
+          || (matcher.matcher !== undefined && typeof matcher.matcher !== "string")
+          || (matcher.timeout !== undefined && (!Number.isFinite(matcher.timeout) || matcher.timeout <= 0))))) {
+      throw new DialogGatewayError(
+        "INVALID_SDK_SESSION_CONFIG",
+        "hooks.events must map event names to matcher objects with optional string matcher and positive timeout.",
+      );
+    }
+  }
+}
+
+function isSdkJsonSchema(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const schema = value as Record<string, unknown>;
+  if (schema.type !== undefined
+    && typeof schema.type !== "string"
+    && (!Array.isArray(schema.type) || schema.type.some((item) => typeof item !== "string"))) return false;
+  if (schema.required !== undefined
+    && (!Array.isArray(schema.required) || schema.required.some((item) => typeof item !== "string"))) return false;
+  if (schema.additionalProperties !== undefined && typeof schema.additionalProperties !== "boolean") return false;
+  if (schema.enum !== undefined && !Array.isArray(schema.enum)) return false;
+  if (schema.properties !== undefined) {
+    if (!schema.properties || typeof schema.properties !== "object" || Array.isArray(schema.properties)) return false;
+    if (!Object.values(schema.properties as Record<string, unknown>).every(isSdkJsonSchema)) return false;
+  }
+  if (schema.items !== undefined && !isSdkJsonSchema(schema.items)) return false;
+  return true;
+}
+
+function deferredHookContext(output: unknown, expectedEvent: string): string {
+  if (!output || typeof output !== "object" || Array.isArray(output)) {
+    throw new DialogGatewayError("INVALID_ASYNC_HOOK_RESULT", "Deferred hook output must be an object.");
+  }
+  const record = output as Record<string, unknown>;
+  if (Object.keys(record).some((key) => key !== "hookSpecificOutput")) {
+    throw new DialogGatewayError(
+      "UNSUPPORTED_ASYNC_HOOK_EFFECT",
+      "Deferred hook results may only supply hookSpecificOutput.additionalContext.",
+    );
+  }
+  if (record.hookSpecificOutput === undefined) return "";
+  if (!record.hookSpecificOutput || typeof record.hookSpecificOutput !== "object" || Array.isArray(record.hookSpecificOutput)) {
+    throw new DialogGatewayError("INVALID_ASYNC_HOOK_RESULT", "hookSpecificOutput must be an object.");
+  }
+  const specific = record.hookSpecificOutput as Record<string, unknown>;
+  if (Object.keys(specific).some((key) => key !== "hookEventName" && key !== "additionalContext")) {
+    throw new DialogGatewayError(
+      "UNSUPPORTED_ASYNC_HOOK_EFFECT",
+      "Deferred hook results may only supply hookEventName and additionalContext.",
+    );
+  }
+  if (specific.hookEventName !== expectedEvent) {
+    throw new DialogGatewayError(
+      "INVALID_ASYNC_HOOK_RESULT",
+      `Deferred hook result belongs to ${String(specific.hookEventName)}, expected ${expectedEvent}.`,
+    );
+  }
+  if (specific.additionalContext === undefined) return "";
+  if (typeof specific.additionalContext !== "string") {
+    throw new DialogGatewayError("INVALID_ASYNC_HOOK_RESULT", "Deferred hook additionalContext must be a string.");
+  }
+  return `<async_hook_context event="${expectedEvent}">\n${specific.additionalContext}\n</async_hook_context>`;
 }
 
 function reasoningValueToMode(value: number): "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" {

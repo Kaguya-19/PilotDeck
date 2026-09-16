@@ -7,6 +7,7 @@ import { requireSessionProjectionValue } from "../../session/projection/SessionP
 import { SessionMetadataStore } from "../../session/metadata/SessionMetadataStore.js";
 import type { SessionTitleGenerator } from "../../session/title/SessionTitleGenerator.js";
 import type { SessionTitlePort } from "../../session/title/SessionTitlePort.js";
+import type { PromptSuggestionGenerator } from "../../session/prompt/PromptSuggestionGenerator.js";
 import type { SessionMetadataValue } from "../../session/transcript/TranscriptEntry.js";
 import { TurnRunner, type AgentLoopRunner } from "../turn/TurnRunner.js";
 import { TurnInputProcessor } from "../turn/TurnInputProcessor.js";
@@ -30,6 +31,8 @@ export type CreateAgentSessionOptions = AgentSessionRuntimeBundleOptions & {
   sessionTitleProvider?: SessionTitlePort;
   /** @deprecated Use sessionTitleProvider. */
   sessionTitleGenerator?: SessionTitleGenerator;
+  /** Gateway-owned generator used only for SDK sessions that opt in. */
+  promptSuggestionGenerator?: PromptSuggestionGenerator;
   /**
    * Session-scoped input admission derived from the frozen extension snapshot.
    * Omitted direct sessions retain the native plain-text processor.
@@ -154,6 +157,7 @@ function buildAgentSession(
         metadataStore,
         sessionTitleProvider: options.sessionTitleProvider,
         sessionTitleGenerator: options.sessionTitleGenerator,
+        promptSuggestionGenerator: options.promptSuggestionGenerator,
         autoGenerateSessionTitle: options.config.isSubagent !== true,
         eventRecorder,
       },

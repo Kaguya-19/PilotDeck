@@ -18,6 +18,8 @@ export type PromptAssemblerInput = {
   customSystemPrompt?: string;
   /** Optional appended fragment (always last). */
   appendSystemPrompt?: string;
+  /** Preserve extension context when a caller replaces the default system prompt. */
+  includeExtensionsWithCustomSystemPrompt?: boolean;
   /** Keep user context out of the system prompt when a durable user-role surface owns it. */
   includeUserContextInSystemPrompt?: boolean;
   /** Optional override for the user-context "now" line. */
@@ -69,7 +71,7 @@ export class PromptAssembler {
       parts.push(...sections.userContext);
     }
 
-    if (!useCustom) {
+    if (!useCustom || input.includeExtensionsWithCustomSystemPrompt === true) {
       parts.push(...sections.systemContext);
     }
 

@@ -16,13 +16,13 @@
  *     hooks the cron-PR coordination notes call for (priority window
  *     200-299, see §6.5.5 step 7 of the deferred-feature guide).
  *
- * Platform support: macOS, Linux, and Windows. On Windows, `child.kill()`
- * maps SIGTERM/SIGKILL to TerminateProcess; `detached` creates a new
- * console group rather than a Unix process group.
+ * Platform support: macOS, Linux, and Windows. Windows process trees are
+ * stopped with `taskkill /T /F` so shell descendants are not orphaned.
  */
 
 import { randomUUID } from "node:crypto";
 import { TaskOutputStore } from "../storage/TaskOutputStore.js";
+import { resolveDefaultCommandShell } from "../../runtime/commandShell.js";
 import type {
   BackgroundTaskSnapshotStore,
   PersistedBackgroundTask,
@@ -387,6 +387,11 @@ export class BackgroundTaskRuntime implements BackgroundTaskPort {
     if (task.status !== "running") return;
     if (!child) return;
     task.interrupted = true;
+    if (process.platform === "win32") {
+      child.terminate("SIGKILL");
+      await waitForDoneOrTimeout(done, options.graceMs ?? DEFAULT_GRACE_MS);
+      return;
+    }
     try {
       child.terminate("SIGTERM");
     } catch {
@@ -401,7 +406,7 @@ export class BackgroundTaskRuntime implements BackgroundTaskPort {
           try {
             child.terminate("SIGKILL");
           } catch {
-            // already exited between the timer firing and kill()
+            // already exited between the timer firing and termination
           }
           resolve();
         }, graceMs);
@@ -572,6 +577,17 @@ export class BackgroundTaskRuntime implements BackgroundTaskPort {
     }
     this.completionEvents.emit(event);
   }
+}
+
+async function waitForDoneOrTimeout(done: Promise<void>, timeoutMs: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    done,
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, timeoutMs);
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
 }
 
 function canAccessTask(

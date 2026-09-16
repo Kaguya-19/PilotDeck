@@ -1,12 +1,14 @@
+import { randomUUID } from "node:crypto";
 import type { PilotDeckReadFileStateMap, PilotDeckSubagentForkApi, PilotDeckWriteSnapshotMap } from "../../tool/index.js";
 import { DEFAULT_SUBAGENT_TIMEOUT_MS } from "../../tool/protocol/subagentTimeout.js";
 import type { PilotDeckHookEvent } from "../../extension/hooks/protocol/events.js";
 import type { AgentRuntimeConfig } from "../runtime/AgentRuntimeConfig.js";
 import type { AgentRuntimeDependencies } from "../runtime/AgentRuntimeDependencies.js";
 import { buildTurnEnvironment } from "../turn/TurnEnvironment.js";
-import { getSubagentDefinition, listSubagentDefinitionIds } from "./builtinSubagentTypes.js";
+import { SUBAGENT_DEFINITIONS, type SubagentDefinition } from "./builtinSubagentTypes.js";
 import { SubAgentSession } from "./SubAgentSession.js";
 import type { SidechainTranscriptWriter } from "./SubagentProvider.js";
+import type { AgentEvent } from "../protocol/events.js";
 
 export type OneShotSubagentPortOptions = {
   config: AgentRuntimeConfig;
@@ -24,6 +26,20 @@ export type OneShotSubagentPortRequest = {
 export type OneShotSubagentPort = {
   createForkApi(input: OneShotSubagentPortRequest): PilotDeckSubagentForkApi;
 };
+
+type InternalSubagentForkInput = Parameters<PilotDeckSubagentForkApi["fork"]>[0] & {
+  suppressAutoObserver?: boolean;
+  definitionOverride?: SubagentDefinition;
+};
+
+type ObserverOutcome = {
+  success: boolean;
+  markdown?: string;
+  error?: string;
+};
+
+const OBSERVER_MAX_ACTIVITY_EVENTS = 64;
+const OBSERVER_MAX_TEXT_CHARS = 12_000;
 
 /**
  * Host-owned one-shot subagent consumer.
@@ -45,17 +61,48 @@ function createNativeForkApi(
 ): PilotDeckSubagentForkApi {
   const depth = options.config.subagentDepth ?? 0;
   const maxSubagentDepth = options.config.maxSubagentDepth ?? 1;
-  return {
+  const definitions: Record<string, SubagentDefinition> = options.config.subagentDefinitions ?? SUBAGENT_DEFINITIONS;
+  const api: PilotDeckSubagentForkApi = {
     depth,
     maxSubagentDepth,
-    listDefinitions: () => listSubagentDefinitionIds().map((id) => {
-      const definition = getSubagentDefinition(id)!;
-      return { id: definition.id, description: definition.description };
-    }),
-    isAllowedDefinition: (id) => getSubagentDefinition(id) !== undefined,
-    fork: async ({ definitionId, directive, subagentId, toolCallId, abortSignal, timeoutMs }) => {
-      const definition = getSubagentDefinition(definitionId);
+    listDefinitions: () => Object.values(definitions).map((definition) => ({
+      id: definition.id,
+      description: definition.description,
+    })),
+    isAllowedDefinition: (id) => definitions[id] !== undefined,
+    isBackgroundDefinition: (id) => definitions[id]?.background === true,
+    launchBackground: options.dependencies.backgroundSubagents
+      ? async ({ definitionId, directive, subagentId, toolCallId, timeoutMs }) => {
+          const definition = definitions[definitionId];
+          if (!definition?.background) {
+            throw new Error(`Subagent type ${definitionId} is not configured for background execution.`);
+          }
+          return options.dependencies.backgroundSubagents!.launch({
+            sessionId: options.sessionId,
+            turnId: options.turnId,
+            subagentId,
+            subagentType: definition.id,
+            run: async (abortSignal) => {
+              await api.fork({ definitionId, directive, subagentId, toolCallId, timeoutMs, abortSignal });
+            },
+          });
+        }
+      : undefined,
+    fork: async (forkInput) => {
+      const { definitionId, directive, subagentId, toolCallId, abortSignal, timeoutMs } = forkInput;
+      const internalInput = forkInput as InternalSubagentForkInput;
+      const definition = internalInput.definitionOverride ?? definitions[definitionId];
       if (!definition) throw new Error(`Unknown subagent type: ${definitionId}`);
+      const observerDefinition = !internalInput.suppressAutoObserver && definition.observer
+        ? definitions[definition.observer]
+        : undefined;
+      if (definition.observer && !internalInput.suppressAutoObserver && !observerDefinition) {
+        throw new Error(`Observer definition ${definition.observer} for ${definition.id} is not configured.`);
+      }
+      if (observerDefinition && !options.dependencies.observerSubagents) {
+        throw new Error(`Observer definition ${observerDefinition.id} requires a host observer-subagent launcher.`);
+      }
+      const observerActivity: AgentEvent[] = [];
       const effectiveTimeoutMs = timeoutMs ?? DEFAULT_SUBAGENT_TIMEOUT_MS;
       const abort = composeAbortSignal(abortSignal, effectiveTimeoutMs);
       const subagentSessionId = `${options.config.cwd}::sub::${subagentId}`;
@@ -116,7 +163,15 @@ function createNativeForkApi(
           parentTurnId: options.turnId,
           subagentSessionId,
           subagentId,
+          maxTurns: definition.maxTurns,
           abortSignal: abort.signal,
+          ...(observerDefinition
+            ? {
+                onActivity: (event: AgentEvent) => {
+                  if (observerActivity.length < OBSERVER_MAX_ACTIVITY_EVENTS) observerActivity.push(event);
+                },
+              }
+            : {}),
           sidechainTranscript: sidechain,
         });
         const report = await session.run();
@@ -157,6 +212,21 @@ function createNativeForkApi(
           durationMs: report.durationMs,
         });
         completedEventEmitted = true;
+        if (observerDefinition) {
+          await launchObserverSubagent({
+            options,
+            api,
+            definitions,
+            observedDefinition: definition,
+            observerDefinition,
+            observedSubagentId: subagentId,
+            activity: observerActivity,
+            directive,
+            observerMessage: definition.observerMessage,
+            timeoutMs,
+            outcome: { success: true, markdown: report.markdown },
+          });
+        }
         return {
           markdown: report.markdown,
           usage: report.usage,
@@ -239,12 +309,179 @@ function createNativeForkApi(
             );
           }
         }
+        if (observerDefinition) {
+          try {
+            await launchObserverSubagent({
+              options,
+              api,
+              definitions,
+              observedDefinition: definition,
+              observerDefinition,
+              observedSubagentId: subagentId,
+              activity: observerActivity,
+              directive,
+              observerMessage: definition.observerMessage,
+              timeoutMs,
+              outcome: {
+                success: false,
+                error: failure instanceof Error ? failure.message : String(failure),
+              },
+            });
+          } catch (observerError) {
+            failure = new AggregateError(
+              [failure, observerError],
+              "Subagent failed and its observer could not be launched.",
+            );
+          }
+        }
         throw failure;
       } finally {
         abort.dispose();
       }
     },
   };
+  return api;
+}
+
+async function launchObserverSubagent(input: {
+  options: OneShotSubagentPortOptions & OneShotSubagentPortRequest;
+  api: PilotDeckSubagentForkApi;
+  definitions: Record<string, SubagentDefinition>;
+  observedDefinition: SubagentDefinition;
+  observerDefinition: SubagentDefinition;
+  observedSubagentId: string;
+  activity: AgentEvent[];
+  directive: string;
+  observerMessage?: string;
+  timeoutMs?: number;
+  outcome: ObserverOutcome;
+}): Promise<void> {
+  const launcher = input.options.dependencies.observerSubagents;
+  if (!launcher) {
+    throw new Error(`Observer definition ${input.observerDefinition.id} requires a host observer-subagent launcher.`);
+  }
+  const observerSubagentId = input.options.dependencies.uuid?.() ?? randomUUID();
+  const observerDefinition: SubagentDefinition = {
+    ...input.observerDefinition,
+    allowedTools: [],
+    disallowedTools: [],
+    isReadOnly: true,
+    permissionMode: "plan",
+    mcpServers: undefined,
+    skills: undefined,
+    memory: "disabled",
+    initialPrompt: undefined,
+    background: undefined,
+    observer: undefined,
+    observerMessage: undefined,
+  };
+  const digest = buildObserverActivityDigest({
+    observedDefinition: input.observedDefinition,
+    directive: input.directive,
+    activity: input.activity,
+    observerMessage: input.observerMessage,
+    outcome: input.outcome,
+  });
+
+  await launcher.launch({
+    sessionId: input.options.sessionId,
+    turnId: input.options.turnId,
+    observedSubagentId: input.observedSubagentId,
+    observerSubagentId,
+    observerSubagentType: observerDefinition.id,
+    run: async (abortSignal) => {
+      const startedAt = (input.options.dependencies.now?.() ?? new Date()).getTime();
+      try {
+        const report = await input.api.fork({
+          definitionId: observerDefinition.id,
+          directive: digest,
+          subagentId: observerSubagentId,
+          abortSignal,
+          timeoutMs: input.timeoutMs,
+          suppressAutoObserver: true,
+          definitionOverride: observerDefinition,
+        } as InternalSubagentForkInput);
+        input.options.dependencies.eventEmitter?.({
+          type: "observer_report",
+          sessionId: input.options.sessionId,
+          turnId: input.options.turnId,
+          observedSubagentId: input.observedSubagentId,
+          observedSubagentType: input.observedDefinition.id,
+          observerSubagentId,
+          observerSubagentType: observerDefinition.id,
+          success: true,
+          report: report.markdown,
+          durationMs: (input.options.dependencies.now?.() ?? new Date()).getTime() - startedAt,
+        });
+      } catch (error) {
+        input.options.dependencies.eventEmitter?.({
+          type: "observer_report",
+          sessionId: input.options.sessionId,
+          turnId: input.options.turnId,
+          observedSubagentId: input.observedSubagentId,
+          observedSubagentType: input.observedDefinition.id,
+          observerSubagentId,
+          observerSubagentType: observerDefinition.id,
+          success: false,
+          error: error instanceof Error ? error.message : String(error),
+          durationMs: (input.options.dependencies.now?.() ?? new Date()).getTime() - startedAt,
+        });
+        throw error;
+      }
+    },
+  });
+}
+
+function buildObserverActivityDigest(input: {
+  observedDefinition: SubagentDefinition;
+  directive: string;
+  activity: AgentEvent[];
+  observerMessage?: string;
+  outcome: ObserverOutcome;
+}): string {
+  const activity = input.activity
+    .map(observerActivityLine)
+    .filter((line): line is string => line !== undefined);
+  return truncateObserverText([
+    "You are an observer. Do not execute the observed task or attempt to change its outcome.",
+    "Review this read-only activity digest and produce a concise report of risks, failures, or notable findings.",
+    "",
+    `Observed agent: ${input.observedDefinition.id}`,
+    `Observed directive: ${truncateObserverText(input.directive, 2_000)}`,
+    "",
+    "Activity:",
+    ...(activity.length > 0 ? activity.map((line) => `- ${line}`) : ["- No observable model or tool activity was recorded."]),
+    "",
+    `Outcome: ${input.outcome.success ? "completed" : "failed"}`,
+    ...(input.outcome.markdown ? ["Observed final report:", truncateObserverText(input.outcome.markdown, 4_000)] : []),
+    ...(input.outcome.error ? [`Observed error: ${truncateObserverText(input.outcome.error, 1_000)}`] : []),
+    ...(input.observerMessage?.trim() ? ["", input.observerMessage.trim()] : []),
+  ].join("\n"), OBSERVER_MAX_TEXT_CHARS);
+}
+
+function observerActivityLine(event: AgentEvent): string | undefined {
+  switch (event.type) {
+    case "model_request_started":
+      return `model request: ${event.provider}/${event.model}`;
+    case "tool_calls_detected":
+      return `tool calls: ${event.calls.map((call) => call.name).join(", ") || "none"}`;
+    case "tool_result":
+      return `tool result: ${event.result.toolName} (${event.result.type === "success" ? "success" : "error"})`;
+    case "assistant_message":
+      return "assistant response emitted";
+    case "warning":
+      return `warning: ${truncateObserverText(event.code, 120)}`;
+    case "agent_status":
+      return `agent status: ${truncateObserverText(event.event, 120)}`;
+    default:
+      return undefined;
+  }
+}
+
+function truncateObserverText(value: string, maxChars: number): string {
+  const normalized = value.trim();
+  if (normalized.length <= maxChars) return normalized;
+  return `${normalized.slice(0, Math.max(0, maxChars - 72))}\n\n[observer digest truncated]`;
 }
 
 async function dispatchSubagentLifecycle(

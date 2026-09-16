@@ -14,6 +14,8 @@ export type GatewaySessionContext = {
   sessionKey: string;
   projectKey?: string;
   channelKey: string;
+  allowedTools?: string[];
+  disallowedTools?: string[];
 };
 
 export type GatewaySessionFactory = (
@@ -44,7 +46,10 @@ export type SessionRouterOptions = {
    * idle sweep, explicit close, or dirty-recreate. Use this to clean up
    * per-session resources (e.g. per-session MCP runtimes / browser processes).
    */
-  onSessionEvict?: (sessionKey: string) => void;
+  onSessionEvict?: (
+    sessionKey: string,
+    reason: "idle" | "closed" | "dirty_recreate" | "shutdown",
+  ) => void;
   onSessionIdleEvict?: (sessionKey: string, record: SessionEvictionSnapshot) => void;
 };
 
@@ -71,6 +76,10 @@ const DEFAULT_IDLE_SWEEP_INTERVAL_MS = 60 * 1000;
 
 export class SessionRouter {
   private readonly sessions = new Map<string, SessionRecord>();
+  private readonly closingSessions = new Map<string, Promise<void>>();
+  private readonly closingProjects = new Map<string, string | undefined>();
+  private readonly pausedProjects = new Set<string>();
+  private readonly creatingSessions = new Map<Promise<void>, GatewaySessionContext>();
   readonly agents: AgentRegistry;
   private readonly agentFactory: AgentFactoryProvider;
   private readonly inFlightTurns = new Map<string, string>();
@@ -102,23 +111,35 @@ export class SessionRouter {
     if (this.isShutdown) {
       throw new Error("Session router is shut down.");
     }
+    this.assertProjectOpen(context.projectKey);
     const operation = this.getOrCreateActive(context);
     const tracked = operation.then(
       () => undefined,
       () => undefined,
     );
     this.pendingSessionCreations.add(tracked);
+    this.creatingSessions.set(tracked, context);
     try {
       return await operation;
     } finally {
       this.pendingSessionCreations.delete(tracked);
+      this.creatingSessions.delete(tracked);
     }
   }
 
   private async getOrCreateActive(context: GatewaySessionContext): Promise<AgentHandle> {
     this.sweepIdle();
+    const closing = this.closingSessions.get(context.sessionKey);
+    if (closing) await closing;
+    this.assertProjectOpen(context.projectKey);
     const cached = this.sessions.get(context.sessionKey);
     if (cached) {
+      // Tool filters shape the registry constructed for an AgentSession.
+      // Recreate only when an explicit Gateway/SDK filter changes; callers
+      // without filters retain the exact native cached-session behavior.
+      if (hasToolFilterChanged(cached.context, context)) {
+        cached.dirtyReason = "tool_filter_changed";
+      }
       cached.context = mergeSessionContext(cached.context, context);
       if (cached.dirtyReason && this.options.recreateSession) {
         const previousSession = cached.handle.session;
@@ -162,6 +183,10 @@ export class SessionRouter {
       await handle.dispose("session_router_shutdown");
       throw new Error("Session router shut down during session creation.");
     }
+    if (context.projectKey && this.pausedProjects.has(context.projectKey)) {
+      await this.agentFactory.remove(context.sessionKey, "project_closed_during_creation");
+      throw new Error("Project is being deleted; the created session was discarded.");
+    }
     this.sessions.set(context.sessionKey, {
       handle,
       lastUsedAt: this.nowMs(),
@@ -169,6 +194,25 @@ export class SessionRouter {
     });
     return handle;
   }
+
+  private assertProjectOpen(projectKey?: string): void {
+    if (projectKey && this.pausedProjects.has(projectKey)) throw new Error("Project is being deleted.");
+  }
+
+  /** Pause creation and drain only this project's runtime writers; no history scan. */
+  async closeProject(projectKey: string): Promise<string[]> {
+    this.pausedProjects.add(projectKey);
+    const creating = [...this.creatingSessions].filter(([, context]) => context.projectKey === projectKey).map(([pending]) => pending);
+    const draining = [...this.closingSessions].filter(([key]) => this.closingProjects.get(key) === projectKey).map(([, pending]) => pending);
+    await Promise.allSettled([...creating, ...draining]);
+    const keys = [...this.sessions].filter(([, record]) => record.context.projectKey === projectKey).map(([key]) => key);
+    await Promise.all([
+      ...keys.map(key => this.close(key)),
+    ]);
+    return keys;
+  }
+
+  resumeProject(projectKey: string): void { this.pausedProjects.delete(projectKey); }
 
   beginTurn(sessionKey: string, runId: string): boolean {
     if (this.isShutdown) return false;
@@ -182,6 +226,12 @@ export class SessionRouter {
 
   hasActiveTurn(sessionKey: string): boolean {
     return this.inFlightTurns.has(sessionKey);
+  }
+
+  /** True when a live AgentSession currently owns this key in Gateway memory. */
+  hasSession(sessionKey: string): boolean {
+    this.sweepIdle();
+    return this.sessions.has(sessionKey);
   }
 
   activeTurnRunId(sessionKey: string): string | undefined {
@@ -204,6 +254,26 @@ export class SessionRouter {
     record?.handle.abort(reason);
     if (record) {
       record.lastUsedAt = this.nowMs();
+    }
+  }
+
+  async seedReadState(
+    context: GatewaySessionContext,
+    input: { path: string; mtime: number },
+  ): Promise<{ applied: boolean }> {
+    this.sweepIdle();
+    if (this.inFlightTurns.has(context.sessionKey) || this.inFlightMaintenance.has(context.sessionKey)) {
+      throw new Error("Cannot seed file read state while a turn or session control is active.");
+    }
+    this.inFlightMaintenance.add(context.sessionKey);
+    try {
+      const handle = await this.getOrCreate(context);
+      if (this.inFlightTurns.has(context.sessionKey)) {
+        throw new Error("Cannot seed file read state while a turn is active.");
+      }
+      return await handle.session.seedReadState(input.path, input.mtime);
+    } finally {
+      this.inFlightMaintenance.delete(context.sessionKey);
     }
   }
 
@@ -262,6 +332,8 @@ export class SessionRouter {
       } finally {
         this.inFlightTurns.delete(sessionKey);
       }
+    } else {
+      await this.closingSessions.get(sessionKey);
     }
   }
 
@@ -417,12 +489,22 @@ export class SessionRouter {
         this.emitSessionEvict(sessionKey, record, reason);
       }
     })();
+    this.closingSessions.set(sessionKey, eviction);
+    this.closingProjects.set(sessionKey, record.context.projectKey);
     this.pendingEvictions.add(eviction);
     void eviction.then(
-      () => this.pendingEvictions.delete(eviction),
-      () => this.pendingEvictions.delete(eviction),
+      () => this.finishEviction(sessionKey, eviction),
+      () => this.finishEviction(sessionKey, eviction),
     );
     return eviction;
+  }
+
+  private finishEviction(sessionKey: string, eviction: Promise<void>): void {
+    this.pendingEvictions.delete(eviction);
+    if (this.closingSessions.get(sessionKey) === eviction) {
+      this.closingSessions.delete(sessionKey);
+      this.closingProjects.delete(sessionKey);
+    }
   }
 
   private emitSessionEvict(
@@ -430,7 +512,7 @@ export class SessionRouter {
     record: SessionRecord,
     reason: "idle" | "closed" | "dirty_recreate" | "shutdown",
   ): void {
-    this.options.onSessionEvict?.(sessionKey);
+    this.options.onSessionEvict?.(sessionKey, reason);
     if (reason === "idle") {
       this.options.onSessionIdleEvict?.(sessionKey, snapshotEvictedSession(sessionKey, record));
     }
@@ -464,5 +546,30 @@ function mergeSessionContext(
     sessionKey: next.sessionKey,
     channelKey: next.channelKey || current.channelKey,
     projectKey: current.projectKey ?? next.projectKey,
+    allowedTools: next.allowedTools ?? current.allowedTools,
+    disallowedTools: next.disallowedTools ?? current.disallowedTools,
   };
+}
+
+function hasToolFilterChanged(
+  current: GatewaySessionContext,
+  next: GatewaySessionContext,
+): boolean {
+  // `undefined` means that this turn does not update the session's tool
+  // filter. The Gateway wire format deliberately has no implicit "clear"
+  // operation, so an ordinary native turn cannot undo an SDK-set filter.
+  return (next.allowedTools !== undefined
+      && !sameOptionalStringArray(current.allowedTools, next.allowedTools))
+    || (next.disallowedTools !== undefined
+      && !sameOptionalStringArray(current.disallowedTools, next.disallowedTools));
+}
+
+function sameOptionalStringArray(left: string[] | undefined, right: string[] | undefined): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  if (left.length !== right.length) return false;
+  return left.every((value, index) => value === right[index]);
+}
+
+function sessionBusyError(message: string): Error & { code: string } {
+  return Object.assign(new Error(message), { code: "SESSION_BUSY" });
 }

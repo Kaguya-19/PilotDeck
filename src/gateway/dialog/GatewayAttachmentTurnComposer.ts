@@ -108,7 +108,9 @@ function buildAttachmentPathNote(
   }
 
   if (lines.length === 0) return undefined;
-  const guidance = hasDiagnostics || attachments.some(isAudioAttachment)
+  const guidance = hasDiagnostics
+    || attachments.some(isAudioAttachment)
+    || attachments.some((attachment) => !isReadFileInspectableAttachment(attachment))
     ? attachmentDiagnosticsGuidance(attachments, allowedReadFiles, projectRoot, installCommand)
     : "These are path references for reuse. If an image/PDF is already visible in this turn, do not call read_file just to view it.";
   return {
@@ -152,7 +154,7 @@ function isReadFileInspectableAttachment(attachment: ChannelAttachment): boolean
   if (mimeType.startsWith("text/")) return true;
   if (mimeType === "application/json" || mimeType.endsWith("+json")) return true;
 
-  const pathOrName = attachment.path || attachment.name || "";
+  const pathOrName = attachment.name || attachment.path || "";
   const extension = extname(pathOrName).toLowerCase();
   if (extension === ".pdf" || extension === ".ipynb") return true;
   if (READ_FILE_BINARY_ATTACHMENT_EXTENSIONS.has(extension)) return false;
@@ -194,8 +196,11 @@ async function attachmentsToContentBlocks(
     return { blocks: [], directContentPaths: new Set<string>(), hasDiagnostics: false };
   }
   const blocks: CanonicalContentBlock[] = [];
-  const resolverRequests: AttachmentRequest[] = [];
-  const resolverRequestPaths: Array<string | undefined> = [];
+  const resolverRequests: Array<{
+    request: AttachmentRequest;
+    path?: string;
+    registered: boolean;
+  }> = [];
   const directContentPaths = new Set<string>();
   const diagnostics: string[] = [];
 
@@ -223,28 +228,37 @@ async function attachmentsToContentBlocks(
       continue;
     }
     if (attachment.type === "image" || attachment.mimeType?.startsWith("image/")) {
-      resolverRequests.push({ type: "image", path: attachment.path, mimeType: attachment.mimeType });
-      resolverRequestPaths.push(resolve(attachment.path));
+      resolverRequests.push({
+        request: { type: "image", path: attachment.path, mimeType: attachment.mimeType },
+        path: resolve(attachment.path),
+        registered: Boolean(attachment.metadata?.channelKey),
+      });
     } else if (attachment.mimeType === "application/pdf" || attachment.path.toLowerCase().endsWith(".pdf")) {
-      resolverRequests.push({ type: "pdf", path: attachment.path });
-      resolverRequestPaths.push(resolve(attachment.path));
+      resolverRequests.push({
+        request: { type: "pdf", path: attachment.path },
+        path: resolve(attachment.path),
+        registered: Boolean(attachment.metadata?.channelKey),
+      });
     } else {
-      resolverRequests.push({ type: "file", path: attachment.path });
-      resolverRequestPaths.push(resolve(attachment.path));
+      resolverRequests.push({
+        request: { type: "file", path: attachment.path },
+        path: resolve(attachment.path),
+        registered: Boolean(attachment.metadata?.channelKey),
+      });
     }
   }
 
   if (resolverRequests.length > 0) {
-    const resolved = await attachmentResolver.resolveAll(resolverRequests);
-    blocks.push(...resolved.blocks);
-    for (const diagnostic of resolved.diagnostics) {
-      if (diagnostic.severity === "error" || diagnostic.severity === "warning") {
-        diagnostics.push(diagnostic.message);
+    for (const item of resolverRequests) {
+      const resolved = await attachmentResolver.resolve(item.request);
+      blocks.push(...resolved.blocks);
+      for (const diagnostic of resolved.diagnostics) {
+        if (diagnostic.severity === "error" || diagnostic.severity === "warning" || !item.registered) {
+          diagnostics.push(diagnostic.message);
+        }
       }
-    }
-    if (resolved.blocks.length > 0 && diagnostics.length === 0) {
-      for (const requestPath of resolverRequestPaths) {
-        if (requestPath) directContentPaths.add(requestPath);
+      if (resolved.blocks.length > 0 && resolved.diagnostics.length === 0 && item.path) {
+        directContentPaths.add(item.path);
       }
     }
   }

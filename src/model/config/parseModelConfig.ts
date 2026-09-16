@@ -17,7 +17,15 @@ import {
   type MultimodalConstraints,
 } from "../protocol/multimodal.js";
 import { lookupCatalogModel, lookupCatalogProvider } from "../catalog/index.js";
-import { resolveApiKey, type CredentialEnv } from "./resolveCredentials.js";
+import {
+  resolveApiKey,
+  resolveApiKeySource,
+  type CredentialEnv,
+} from "./resolveCredentials.js";
+import {
+  resolveCatalogProviderApiKeyEnvVar,
+  resolveCatalogProviderDefaultUrl,
+} from "./providerCredentialScope.js";
 import {
   isModelProtocol,
   isRecord,
@@ -30,6 +38,7 @@ import {
 
 export type ParseModelConfigOptions = {
   env?: CredentialEnv;
+  onInvalidProvider?: (providerId: string, error: ModelConfigError) => void;
 };
 
 export function parseModelConfig(
@@ -46,7 +55,12 @@ export function parseModelConfig(
 
   const providers: Record<string, ProviderConfig> = {};
   for (const [providerId, rawProvider] of Object.entries(rawConfig.providers)) {
-    providers[providerId] = parseProvider(providerId, rawProvider, options.env);
+    try {
+      providers[providerId] = parseProvider(providerId, rawProvider, options.env);
+    } catch (error) {
+      if (!options.onInvalidProvider || !(error instanceof ModelConfigError)) throw error;
+      options.onInvalidProvider(providerId, error);
+    }
   }
 
   return {
@@ -75,7 +89,7 @@ function parseProvider(providerId: string, rawProvider: unknown, env?: Credentia
   const trimmedUrl = typeof provider.url === "string" ? provider.url.trim() : "";
   const rawUrl = trimmedUrl.length > 0
     ? trimmedUrl
-    : resolveDefaultProviderUrl(providerId, protocol, catalogProvider?.defaultUrl);
+    : resolveCatalogProviderDefaultUrl(providerId, protocol);
   if (!rawUrl) {
     throw new ModelConfigError("invalid_config_value", `Provider ${providerId} requires a url.`, { providerId });
   }
@@ -92,11 +106,15 @@ function parseProvider(providerId: string, rawProvider: unknown, env?: Credentia
     models[modelId] = parseModelDefinition(modelId, protocol, rawModel, providerId);
   }
 
+  const effectiveApiKeyEnvVar = resolveCatalogProviderApiKeyEnvVar(providerId, protocol, rawUrl);
+  const credential = resolveProviderCredential(providerId, provider.apiKey, env, effectiveApiKeyEnvVar);
+
   return {
     id: providerId,
     protocol,
     url: rawUrl,
-    apiKey: resolveProviderApiKey(providerId, provider.apiKey, env, catalogProvider?.apiKeyEnvVar),
+    apiKey: credential.apiKey,
+    credentialSource: credential.source,
     timeoutMs: readOptionalPositiveNumber(provider.timeoutMs, "timeoutMs"),
     headers: readStringRecord(provider.headers, "headers"),
     extraBody: isRecord(provider.extraBody) ? (provider.extraBody as Record<string, unknown>) : undefined,
@@ -129,32 +147,24 @@ function parseSpeedMapping(
   return undefined;
 }
 
-function resolveProviderApiKey(
+function resolveProviderCredential(
   providerId: string,
   value: unknown,
   env?: CredentialEnv,
   catalogEnvVar?: string,
-): string {
+): { apiKey: string; source: "environment" | "literal" | "provider_default" } {
   if (providerId === "ollama" && value === undefined) {
-    return "ollama";
+    return { apiKey: "ollama", source: "provider_default" };
   }
   const hasBlankString = typeof value === "string" && value.trim().length === 0;
   const hasConfigValue = value !== undefined && value !== null && !hasBlankString;
   const effectiveValue = hasConfigValue
     ? value
     : catalogEnvVar ? `\${${catalogEnvVar}}` : value;
-  return resolveApiKey(effectiveValue, env);
-}
-
-function resolveDefaultProviderUrl(
-  providerId: string,
-  protocol: ModelProtocol,
-  catalogDefaultUrl: string | undefined,
-): string | undefined {
-  if (providerId === "google" && protocol === "openai") {
-    return "https://generativelanguage.googleapis.com/v1beta/openai";
-  }
-  return catalogDefaultUrl;
+  return {
+    apiKey: resolveApiKey(effectiveValue, env),
+    source: resolveApiKeySource(effectiveValue),
+  };
 }
 
 function parseRetryConfig(raw: unknown): ProviderRetryConfig | undefined {
@@ -193,7 +203,12 @@ function parseModelDefinition(
   const catalogHit = lookupCatalogModel(providerId, modelId);
   const catalogModel = catalogHit.model;
 
-  const capabilities = parseCapabilities(protocol, model.capabilities, catalogModel?.capabilities);
+  const capabilities = parseCapabilities(
+    protocol,
+    model.capabilities,
+    catalogModel?.capabilities,
+    providerId,
+  );
   // Cross-provider model-name matches are useful for token/capability hints,
   // but they must not silently opt a custom model into image delivery. Aliases
   // declared by the selected catalog provider are trusted like exact matches.
@@ -217,6 +232,7 @@ function parseCapabilities(
   protocol: ModelProtocol,
   rawCapabilities: unknown,
   catalogCapabilities?: ModelCapabilities,
+  providerId?: string,
 ): ModelCapabilities {
   const protocolDefaults =
     protocol === "anthropic"
@@ -227,7 +243,7 @@ function parseCapabilities(
   const defaults = catalogCapabilities ?? protocolDefaults;
 
   if (rawCapabilities === undefined) {
-    return defaults;
+    return applyOfficialSpeedDefault(defaults, providerId);
   }
 
   if (!isRecord(rawCapabilities)) {
@@ -268,12 +284,22 @@ function parseCapabilities(
     }
   }
 
-  return {
+  return applyOfficialSpeedDefault({
     ...mergeCapabilities(defaults, overrides),
     ...(capabilities.supportsThinking !== undefined
       ? { supportsThinkingExplicit: capabilities.supportsThinking }
       : {}),
-  } as ModelCapabilities;
+  } as ModelCapabilities, providerId, overrides.supportsSpeed);
+}
+
+function applyOfficialSpeedDefault(
+  capabilities: ModelCapabilities,
+  providerId: string | undefined,
+  explicitSpeed?: boolean,
+): ModelCapabilities {
+  if (explicitSpeed !== undefined) return capabilities;
+  if (providerId !== "openai" && providerId !== "anthropic") return capabilities;
+  return { ...capabilities, supportsSpeed: true };
 }
 
 function parseMultimodal(
@@ -403,7 +429,8 @@ function parseImageDetail(value: unknown): MultimodalConstraints["imageDetail"] 
 
 function assertValidUrl(value: string, providerId: string): void {
   try {
-    new URL(value);
+    const url = new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("Unsupported URL scheme");
   } catch {
     throw new ModelConfigError("invalid_url", `Provider ${providerId} url is invalid.`, {
       providerId,

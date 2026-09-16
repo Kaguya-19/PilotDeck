@@ -412,5 +412,22 @@ export function asAgentHandle(
   session: AgentSession | AgentHandle,
   options: AgentHandleOptions = {},
 ): AgentHandle {
-  return session instanceof AgentHandle ? session : new AgentHandle(session, options);
+  if (session instanceof AgentHandle) return session;
+  return new AgentHandle(session, {
+    ...options,
+    onDispose: async () => {
+      const results = await Promise.allSettled([
+        typeof (session as { dispose?: unknown }).dispose === "function"
+          ? session.dispose()
+          : Promise.resolve(),
+        options.onDispose?.() ?? Promise.resolve(),
+      ]);
+      const errors = results
+        .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+        .map((result) => result.reason);
+      if (errors.length > 0) {
+        throw new AggregateError(errors, "Failed to dispose agent session.");
+      }
+    },
+  });
 }

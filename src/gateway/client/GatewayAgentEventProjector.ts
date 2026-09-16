@@ -35,7 +35,7 @@ export class GatewayAgentEventProjector implements GatewayAgentEventProjectorPor
   }
 
   project(input: GatewayAgentEventProjectionInput): GatewayEvent[] {
-    return projectAgentEventForTurn(input.event, input.runId, this.toolResultArtifacts).map((event) =>
+    return projectAgentEventForTurn(input.event, input.runId, this.toolResultArtifacts, input.forwardSubagentText === true).map((event) =>
       withGatewayRunId(event, input.runId)
     );
   }
@@ -51,18 +51,22 @@ const DEFAULT_PROJECTOR = new GatewayAgentEventProjector();
 export function mapAgentEvent(
   event: AgentEvent,
   runId: string,
-  toolResultArtifacts?: GatewayToolResultArtifactStorePort,
+  options: GatewayToolResultArtifactStorePort | { forwardSubagentText?: boolean } = {},
 ): GatewayEvent[] {
-  const projector = toolResultArtifacts
-    ? new GatewayAgentEventProjector({ toolResultArtifacts })
-    : DEFAULT_PROJECTOR;
-  return projector.project({ event, runId });
+  const toolResultArtifacts = "persist" in options ? options : undefined;
+  const projector = toolResultArtifacts ? new GatewayAgentEventProjector({ toolResultArtifacts }) : DEFAULT_PROJECTOR;
+  return projector.project({
+    event,
+    runId,
+    ...("forwardSubagentText" in options ? { forwardSubagentText: options.forwardSubagentText } : {}),
+  });
 }
 
 function projectAgentEventForTurn(
   event: AgentEvent,
   runId: string,
   toolResultArtifacts: GatewayToolResultArtifactStorePort,
+  forwardSubagentText: boolean,
 ): GatewayEvent[] {
   switch (event.type) {
     case "turn_started":
@@ -77,6 +81,8 @@ function projectAgentEventForTurn(
       return [{ type: "model_request_started", model: event.model, provider: event.provider }];
     case "model_event":
       return mapModelEvent(event.event, runId);
+    case "prompt_suggestion":
+      return [{ type: "prompt_suggestion", suggestion: event.suggestion }];
     case "tool_calls_detected":
       return event.calls.map((call) => ({
         type: "tool_call_started",
@@ -84,6 +90,15 @@ function projectAgentEventForTurn(
         name: call.name,
         argsPreview: previewUnknown(call.input),
       }));
+    case "tool_progress":
+      return [{
+        type: "tool_progress",
+        toolCallId: event.toolCallId,
+        toolName: event.toolName,
+        message: event.message,
+        ...(event.metadata ? { metadata: event.metadata } : {}),
+        createdAt: event.createdAt,
+      }];
     case "tool_result": {
       const fullText = event.result.content.map(contentToText).join("\n");
       const resultPreview = limitGatewayToolResultPreview(fullText);
@@ -284,11 +299,33 @@ function projectAgentEventForTurn(
         type: "context_budget",
         used: event.snapshot.tokens,
         displayUsed: event.snapshot.tokens,
+        ...(event.snapshot.localEstimateTokens !== undefined ? { localEstimateTokens: event.snapshot.localEstimateTokens } : {}),
+        ...(event.snapshot.displayTokens !== undefined ? { displayTokens: event.snapshot.displayTokens } : {}),
+        ...(event.snapshot.estimateSource !== undefined ? { estimateSource: event.snapshot.estimateSource } : {}),
+        ...(event.snapshot.usageTokens !== undefined ? { usageTokens: event.snapshot.usageTokens } : {}),
+        ...(event.snapshot.calibrationActualInputTokens !== undefined
+          ? { calibrationActualInputTokens: event.snapshot.calibrationActualInputTokens }
+          : {}),
+        ...(event.snapshot.calibrationEstimatedInputTokens !== undefined
+          ? { calibrationEstimatedInputTokens: event.snapshot.calibrationEstimatedInputTokens }
+          : {}),
         total: totalContextTokens,
+        ...(event.snapshot.totalContextTokens !== undefined ? { totalContextTokens: event.snapshot.totalContextTokens } : {}),
+        maxContextTokens: event.snapshot.maxContextTokens,
         effectiveTotal: event.snapshot.effectiveContextTokens ?? event.snapshot.maxContextTokens,
+        ...(event.snapshot.effectiveContextTokens !== undefined
+          ? { effectiveContextTokens: event.snapshot.effectiveContextTokens }
+          : {}),
+        ...(event.snapshot.maxOutputTokens !== undefined ? { maxOutputTokens: event.snapshot.maxOutputTokens } : {}),
         reservedOutputTokens,
+        warningRatio: event.snapshot.warningRatio,
+        blockingRatio: event.snapshot.blockingRatio,
         ratio: event.snapshot.ratio,
         state: event.snapshot.state,
+        ...(event.snapshot.source !== undefined ? { source: event.snapshot.source } : {}),
+        ...(event.snapshot.exact !== undefined ? { exact: event.snapshot.exact } : {}),
+        ...(event.snapshot.estimatorError !== undefined ? { estimatorError: event.snapshot.estimatorError } : {}),
+        ...(event.snapshot.breakdown !== undefined ? { breakdown: event.snapshot.breakdown } : {}),
       }];
     }
     case "warning":
@@ -320,7 +357,7 @@ function projectAgentEventForTurn(
         },
       }];
     case "subagent_model_event":
-      return mapSubagentModelEvent(event);
+      return mapSubagentModelEvent(event, forwardSubagentText);
     case "subagent_tool_calls_detected":
       return event.calls.map((call) => ({
         type: "agent_status",
@@ -391,9 +428,14 @@ function projectAgentEventForTurn(
     case "pre_tool_execute":
     case "post_tool_execute":
     case "permission_requested":
-    case "permission_denied":
     case "elicitation_requested":
       return [];
+    case "permission_denied":
+      return [{
+        type: "permission_denied",
+        toolName: event.toolName,
+        reason: event.reason,
+      }];
     default:
       return [];
   }
@@ -456,10 +498,16 @@ function mapModelEvent(event: CanonicalModelEvent, runId: string): GatewayEvent[
   }
 }
 
-function mapSubagentModelEvent(event: Extract<AgentEvent, { type: "subagent_model_event" }>): GatewayEvent[] {
+function mapSubagentModelEvent(
+  event: Extract<AgentEvent, { type: "subagent_model_event" }>,
+  forwardSubagentText: boolean,
+): GatewayEvent[] {
   const base = { subagentId: event.subagentId, subagentType: event.subagentType };
   switch (event.event.type) {
     case "text_delta":
+      if (forwardSubagentText) {
+        return [{ type: "subagent_text_delta", ...base, text: event.event.text }];
+      }
       return [{ type: "agent_status", event: "subagent_text_delta", detail: { ...base, text: event.event.text } }];
     case "thinking_delta":
       return [{ type: "agent_status", event: "subagent_thinking_delta", detail: { ...base, text: event.event.text } }];

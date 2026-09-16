@@ -22,6 +22,8 @@ import {
 } from "../session/AgentSessionRuntimeBundle.js";
 import { createAgentTurnCapabilities } from "../loop/nativeAgentTurnCapabilitiesAdapter.js";
 import type { AgentTranscriptWriter } from "../../session/transcript/TranscriptWriter.js";
+import { ToolRegistry } from "../../tool/registry/ToolRegistry.js";
+import { McpRuntime, createMcpToolDefinitionsFromRuntime } from "../../mcp/index.js";
 import type { CanonicalAssistantTextSummary } from "./types.js";
 import type {
   CanonicalMessage,
@@ -30,7 +32,7 @@ import { messageContent } from "../../model/protocol/clone.js";
 import {
   buildForkedMessages,
 } from "./buildForkedMessages.js";
-import type { SubagentDefinition } from "./builtinSubagentTypes.js";
+import type { SubagentDefinition, SubagentMcpServerConfig } from "./builtinSubagentTypes.js";
 import {
   cloneReadFileState,
   cloneWriteSnapshots,
@@ -156,7 +158,13 @@ export class SubAgentSession {
     const subConfig = scopedRuntime.config;
     const sidechain = this.resolveSidechainTranscript();
     let sidechainRuntime: AgentSessionRuntimeResources | undefined;
+    let definitionMcp: McpRuntime | undefined;
     try {
+      definitionMcp = await this.attachDefinitionMcpTools(subDependencies.tools.registry);
+      this.options.parentDependencies.subagentComposition?.configureTools?.(
+        this.options.definition,
+        subDependencies.tools.registry,
+      );
       sidechainRuntime = sidechain?.recordSessionEvent
         ? new AgentSessionRuntimeBundle({
             sessionId: this.options.subagentSessionId,
@@ -207,6 +215,7 @@ export class SubAgentSession {
           break;
         }
         const event = next.value;
+        this.options.onActivity?.(event);
         this.forwardActivity(event);
         if (
           sidechain &&
@@ -253,6 +262,11 @@ export class SubAgentSession {
         errors.push(error);
       }
       try {
+        await definitionMcp?.stop();
+      } catch (error) {
+        errors.push(error);
+      }
+      try {
         await scopedRuntime.dispose();
       } catch (error) {
         errors.push(error);
@@ -264,11 +278,34 @@ export class SubAgentSession {
   }
 
   private buildInitialMessages(): CanonicalMessage[] {
-    return buildForkedMessages(this.options.directive);
+    return buildForkedMessages(this.options.directive, this.options.definition.initialPrompt);
   }
 
   private resolveSidechainTranscript(): SidechainTranscriptWriter | undefined {
     return this.options.sidechainTranscript;
+  }
+
+  /** Start only this definition's MCP endpoints and add their native tools. */
+  private async attachDefinitionMcpTools(registry: ToolRegistry): Promise<McpRuntime | undefined> {
+    const configured = this.options.definition.mcpServers;
+    if (!configured || Object.keys(configured).length === 0) return undefined;
+    const runtime = new McpRuntime(
+      Object.entries(configured).map(([id, config]) => toSubagentMcpServerSpec(id, config)),
+    );
+    try {
+      await runtime.start();
+      const allowed = new Set(this.options.definition.allowedTools);
+      const denied = new Set(this.options.definition.disallowedTools ?? []);
+      const wildcard = allowed.has("*");
+      for (const tool of await createMcpToolDefinitionsFromRuntime(runtime)) {
+        if ((!wildcard && !allowed.has(tool.name)) || denied.has(tool.name)) continue;
+        registry.registerOrReplace(tool);
+      }
+      return runtime;
+    } catch (error) {
+      await runtime.stop();
+      throw error;
+    }
   }
 
   private forwardActivity(event: AgentEvent): void {
@@ -319,6 +356,39 @@ function createSidechainTranscriptWriter(
     recordAcceptedInput: sidechain.recordAcceptedInput.bind(sidechain),
     recordDurableMessage: sidechain.recordDurableMessage.bind(sidechain),
     recordTurnResult: sidechain.recordTurnResult?.bind(sidechain) ?? (() => undefined),
+  };
+}
+
+function toSubagentMcpServerSpec(
+  id: string,
+  config: SubagentMcpServerConfig,
+): import("../../mcp/protocol/types.js").PilotDeckMcpServerSpec {
+  if (config.type === "stdio") {
+    return {
+      id,
+      transport: "stdio",
+      command: config.command,
+      ...(config.args?.length ? { args: [...config.args] } : {}),
+      ...(config.env ? { env: { ...config.env } } : {}),
+      ...(config.cwd ? { cwd: config.cwd } : {}),
+      ...(config.timeout !== undefined ? { callTimeoutMs: config.timeout } : {}),
+    };
+  }
+  if (config.type === "sse") {
+    return {
+      id,
+      transport: "sse",
+      url: config.url,
+      ...(config.headers ? { headers: { ...config.headers } } : {}),
+      ...(config.timeout !== undefined ? { callTimeoutMs: config.timeout } : {}),
+    };
+  }
+  return {
+    id,
+    transport: "streamable_http",
+    url: config.url,
+    ...(config.headers ? { headers: { ...config.headers } } : {}),
+    ...(config.timeout !== undefined ? { callTimeoutMs: config.timeout } : {}),
   };
 }
 

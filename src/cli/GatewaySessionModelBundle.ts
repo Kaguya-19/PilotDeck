@@ -34,7 +34,7 @@ export class GatewaySessionModelBundle {
   constructor(private readonly options: GatewaySessionModelBundleOptions) {}
 
   async modelCatalogList(input: ModelCatalogListInput): Promise<ModelCatalogListResult> {
-    const projectKey = await this.options.resolveProjectKey(input.projectKey);
+    const projectKey = await this.options.resolveProjectKey(input.projectKey ?? this.options.fallbackProjectKey);
     return this.options.policy.listCatalog({ ...input, projectKey });
   }
 
@@ -76,12 +76,27 @@ export class GatewaySessionModelBundle {
   }
 
   async resolveTurnModelSelection(
-    input: Pick<GatewaySubmitTurnInput, "projectKey" | "sessionKey" | "modelOverride">,
+    input: Pick<GatewaySubmitTurnInput, "projectKey" | "sessionKey" | "modelSelection" | "modelOverride">,
   ): Promise<{
     selection?: NonNullable<GatewaySubmitTurnInput["modelOverride"]>;
     source: "turn" | "session" | "router" | "default";
   }> {
     const projectKey = await this.options.resolveProjectKey(input.projectKey ?? this.options.fallbackProjectKey);
+    if (input.modelSelection !== undefined && input.modelOverride !== undefined) {
+      throw new DialogGatewayError(
+        "INVALID_MODEL_OVERRIDE",
+        "Specify modelSelection or modelOverride, not both.",
+      );
+    }
+    if (input.modelSelection !== undefined) {
+      if (!input.modelSelection || typeof input.modelSelection !== "object") {
+        throw new DialogGatewayError("INVALID_MODEL_OVERRIDE", "modelSelection must be an object.");
+      }
+      this.options.policy.validateSelection(projectKey, input.modelSelection);
+      return input.modelSelection.mode === "model"
+        ? { selection: input.modelSelection, source: "turn" }
+        : { source: "router" };
+    }
     if (input.modelOverride) {
       this.options.policy.validateExplicit(projectKey, input.modelOverride);
       return { selection: input.modelOverride, source: "turn" };

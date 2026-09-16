@@ -290,11 +290,19 @@ const turnSummaryProjection: SessionProjectionDefinition<AgentTurnSummaryProject
 
 const metadataProjection: SessionProjectionDefinition<SessionMetadataValue> = {
   name: AGENT_TRANSCRIPT_PROJECTION_NAMES.metadata,
-  version: 1,
+  version: 2,
   create: () => ({}),
   reduce(state, entry) {
-    if (entry.type !== "session_metadata") return state;
-    return mergeMetadata(state, entry.metadata);
+    if (entry.type === "session_metadata") return mergeMetadata(state, entry.metadata);
+    if (entry.type !== "accepted_input" || !entry.metadata?.modelSelection) return state;
+    const selection = entry.metadata.modelSelection as SessionMetadataValue["modelSelection"];
+    if (
+      selection?.mode !== "auto"
+      && !(selection?.mode === "model" && typeof selection.provider === "string" && typeof selection.model === "string")
+    ) {
+      return state;
+    }
+    return mergeMetadata(state, { modelSelection: { ...selection } });
   },
   checkpoint: {
     encode: (state) => checkpointJsonSnapshot(state, "session metadata"),

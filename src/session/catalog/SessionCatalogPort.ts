@@ -23,6 +23,8 @@ export type SessionInfo = {
 export type SessionCatalogListInput = {
   projectRoot: string;
   pilotHome: string;
+  /** @deprecated Native JSONL compatibility override. */
+  chatDir?: string;
   limit?: number;
   offset?: number;
   includeInternal?: boolean;

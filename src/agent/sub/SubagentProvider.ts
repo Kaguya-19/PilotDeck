@@ -56,6 +56,8 @@ export type SubagentRunRequest = {
   subagentId: string;
   maxTurns?: number;
   abortSignal?: AbortSignal;
+  /** Read-only activity tap used by the native observer composition. */
+  onActivity?: (event: import("../protocol/events.js").AgentEvent) => void;
   sidechainTranscript?: SidechainTranscriptWriter;
   mode?: "one-shot" | "continuable";
 };

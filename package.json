@@ -7,7 +7,8 @@
     "node": ">=22.13.0 <23"
   },
   "workspaces": [
-    "ui"
+    "ui",
+    "packages/sdk"
   ],
   "bin": {
     "pilotdeck": "./dist/src/cli/pilotdeck.js",
@@ -18,13 +19,13 @@
     "install:browser": "npx @playwright/mcp install-browser chrome-for-testing",
     "install:asr": "node scripts/install-asr.mjs",
     "prebuild": "npm run check:runtime && node scripts/bootstrap-pilotdeck-config.mjs && cd src/context/memory/edgeclaw-memory-core && npm run build",
-    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json && node -e \"require('fs').cpSync('src/extension/plugins/builtin','dist/src/extension/plugins/builtin',{recursive:true})\"",
+    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json && node -e \"const fs=require('fs'); fs.cpSync('src/extension/plugins/builtin','dist/src/extension/plugins/builtin',{recursive:true}); fs.cpSync('ui/server','dist/ui/server',{recursive:true})\"",
     "server": "npm run check:runtime && tsx src/cli/pilotdeck.ts server",
     "server:built": "npm run check:runtime && node dist/src/cli/pilotdeck.js server",
     "skills:migrate": "tsx src/cli/pilotdeck.ts skills migrate",
     "predev": "npm run check:runtime && node scripts/bootstrap-pilotdeck-config.mjs",
     "dev": "node scripts/dev-launcher.mjs",
-    "test": "npm run build && node --test --test-force-exit --test-timeout 60000 \"dist/tests/**/*.test.js\" \"dist/tests/**/*.spec.js\"",
+    "test": "npm run build && node --test --test-force-exit --test-concurrency 8 --test-timeout 300000 \"dist/tests/**/*.test.js\" \"dist/tests/**/*.spec.js\"",
     "e2e:real-compaction": "npm run build && PILOTDECK_RUN_REAL_COMPACTION_E2E=1 node dist/tests/agent/e2e/run-real-compaction.js",
     "e2e:real-agent-lifecycle-hooks": "npm run build && PILOTDECK_RUN_REAL_AGENT_LIFECYCLE_E2E=1 node dist/tests/agent/e2e/run-real-agent-lifecycle-hooks.js"
   },
@@ -42,6 +43,8 @@
     "@types/react": "^19.2.14",
     "@types/turndown": "^5.0.6",
     "@vscode/ripgrep": "^1.18.0",
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
     "csv-parse": "^7.0.0",
     "edgeclaw-memory-core": "file:src/context/memory/edgeclaw-memory-core",
     "ink": "^7.0.2",

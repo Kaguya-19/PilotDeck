@@ -2,6 +2,7 @@ import { basename, dirname, join, relative } from "node:path";
 import type { CanonicalMessage } from "../../model/index.js";
 import type { AgentTurnResult } from "../../agent/protocol/result.js";
 import { JsonlSessionEventStore } from "../events/JsonlSessionEventStore.js";
+import { SessionRuntime } from "../events/SessionRuntime.js";
 import type { SessionEventDraft, SessionEventStore } from "../events/SessionEventStore.js";
 import {
   classifyDurableMessageEntry,
@@ -9,6 +10,7 @@ import {
   SUBAGENT_PROMPT_PREVIEW_BYTES,
   SUBAGENT_SUMMARY_PREVIEW_BYTES,
   type AgentControlBoundaryTranscriptEntry,
+  type AgentFileSnapshotRecordedTranscriptEntry,
   type AgentMessageTranscriptEntry,
   type AgentSubagentCompletedTranscriptEntry,
   type AgentTranscriptEntry,
@@ -33,6 +35,12 @@ export type JsonlTranscriptWriterOptions = {
   uuid?: () => string;
   eventStore?: SessionEventStore;
   /**
+   * Optional durable append sink. When supplied, entries are serialized by
+   * this writer but persisted by the owning host instead of the local JSONL
+   * file. The sink must provide atomic append semantics for its key.
+   */
+  appendEntry?: (path: string, entry: AgentTranscriptEntry) => void | Promise<void>;
+  /**
    * Optional resolver mapping a subagentId → absolute sidechain path. Wired
    * by the parent session so {@link JsonlTranscriptWriter#forSubagent} can
    * derive a sidechain writer without the caller computing paths. Defaults
@@ -44,14 +52,27 @@ export type JsonlTranscriptWriterOptions = {
 export class JsonlTranscriptWriter implements AgentTranscriptWriter {
   private readonly eventStore: SessionEventStore;
   private readonly now: () => Date;
+  private writeTail: Promise<void> = Promise.resolve();
+  private closed = false;
 
   constructor(private readonly options: JsonlTranscriptWriterOptions) {
     this.now = options.now ?? (() => new Date());
-    this.eventStore = options.eventStore ?? new JsonlSessionEventStore({
-      path: options.path,
-      now: this.now,
-      uuid: options.uuid,
-    });
+    if (options.eventStore) {
+      this.eventStore = options.eventStore;
+    } else if (options.appendEntry) {
+      const eventStore = new SessionRuntime({ now: this.now, uuid: options.uuid });
+      eventStore.subscribe(
+        (entry) => options.appendEntry!(options.path, entry),
+        { failureMode: "propagate" },
+      );
+      this.eventStore = eventStore;
+    } else {
+      this.eventStore = new JsonlSessionEventStore({
+        path: options.path,
+        now: this.now,
+        uuid: options.uuid,
+      });
+    }
   }
 
   /**
@@ -169,7 +190,21 @@ export class JsonlTranscriptWriter implements AgentTranscriptWriter {
   }
 
   recordEntry(entry: AgentTranscriptEntry): Promise<void> {
-    return this.eventStore.appendRecorded(entry);
+    return this.enqueueWrite(() => this.eventStore.appendRecorded(entry));
+  }
+
+  recordFileSnapshot(
+    sessionId: string,
+    turnId: string,
+    snapshot: Omit<AgentFileSnapshotRecordedTranscriptEntry, "type" | "sessionId" | "turnId" | "sequence" | "createdAt" | "entryId" | "parentEntryId">,
+  ): Promise<void> {
+    return this.append(sessionId, turnId, { type: "file_snapshot_recorded", ...snapshot });
+  }
+
+  async close(): Promise<void> {
+    this.closed = true;
+    await this.writeTail.catch(() => undefined);
+    await this.eventStore.flush();
   }
 
   /**
@@ -237,7 +272,12 @@ export class JsonlTranscriptWriter implements AgentTranscriptWriter {
     const path =
       this.options.subagentTranscriptPath?.(subagentId) ??
       defaultSubagentPath(this.options.path, subagentId);
-    const writer = new JsonlTranscriptWriter({ path, now: now ?? this.now, uuid: this.options.uuid });
+    const writer = new JsonlTranscriptWriter({
+      path,
+      now: now ?? this.now,
+      uuid: this.options.uuid,
+      ...(this.options.appendEntry ? { appendEntry: this.options.appendEntry } : {}),
+    });
     return { subagentId, writer, transcriptPath: path };
   }
 
@@ -254,7 +294,14 @@ export class JsonlTranscriptWriter implements AgentTranscriptWriter {
   }
 
   private append(sessionId: string, turnId: string, event: SessionEventDraft): Promise<void> {
-    return this.eventStore.append(sessionId, turnId, event).then(() => undefined);
+    return this.enqueueWrite(() => this.eventStore.append(sessionId, turnId, event).then(() => undefined));
+  }
+
+  private enqueueWrite(operation: () => Promise<void>): Promise<void> {
+    if (this.closed) return Promise.resolve();
+    const write = this.writeTail.then(() => this.closed ? undefined : operation());
+    this.writeTail = write.then(() => undefined, () => undefined);
+    return write;
   }
 }
 

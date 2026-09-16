@@ -134,6 +134,10 @@ export type ProjectRuntimeResourcesBundleOptions = {
   routerSessionCustomRouterFactory?: () => RouterSessionCustomRouterPort;
   /** Application-selected per-generation Router provider-health policy. */
   routerProviderHealthFactory?: (input: { now: () => number }) => RouterProviderHealthPort;
+  modelPolicy?: {
+    isAllowed(snapshot: PilotConfigSnapshot, model: { provider: string; model: string }): boolean;
+    assertAllowed(snapshot: PilotConfigSnapshot, model: { provider: string; model: string }): void;
+  };
   /** Application profile choices frozen with this project runtime generation. */
   runtimeProfileOverrides?: PilotDeckRuntimeProfileOverrides;
   createRouterConfig: ProjectRouterRuntimeBundleOptions["createRouterConfig"];
@@ -206,6 +210,10 @@ export class ProjectRuntimeResourcesBundle {
       telemetry: this.options.telemetry,
       customRouterRegistry: routerSessionCustomRouters,
       createProviderHealth: this.options.routerProviderHealthFactory,
+      ...(this.options.modelPolicy ? {
+        isModelAllowed: (model) => this.options.modelPolicy!.isAllowed(snapshot, model),
+        assertModelAllowed: (model) => this.options.modelPolicy!.assertAllowed(snapshot, model),
+      } : {}),
       createRouterConfig: this.options.createRouterConfig,
       createRouterEventBus: this.options.createRouterEventBus,
       sessionState: this.options.routerSessionState,

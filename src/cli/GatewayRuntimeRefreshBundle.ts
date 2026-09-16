@@ -1,5 +1,3 @@
-import { HookRuntime } from "../extension/index.js";
-import { LifecycleRuntime } from "../lifecycle/index.js";
 import type { ProjectMemoryMaintenancePort } from "./ProjectMemoryMaintenanceController.js";
 
 export type GatewayRuntimeConfigEvent = {
@@ -29,6 +27,7 @@ export type GatewayRuntimeRefreshBundleOptions = {
   memoryDiagnosticsEnabled: boolean;
   logMemoryDiagnostic: (input: Record<string, unknown>) => void;
   summarizeMessages: (messages: unknown) => Record<string, unknown>;
+  dispatchSdkConfigChange?(payload: { changedPaths: string[]; changeClasses: string[] }): void;
   warn?: (message: string, error?: unknown) => void;
   log?: (message: string) => void;
 };
@@ -43,7 +42,6 @@ type GatewayNotificationServer = {
  * only coordinates their existing callbacks and notification projection.
  */
 export class GatewayRuntimeRefreshBundle {
-  private readonly lifecycle = new LifecycleRuntime(new HookRuntime({}));
   private readonly warn: (message: string, error?: unknown) => void;
   private readonly log: (message: string) => void;
   private unsubscribe?: () => void;
@@ -140,6 +138,7 @@ export class GatewayRuntimeRefreshBundle {
       return;
     }
     this.log(`[pilotdeck] Config reloaded, refreshing runtimes: ${changedPaths.join(", ")}`);
+    this.options.dispatchSdkConfigChange?.({ changedPaths, changeClasses });
     void this.options.registry.reload().then(() => {
       const router = this.options.getRouter();
       if (this.options.memoryDiagnosticsEnabled) {
@@ -151,12 +150,6 @@ export class GatewayRuntimeRefreshBundle {
         });
       }
       router?.markAllDirty("config_changed");
-      this.lifecycle.dispatch({
-        event: "ConfigChange",
-        baseInput: { sessionId: "", transcriptPath: "", cwd: this.options.projectRoot },
-        payload: { changedPaths, changeClasses },
-        matchQuery: "ConfigChange",
-      }).catch(() => {});
       this.boundServer?.broadcastNotification("config_changed", { changedPaths, changeClasses });
     }, (error) => {
       this.warn("[pilotdeck] Config runtime refresh rejected; keeping previous runtimes:", error);

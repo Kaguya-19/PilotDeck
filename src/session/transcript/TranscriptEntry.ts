@@ -328,14 +328,21 @@ export type FileHistorySnapshotRecord = {
       backupTime: string;
     }
   >;
+  expectedFileStates?: Record<string, import("../filesystem/types.js").FileHistoryExpectedFileState>;
   timestamp: string;
 };
 
-export type AgentFileSnapshotRecordedTranscriptEntry = AgentTranscriptEntryBase &
-  FileHistorySnapshotRecord & {
-    type: "file_snapshot_recorded";
-    snapshotKind: "create" | "update";
-  };
+export type AgentFileSnapshotRecordedTranscriptEntry = AgentTranscriptEntryBase & {
+  type: "file_snapshot_recorded";
+  messageId: string;
+  trackedFileBackups: FileHistorySnapshotRecord["trackedFileBackups"];
+  expectedFileStates?: FileHistorySnapshotRecord["expectedFileStates"];
+  /** Current event-store representation. */
+  timestamp?: string;
+  snapshotKind?: "create" | "update";
+  /** Legacy SDK compatibility representation. */
+  snapshotTimestamp?: string;
+};
 
 export type CompactBoundaryMetadata = {
   /** Stable identity shared by live and persisted representations. */

@@ -4,6 +4,7 @@ export {
   readAgentProjectSessionPersistence,
   readSubagentProjectSessionPersistence,
   sanitizeSessionIdForPath,
+  type AgentProjectSubagentTranscriptHandle,
   type AgentProjectSessionStorage,
   type AgentProjectSessionStorageOptions,
   type SubagentProjectSessionStorageOptions,
@@ -244,6 +245,7 @@ export {
   type FileArtifactOperation,
   type FileArtifactSource,
   type FileArtifactStatus,
+  type ToolResultArtifactStorage,
 } from "./artifacts/index.js";
 export type {
   AgentAcceptedInputTranscriptEntry,
@@ -305,6 +307,7 @@ export {
   type CreateBackupOptions,
   type CreateBackupResult,
   type FileHistoryBackup,
+  type FileHistoryBackupStorage,
   type FileHistoryDiffStats,
   type FileHistorySnapshot,
   type FileHistorySnapshotRecordedEntry,

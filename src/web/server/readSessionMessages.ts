@@ -28,8 +28,11 @@ import {
   readAgentProjectSessionPersistence,
   readSubagentProjectSessionPersistence,
   readTranscript,
+  listProjectSessions,
+  type AgentProjectSessionStorage,
   type WebTokenUsageProjectionResult,
 } from "../../session/index.js";
+import { readAgentProjectSessionTranscript } from "../../session/storage/ProjectSessionStorage.js";
 import type { SessionCatalogPort, SessionInfo } from "../../session/catalog/SessionCatalogPort.js";
 import type { ProjectSessionStorageProvider } from "../../session/storage/ProjectSessionStorageProvider.js";
 import type {
@@ -50,7 +53,9 @@ export type ReadWebSessionMessagesOptions = {
   projectRoot: string;
   pilotHome: string;
   /** Application-selected read-only catalog used to resolve session metadata. */
-  sessionCatalog: SessionCatalogPort;
+  sessionCatalog?: SessionCatalogPort;
+  /** @deprecated Use storageProvider plus sessionCatalog. */
+  storage?: AgentProjectSessionStorage;
   /** Optional selected persistence backend for standard Agent session history. */
   storageProvider?: ProjectSessionStorageProvider;
   maxContextTokens?: number;
@@ -66,17 +71,21 @@ export async function readWebSessionMessages(
   options: ReadWebSessionMessagesOptions,
 ): Promise<WebReadSessionMessagesResult> {
   const effectiveProjectRoot = input.projectKey ?? options.projectRoot;
-  const chatDir = getPilotProjectChatDir(effectiveProjectRoot, options.pilotHome);
-  const transcriptPath = resolveTranscriptPath(input, chatDir);
+  const chatDir = options.storage?.chatDir ?? getPilotProjectChatDir(effectiveProjectRoot, options.pilotHome);
+  const transcriptPath = isBackgroundTaskInput(input)
+    ? resolveTranscriptPath(input, chatDir)
+    : options.storage?.transcriptPath ?? resolveTranscriptPath(input, chatDir);
   const isBackgroundTask = isBackgroundTaskInput(input);
-  const { entries } = !isBackgroundTask && options.storageProvider
-    ? await readAgentProjectSessionPersistence({
+  const { entries } = !isBackgroundTask && options.storage
+    ? await readAgentProjectSessionTranscript(options.storage)
+    : !isBackgroundTask && options.storageProvider
+      ? await readAgentProjectSessionPersistence({
         projectRoot: effectiveProjectRoot,
         pilotHome: options.pilotHome,
         sessionId: input.sessionKey,
         storageProvider: options.storageProvider,
-    })
-    : await readTranscript(transcriptPath);
+      })
+      : await readTranscript(transcriptPath);
   const sessionInfo = isBackgroundTask ? undefined : await locateSession(input.sessionKey, entries, {
     ...options,
     projectRoot: effectiveProjectRoot,
@@ -263,19 +272,21 @@ export async function readSubagentWebMessages(
   options: ReadWebSessionMessagesOptions,
 ): Promise<{ messages: WebMessage[]; total: number }> {
   const effectiveProjectRoot = input.projectKey ?? options.projectRoot;
-  const chatDir = getPilotProjectChatDir(effectiveProjectRoot, options.pilotHome);
-  const parentTranscriptPath = resolveTranscriptPath(input, chatDir);
+  const chatDir = options.storage?.chatDir ?? getPilotProjectChatDir(effectiveProjectRoot, options.pilotHome);
+  const parentTranscriptPath = options.storage?.transcriptPath ?? resolveTranscriptPath(input, chatDir);
   const parentSessionId = input.parentSessionId ?? input.sessionKey;
   const isBackgroundTask = isBackgroundTaskInput(input);
 
-  const { entries: parentEntries } = !isBackgroundTask && options.storageProvider
-    ? await readAgentProjectSessionPersistence({
+  const { entries: parentEntries } = !isBackgroundTask && options.storage
+    ? await readAgentProjectSessionTranscript(options.storage)
+    : !isBackgroundTask && options.storageProvider
+      ? await readAgentProjectSessionPersistence({
         projectRoot: effectiveProjectRoot,
         pilotHome: options.pilotHome,
         sessionId: parentSessionId,
         storageProvider: options.storageProvider,
       })
-    : await readTranscript(parentTranscriptPath);
+      : await readTranscript(parentTranscriptPath);
   const sidechainReference = projectSubagentReferences(parentEntries).startedById.get(input.subagentId);
   const sidechainRelative = sidechainReference?.transcriptRelativePath;
 
@@ -283,8 +294,14 @@ export async function readSubagentWebMessages(
     return { messages: [], total: 0 };
   }
 
-  const { entries } = !isBackgroundTask && options.storageProvider && sidechainReference.subagentSessionId
-    ? await readSubagentProjectSessionPersistence({
+  const { entries } = !isBackgroundTask && options.storage?.readTranscriptAtPath && sidechainRelative
+    ? await options.storage.readTranscriptAtPath(resolveRelativeTranscriptPath(
+        sidechainRelative,
+        dirname(parentTranscriptPath),
+        chatDir,
+      ))
+    : !isBackgroundTask && options.storageProvider && sidechainReference.subagentSessionId
+      ? await readSubagentProjectSessionPersistence({
         projectRoot: effectiveProjectRoot,
         pilotHome: options.pilotHome,
         parentSessionId,
@@ -292,13 +309,13 @@ export async function readSubagentWebMessages(
         sidechainId: input.subagentId,
         storageProvider: options.storageProvider,
       })
-    : sidechainRelative
-      ? await readTranscript(resolveRelativeTranscriptPath(
+      : sidechainRelative
+        ? await readTranscript(resolveRelativeTranscriptPath(
           sidechainRelative,
           dirname(parentTranscriptPath),
           chatDir,
         ))
-      : { entries: [] };
+        : { entries: [] };
   const webReplay = extractSubagentExecutionMessages(entries);
 
   const flattenedPerMessage: WebMessage[][] = webReplay.messages
@@ -398,15 +415,21 @@ async function locateSession(
 ): Promise<SessionInfo | undefined> {
   let sessions: SessionInfo[];
   try {
-    sessions = await options.sessionCatalog.list({
-      projectRoot: options.projectRoot,
-      pilotHome: options.pilotHome,
-    });
+    sessions = options.sessionCatalog
+      ? await options.sessionCatalog.list({
+          projectRoot: options.projectRoot,
+          pilotHome: options.pilotHome,
+        })
+      : await listProjectSessions({
+          projectRoot: options.projectRoot,
+          pilotHome: options.pilotHome,
+          ...(options.storage ? { chatDir: options.storage.chatDir } : {}),
+        });
   } catch (error) {
     // Exact-session history already has durable entries from the selected
     // provider. Catalog enumeration is optional and must not force a JSONL
     // fallback for this direct read.
-    if (!options.storageProvider) throw error;
+    if (!options.storageProvider && !options.storage) throw error;
     return sessionInfoFromEntries(sessionKey, entries, options.projectRoot);
   }
   // sessionId in SessionInfo is the on-disk filename (already sanitized);
@@ -521,6 +544,7 @@ export function flattenCanonicalMessage(
       role,
       kind: "text",
       text: textBuffer,
+      ...(role === "assistant" && typeof message.metadata?.model === "string" ? { model: message.metadata.model } : {}),
       ...(pendingImages.length > 0 ? { images: pendingImages } : {}),
       ...(context.forkUnsupportedContent
         ? {

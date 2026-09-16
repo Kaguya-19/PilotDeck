@@ -4,6 +4,7 @@ import type { PilotDeckToolDefinition, PilotDeckToolRuntimeContext } from "../pr
 import { contentToText, type PilotDeckToolResult } from "../protocol/result.js";
 import type { PilotDeckToolValidationIssue } from "../protocol/schema.js";
 import { isReadOnlyShellCommand } from "./bash/permissions.js";
+import type { PilotDeckCommandRunner } from "./bash/commandRunner.js";
 import { collectPythonSyntaxDiagnostics } from "./filesystem/syntaxDiagnostics.js";
 import { createNodeExecutionWorkspacePort } from "../execution-world/NodeExecutionWorkspacePort.js";
 import type { ExecutionWorkspacePort } from "../execution-world/ExecutionWorkspacePort.js";
@@ -44,6 +45,8 @@ export type ExecuteCodeOutput = {
 export type CreateExecuteCodeToolOptions = {
   /** Defaults to true. False removes the web_search Python helper and RPC capability. */
   webSearch?: boolean;
+  /** Optional host-selected helper allowlist. */
+  allowedTools?: readonly ExecuteCodeHelperToolName[];
   /** Private temporary workspace provider; composition roots may replace the Node provider. */
   executionWorkspace?: ExecutionWorkspacePort;
   /** Code process provider; the builtin retains Python RPC and tool-dispatch ownership. */
@@ -82,6 +85,7 @@ export async function handleExecuteCodeRpcLineForTests(
     expectedToken?: string;
     executeTool?: NonNullable<PilotDeckToolRuntimeContext["executeTool"]>;
     webSearch?: boolean;
+    allowedTools?: readonly ExecuteCodeHelperToolName[];
   } = {},
 ): Promise<RpcResponse> {
   return handleRpcLine(line, {
@@ -107,7 +111,10 @@ export async function handleExecuteCodeRpcLineForTests(
     nextToolCall: () => 1,
     canCallTool: () => true,
     expectedToken: options.expectedToken,
-    allowedTools: resolveExecuteCodeAllowedTools({ webSearch: options.webSearch }),
+    allowedTools: resolveExecuteCodeAllowedTools({
+      webSearch: options.webSearch,
+      ...(options.allowedTools ? { allowedTools: options.allowedTools } : {}),
+    }),
   });
 }
 
@@ -125,9 +132,15 @@ const EXECUTE_CODE_BASE_ALLOWED_TOOLS = [
   "bash",
 ] as const;
 
+export type ExecuteCodeHelperToolName = (typeof EXECUTE_CODE_BASE_ALLOWED_TOOLS)[number] | "web_search";
+
 function resolveExecuteCodeAllowedTools(
   options: CreateExecuteCodeToolOptions,
 ): ReadonlySet<string> {
+  if (options.allowedTools) {
+    const known = new Set<ExecuteCodeHelperToolName>([...EXECUTE_CODE_BASE_ALLOWED_TOOLS, "web_search"]);
+    return new Set(options.allowedTools.filter((name) => known.has(name)));
+  }
   const allowed = new Set<string>(EXECUTE_CODE_BASE_ALLOWED_TOOLS);
   if (options.webSearch !== false) {
     allowed.add("web_search");
@@ -138,25 +151,41 @@ function resolveExecuteCodeAllowedTools(
 export function createExecuteCodeTool(
   options: CreateExecuteCodeToolOptions = {},
 ): PilotDeckToolDefinition<ExecuteCodeInput, ExecuteCodeOutput> {
-  const webSearchEnabled = options.webSearch !== false;
   const allowedTools = resolveExecuteCodeAllowedTools(options);
   const executionWorkspace = options.executionWorkspace ?? createNodeExecutionWorkspacePort();
   const codeRuntime = options.codeRuntime ?? createNodeCodeRuntimePort();
   const executionTransport = options.executionTransport ?? createNodeExecutionTransportPort();
   const sandbox = options.sandbox;
   const availableHelpers = [
-    ...(webSearchEnabled ? ["web_search"] : []),
-    ...EXECUTE_CODE_BASE_ALLOWED_TOOLS,
+    ...allowedTools,
   ];
+  const supportsFileWrites = allowedTools.has("write_file") || allowedTools.has("edit_file");
+  const helperExample = allowedTools.has("edit_file")
+    ? "grep -> read_file -> edit_file"
+    : allowedTools.has("read_file")
+      ? "grep -> read_file"
+      : "bash -> concise output";
+  const fileWriteGuidance = supportsFileWrites
+    ? "Before modifying an existing file, call read_file first so PilotDeck can verify freshness. Prefer edit_file for targeted changes and write_file for new files or complete rewrites. "
+    : "This session exposes only the listed helper subset; unavailable file-write and network helpers must not be imported or called. ";
+  const helperSurface = availableHelpers.length > 0
+    ? `Available helper functions: ${availableHelpers.join(", ")}. `
+    : "No PilotDeck helper RPC is available in this strict host sandbox. ";
+  const helperGuidance = availableHelpers.length > 0
+    ? `Use normal Python control flow to orchestrate tools: loops for batch work, conditionals for branching, data structures for aggregation, and try/except around individual helper calls when one failure should not abort the whole script. Helper failures raise RuntimeError. You can chain helper results, e.g. ${helperExample}. Print only the concise final result needed by the agent. `
+    : "Use normal Python only against the profile-owned process and its mounted workspace; do not import PilotDeck helpers. ";
+  const executionEnvironment = sandbox
+    ? "The script runs through a Gateway-selected host sandbox runner. It receives only the private RPC/module environment needed for this execution, not the Gateway process environment, provider credentials, or arbitrary host variables. "
+    : "The script runs from the workspace cwd and inherits the same runtime environment as normal tools such as bash, including configured API, proxy, PATH, virtualenv, and conda variables; do not print secrets or dump the full environment. ";
   return {
     name: "execute_code",
     description:
       "Run a local Python 3 script that can call a small allow-list of PilotDeck tools via `import pilotdeck_tools`. " +
-      "The script runs from the workspace cwd and inherits the same runtime environment as normal tools such as bash, including configured API, proxy, PATH, virtualenv, and conda variables; do not print secrets or dump the full environment. " +
+      executionEnvironment +
       "Only the script's final stdout/stderr summary is returned to the model; intermediate tool results stay inside the script. " +
-      `Available helper functions: ${availableHelpers.join(", ")}. ` +
-      "Use normal Python control flow to orchestrate tools: loops for batch work, conditionals for branching, data structures for aggregation, and try/except around individual helper calls when one failure should not abort the whole script. Helper failures raise RuntimeError. You can chain helper results, e.g. grep -> read_file -> edit_file. Print only the concise final result needed by the agent. " +
-      "Before modifying an existing file, call read_file first so PilotDeck can verify freshness. Prefer edit_file for targeted changes and write_file for new files or complete rewrites. " +
+      helperSurface +
+      helperGuidance +
+      fileWriteGuidance +
       "Notebook edits, agent, task tools, MCP tools, and execute_code itself are not available.",
     kind: "custom",
     inputSchema: {
@@ -200,7 +229,6 @@ export function createExecuteCodeTool(
       const startedAt = Date.now();
       const result = await runExecuteCode(input, context, startedAt, {
         allowedTools,
-        webSearchEnabled,
         executionWorkspace,
         codeRuntime,
         executionTransport,
@@ -351,7 +379,6 @@ async function runExecuteCode(
   startedAt: number,
   options: {
     allowedTools: ReadonlySet<string>;
-    webSearchEnabled: boolean;
     executionWorkspace: ExecutionWorkspacePort;
     codeRuntime: CodeRuntimePort;
     executionTransport: ExecutionTransportPort;
@@ -404,7 +431,7 @@ async function runExecuteCode(
   try {
     await executionWorkspace.writeText(
       "pilotdeck_tools.py",
-      generatePilotDeckToolsModule(transport.kind, options.webSearchEnabled),
+      generatePilotDeckToolsModule(transport.kind, options.allowedTools),
     );
     await executionWorkspace.writeText("script.py", input.code);
 
@@ -604,10 +631,17 @@ function formatToolErrorDetails(result: Extract<PilotDeckToolResult, { type: "er
 
 function generatePilotDeckToolsModule(
   kind: RpcTransport["kind"],
-  webSearchEnabled: boolean,
+  allowedTools: ReadonlySet<string>,
 ): string {
+  // A strict host profile deliberately receives an importable but empty
+  // module. This avoids exposing the RPC socket or any helper function to the
+  // sandboxed Python process; the server still rejects raw protocol requests
+  // because it receives the same empty allowlist.
+  if (allowedTools.size === 0) {
+    return '"""No PilotDeck helper RPC is available in this strict host sandbox."""\n';
+  }
   const transportHeader = kind === "tcp" ? TCP_PYTHON_TRANSPORT_HEADER : UDS_PYTHON_TRANSPORT_HEADER;
-  const webSearchHelper = webSearchEnabled ? `
+  const webSearchHelper = allowedTools.has("web_search") ? `
 def web_search(query, country=None):
     args = {"query": query}
     if country is not None:
@@ -615,9 +649,7 @@ def web_search(query, country=None):
     return _call("web_search", args)
 
 ` : "";
-  return `${transportHeader}
-${webSearchHelper}
-
+  const webFetchHelper = allowedTools.has("web_fetch") ? `
 def web_fetch(url, mode=None, prompt=None):
     args = {"url": url}
     if mode is not None:
@@ -626,7 +658,8 @@ def web_fetch(url, mode=None, prompt=None):
         args["prompt"] = prompt
     return _call("web_fetch", args)
 
-
+` : "";
+  const readFileHelper = allowedTools.has("read_file") ? `
 def read_file(file_path, offset=0, limit=None):
     args = {"file_path": file_path}
     if offset is not None and offset > 0:
@@ -635,11 +668,13 @@ def read_file(file_path, offset=0, limit=None):
         args["limit"] = limit
     return _call("read_file", args)
 
-
+` : "";
+  const writeFileHelper = allowedTools.has("write_file") ? `
 def write_file(file_path, content):
     return _call("write_file", {"file_path": file_path, "content": content})
 
-
+` : "";
+  const editFileHelper = allowedTools.has("edit_file") ? `
 def edit_file(file_path, old_string, new_string, replace_all=False):
     return _call("edit_file", {
         "file_path": file_path,
@@ -648,7 +683,8 @@ def edit_file(file_path, old_string, new_string, replace_all=False):
         "replace_all": replace_all,
     })
 
-
+` : "";
+  const grepHelper = allowedTools.has("grep") ? `
 def grep(pattern, path=None, glob=None):
     args = {"pattern": pattern}
     if path is not None:
@@ -657,14 +693,16 @@ def grep(pattern, path=None, glob=None):
         args["glob"] = glob
     return _call("grep", args)
 
-
+` : "";
+  const globHelper = allowedTools.has("glob") ? `
 def glob(pattern, path=None):
     args = {"pattern": pattern}
     if path is not None:
         args["path"] = path
     return _call("glob", args)
 
-
+` : "";
+  const bashHelper = allowedTools.has("bash") ? `
 def bash(command, timeout_ms=None, workdir=None):
     args = {"command": command}
     if workdir is not None:
@@ -672,7 +710,9 @@ def bash(command, timeout_ms=None, workdir=None):
     if timeout_ms is not None:
         args["timeout"] = timeout_ms
     return _call("bash", args)
-`;
+` : "";
+  return `${transportHeader}
+${webSearchHelper}${webFetchHelper}${readFileHelper}${writeFileHelper}${editFileHelper}${grepHelper}${globHelper}${bashHelper}`;
 }
 
 const UDS_PYTHON_TRANSPORT_HEADER = `"""Auto-generated PilotDeck execute_code RPC helpers."""

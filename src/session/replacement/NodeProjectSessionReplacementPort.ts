@@ -39,6 +39,8 @@ export type RecoverNodeProjectSessionReplacementsResult = {
 export type RecoverNodeProjectSessionReplacementsOptions = {
   /** @internal Injectable process probe for deterministic recovery tests. */
   isProcessAlive?: (pid: number) => boolean;
+  /** @deprecated Explicit native chat directories retained for SDK compatibility. */
+  chatDirs?: readonly string[];
 };
 
 export class NodeProjectSessionReplacementError extends Error {
@@ -53,8 +55,9 @@ function replacementPaths(
   projectKey: string,
   pilotHome: string,
   transactionId?: string,
+  resolvedChatDir?: string,
 ): { transcriptPath: string; safeId: string; backupPath?: string; journalPath?: string } {
-  const chatDir = getPilotProjectChatDir(projectKey, pilotHome);
+  const chatDir = resolvedChatDir ? resolve(resolvedChatDir) : getPilotProjectChatDir(projectKey, pilotHome);
   const safeId = sanitizeSessionIdForPath(sessionKey);
   const transcriptPath = resolve(chatDir, `${safeId}.jsonl`);
   return {
@@ -206,18 +209,10 @@ export function recoverNodeProjectSessionReplacements(
   };
   const processIsAlive = options.isProcessAlive ?? isProcessAlive;
   const groups = new Map<string, { transcriptPath: string; artifacts: ReplacementArtifact[] }>();
-  const projectsDir = resolve(pilotHome, "projects");
-  let projectDirNames: string[];
-  try {
-    projectDirNames = readdirSync(projectsDir, { withFileTypes: true, encoding: "utf8" })
-      .filter((entry) => entry.isDirectory())
-      .map((entry) => entry.name);
-  } catch {
-    return result;
-  }
-
-  for (const projectDirName of projectDirNames) {
-    const chatDir = resolve(projectsDir, projectDirName, "chats");
+  const chatDirs = options.chatDirs
+    ? [...new Set(options.chatDirs.map((path) => resolve(path)))]
+    : discoverProjectChatDirs(pilotHome);
+  for (const chatDir of chatDirs) {
     let names: string[];
     try {
       names = readdirSync(chatDir);
@@ -313,6 +308,17 @@ export function recoverNodeProjectSessionReplacements(
   return result;
 }
 
+function discoverProjectChatDirs(pilotHome: string): string[] {
+  const projectsDir = resolve(pilotHome, "projects");
+  try {
+    return readdirSync(projectsDir, { withFileTypes: true, encoding: "utf8" })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => resolve(projectsDir, entry.name, "chats"));
+  } catch {
+    return [];
+  }
+}
+
 async function prepareNodeProjectSessionReplacement(
   input: ProjectSessionReplacementPrepareInput,
 ): Promise<void> {
@@ -322,6 +328,7 @@ async function prepareNodeProjectSessionReplacement(
     input.projectRoot,
     input.pilotHome,
     input.transactionId,
+    input.chatDir,
   );
   if (!backupPath || !journalPath) throw new Error("Replacement transaction paths were not created.");
   const originalBody = await readFile(transcriptPath, "utf8");
@@ -361,6 +368,7 @@ async function finalizeNodeProjectSessionReplacement(
     input.projectRoot,
     input.pilotHome,
     input.transactionId,
+    input.chatDir,
   );
   if (!backupPath || !journalPath) throw new Error("Replacement transaction paths were not created.");
 

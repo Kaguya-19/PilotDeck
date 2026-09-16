@@ -9,6 +9,7 @@ import {
   type ProjectSessionReplacementPort,
   type ProjectSessionReplacementOwner,
   type ProjectSessionStorageProvider,
+  type AgentProjectSessionStorage,
   type RecoverNodeProjectSessionReplacementsOptions,
   type RecoverNodeProjectSessionReplacementsResult,
 } from "../../session/index.js";
@@ -30,6 +31,8 @@ export type ReplaceLastWebSessionTurnOptions = {
   pilotHome: string;
   /** Application-selected backend for source reads and replacement transactions. */
   storageProvider?: ProjectSessionStorageProvider;
+  /** @deprecated Use storageProvider plus sessionReplacementPort. */
+  storage?: AgentProjectSessionStorage;
   /** Explicit application-selected replacement transaction port. */
   sessionReplacementPort?: ProjectSessionReplacementPort;
   now?: () => Date;
@@ -177,12 +180,14 @@ export async function replaceLastWebSessionTurn(
 ): Promise<WebReplaceLastTurnResult> {
   validateReplacementInput(input);
   const projectRoot = input.projectKey ?? options.projectRoot;
-  const { entries, diagnostics } = await readAgentProjectSessionPersistence({
-    projectRoot,
-    pilotHome: options.pilotHome,
-    sessionId: input.sessionKey,
-    ...(options.storageProvider ? { storageProvider: options.storageProvider } : {}),
-  });
+  const { entries, diagnostics } = options.storage
+    ? await options.storage.restore()
+    : await readAgentProjectSessionPersistence({
+        projectRoot,
+        pilotHome: options.pilotHome,
+        sessionId: input.sessionKey,
+        ...(options.storageProvider ? { storageProvider: options.storageProvider } : {}),
+      });
   if (diagnostics.some((diagnostic) => diagnostic.severity === "error")) {
     throw new ReplaceLastTurnError(
       "replace_invalid_transcript",
@@ -193,12 +198,11 @@ export async function replaceLastWebSessionTurn(
   const now = options.now?.() ?? new Date();
   const plan = createReplacementPlan(entries, input, now);
   const transactionId = randomUUID();
-  const replacementPort = options.sessionReplacementPort ?? createProjectSessionReplacementPort({
-    ...(options.storageProvider ? { storageProvider: options.storageProvider } : {}),
-  });
+  const replacementPort = resolveReplacementPort(options);
   await replacementPort.prepare({
     projectRoot,
     pilotHome: options.pilotHome,
+    ...(options.storage?.chatDir ? { chatDir: options.storage.chatDir } : {}),
     sessionId: input.sessionKey,
     transactionId,
     replacementTurnId: input.replacementTurnId,
@@ -235,12 +239,11 @@ export async function finalizeLastWebSessionTurnReplacement(
     throw new ReplaceLastTurnError("replace_invalid_action", "Replacement action must be commit or rollback.");
   }
 
-  const replacementPort = options.sessionReplacementPort ?? createProjectSessionReplacementPort({
-    ...(options.storageProvider ? { storageProvider: options.storageProvider } : {}),
-  });
+  const replacementPort = resolveReplacementPort(options);
   await replacementPort.finalize({
     projectRoot: input.projectKey ?? options.projectRoot,
     pilotHome: options.pilotHome,
+    ...(options.storage?.chatDir ? { chatDir: options.storage.chatDir } : {}),
     sessionId: input.sessionKey,
     transactionId: input.transactionId,
     action: input.action,
@@ -250,4 +253,26 @@ export async function finalizeLastWebSessionTurnReplacement(
     transactionId: input.transactionId,
     action: input.action,
   };
+}
+
+function resolveReplacementPort(options: ReplaceLastWebSessionTurnOptions): ProjectSessionReplacementPort {
+  if (options.sessionReplacementPort) return options.sessionReplacementPort;
+  if (options.storage?.prepareTranscriptReplacement && options.storage.finalizeTranscriptReplacement) {
+    return {
+      prepare: async (input) => options.storage!.prepareTranscriptReplacement!({
+        transactionId: input.transactionId,
+        replacementTurnId: input.replacementTurnId,
+        owner: input.owner,
+        entries: input.replacementEntries,
+      }),
+      finalize: (input) => options.storage!.finalizeTranscriptReplacement!({
+        transactionId: input.transactionId,
+        action: input.action,
+      }),
+      recover: () => ({ committed: 0, rolledBack: 0, cleaned: 0, skipped: 0, failures: [] }),
+    };
+  }
+  return createProjectSessionReplacementPort({
+    ...(options.storageProvider ? { storageProvider: options.storageProvider } : {}),
+  });
 }

@@ -5,7 +5,12 @@ import { parseCronConfig } from "../../cron/config/parseCronConfig.js";
 import { parseModelConfig } from "../../model/config/parseModelConfig.js";
 import { isRecord } from "../../model/config/schema.js";
 import { ModelConfigError } from "../../model/protocol/errors.js";
-import { getPilotConfigFilePath, getPilotMemoryRootDir, resolvePilotHome } from "../paths.js";
+import {
+  getPilotConfigFilePath,
+  getPilotMemoryRootDir,
+  getPilotProjectConfigFilePath,
+  resolvePilotHome,
+} from "../paths.js";
 import { sha256, stableStringify } from "./hash.js";
 import { mergeConfigSources } from "./merge.js";
 import { parseMemoryConfig } from "./parseMemoryConfig.js";
@@ -46,6 +51,12 @@ const ENV_CONFIG_OVERRIDES = [
   ["PILOT_AGENT_MODEL", ["agent", "model"]],
 ] as const;
 
+export function resolvePilotConfigPath(options: PilotConfigLoadOptions = {}): string {
+  const env = options.env ?? process.env;
+  const envConfigPath = env.PILOTDECK_CONFIG_PATH?.trim();
+  return options.configPath ?? envConfigPath ?? getPilotConfigFilePath(resolvePilotHome(env));
+}
+
 export function loadPilotConfig(options: PilotConfigLoadOptions = {}): PilotConfigSnapshot {
   const env = options.env ?? process.env;
   const loadedAt = new Date();
@@ -63,8 +74,19 @@ export function loadPilotConfig(options: PilotConfigLoadOptions = {}): PilotConf
     });
   }
 
-  const defaultConfigPath = getPilotConfigFilePath(pilotHome);
+  const defaultConfigPath = resolvePilotConfigPath(options);
   const defaultConfig = readYamlSource(defaultConfigPath, "default", 10, loadedAt, diagnostics, sources);
+
+  // Project configuration is a Gateway-host-owned source. It is resolved
+  // before environment overrides so a process-level deployment policy can
+  // still take precedence. A missing project file is intentionally a no-op,
+  // preserving the historical global-config-only behavior.
+  const projectConfigPath = options.projectRoot
+    ? getPilotProjectConfigFilePath(options.projectRoot)
+    : undefined;
+  const projectConfig = projectConfigPath
+    ? readYamlSource(projectConfigPath, "project", 20, loadedAt, diagnostics, sources)
+    : undefined;
 
   const envConfig = readEnvOverrides(env);
   if (envConfig) {
@@ -77,7 +99,7 @@ export function loadPilotConfig(options: PilotConfigLoadOptions = {}): PilotConf
     });
   }
 
-  const rawConfig = mergeConfigSources(defaultConfig, envConfig) as PilotRawConfig;
+  const rawConfig = mergeConfigSources(defaultConfig, projectConfig, envConfig) as PilotRawConfig;
   validateTopLevel(rawConfig, diagnostics);
   const schemaVersion = parseSchemaVersion(rawConfig.schemaVersion, diagnostics);
 
@@ -494,6 +516,7 @@ function parseAgentSubagents(
       );
     }
   }
+  const maxDepth = readOptionalNonNegativeInteger(value.maxDepth, "agent.subagents.maxDepth");
   return {
     ...(defaultModel ? { default: defaultModel } : {}),
     timeoutMs: readOptionalPositiveInteger(value.timeoutMs, "agent.subagents.timeoutMs"),
@@ -663,7 +686,17 @@ function parseModel(
   diagnostics: PilotConfigDiagnostic[],
 ) {
   try {
-    return parseModelConfig(rawModel, { env });
+    return parseModelConfig(rawModel, {
+      env,
+      onInvalidProvider: (providerId, error) => diagnostics.push({
+        code: `MODEL_${error.code.toUpperCase()}`,
+        severity: "warning",
+        message: error.message,
+        path: `model.providers.${providerId}`,
+        hint: "This provider was excluded from the runtime. Correct its settings to enable it.",
+        recoverable: true,
+      }),
+    });
   } catch (error) {
     if (error instanceof ModelConfigError) {
       diagnostics.push({

@@ -33,6 +33,12 @@ export type AgentSubmitOptions = {
    */
   execution?: Pick<import("../modules/protocol.js").AgentExecutionContext, "runId" | "operationId" | "idempotencyKey" | "operationDeadline">;
   maxTurns?: number;
+  /** Gateway-owned USD ceiling for this submitted turn. */
+  maxBudgetUsd?: number;
+  /** Gateway-owned USD ceiling shared by every turn in an SDK session. */
+  taskBudgetUsd?: number;
+  /** Gateway-owned amount already charged to `taskBudgetUsd` before this turn. */
+  initialTaskBudgetSpentUsd?: number;
   metadata?: Record<string, unknown>;
   runMode?: AgentRunMode;
   permissionMode?: PermissionMode;
@@ -42,6 +48,8 @@ export type AgentSubmitOptions = {
   /** Allow model-visible plan mode tools for this turn. */
   allowPlanModeTools?: boolean;
   canPrompt?: boolean;
+  /** Allow the native elicitation channel without enabling permission prompts. */
+  canElicit?: boolean;
   permissionRules?: Partial<PermissionRuleSet>;
   /**
    * Synthetic messages appended after the user input in the turn.
@@ -50,4 +58,6 @@ export type AgentSubmitOptions = {
    */
   syntheticMessages?: import("../../model/index.js").CanonicalMessage[];
   modelOverride?: AgentModelOverride;
+  /** Submitted model snapshot, recorded for replay and legacy session clients. */
+  modelSelection?: NonNullable<import("../../session/transcript/TranscriptEntry.js").SessionMetadataValue["modelSelection"]>;
 };

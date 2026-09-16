@@ -10,13 +10,14 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import { resolve, basename } from "node:path";
 import type { SessionCatalogPort } from "../../session/catalog/SessionCatalogPort.js";
+import { listProjectSessions } from "../../session/index.js";
 import { createProjectId } from "../../pilot/index.js";
 import type { WebListProjectsResult, WebProjectSummary } from "../client/protocol.js";
 
 export type ListWebProjectsOptions = {
   pilotHome: string;
   /** Application-selected read-only catalog used for project activity summaries. */
-  sessionCatalog: SessionCatalogPort;
+  sessionCatalog?: SessionCatalogPort;
 };
 
 export async function listWebProjects(
@@ -59,6 +60,53 @@ export async function listWebProjects(
 
   projects.sort((left, right) => (right.lastActivity ?? 0) - (left.lastActivity ?? 0));
   return { projects };
+}
+
+/** Registration-only lookup: never read chat transcripts to validate a send. */
+export async function listRegisteredWebProjects(
+  options: ListWebProjectsOptions,
+): Promise<Array<{ projectKey: string }>> {
+  const projectsDir = resolve(options.pilotHome, "projects");
+  const entries = await readdir(projectsDir, { withFileTypes: true }).catch(() => []);
+  const projects: Array<{ projectKey: string }> = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const projectKey = await resolveProjectPathFromId(projectsDir, entry.name);
+    if (projectKey && resolve(projectKey) !== resolve(options.pilotHome)) projects.push({ projectKey });
+  }
+  return projects;
+}
+
+/** Cache locations, not authorization: revalidate registrations on every lookup. */
+export function createRegisteredWebProjectResolver(options: ListWebProjectsOptions) {
+  const projectsDir = resolve(options.pilotHome, "projects");
+  const locations = new Map<string, string>();
+  return async (projectKey: string): Promise<string | undefined> => {
+    const requested = resolve(projectKey);
+    const directId = createProjectId(requested);
+    const matches = async (id: string): Promise<boolean> => {
+      if (!(await stat(resolve(projectsDir, id)).catch(() => undefined))?.isDirectory()) return false;
+      const registered = await resolveProjectPathFromId(projectsDir, id);
+      return registered !== null && resolve(registered) === requested;
+    };
+    const cachedId = locations.get(requested);
+    for (const id of new Set([cachedId, directId])) {
+      if (id && await matches(id)) return requested;
+    }
+    locations.delete(requested);
+    // Legacy/collision-resistant directories may use a different ID. Only
+    // inspect registration markers; session counts and titles are irrelevant.
+    const entries = await readdir(projectsDir, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name === directId || entry.name === cachedId) continue;
+      if (await matches(entry.name)) {
+        if (locations.size >= 256) locations.delete(locations.keys().next().value!);
+        locations.set(requested, entry.name);
+        return requested;
+      }
+    }
+    return undefined;
+  };
 }
 
 export async function describeWebProject(
@@ -130,10 +178,9 @@ async function summarizeProject(
     }
   }
   try {
-    const sessions = await options.sessionCatalog.list({
-      projectRoot,
-      pilotHome: options.pilotHome,
-    });
+    const sessions = options.sessionCatalog
+      ? await options.sessionCatalog.list({ projectRoot, pilotHome: options.pilotHome })
+      : await listProjectSessions({ projectRoot, pilotHome: options.pilotHome });
     sessionCount = sessions.length;
     lastActivity = sessions[0]?.lastModified;
   } catch {

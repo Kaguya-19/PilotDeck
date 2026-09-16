@@ -73,6 +73,7 @@ export { loadPluginHooks } from "./plugins/loading/PluginHookLoader.js";
 export { getPluginCommandName, loadPluginCommands, type LoadedPluginCommand } from "./plugins/loading/PluginCommandLoader.js";
 export {
   PluginRuntime,
+  PluginRuntimeView,
   type PluginRuntimeOptions,
   type PluginRefreshResult,
   type PluginRefreshFailure,

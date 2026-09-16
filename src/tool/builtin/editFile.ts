@@ -211,6 +211,10 @@ export function createEditFileTool(options: CreateEditFileToolOptions = {}): Pil
         allowOverwrite: true,
         workspaceRoot: resolved.root,
       });
+      await context.fileHistory?.markEditCommitted?.(
+        resolved.absolutePath,
+        context.messageId ?? context.turnId,
+      );
       invalidateReadFileState(context, resolved.absolutePath);
       recordWriteSnapshot(context, resolved.absolutePath, nextContent, write.mtimeMs);
 
