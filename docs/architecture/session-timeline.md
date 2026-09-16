@@ -52,7 +52,10 @@ that execution, without clearing gaps in other active executions.
 
 The store creates the timeline before processing any close event, including an
 initial WebSocket replay. Live frames and HTTP baselines use the same child-cache
-projection, which retains non-timeline messages such as model errors.
+projection, which retains non-timeline messages such as model errors. Child model
+errors receive an `errorId` at gateway creation, before live delivery and replay
+storage diverge. The bridge reuses that identity on HTTP and WebSocket recovery;
+separate failures remain distinct even when their messages are identical.
 
 A complete history read reconciles previously confirmed entities: missing blocks
 are removed, and missing user turns invalidate their cached content. Live-only

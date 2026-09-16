@@ -1474,7 +1474,7 @@ function createSubagentDetailFrames(event, base, detail) {
         case 'subagent_model_error':
             return [createNormalizedMessage({
                 ...detailBase,
-                id: `subagent_detail_error_${sanitizeMessageId(detailSessionId)}_${Date.now()}`,
+                id: `subagent_detail_error_${sanitizeMessageId(detailSessionId)}_${detail.errorId || randomUUID()}`,
                 kind: 'error',
                 content: detail.message || detail.error || 'Subagent model error',
             })];

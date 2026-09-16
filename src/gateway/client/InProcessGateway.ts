@@ -2420,6 +2420,8 @@ function mapSubagentModelEvent(
         event: "subagent_model_error",
         detail: {
           ...base,
+          // Allocate once before live delivery and replay storage diverge.
+          errorId: randomUUID(),
           code: event.event.error.code,
           message: event.event.error.message,
         },

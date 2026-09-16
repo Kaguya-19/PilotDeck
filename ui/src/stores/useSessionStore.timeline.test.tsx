@@ -140,3 +140,47 @@ it.each(['fetchFromServer', 'refreshFromServer'] as const)('%s preserves child e
     .toEqual(['Timeout detail', 'Recovered error detail']);
   expect(result.current.getSubagentDetailMessages('s', 'child').find(m => m.kind === 'thinking')?.streamState).toBe('closed');
 });
+
+
+for (const method of ['fetchFromServer', 'refreshFromServer'] as const) {
+  it.each(['http-first', 'ws-first'])(`${method} deduplicates restored child errors (%s) without merging separate failures`, async (order) => {
+    // Runtime import keeps Node-only bridge dependencies out of browser types.
+    const bridgePath = '../../server/pilotdeck-bridge.js';
+    const { gatewayEventToFrames } = await import(bridgePath) as {
+      gatewayEventToFrames: (event: unknown, sessionId: string, provider: string) => NormalizedMessage[];
+    };
+    const event = { type: 'agent_status', runId: 'run', event: 'subagent_model_error',
+      detail: { subagentId: 'child', errorId: 'failure-1', message: 'Timed out' } };
+    // Each transport independently deserializes and converts the same event.
+    const frames = () => gatewayEventToFrames(JSON.parse(JSON.stringify(event)), 's', 'pilotdeck');
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ messages: [],
+      stream: { active: true, runId: 'run', messages: frames() } }))));
+    const { result } = renderHook(useSessionStore);
+    const http = async () => { await act(async () => { await result.current[method]('s'); }); };
+    const ws = () => { act(() => {
+      for (const frame of frames()) result.current.appendSubagentDetailMessage('s', 'child', frame);
+    }); };
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(1000);
+    try {
+      if (order === 'http-first') await http(); else ws();
+      clock.mockReturnValue(2000);
+      if (order === 'http-first') ws(); else await http();
+      expect(result.current.getSubagentDetailMessages('s', 'child')).toHaveLength(1);
+      clock.mockReturnValue(3000);
+      ws();
+      await http();
+      expect(result.current.getSubagentDetailMessages('s', 'child')).toHaveLength(1);
+      act(() => {
+        const separate = { ...event, detail: { ...event.detail, errorId: 'failure-2' } };
+        for (const frame of gatewayEventToFrames(separate, 's', 'pilotdeck')) {
+          result.current.appendSubagentDetailMessage('s', 'child', frame);
+        }
+      });
+      const errors = result.current.getSubagentDetailMessages('s', 'child');
+      expect(errors.map(m => m.content)).toEqual(['Timed out', 'Timed out']);
+      expect(new Set(errors.map(m => m.id)).size).toBe(2);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+}
