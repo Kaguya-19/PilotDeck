@@ -101,7 +101,7 @@ describe('versioned session timeline', () => {
   it('keeps child and parent identities and lifecycle separate', () => {
     const state = new SessionTimeline();
     state.apply(frame('a', 0, 1, 'parent', 0));
-    const child = frame('a', 0, 1, 'child', 0, { subagentId: 'child' });
+    const child = frame('a', 0, 1, 'child', 0, { subagentId: 'child', isSubagentDetail: true });
     child.timeline!.turnId = 'child-turn';
     state.apply(child);
     state.close('turn', false, 'child', { turnId: 'child-turn', through: 0 });

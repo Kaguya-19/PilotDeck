@@ -86,3 +86,28 @@ test('tool results, compaction and steers get the same position in live and dura
   timeline.message(steer);
   assert.ok(steer.content[0].timeline!.order > compact.timeline!.order);
 });
+
+for (const withStart of [true, false]) test(`tool-separated text keeps wire/history order (start frame: ${withStart})`, () => {
+  const assembler = createModelMessageAssemblerState('attempt');
+  const timeline = new TurnTimeline('turn');
+  const events: CanonicalModelEvent[] = [
+    { type: 'text_delta', text: 'Before' },
+    ...(withStart ? [{ type: 'tool_call_start' as const, id: 'call', name: 'read_file' }] : []),
+    { type: 'tool_call_end', toolCall: { id: 'call', name: 'read_file', input: { path: 'README.md' } } },
+    { type: 'text_delta', text: 'After' },
+    { type: 'message_end', finishReason: 'tool_call' },
+  ];
+  for (const event of events) {
+    const blockId = event.type === 'text_delta' ? getModelStreamBlockId(assembler, 'text') : undefined;
+    timeline.event({ type: 'model_event', ...base, event, blockId });
+    applyModelEventToAssembler(assembler, event);
+  }
+  const { message, toolCalls } = assembleAssistantMessage(assembler);
+  timeline.message(message);
+  timeline.event({ type: 'tool_calls_detected', ...base, calls: toolCalls });
+  const rows = flattenCanonicalMessage(message, { index: 0, sessionKey: 's' });
+  assert.deepEqual(rows.map(row => row.timeline?.order), [0, 1, 2]);
+  assert.deepEqual(rows.map(row => row.kind), ['text', 'tool_use', 'text']);
+  assert.equal(toolCalls[0].timeline?.order, 1);
+  assert.equal(rows[2].timeline?.previousId, 'tool:call');
+});

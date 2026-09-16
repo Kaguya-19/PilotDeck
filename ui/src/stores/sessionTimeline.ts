@@ -16,7 +16,9 @@ export function isTimelineMessage(message: NormalizedMessage): boolean {
     && Number.isInteger(p.revision) && Boolean(message.turnId || message.runId);
 }
 const turn = (message: NormalizedMessage) => message.timeline?.turnId || message.turnId || message.runId || '';
-const scope = (message: NormalizedMessage) => `${turn(message)}:${message.subagentId || ''}`;
+// On a parent Agent card, subagentId is a link, not message ownership.
+const detailAgent = (message: NormalizedMessage) => message.isSubagentDetail ? message.subagentId : undefined;
+const scope = (message: NormalizedMessage) => `${turn(message)}:${detailAgent(message) || ''}`;
 const key = (message: NormalizedMessage) => `${message.timeline!.turnId}:${message.timeline!.id}`;
 const isContent = (message: NormalizedMessage) => message.kind === 'thinking'
   || message.kind === 'stream_delta' || (message.kind === 'text' && message.role !== 'user');
@@ -41,7 +43,7 @@ export class SessionTimeline {
     if (p.offset !== undefined && p.previousId && !this.blocks.has(`${p.turnId}:${p.previousId}`)) {
       this.missingPredecessors.add(`${p.turnId}:${p.previousId}`);
     }
-    if (this.terminalTurns.has(p.turnId) && !message.isFinal) return this.hasGap;
+    if ((this.terminalTurns.has(p.turnId) || this.terminalTurns.has(message.runId || '')) && !message.isFinal) return this.hasGap;
     // A new block closes earlier blocks, even if packets for them arrive late.
     const channel = scope(message);
     this.closedThrough.set(channel, Math.max(this.closedThrough.get(channel) ?? -1, p.order - 1));
@@ -90,13 +92,14 @@ export class SessionTimeline {
   close(runId?: string, terminal = false, subagentId?: string, boundary?: { turnId: string; through: number }): void {
     for (const message of this.blocks.values()) {
       if (runId && turn(message) !== runId && message.runId !== runId) continue;
-      if (subagentId !== undefined && message.subagentId !== subagentId) continue;
-      if (subagentId === undefined && message.subagentId) continue;
+      if (subagentId !== undefined && detailAgent(message) !== subagentId) continue;
+      if (subagentId === undefined && !terminal && detailAgent(message)) continue;
       if (boundary && turn(message) !== boundary.turnId) continue;
       const channel = scope(message);
       this.closedThrough.set(channel, Math.max(this.closedThrough.get(channel) ?? -1, boundary?.through ?? message.timeline!.order));
+      if (terminal) this.terminalTurns.add(turn(message));
     }
-    if (terminal && runId) this.terminalTurns.add(runId);
+    if (terminal && runId && subagentId === undefined) this.terminalTurns.add(runId);
   }
 
   removeTurn(runId: string): void {
@@ -112,7 +115,7 @@ export class SessionTimeline {
   }
 
   values(subagentId?: string | null): NormalizedMessage[] {
-    return [...this.blocks.values()].filter(m => subagentId === null || (m.subagentId || undefined) === subagentId).map(message => {
+    return [...this.blocks.values()].filter(m => subagentId === null || detailAgent(m) === subagentId).map(message => {
       const closed = message.isFinal || this.terminalTurns.has(turn(message)) || this.terminalTurns.has(message.runId || "")
         || message.timeline!.order <= (this.closedThrough.get(scope(message)) ?? -1);
       if (!isContent(message)) return message;

@@ -1802,6 +1802,12 @@ export function useSessionStore() {
     const slot = getSlot(sessionId);
     slot.timeline?.close(runId, terminal, subagentId, boundary);
     if (subagentId) slot.subagentDetailMessages.set(subagentId, slot.timeline?.values(subagentId) ?? []);
+    else if (terminal && slot.timeline) {
+      for (const childId of slot.subagentDetailMessages.keys()) {
+        const legacy = slot.subagentDetailMessages.get(childId)!.filter(message => !isTimelineMessage(message));
+        slot.subagentDetailMessages.set(childId, [...legacy, ...slot.timeline.values(childId)]);
+      }
+    }
     forceRecomputeMerged(slot);
     notify(sessionId);
   }, [getSlot, notify]);

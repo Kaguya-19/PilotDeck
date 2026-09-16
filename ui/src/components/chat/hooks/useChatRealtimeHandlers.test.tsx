@@ -82,6 +82,43 @@ describe('useChatRealtimeHandlers terminal errors', () => {
     expect(messages[2].content).toBe('After compact');
   });
 
+  it.each(['completed', 'failed', 'cancelled'])('closes child detail on %s using its parent run identity', (state) => {
+    const { result } = renderHook(useSessionStore);
+    const sessionStore = result.current;
+    renderHook(() => useChatRealtimeHandlers({
+      provider,
+      selectedProject: { name: 'project', fullPath: '/tmp/project' } as unknown as Project,
+      selectedSession: { id: 'web:s_test' } as unknown as ProjectSession,
+      currentSessionId: 'web:s_test',
+      setCurrentSessionId: noop,
+      setIsLoading: noop,
+      setSessionRuntimeState: noop,
+      activeRunId: 'run-1',
+      setActiveRunId: noop,
+      setCanAbortSession: noop,
+      setIsAborting: noop,
+      setClaudeStatus: noop,
+      setPilotDeckStatus: noop,
+      setTokenBudget: noop,
+      setPendingPermissionRequests: noop,
+      pendingViewSessionRef: { current: null },
+      sessionStore,
+    }));
+
+    act(() => {
+      const base = { sessionId: 'web:s_test', runId: 'run-1', provider };
+      mocks.listener?.({ ...base, id: 'parent', kind: 'thinking', content: 'Parent thought',
+        timeline: { version: 1, turnId: 'run-1', id: 'parent', order: 0, revision: 1, offset: 0 } });
+      mocks.listener?.({ ...base, id: 'child', kind: 'thinking', content: 'Child thought',
+        subagentId: 'child', isSubagentDetail: true,
+        timeline: { version: 1, turnId: 'child-t0', id: 'thought', order: 0, revision: 1, offset: 0 } });
+      mocks.listener?.({ ...base, id: 'activity', kind: 'agent_activity', phase: 'subagent',
+        state, subagentId: 'child', parentRunId: 'run-1', runId: 'subagent:child' });
+    });
+    expect(sessionStore.getSubagentDetailMessages('web:s_test', 'child')[0].streamState).toBe('closed');
+    expect(sessionStore.getMessages('web:s_test').find(m => m.kind === 'thinking')?.streamState).toBe('open');
+  });
+
   it('finalizes assistant streams when applied guidance creates a user boundary in the same run', () => {
     const sessionStore = createSessionStore();
     renderHook(() => useChatRealtimeHandlers({

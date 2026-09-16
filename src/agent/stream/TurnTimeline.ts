@@ -41,6 +41,12 @@ export class TurnTimeline {
   }
 
   event(event: AgentEvent): AgentEvent {
+    if (event.type === 'model_event') {
+      // Reserve the tool's slot before any subsequent text gets a position.
+      // Some adapters emit only a complete tool call, without a start frame.
+      if (event.event.type === 'tool_call_start') this.position(`tool:${event.event.id}`);
+      if (event.event.type === 'tool_call_end') this.position(`tool:${event.event.toolCall.id}`);
+    }
     if (event.type === 'model_event' && event.blockId &&
         (event.event.type === 'text_delta' || event.event.type === 'thinking_delta')) {
       const offset = this.offsets.get(event.blockId) ?? 0;

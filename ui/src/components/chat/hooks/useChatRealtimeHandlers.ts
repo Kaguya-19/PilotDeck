@@ -778,7 +778,7 @@ export function useChatRealtimeHandlers({
         msg.phase === 'subagent' &&
         ['completed', 'failed', 'cancelled'].includes(String(msg.state || ''))
       ) {
-        sessionStore.closeTimeline(sid, msgRunId, false, activitySubagentId);
+        sessionStore.closeTimeline(sid, getMessageRunId({ runId: msg.parentRunId }), true, activitySubagentId);
         sessionStore.finalizeSubagentDetailThinking?.(sid, activitySubagentId);
         sessionStore.finalizeSubagentDetailStreaming?.(sid, activitySubagentId);
       }

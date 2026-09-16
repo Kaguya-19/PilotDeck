@@ -35,3 +35,32 @@ it('editing a turn tombstones its protocol rows and rejects late final snapshots
   act(() => result.current.applyTimelineMessage('s', { ...thought(2, 'old final'), isFinal: true }));
   expect(result.current.getMessages('s').map(m => m.content)).toEqual(['new']);
 });
+
+it('keeps linked Agent cards in parent history while excluding actual child detail', async () => {
+  const card: NormalizedMessage = { ...thought(1, ''), kind: 'tool_use', toolName: 'Agent', toolId: 'call',
+    subagentId: 'child', isFinal: true, timeline: { ...thought(1, '').timeline!, id: 'tool:call' } };
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ messages: [card] }))));
+  const { result } = renderHook(useSessionStore);
+  act(() => result.current.applyTimelineMessage('s', {
+    ...thought(1, 'child thought', 0), subagentId: 'child', isSubagentDetail: true,
+    timeline: { ...thought(1, '', 0).timeline!, turnId: 'child-t0' },
+  }));
+  await act(async () => { await result.current.fetchFromServer('s'); });
+  expect(result.current.getMessages('s')).toHaveLength(1);
+  expect(result.current.getMessages('s')[0]).toMatchObject({ toolId: 'call', subagentId: 'child' });
+  expect(result.current.getSubagentDetailMessages('s', 'child')).toHaveLength(1);
+});
+
+it('parent termination closes and refreshes cached child details and rejects late deltas', () => {
+  const { result } = renderHook(useSessionStore);
+  const child = { ...thought(1, 'child thought', 0), subagentId: 'child', isSubagentDetail: true,
+    timeline: { ...thought(1, '', 0).timeline!, turnId: 'child-t0' } };
+  act(() => {
+    result.current.applyTimelineMessage('s', child);
+    result.current.closeTimeline('s', 'run', true);
+  });
+  expect(result.current.getSubagentDetailMessages('s', 'child')[0].streamState).toBe('closed');
+  act(() => result.current.applyTimelineMessage('s', { ...child, content: ' late',
+    timeline: { ...child.timeline, revision: 2, offset: child.content!.length } }));
+  expect(result.current.getSubagentDetailMessages('s', 'child')[0]).toMatchObject({ content: 'child thought', streamState: 'closed' });
+});
