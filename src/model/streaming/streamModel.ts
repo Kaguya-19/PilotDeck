@@ -254,14 +254,22 @@ export async function* streamModel(
     const state = createStreamNormalizerState(provider.protocol);
     let streamCompleted = false;
     let sawCompletionSentinel = false;
-    let rawResponse = "";
+    const rawResponseChunks: Buffer[] = [];
+    let rawResponseBytes = 0;
+    let decodedRawResponse: string | undefined;
+    const getRawResponse = (): string => {
+      decodedRawResponse ??= Buffer.concat(rawResponseChunks, rawResponseBytes).toString("utf8");
+      return decodedRawResponse;
+    };
 
     const streamIdleTimeoutMs = resolveStreamIdleTimeout(provider, options);
     const streamGuard = createStreamGuard(provider);
 
     try {
       for await (const sseEvent of readServerSentEvents(response.body, options.signal, streamIdleTimeoutMs, (chunk) => {
-        rawResponse += Buffer.from(chunk).toString("utf8");
+        const copy = Buffer.from(chunk);
+        rawResponseChunks.push(copy);
+        rawResponseBytes += copy.byteLength;
       })) {
         streamGuard.checkDuration();
         if (sseEvent.type === "done") {
@@ -285,14 +293,14 @@ export async function* streamModel(
         throw new IncompleteStreamError();
       }
       streamCompleted = true;
-      finishInvocation(invocation, options, "success", rawResponse, response.status, undefined, true);
+      finishInvocation(invocation, options, "success", getRawResponse(), response.status, undefined, true, rawResponseBytes);
     } catch (error) {
       if (
         attempt < maxRetries &&
         isRetryableStreamError(error) &&
         checkpoint.canContinueText()
       ) {
-        finishInvocation(invocation, options, "incomplete", rawResponse, response.status, error, false);
+        finishInvocation(invocation, options, "incomplete", getRawResponse(), response.status, error, false, rawResponseBytes);
         currentRequest = buildLiteLLMContinuationRequest(currentRequest, checkpoint.get().partialText);
         const delayMs = calculateRetryDelay(provider, attempt, retryAfterMsForError(error));
         emitModelRetryProgress(options, "continuation", attempt, maxRetries, delayMs, provider, currentRequest.model);
@@ -305,7 +313,7 @@ export async function* streamModel(
         attempt < maxRetries &&
         checkpoint.interruption().phase === "empty"
       ) {
-        finishInvocation(invocation, options, "incomplete", rawResponse, response.status, error, false);
+        finishInvocation(invocation, options, "incomplete", getRawResponse(), response.status, error, false, rawResponseBytes);
         const delayMs = calculateRetryDelay(provider, attempt, retryAfterMsForError(error));
         emitModelRetryProgress(options, retryReasonForThrownError(error), attempt, maxRetries, delayMs, provider, currentRequest.model);
         await delay(delayMs, options.signal);
@@ -313,14 +321,14 @@ export async function* streamModel(
       }
 
       if (isRetryableStreamError(error)) {
-        finishInvocation(invocation, options, "incomplete", rawResponse, response.status, error, false);
+        finishInvocation(invocation, options, "incomplete", getRawResponse(), response.status, error, false, rawResponseBytes);
         yield {
           type: "error",
           error: streamInterruptionError(provider, error, checkpoint),
         };
         return;
       }
-      finishInvocation(invocation, options, "transport_error", rawResponse, response.status, error, false);
+      finishInvocation(invocation, options, "transport_error", getRawResponse(), response.status, error, false, rawResponseBytes);
       throw error;
     }
 
@@ -920,6 +928,7 @@ function finishInvocation(
   httpStatus?: number,
   error?: unknown,
   responseComplete = false,
+  responseBytes?: number,
 ): void {
   if (!state || !options.invocation) return;
   if (state.finished) return;
@@ -942,7 +951,7 @@ function finishInvocation(
     requestBody: state.requestBody,
     responseBody,
     requestBytes: Buffer.byteLength(state.requestBody),
-    responseBytes: responseBody === undefined ? undefined : Buffer.byteLength(responseBody),
+    responseBytes: responseBody === undefined ? undefined : responseBytes ?? Buffer.byteLength(responseBody),
     httpStatus,
     outcome: normalizedOutcome,
     responseComplete,

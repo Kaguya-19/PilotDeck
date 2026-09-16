@@ -10,7 +10,11 @@ import type { CanonicalModelRequest } from "../../../src/model/protocol/canonica
 import type { ProviderConfig } from "../../../src/model/protocol/canonical.js";
 import type { GoogleClientFactory } from "../../../src/model/providers/google/client.js";
 import { complete, streamModel } from "../../../src/model/streaming/streamModel.js";
-import { JsonlInvocationLogSink } from "../../../src/storage/legalDataStorage.js";
+import {
+  JsonlInvocationLogSink,
+  type InvocationLogRecord,
+  type ModelInvocationLogSink,
+} from "../../../src/storage/legalDataStorage.js";
 
 const config = parseModelConfig({
   providers: {
@@ -55,6 +59,50 @@ function assertRequestWasStaged(root: string, body: BodyInit | null | undefined)
     requestBody: string;
   };
   assert.equal(staged.requestBody, String(body));
+}
+
+function splitUtf8Response(payload: string, character: string): Response {
+  const bytes = Buffer.from(payload, "utf8");
+  const characterBytes = Buffer.from(character, "utf8");
+  const characterOffset = bytes.indexOf(characterBytes);
+  assert.notEqual(characterOffset, -1);
+  const splitOffset = characterOffset + characterBytes.byteLength - 1;
+
+  return new Response(new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(bytes.subarray(0, splitOffset));
+      controller.enqueue(bytes.subarray(splitOffset));
+      controller.close();
+    },
+  }), {
+    status: 200,
+    headers: { "content-type": "text/event-stream" },
+  });
+}
+
+function captureInvocationRecords(): {
+  records: InvocationLogRecord[];
+  sink: ModelInvocationLogSink;
+} {
+  const records: InvocationLogRecord[] = [];
+  return {
+    records,
+    sink: {
+      stage: () => {},
+      append: async (record) => { records.push(record); },
+    },
+  };
+}
+
+function invocationContext() {
+  return {
+    workspaceId: "workspace",
+    sessionId: "session",
+    turnId: "turn",
+    runId: "turn",
+    logicalCallId: "call",
+    caller: "agent" as const,
+  };
 }
 
 test("complete synchronously stages the invocation before sending HTTP", async (t) => {
@@ -119,6 +167,46 @@ test("streamModel synchronously stages the invocation before sending HTTP", asyn
     // Drain the stream so the invocation is finalized.
   }
   assert.equal(fetchCalls, 1);
+});
+
+test("streamModel preserves UTF-8 response bytes split across chunks", async () => {
+  const payload = 'data: {"choices":[{"delta":{"content":"中"}}]}\n\ndata: [DONE]\n\n';
+  const { records, sink } = captureInvocationRecords();
+  const events = [];
+
+  for await (const event of streamModel(request, config, {
+    invocation: { context: invocationContext(), sink },
+    fetch: async () => splitUtf8Response(payload, "中"),
+  })) {
+    events.push(event);
+  }
+
+  assert.equal(events.some((event) => event.type === "text_delta" && event.text === "中"), true);
+  assert.equal(records.length, 1);
+  assert.equal(records[0]?.responseBody, payload);
+  assert.equal(records[0]?.responseBody?.includes("\uFFFD"), false);
+  assert.equal(records[0]?.responseBytes, Buffer.byteLength(payload));
+  assert.equal(records[0]?.outcome, "success");
+  assert.equal(records[0]?.responseComplete, true);
+});
+
+test("streamModel preserves completed UTF-8 characters in an interrupted response", async () => {
+  const payload = 'data: {"choices":[{"delta":{"content":"中"}}]}\n\n';
+  const { records, sink } = captureInvocationRecords();
+
+  for await (const _event of streamModel(request, config, {
+    invocation: { context: invocationContext(), sink },
+    fetch: async () => splitUtf8Response(payload, "中"),
+  })) {
+    // Drain the incomplete stream so the invocation is finalized.
+  }
+
+  assert.equal(records.length, 1);
+  assert.equal(records[0]?.responseBody, payload);
+  assert.equal(records[0]?.responseBody?.includes("\uFFFD"), false);
+  assert.equal(records[0]?.responseBytes, Buffer.byteLength(payload));
+  assert.equal(records[0]?.outcome, "incomplete");
+  assert.equal(records[0]?.responseComplete, false);
 });
 
 test("does not send HTTP when synchronous invocation staging fails", async () => {
