@@ -11,9 +11,11 @@ if an older assembler already combined non-adjacent parts.
 - `turnId` identifies the originating agent turn, including child-agent turns.
 - `id` and `order` are allocated before the first update and survive persistence.
 - `previousId` allows a client to notice a completely missing live block.
-  Tool starts reserve ordering slots but join this chain only once complete;
-  interrupted, unfinished tool reservations are discarded before the next model
-  request. They are never advertised as recoverable predecessors.
+  Tool starts reserve ordering slots but join this chain only when AgentLoop
+  publishes/retains the assistant message or emits the accepted tool calls.
+  Receiving all arguments is not publication: an interrupted response may discard
+  even its complete calls. Unpublished reservations are discarded before the next
+  model request and never advertised as recoverable predecessors.
 - `revision` increases within the turn. An older snapshot never replaces newer
   content. Final snapshots replace drafts by identity, not by comparing text.
 - `offset` is the UTF-16 string offset of an incremental text payload. Absence
@@ -47,6 +49,15 @@ Terminal child state is retained by parent-run/child identity even before any
 content arrives. Restored absolute snapshots remain readable but closed; late
 deltas cannot restart them. Terminal transitions clear pending recovery work for
 that execution, without clearing gaps in other active executions.
+
+The store creates the timeline before processing any close event, including an
+initial WebSocket replay. Live frames and HTTP baselines use the same child-cache
+projection, which retains non-timeline messages such as model errors.
+
+A complete history read reconciles previously confirmed entities: missing blocks
+are removed, and missing user turns invalidate their cached content. Live-only
+content is retained unless its confirmed user turn was removed. Partial history
+pages only add/update content; absence from a page is not evidence of deletion.
 
 There is deliberately no client reconstruction of a provider response from its
 text. Legacy records/frames use the old adapter at the boundary. Runtime status

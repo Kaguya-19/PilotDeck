@@ -109,7 +109,7 @@ for (const withStart of [true, false]) test(`tool-separated text keeps wire/hist
   assert.deepEqual(rows.map(row => row.timeline?.order), [0, 1, 2]);
   assert.deepEqual(rows.map(row => row.kind), ['text', 'tool_use', 'text']);
   assert.equal(toolCalls[0].timeline?.order, 1);
-  assert.equal(rows[2].timeline?.previousId, 'tool:call');
+  assert.equal(rows[2].timeline?.previousId, rows[0].timeline?.id, 'streamed text only depends on already published blocks');
 });
 
 test('uncompleted tools reserve order without becoming predecessors of interleaved or retried text', () => {

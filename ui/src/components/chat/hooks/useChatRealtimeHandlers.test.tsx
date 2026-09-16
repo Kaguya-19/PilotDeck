@@ -82,6 +82,54 @@ describe('useChatRealtimeHandlers terminal errors', () => {
     expect(messages[2].content).toBe('After compact');
   });
 
+  it.each([false, true])('preserves first WS child termination and error details (existing cache: %s)', async (cached) => {
+    // Load the Node bridge at runtime without adding its backend dependencies
+    // to the browser TypeScript project. Exercise the real transport mapping.
+    const bridgePath = '../../../../server/pilotdeck-bridge.js';
+    const { gatewayEventToFrames } = await import(bridgePath) as {
+      gatewayEventToFrames: (event: Record<string, unknown>, sessionId: string, provider: SessionProvider) => unknown[];
+    };
+    const { result } = renderHook(useSessionStore);
+    const sessionStore = result.current;
+    renderHook(() => useChatRealtimeHandlers({
+      provider,
+      selectedProject: { name: 'project', fullPath: '/tmp/project' } as unknown as Project,
+      selectedSession: { id: 'web:s_test' } as unknown as ProjectSession,
+      currentSessionId: 'web:s_test',
+      setCurrentSessionId: noop,
+      setIsLoading: noop,
+      setSessionRuntimeState: noop,
+      activeRunId: 'run-1',
+      setActiveRunId: noop,
+      setCanAbortSession: noop,
+      setIsAborting: noop,
+      setClaudeStatus: noop,
+      setPilotDeckStatus: noop,
+      setTokenBudget: noop,
+      setPendingPermissionRequests: noop,
+      pendingViewSessionRef: { current: null },
+      sessionStore,
+    }));
+
+    const child = { type: 'agent_status', runId: 'run-1', event: 'subagent_thinking_delta',
+      timeline: { version: 1, turnId: 'child-t0', id: 'thought', order: 0, revision: 1 },
+      streamState: 'open', detail: { subagentId: 'child', text: 'Restored thought' } };
+    const deliver = (event: Parameters<typeof gatewayEventToFrames>[0]) => {
+      for (const frame of gatewayEventToFrames(event, 'web:s_test', provider)) mocks.listener?.(frame);
+    };
+    act(() => {
+      if (cached) deliver(child);
+      deliver({ type: 'agent_status', runId: 'run-1', event: 'subagent_model_error',
+        detail: { subagentId: 'child', message: 'Timeout detail' } });
+      deliver({ type: 'agent_status', runId: 'run-1', event: 'subagent_completed',
+        detail: { subagentId: 'child', errored: true } });
+      deliver(child);
+    });
+    const detail = sessionStore.getSubagentDetailMessages('web:s_test', 'child');
+    expect(detail.find(m => m.kind === 'error')?.content).toBe('Timeout detail');
+    expect(detail.find(m => m.kind === 'thinking')).toMatchObject({ content: 'Restored thought', streamState: 'closed' });
+  });
+
   it.each(['completed', 'failed', 'cancelled'])('closes child detail on %s using its parent run identity', (state) => {
     const { result } = renderHook(useSessionStore);
     const sessionStore = result.current;

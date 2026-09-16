@@ -1470,6 +1470,54 @@ function forceRecomputeMerged(slot: SessionSlot): void {
   ));
 }
 
+/** All live and restored child updates retain messages outside the timeline
+ * protocol (notably model errors). Protocol rows are replaced by identity.
+ */
+function syncSubagentTimeline(slot: SessionSlot, childId: string, additional: NormalizedMessage[] = []): void {
+  const current = upsertRealtimeMessages(slot.subagentDetailMessages.get(childId) ?? [], additional);
+  const projected = slot.timeline?.values(childId) ?? [];
+  const remaining = new Map(projected.map(message => [message.id, message]));
+  const next = current.flatMap(message => {
+    if (!isTimelineMessage(message)) return [message];
+    const updated = remaining.get(message.id);
+    remaining.delete(message.id);
+    return updated ? [updated] : [];
+  });
+  next.push(...remaining.values());
+  slot.subagentDetailMessages.set(childId, next);
+}
+
+function applyTimelineFrames(slot: SessionSlot, frames: NormalizedMessage[]): boolean {
+  const timeline = slot.timeline ??= new SessionTimeline();
+  const affected = new Set<string>();
+  for (const raw of frames) {
+    const frame = normalizeCompactionMessage(raw);
+    timeline.apply(frame);
+    if (frame.subagentId && (frame.isSubagentDetail || frame.phase === 'subagent')) {
+      affected.add(frame.subagentId);
+      if (frame.isSubagentDetail && !isTimelineMessage(frame)) {
+        syncSubagentTimeline(slot, frame.subagentId, [frame]);
+      }
+    }
+  }
+  for (const childId of affected) syncSubagentTimeline(slot, childId);
+  return timeline.hasGap;
+}
+
+function reconcileTimelineHistory(slot: SessionSlot, messages: NormalizedMessage[], complete: boolean): void {
+  if (!complete) return;
+  const timeline = slot.timeline ??= new SessionTimeline();
+  const removed = timeline.reconcileHistory(slot.serverMessages, messages);
+  const keep = (message: NormalizedMessage) => !removed.has(message.runId || '')
+    && !removed.has(message.turnId || '') && !removed.has(message.parentRunId || '');
+  slot.realtimeMessages = slot.realtimeMessages.filter(keep);
+  slot.activityMessages = slot.activityMessages.filter(keep);
+  for (const [childId, detail] of slot.subagentDetailMessages) {
+    slot.subagentDetailMessages.set(childId, detail.filter(keep));
+    syncSubagentTimeline(slot, childId);
+  }
+}
+
 function streamingKey(sessionId: string, runId?: string): string {
   return runId ? `${sessionId}_${runId}` : sessionId;
 }
@@ -1674,14 +1722,9 @@ export function useSessionStore() {
       const data = await response.json();
       if (requestGeneration < slot._serverAppliedGeneration) return slot;
       slot._serverAppliedGeneration = requestGeneration;
-      if (Array.isArray(data.stream?.messages)) {
-        const timeline = slot.timeline ??= new SessionTimeline();
-        for (const frame of data.stream.messages) {
-          timeline.apply(normalizeCompactionMessage(frame));
-          if (frame.subagentId) slot.subagentDetailMessages.set(frame.subagentId, timeline.values(frame.subagentId));
-        }
-      }
+      if (Array.isArray(data.stream?.messages)) applyTimelineFrames(slot, data.stream.messages);
       const messages: NormalizedMessage[] = data.messages || [];
+      reconcileTimelineHistory(slot, messages, !data.hasMore && (opts.offset ?? 0) === 0);
 
       const previousById = new Map(slot.serverMessages.map(message => [message.id, message]));
       slot.serverMessages = enrichConfirmedUsers(messages, slot.realtimeMessages)
@@ -1790,9 +1833,7 @@ export function useSessionStore() {
    */
   const applyTimelineMessage = useCallback((sessionId: string, message: NormalizedMessage): boolean => {
     const slot = getSlot(sessionId);
-    const timeline = slot.timeline ??= new SessionTimeline();
-    const gap = timeline.apply(message);
-    if (message.subagentId) slot.subagentDetailMessages.set(message.subagentId, timeline.values(message.subagentId));
+    const gap = applyTimelineFrames(slot, [message]);
     forceRecomputeMerged(slot);
     notify(sessionId);
     return gap;
@@ -1800,13 +1841,11 @@ export function useSessionStore() {
 
   const closeTimeline = useCallback((sessionId: string, runId?: string, terminal = false, subagentId?: string, boundary?: NormalizedMessage["streamBoundary"]) => {
     const slot = getSlot(sessionId);
-    slot.timeline?.close(runId, terminal, subagentId, boundary);
-    if (subagentId) slot.subagentDetailMessages.set(subagentId, slot.timeline?.values(subagentId) ?? []);
-    else if (terminal && slot.timeline) {
-      for (const childId of slot.subagentDetailMessages.keys()) {
-        const legacy = slot.subagentDetailMessages.get(childId)!.filter(message => !isTimelineMessage(message));
-        slot.subagentDetailMessages.set(childId, [...legacy, ...slot.timeline.values(childId)]);
-      }
+    const timeline = slot.timeline ??= new SessionTimeline();
+    timeline.close(runId, terminal, subagentId, boundary);
+    if (subagentId) syncSubagentTimeline(slot, subagentId);
+    else if (terminal) {
+      for (const childId of slot.subagentDetailMessages.keys()) syncSubagentTimeline(slot, childId);
     }
     forceRecomputeMerged(slot);
     notify(sessionId);
@@ -1930,6 +1969,11 @@ export function useSessionStore() {
     msg: NormalizedMessage,
   ) => {
     const slot = getSlot(sessionId);
+    if (isTimelineMessage(msg)) {
+      applyTimelineFrames(slot, [{ ...msg, subagentId, isSubagentDetail: true }]);
+      notify(sessionId);
+      return;
+    }
     const current = slot.subagentDetailMessages.get(subagentId) ?? [];
     let msgToStore = msg;
     if ((msg.kind === 'tool_use' || msg.kind === 'tool_result') && msg.toolId) {
@@ -1942,10 +1986,7 @@ export function useSessionStore() {
         msgToStore = { ...msg, id: existing.id };
       }
     }
-    const updated = upsertRealtimeMessages(current, [msgToStore]);
-    const nextMap = new Map(slot.subagentDetailMessages);
-    nextMap.set(subagentId, updated);
-    slot.subagentDetailMessages = nextMap;
+    syncSubagentTimeline(slot, subagentId, [msgToStore]);
     notify(sessionId);
   }, [getSlot, notify]);
 
@@ -2192,16 +2233,11 @@ export function useSessionStore() {
         return;
       }
       slot._serverAppliedGeneration = requestGeneration;
-      if (Array.isArray(data.stream?.messages)) {
-        const timeline = slot.timeline ??= new SessionTimeline();
-        for (const frame of data.stream.messages) {
-          timeline.apply(normalizeCompactionMessage(frame));
-          if (frame.subagentId) slot.subagentDetailMessages.set(frame.subagentId, timeline.values(frame.subagentId));
-        }
-      }
+      if (Array.isArray(data.stream?.messages)) applyTimelineFrames(slot, data.stream.messages);
       // Don't overwrite existing server messages with empty response
       // (race condition: server hasn't committed yet after stop/complete).
       if (incomingMessages.length > 0 || slot.serverMessages.length === 0) {
+        reconcileTimelineHistory(slot, incomingMessages, !data.hasMore);
         const previousById = new Map(slot.serverMessages.map(message => [message.id, message]));
         slot.serverMessages = enrichConfirmedUsers(incomingMessages, slot.realtimeMessages)
           .map(message => preserveUserInputs(message, previousById.get(message.id)));

@@ -22,8 +22,8 @@ export class TurnTimeline {
       else this.previousId = id;
     }
     if (!provisional && this.provisionalTools.delete(id)) {
-      // Only complete tools enter the predecessor chain. A reserved but
-      // interrupted argument stream must never become a recoverable dependency.
+      // Only published tools enter the predecessor chain. Receiving complete
+      // arguments does not mean AgentLoop will retain this response.
       const previous = [...this.positions.values()].filter(candidate =>
         candidate.order < position!.order && !this.provisionalTools.has(candidate.id))
         .sort((a, b) => b.order - a.order)[0];
@@ -61,7 +61,7 @@ export class TurnTimeline {
       // Reserve the tool's slot before any subsequent text gets a position.
       // Some adapters emit only a complete tool call, without a start frame.
       if (event.event.type === 'tool_call_start') this.position(`tool:${event.event.id}`, true);
-      if (event.event.type === 'tool_call_end') this.position(`tool:${event.event.toolCall.id}`);
+      if (event.event.type === 'tool_call_end') this.position(`tool:${event.event.toolCall.id}`, true);
     }
     if (event.type === 'model_event' && event.blockId &&
         (event.event.type === 'text_delta' || event.event.type === 'thinking_delta')) {

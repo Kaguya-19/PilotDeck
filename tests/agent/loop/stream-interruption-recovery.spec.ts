@@ -40,13 +40,18 @@ test("output-limit continuation preserves distinct block identities through live
   assert.deepEqual(history.map(message => message.text), ["Same reasoning", "Same answer", "Same reasoning", "Same answer"]);
 });
 
-test("agent loop drops interrupted tool calls and continues with a chunked-write prompt", async () => {
+for (const completeFirst of [false, true]) test(`agent loop drops interrupted response tools (complete first call: ${completeFirst})`, async () => {
   const requests: CanonicalModelRequest[] = [];
   let scheduledToolCalls = 0;
   const loop = createLoop(async function* (_decision, request) {
     requests.push(request);
     if (requests.length === 1) {
       yield { type: "message_start", role: "assistant" };
+      if (completeFirst) {
+        yield { type: "tool_call_start", id: "complete-but-discarded", name: "write_file" };
+        yield { type: "tool_call_end", toolCall: { id: "complete-but-discarded", name: "write_file", input: { path: "unused", content: "unused" } } };
+      }
+
       yield { type: "tool_call_start", id: "call-1", name: "write_file" };
       yield { type: "tool_call_delta", id: "call-1", delta: '{"path":"deck.mjs","content":"partial"' };
       yield {
@@ -83,7 +88,7 @@ test("agent loop drops interrupted tool calls and continues with a chunked-write
   assert.equal(scheduledToolCalls, 0);
   const recoveredDelta = events.find(event => event.type === "model_event" && event.event.type === "text_delta");
   assert.ok(recoveredDelta?.timeline);
-  assert.equal(recoveredDelta.timeline.previousId, undefined, "an incomplete tool must not leave a predecessor dependency");
+  assert.equal(recoveredDelta.timeline.previousId, undefined, "a discarded response tool must not leave a predecessor dependency");
 
   assert.ok(events.some((event) => event.type === "turn_continued"));
   assert.ok(!events.some((event) => event.type === "turn_failed"));

@@ -32,6 +32,7 @@ export class SessionTimeline {
   private pending = new Map<string, Map<number, NormalizedMessage>>();
   private closedThrough = new Map<string, number>();
   private removedTurns = new Set<string>();
+  private removedBlocks = new Set<string>();
   private terminalTurns = new Set<string>();
   private terminalAgents = new Set<string>();
 
@@ -61,7 +62,7 @@ export class SessionTimeline {
     if (!isTimelineMessage(message)) return false;
     const id = key(message);
     const p = message.timeline!;
-    if (this.removedTurns.has(p.turnId) || this.removedTurns.has(message.runId || "")) return this.hasGap;
+    if (this.removedBlocks.has(id) || this.removedTurns.has(p.turnId) || this.removedTurns.has(message.runId || "")) return this.hasGap;
     // Restore absolute content after termination, but never resume its stream.
     if (this.isTerminal(message) && p.offset !== undefined) return this.hasGap;
     this.missingPredecessors.delete(id);
@@ -141,6 +142,31 @@ export class SessionTimeline {
       this.conflicts.delete(id);
     }
     this.terminalTurns.add(runId);
+  }
+
+  /** A complete history replaces previously confirmed entities. Live-only
+   * blocks are retained unless their previously confirmed user turn was removed.
+   * A page of history cannot prove that an absent entity was deleted.
+   */
+  reconcileHistory(previous: NormalizedMessage[], next: NormalizedMessage[]): Set<string> {
+    const nextKeys = new Set(next.filter(isTimelineMessage).map(key));
+    const nextTurns = new Set(next.map(turn));
+    const removed = new Set<string>();
+    for (const message of previous) {
+      const runId = turn(message);
+      if (message.kind === 'text' && message.role === 'user' && !message.isSteer
+          && runId && !nextTurns.has(runId)) removed.add(runId);
+      if (!isTimelineMessage(message) || nextKeys.has(key(message))) continue;
+      const id = key(message);
+      this.removedBlocks.add(id);
+      this.blocks.delete(id);
+      this.rendered.delete(id);
+      this.pending.delete(id);
+      this.conflicts.delete(id);
+      this.missingPredecessors.delete(id);
+    }
+    for (const runId of removed) this.removeTurn(runId);
+    return removed;
   }
 
   values(subagentId?: string | null): NormalizedMessage[] {

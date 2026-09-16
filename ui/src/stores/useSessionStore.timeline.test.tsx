@@ -78,3 +78,65 @@ it.each(['fetchFromServer', 'refreshFromServer'] as const)('%s applies child ter
   expect(result.current.getSubagentDetailMessages('s', 'child')[0]).toMatchObject({ content: 'Interrupted thought', streamState: 'closed' });
   expect(result.current.getMessages('s')[0]).toMatchObject({ content: 'Parent continues', streamState: 'open' });
 });
+
+const user = (runId: string, content: string): NormalizedMessage => ({
+  ...thought(1, content), timeline: undefined, id: `user-${runId}`, runId, kind: 'text', role: 'user',
+});
+const answer = (runId: string, content: string): NormalizedMessage => ({
+  ...thought(2, content), id: `answer-${runId}`, runId, kind: 'text', role: 'assistant', isFinal: true,
+  timeline: { ...thought(2, '').timeline!, turnId: runId },
+});
+
+it.each(['fetchFromServer', 'refreshFromServer'] as const)('%s replaces remotely edited history while retaining uncommitted live content', async (method) => {
+  let messages = [user('old', 'Old question'), answer('old', 'Old answer')];
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ messages, hasMore: false }))));
+  const { result } = renderHook(useSessionStore);
+  await act(async () => { await result.current.fetchFromServer('s'); });
+  act(() => { result.current.setActiveSession('elsewhere'); });
+  messages = [user('new', 'Edited question'), answer('new', 'New answer')];
+  const live = { ...answer('live', 'Not on disk'), isFinal: false, timeline: { ...answer('live', '').timeline!, offset: 0 } };
+  act(() => {
+    result.current.setActiveSession('s');
+    result.current.appendRealtime('s', user('live', 'Next question'));
+    result.current.applyTimelineMessage('s', live);
+  });
+  await act(async () => { await result.current[method]('s'); });
+  expect(result.current.getMessages('s').map(m => m.content)).toEqual(['Edited question', 'New answer', 'Next question', 'Not on disk']);
+  act(() => result.current.applyTimelineMessage('s', answer('old', 'Late old answer')));
+  expect(result.current.getMessages('s').some(m => m.content?.includes('old answer'))).toBe(false);
+});
+
+it('a partial history page does not remove previously confirmed timeline blocks', async () => {
+  let messages = [user('old', 'Old question'), answer('old', 'Old answer')];
+  let hasMore = false;
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ messages, hasMore }))));
+  const { result } = renderHook(useSessionStore);
+  await act(async () => { await result.current.fetchFromServer('s'); });
+  messages = [user('new', 'New question'), answer('new', 'New answer')];
+  hasMore = true;
+  await act(async () => { await result.current.fetchFromServer('s', { limit: 2 }); });
+  expect(result.current.getMessages('s').some(m => m.content === 'Old answer')).toBe(true);
+});
+
+it.each(['fetchFromServer', 'refreshFromServer'] as const)('%s preserves child errors through cached and restored protocol updates', async (method) => {
+  const child: NormalizedMessage = { ...thought(1, 'Thought'), isSubagentDetail: true, subagentId: 'child',
+    timeline: { ...thought(1, '').timeline!, turnId: 'child-t0' } };
+  const error: NormalizedMessage = { ...child, id: 'error', timeline: undefined, kind: 'error', content: 'Timeout detail' };
+  const restoredError = { ...error, id: 'restored-error', content: 'Recovered error detail' };
+  const completed: NormalizedMessage = { ...child, timeline: undefined, kind: 'agent_activity', phase: 'subagent',
+    isSubagentDetail: false, parentRunId: 'run', runId: 'subagent:child', state: 'failed' };
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ messages: [],
+    stream: { active: true, runId: 'run', messages: [restoredError, completed, child] } }))));
+  const { result } = renderHook(useSessionStore);
+  act(() => {
+    result.current.applyTimelineMessage('s', child);
+    result.current.appendSubagentDetailMessage('s', 'child', error);
+    result.current.applyTimelineMessage('s', { ...child, content: 'More thought', timeline: { ...child.timeline!, revision: 2 } });
+    result.current.closeTimeline('s', 'run', true, 'child');
+  });
+  expect(result.current.getSubagentDetailMessages('s', 'child').find(m => m.id === 'error')?.content).toBe('Timeout detail');
+  await act(async () => { await result.current[method]('s'); });
+  expect(result.current.getSubagentDetailMessages('s', 'child').filter(m => m.kind === 'error').map(m => m.content))
+    .toEqual(['Timeout detail', 'Recovered error detail']);
+  expect(result.current.getSubagentDetailMessages('s', 'child').find(m => m.kind === 'thinking')?.streamState).toBe('closed');
+});
