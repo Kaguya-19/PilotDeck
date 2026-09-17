@@ -283,7 +283,7 @@ _SEMANTIC_EVENT_FIELDS = {
     "agent.status": {"event", "detail"},
     "durable.status": {"event", "statusKind", "text"},
     "durable.steer": {"itemId", "message"},
-    "durable.compaction_completed": {"operationId"},
+    "durable.compaction_completed": {"operationId", "status"},
     "durable.state": {
         "durableStatusCount", "durableSteerCount", "compactionBoundaryCount",
         "compactionCompletedCount", "replayedStatusCount",
@@ -300,7 +300,7 @@ _SEMANTIC_EVENT_FIELDS = {
     "checkpoint": {"status", "seedState", "messages", "activeStepId", "taskFrameId", "slots", "knowledgeBudget", "recoveryPoint", "sideEffectCount"},
     "taskframe": {"taskFrame", "status", "stepId", "nextStepId", "slots", "requiredCapabilities", "knowledgeBudget", "priorTaskResults"},
     "session.state": {"activeSkillId", "activeStepId", "pendingTasks", "awaitingInput", "handoff", "slots", "priorTaskResults"},
-    "terminal": {"outcome", "code", "stopReason", "structuredResult", "output", "frameStatus", "runStatus", "taskFrame", "session"},
+    "terminal": {"outcome", "code", "stopReason", "resultType", "structuredResult", "output", "frameStatus", "runStatus", "taskFrame", "session"},
     "user.output": {"text"},
 }
 
@@ -460,8 +460,75 @@ def _diff_values(left: Any, right: Any) -> list[Difference]:
     return differences
 
 
+def _semantic_event_key(record: dict[str, Any]) -> tuple[str, str | None]:
+    """Return a stable stream key without treating adjacent insertions as drift.
+
+    A durable status can be inserted before a model request by a newer runtime.
+    That remains a semantic difference, but it must not shift every later model,
+    tool, and terminal record into a misleading positional mismatch.
+    """
+    scope = record.get("agentScope")
+    return str(record.get("kind") or ""), scope if isinstance(scope, str) else None
+
+
+def _diff_semantic_records(left: list[dict[str, Any]], right: list[dict[str, Any]]) -> list[Difference]:
+    left_keys = [_semantic_event_key(record) for record in left]
+    right_keys = [_semantic_event_key(record) for record in right]
+    rows, columns = len(left), len(right)
+    lcs = [[0] * (columns + 1) for _ in range(rows + 1)]
+    for left_index in range(rows - 1, -1, -1):
+        for right_index in range(columns - 1, -1, -1):
+            if left_keys[left_index] == right_keys[right_index]:
+                lcs[left_index][right_index] = 1 + lcs[left_index + 1][right_index + 1]
+            else:
+                lcs[left_index][right_index] = max(lcs[left_index + 1][right_index], lcs[left_index][right_index + 1])
+
+    differences: list[Difference] = []
+    left_index = right_index = 0
+    while left_index < rows and right_index < columns:
+        if left_keys[left_index] == right_keys[right_index]:
+            left_record = left[left_index]
+            right_record = right[right_index]
+            # A model-visible request is an atomic contract. Reporting every
+            # nested prompt/tool-schema leaf obscures the first behavioral
+            # divergence without preserving additional diagnostic value; the
+            # full request remains attached to the single difference.
+            if (
+                left_record.get("kind") == "model.request"
+                and left_record.get("modelView") != right_record.get("modelView")
+            ):
+                differences.append(Difference(
+                    f"trace[{left_index}]~[{right_index}].modelView",
+                    left_record.get("modelView"),
+                    right_record.get("modelView"),
+                ))
+                left_record = {key: value for key, value in left_record.items() if key != "modelView"}
+                right_record = {key: value for key, value in right_record.items() if key != "modelView"}
+            for difference in _diff_values(left_record, right_record):
+                differences.append(Difference(
+                    difference.path.replace("trace", f"trace[{left_index}]~[{right_index}]", 1),
+                    difference.left,
+                    difference.right,
+                ))
+            left_index += 1
+            right_index += 1
+        elif lcs[left_index + 1][right_index] >= lcs[left_index][right_index + 1]:
+            differences.append(Difference(f"trace[{left_index}]", left[left_index], None))
+            left_index += 1
+        else:
+            differences.append(Difference(f"trace[{left_index}]", None, right[right_index]))
+            right_index += 1
+    while left_index < rows:
+        differences.append(Difference(f"trace[{left_index}]", left[left_index], None))
+        left_index += 1
+    while right_index < columns:
+        differences.append(Difference(f"trace[{left_index}]", None, right[right_index]))
+        right_index += 1
+    return differences
+
+
 def compare_trace_details(left: list[dict[str, Any]], right: list[dict[str, Any]]) -> Comparison:
-    semantic = _diff_values(project_semantic_trace(left), project_semantic_trace(right))
+    semantic = _diff_semantic_records(project_semantic_trace(left), project_semantic_trace(right))
     format_differences = _diff_values(project_format_trace(left), project_format_trace(right))
     return Comparison(semantic=semantic, format_warnings=format_differences)
 

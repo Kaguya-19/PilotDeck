@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 
-import type { CanonicalMessage } from "../../../model/index.js";
+import type { CanonicalContentBlock, CanonicalMessage, CanonicalToolCall } from "../../../model/index.js";
 import { HostToolCheckpoint } from "../checkpoint/hostToolCheckpoint.js";
 import { parseAgentLoopSeedStateProjection, serializeAgentLoopSeedStateProjection } from "../checkpoint/seedStateProjection.js";
 import {
@@ -44,6 +44,7 @@ import {
   type AgentLoopSeedState,
 } from "../../loop/AgentLoop.js";
 import { seedAgentReadState } from "../../loop/seedReadState.js";
+import { TurnTimeline } from "../../stream/TurnTimeline.js";
 import { applyAgentPermissionOverrides } from "../../turn/permissionOverrides.js";
 import type { AgentEvent } from "../../protocol/events.js";
 import { agentError } from "../../protocol/errors.js";
@@ -351,6 +352,7 @@ class AgentLoopSidecarRunner implements AgentLoopRunner {
           transportObserver: this.options.transportObserver,
         }),
       });
+      const hostEventProjector = new SidecarHostEventProjector(input);
       protocol = new SidecarTurnProtocol({
         config: this.options.config,
         input,
@@ -362,9 +364,10 @@ class AgentLoopSidecarRunner implements AgentLoopRunner {
         operationLedger: this.options.operationLedger,
         transportObserver: this.options.transportObserver,
         moduleHandlers: Object.freeze({ ...dispatcher.handlers, ...moduleHandlers }),
+        projectTerminal: (terminal) => hostEventProjector.projectTerminal(terminal),
       });
       const iterator = protocol.execute(connection);
-      const drainHostEvents = (): AgentEvent[] => this.options.modules.event?.drain?.() ?? [];
+      const drainHostEvents = (): AgentEvent[] => hostEventProjector.drain(this.options.modules.event?.drain?.() ?? []);
       let result: SidecarTerminal;
       let pendingNext = iterator.next();
       while (true) {
@@ -374,6 +377,7 @@ class AgentLoopSidecarRunner implements AgentLoopRunner {
         ]);
         if (received.type === "pump") {
           for (const hostEvent of drainHostEvents()) yield hostEvent;
+          for (const heartbeat of hostEventProjector.heartbeats()) yield heartbeat;
           continue;
         }
         const next = received.next;
@@ -384,7 +388,7 @@ class AgentLoopSidecarRunner implements AgentLoopRunner {
           result = next.value;
           break;
         }
-        const event = next.value;
+        const event = hostEventProjector.project(next.value);
         if (event.type === "steer_applied") {
           await input.onDurableMessage?.(event.message);
           dispatcher.applySteerAuthorization(event.itemId);
@@ -504,6 +508,7 @@ class SidecarTurnProtocol {
     operationLedger?: AgentLoopOperationLedger;
     transportObserver?: AgentLoopSidecarTransportObserver;
     moduleHandlers: SidecarModuleHandlerRegistry;
+    projectTerminal?: (terminal: SidecarTerminal) => SidecarTerminal;
   }) {
     this.hostToolCheckpoint = options.checkpoint;
     this.helloMessageId = `hello-${options.uuid()}`;
@@ -589,8 +594,7 @@ class SidecarTurnProtocol {
           }
           const terminal = await this.acceptResponse(message);
           if (terminal) {
-            const hostTerminal = this.withHostToolCheckpoint(terminal);
-            await this.recordKnownTerminal(hostTerminal, "failed");
+            const hostTerminal = await this.recordKnownTerminal(this.withHostToolCheckpoint(terminal), "failed");
             terminalObserved = true;
             yield {
               type: "turn_completed",
@@ -609,11 +613,11 @@ class SidecarTurnProtocol {
         if (phase !== "execute") throw new Error("Sidecar emitted an event before handshake completed.");
         this.assertEventIdentity(message);
         if (message.final) {
-          const terminal = message.outcome === "result_unknown"
+          let terminal = message.outcome === "result_unknown"
             ? await this.reconcileResultUnknown(message)
             : this.withHostToolCheckpoint(readTerminal(message, this.options.input));
           if (isResolvedModuleOutcome(message.outcome)) {
-            await this.recordKnownTerminal(terminal, message.outcome);
+            terminal = await this.recordKnownTerminal(terminal, message.outcome);
           }
           terminalObserved = true;
           // Module final is the authoritative terminal. Suppress a preceding
@@ -963,9 +967,9 @@ class SidecarTurnProtocol {
     // A successful external status query becomes the new durable source of
     // truth. Without this write, a later session recovery would see only the
     // result_unknown observation and repeat reconciliation indefinitely.
-    await this.recordKnownTerminal(terminal, resolution.outcome);
+    const projected = await this.recordKnownTerminal(terminal, resolution.outcome);
     this.observe({ type: "result_unknown_resolved", source, outcome: resolution.outcome });
-    return terminal;
+    return projected;
   }
 
   private withHostToolCheckpoint(terminal: SidecarTerminal): SidecarTerminal {
@@ -998,16 +1002,18 @@ class SidecarTurnProtocol {
   private async recordKnownTerminal(
     terminal: SidecarTerminal,
     outcome: Exclude<ModuleOutcome, "result_unknown">,
-  ): Promise<void> {
+  ): Promise<SidecarTerminal> {
+    const projected = this.options.projectTerminal?.(terminal) ?? terminal;
     await this.options.operationLedger?.terminal({
       ...this.operationIdentity(),
       ...(this.streamId ? { streamId: this.streamId } : {}),
       lastAppliedSequence: this.nextSequence - 1,
       outcome,
-      result: terminal.result,
-      messages: terminal.messages,
-      ...(terminal.seedState ? { seedState: terminal.seedState } : {}),
+      result: projected.result,
+      messages: projected.messages,
+      ...(projected.seedState ? { seedState: projected.seedState } : {}),
     });
+    return projected;
   }
 
   private async dispatchModuleCall(call: ModuleCallRequest): Promise<ModuleResponse> {
@@ -1231,6 +1237,9 @@ function serializeAgentConfig(config: AgentRuntimeConfig): Record<string, unknow
       : {}),
     ...(config.jsonSelfCorrect !== undefined ? { jsonSelfCorrect: config.jsonSelfCorrect } : {}),
     ...(config.runMode ? { runMode: config.runMode } : {}),
+    ...(config.permissionModeBeforePlan
+      ? { permissionModeBeforePlan: config.permissionModeBeforePlan }
+      : {}),
     ...(config.isSubagent !== undefined ? { isSubagent: config.isSubagent } : {}),
     ...(config.metadata ? { metadata: config.metadata } : {}),
     ...(config.subagentModel ? { subagentModel: config.subagentModel } : {}),
@@ -1390,6 +1399,215 @@ function sidecarTransportTurn(input: AgentLoopInput): SidecarTransportTurn {
     ...(input.execution?.idempotencyKey ? { idempotencyKey: input.execution.idempotencyKey } : {}),
     ...(input.execution?.operationDeadline ? { operationDeadline: input.execution.operationDeadline } : {}),
   });
+}
+
+type ActiveHostSubagent = {
+  subagentId: string;
+  subagentType?: string;
+  startedAtMs: number;
+  lastHeartbeatMs: number;
+  currentToolCallId?: string;
+  currentToolName?: string;
+};
+
+/**
+ * The runner owns the externally visible timeline for both child and host
+ * events. Child-local coordinates are transport implementation details and
+ * must not form a second visible allocator chain.
+ */
+class SidecarHostEventProjector {
+  private readonly timeline: TurnTimeline;
+  private readonly activeSubagents = new Map<string, ActiveHostSubagent>();
+
+  constructor(private readonly input: AgentLoopInput) {
+    this.timeline = new TurnTimeline(input.turnId);
+  }
+
+  drain(events: readonly AgentEvent[]): AgentEvent[] {
+    const projected: AgentEvent[] = [];
+    for (const event of events) {
+      const timed = this.project(event);
+      projected.push(timed);
+      const status = this.deriveSubagentStatus(event);
+      if (status) projected.push(this.project(status));
+    }
+    return projected;
+  }
+
+  project(event: AgentEvent): AgentEvent {
+    if (event.type === "subagent_model_event") {
+      // A subagent has its own stream allocator. It is not a child-sidecar
+      // coordinate and must remain intact for the Gateway subagent stream.
+      return event;
+    }
+    const { timeline: _timeline, streamBoundary: _streamBoundary, ...untimed } = stripChildTimeline(event);
+    return this.timeline.event(untimed as AgentEvent);
+  }
+
+  projectTerminal(terminal: SidecarTerminal): SidecarTerminal {
+    const messages = terminal.messages.map((message) => this.projectTerminalMessage(message));
+    const finalMessage = terminal.result.finalMessage
+      ? this.projectTerminalMessage(terminal.result.finalMessage)
+      : undefined;
+    return {
+      ...terminal,
+      messages,
+      result: {
+        ...terminal.result,
+        ...(finalMessage ? { finalMessage } : {}),
+      },
+    };
+  }
+
+  private projectTerminalMessage(message: CanonicalMessage): CanonicalMessage {
+    const projected = stripMessageTimeline(message);
+    for (const block of projected.content) {
+      const id = timelineContentId(block);
+      if (id) block.timeline = this.timeline.position(id);
+      else if (projected.metadata?.queueItemId) block.timeline = this.timeline.position(`steer:${projected.metadata.queueItemId}`);
+    }
+    return projected;
+  }
+
+  heartbeats(nowMs = Date.now()): AgentEvent[] {
+    const result: AgentEvent[] = [];
+    for (const state of this.activeSubagents.values()) {
+      if (nowMs - state.lastHeartbeatMs < 2_000) continue;
+      state.lastHeartbeatMs = nowMs;
+      result.push(this.timeline.event({
+        type: "subagent_status",
+        sessionId: this.input.sessionId,
+        turnId: this.input.turnId,
+        subagentId: state.subagentId,
+        subagentType: state.subagentType,
+        status: state.currentToolName ? "running" : "waiting_model",
+        toolCallId: state.currentToolCallId,
+        toolName: state.currentToolName,
+        durationMs: Math.max(0, nowMs - state.startedAtMs),
+      }));
+    }
+    return result;
+  }
+
+  private deriveSubagentStatus(event: AgentEvent): AgentEvent | undefined {
+    const nowMs = Date.now();
+    if (event.type === "subagent_started") {
+      this.activeSubagents.set(event.subagentId, {
+        subagentId: event.subagentId,
+        subagentType: event.subagentType,
+        startedAtMs: nowMs,
+        lastHeartbeatMs: nowMs,
+      });
+      return undefined;
+    }
+    if (event.type === "subagent_completed") {
+      this.activeSubagents.delete(event.subagentId);
+      return undefined;
+    }
+    if (event.type !== "pre_tool_execute" && event.type !== "post_tool_execute") return undefined;
+    const subagentId = subagentIdFromSessionId(event.sessionId);
+    if (!subagentId) return undefined;
+    const state = this.activeSubagents.get(subagentId) ?? {
+      subagentId,
+      startedAtMs: nowMs,
+      lastHeartbeatMs: nowMs,
+    };
+    if (event.type === "pre_tool_execute") {
+      state.currentToolCallId = event.toolCallId;
+      state.currentToolName = event.toolName;
+    } else {
+      state.currentToolCallId = undefined;
+      state.currentToolName = undefined;
+    }
+    state.lastHeartbeatMs = nowMs;
+    this.activeSubagents.set(subagentId, state);
+    return {
+      type: "subagent_status",
+      sessionId: this.input.sessionId,
+      turnId: this.input.turnId,
+      subagentId,
+      subagentType: state.subagentType,
+      status: event.type === "pre_tool_execute" ? "tool_started" : "tool_completed",
+      toolCallId: event.toolCallId,
+      toolName: event.toolName,
+      ...(event.type === "post_tool_execute" ? { success: event.success } : {}),
+      durationMs: Math.max(0, nowMs - state.startedAtMs),
+    };
+  }
+}
+
+/**
+ * A sidecar child may retain its own transient stream coordinates. They are
+ * not valid outside that child: the runner's timeline is the sole allocator
+ * for host-visible events and the message blocks embedded in those events.
+ */
+function stripChildTimeline(event: AgentEvent): AgentEvent {
+  switch (event.type) {
+    case "assistant_message":
+    case "tool_results_projected":
+    case "steer_applied":
+      return { ...event, message: stripMessageTimeline(event.message) };
+    case "tool_calls_detected":
+      return {
+        ...event,
+        calls: event.calls.map((call): CanonicalToolCall => {
+          const { timeline: _timeline, ...untimed } = call;
+          return untimed;
+        }),
+      };
+    case "model_event":
+    case "subagent_model_event":
+      if (event.event.type !== "tool_call_end") return event;
+      return {
+        ...event,
+        event: {
+          ...event.event,
+          toolCall: (() => {
+            const { timeline: _timeline, ...untimed } = event.event.toolCall;
+            return untimed;
+          })(),
+        },
+      };
+    default:
+      return event;
+  }
+}
+
+function stripMessageTimeline(message: CanonicalMessage): CanonicalMessage {
+  return { ...message, content: message.content.map(stripCanonicalContentTimeline) };
+}
+
+function timelineContentId(block: CanonicalContentBlock): string | undefined {
+  if (block.type === "text" || block.type === "thinking") return block.blockId;
+  if (block.type === "tool_call") return `tool:${block.id}`;
+  if (block.type === "tool_result" || block.type === "tool_result_reference") return `result:${block.toolCallId}`;
+  return undefined;
+}
+
+function stripCanonicalContentTimeline(block: CanonicalContentBlock): CanonicalContentBlock {
+  if (block.type === "tool_result") {
+    const { timeline: _timeline, ...untimed } = block;
+    return {
+      ...untimed,
+      content: block.content.map(stripToolResultContentTimeline),
+    } as CanonicalContentBlock;
+  }
+  const { timeline: _timeline, ...untimed } = block;
+  return untimed as CanonicalContentBlock;
+}
+
+function stripToolResultContentTimeline<T extends object>(content: T): T {
+  if (!("timeline" in content)) return { ...content };
+  const { timeline: _timeline, ...untimed } = content as T & { timeline?: unknown };
+  return untimed as T;
+}
+
+function subagentIdFromSessionId(sessionId: string): string | undefined {
+  const marker = "::sub::";
+  const index = sessionId.lastIndexOf(marker);
+  if (index < 0) return undefined;
+  const subagentId = sessionId.slice(index + marker.length).trim();
+  return subagentId.length > 0 ? subagentId : undefined;
 }
 
 function modelOverride(value: unknown): { provider: string; model: string } | undefined {

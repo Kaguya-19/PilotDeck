@@ -118,6 +118,24 @@ test("durable model and tool decorators commit facts before returning them to Ag
   assert.equal(JSON.stringify(callEntry).includes("raw"), false);
 });
 
+test("durable tool decorator preserves an optional host catalog refresh", async () => {
+  const transcript = new InMemoryTranscriptWriter();
+  const recorder = new AgentSessionEventRecorder(transcript);
+  let refreshes = 0;
+  const tools = createDurableToolPort({
+    list: () => [],
+    async refresh() {
+      refreshes += 1;
+      return [];
+    },
+    async executeAll() { return []; },
+  }, recorder);
+
+  assert.equal(typeof tools.refresh, "function");
+  await tools.refresh?.();
+  assert.equal(refreshes, 1);
+});
+
 test("model_request persistence failure prevents provider dispatch", async () => {
   let dispatched = false;
   const transcript = new FailingSessionEventWriter("model_request");

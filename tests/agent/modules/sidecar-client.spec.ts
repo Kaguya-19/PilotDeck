@@ -13,6 +13,7 @@ import {
 } from "../../../src/agent/index.js";
 import { createSidecarExecution } from "../../../src/cli/pilotdeck-agent-loop-default-factory.js";
 import { createAgentSession } from "../../../src/agent/session/createAgentSession.js";
+import type { AgentEvent } from "../../../src/agent/protocol/events.js";
 import { createDefaultPermissionContext, PermissionRuntime } from "../../../src/permission/index.js";
 import type { AgentLoopSeedState } from "../../../src/agent/loop/AgentLoop.js";
 import type { AgentRuntimeConfig } from "../../../src/agent/runtime/AgentRuntimeConfig.js";
@@ -599,6 +600,7 @@ test("sidecar execute wire preserves AgentLoop turn limits and model configurati
     stopOnStructuredOutput: true,
     jsonSelfCorrect: true,
     isSubagent: true,
+    permissionModeBeforePlan: "bypassPermissions",
     metadata: { subagentId: "child-1", subagentType: "general-purpose" },
   };
   const session = createAgentSession({
@@ -664,7 +666,163 @@ test("sidecar execute wire preserves AgentLoop turn limits and model configurati
   assert.equal(agent.stopOnStructuredOutput, true);
   assert.equal(agent.jsonSelfCorrect, true);
   assert.equal(agent.isSubagent, true);
+  assert.equal(agent.permissionModeBeforePlan, "bypassPermissions");
   assert.deepEqual(agent.metadata, { subagentId: "child-1", subagentType: "general-purpose" });
+});
+
+test("sidecar runner reprojects child and host events onto one visible timeline", async () => {
+  const responses = queue<unknown>();
+  const hostEvents: AgentEvent[] = [];
+  const sessionId = "projected-event-session";
+  const turnId = "projected-event-turn";
+  const childAssistantMessage = {
+    role: "assistant" as const,
+    content: [{
+      type: "text" as const,
+      blockId: "child-text",
+      text: "projected",
+      timeline: { version: 1, turnId: "child-local-turn", id: "child-text", order: 99, revision: 99 },
+    }],
+  };
+  const factory = createAgentLoopSidecarRuntimeFactory({
+    connect: () => ({
+      send(message: unknown) {
+        const request = message as Record<string, unknown>;
+        if (request.method === "hello") {
+          responses.push(handshakeResponse(request, {}, "projected-events", {
+            capabilitiesVersion: "2.0",
+            methods: [{ name: "execute", enabled: true, profiles: ["streaming"] }],
+          }));
+          return;
+        }
+        if (request.method === "capabilities") {
+          const capabilities = {
+            capabilitiesVersion: "2.0",
+            methods: [{ name: "execute", enabled: true, profiles: ["streaming"] }],
+          };
+          responses.push(handshakeResponse(request, capabilities, "projected-events", capabilities));
+          return;
+        }
+        if (request.method !== "execute") return;
+        hostEvents.push({
+          type: "subagent_started",
+          sessionId,
+          turnId,
+          subagentId: "child-a",
+          subagentType: "general-purpose",
+        }, {
+          type: "pre_tool_execute",
+          sessionId: `${sessionId}::sub::child-a`,
+          turnId,
+          toolCallId: "host-tool",
+          toolName: "read_file",
+        });
+        responses.push({
+          kind: "response",
+          messageId: "projected-events-accepted",
+          inReplyTo: request.messageId,
+          requestId: request.requestId,
+          ok: true,
+          streamId: "projected-events-stream",
+          cursor: 0,
+        });
+        responses.push({
+          kind: "event",
+          eventType: "agent.execute.event",
+          streamId: "projected-events-stream",
+          sequence: 0,
+          runId: request.runId,
+          operationId: request.operationId,
+          requestId: request.requestId,
+          final: false,
+          payload: {
+            type: "assistant_message",
+            sessionId,
+            turnId,
+            message: childAssistantMessage,
+          },
+        });
+        responses.push({
+          kind: "event",
+          eventType: "agent.execute.event",
+          streamId: "projected-events-stream",
+          sequence: 1,
+          runId: request.runId,
+          operationId: request.operationId,
+          requestId: request.requestId,
+          final: false,
+          payload: {
+            type: "tool_calls_detected",
+            sessionId,
+            turnId,
+            calls: [{
+              id: "child-tool",
+              name: "read_file",
+              input: {},
+              timeline: { version: 1, turnId: "child-local-turn", id: "tool:child-tool", order: 100, revision: 100 },
+            }],
+          },
+        });
+        responses.push({
+          kind: "event",
+          eventType: "agent.execute.completed",
+          streamId: "projected-events-stream",
+          sequence: 2,
+          runId: request.runId,
+          operationId: request.operationId,
+          requestId: request.requestId,
+          final: true,
+          outcome: "completed",
+          payload: {
+            result: { ...completedResult(sessionId, turnId), finalMessage: childAssistantMessage },
+            messages: [childAssistantMessage],
+          },
+        });
+        responses.end();
+      },
+      receive: () => responses,
+    }),
+    uuid: deterministicIds(),
+  });
+  const session = createAgentSession({
+    sessionId,
+    config: config(),
+    dependencies: {
+      router: {} as never,
+      ports: { model: noopModel(), tools: noopTools() },
+      tools: { registry: { list: () => [] } as never, scheduler: { executeAll: async () => [] } as never },
+      eventEmitter: (event) => hostEvents.push(event),
+      drainEvents: () => hostEvents.splice(0),
+    },
+    agentLoopFactory: factory,
+  });
+
+  const events: AgentEvent[] = [];
+  for await (const event of session.submit({ type: "text", text: "project events" }, { turnId })) events.push(event);
+
+  const assistant = events.find((event) => event.type === "assistant_message");
+  const text = assistant?.type === "assistant_message" ? assistant.message.content[0] : undefined;
+  assert.equal(text?.type, "text");
+  assert.equal(text?.timeline?.turnId, turnId);
+  assert.notEqual(text?.timeline?.order, 99);
+  const terminal = events.find((event) => event.type === "turn_completed");
+  const terminalText = terminal?.type === "turn_completed"
+    ? terminal.result.finalMessage?.content[0]
+    : undefined;
+  assert.equal(terminalText?.type, "text");
+  assert.deepEqual(terminalText?.timeline, text?.timeline);
+  const snapshotText = session.snapshot().messages.find((message) =>
+    message.content.some((block) => block.type === "text" && block.blockId === "child-text"))?.content[0];
+  assert.equal(snapshotText?.type, "text");
+  assert.deepEqual(snapshotText?.timeline, text?.timeline);
+  const calls = events.find((event) => event.type === "tool_calls_detected");
+  assert.equal(calls?.type, "tool_calls_detected");
+  assert.equal(calls?.type === "tool_calls_detected" && calls.calls[0]?.timeline?.turnId, turnId);
+  assert.notEqual(calls?.type === "tool_calls_detected" && calls.calls[0]?.timeline?.order, 100);
+  const derivedStatus = events.find((event) => event.type === "subagent_status");
+  assert.equal(derivedStatus?.type, "subagent_status");
+  assert.equal(derivedStatus?.type === "subagent_status" && derivedStatus.status, "tool_started");
+  await session.dispose();
 });
 
 test("sidecar known terminal keeps host tool checkpoint state and current attachment authorization", async () => {
@@ -979,8 +1137,22 @@ test("sidecar host owns tool-driven plan mode across callbacks and turns", async
     execute: async () => ({ content: [] }),
   };
 
-  const run = async (kind: "native" | "sidecar") => {
-    const runtimeConfig = config();
+  const run = async (
+    kind: "native" | "sidecar",
+    baseMode: "default" | "bypassPermissions",
+  ) => {
+    const runtimeConfig: AgentRuntimeConfig = baseMode === "bypassPermissions"
+      ? {
+          ...config(),
+          permissionMode: "bypassPermissions",
+          permissionContext: createDefaultPermissionContext({
+            cwd: "/workspace",
+            mode: "bypassPermissions",
+            bypassAvailable: true,
+            canPrompt: false,
+          }),
+        }
+      : config();
     const permissionRuntime = new PermissionRuntime();
     const permissionModes: string[] = [];
     const lifecycle = new RecordingLifecycleRuntime();
@@ -1093,25 +1265,37 @@ test("sidecar host owns tool-driven plan mode across callbacks and turns", async
     const plannedWrite = await submit(`${kind}-planned-write`);
     const exited = await submit(`${kind}-exit`, true);
     const defaultWrite = await submit(`${kind}-default-write`);
-    return { runtimeConfig, permissionModes, lifecycle, entered, plannedWrite, exited, defaultWrite };
+    return { runtimeConfig, permissionModes, lifecycle, entered, plannedWrite, exited, defaultWrite, baseMode };
   };
 
-  const native = await run("native");
-  const sidecar = await run("sidecar");
+  const results = await Promise.all([
+    run("native", "default"),
+    run("sidecar", "default"),
+    run("native", "bypassPermissions"),
+    run("sidecar", "bypassPermissions"),
+  ]);
 
-  for (const result of [native, sidecar]) {
-    assert.deepEqual(result.permissionModes, ["default", "plan", "plan", "default"]);
+  for (const result of results) {
+    assert.deepEqual(result.permissionModes, [result.baseMode, "plan", "plan", result.baseMode]);
     assert.deepEqual(
       result.lifecycle.inputs.filter((input) => input.event === "Stop").map((input) => input.baseInput.permissionMode),
-      ["plan", "plan", "default", "default"],
+      ["plan", "plan", result.baseMode, result.baseMode],
     );
-    assert.equal(result.runtimeConfig.permissionMode, "default");
-    assert.equal(result.runtimeConfig.permissionContext.mode, "default");
+    assert.equal(result.runtimeConfig.permissionMode, result.baseMode);
+    assert.equal(result.runtimeConfig.permissionContext.mode, result.baseMode);
     const plannedResult = result.plannedWrite.find((event) => event.type === "tool_result") as {
       result?: { type?: string; error?: { code?: string } };
     } | undefined;
     assert.equal(plannedResult?.result?.type, "error");
     assert.equal(plannedResult?.result?.error?.code, "permission_denied");
+    const postExitWrite = result.defaultWrite.find((event) => event.type === "tool_result") as {
+      result?: { type?: string };
+    } | undefined;
+    assert.equal(postExitWrite?.result?.type, result.baseMode === "bypassPermissions" ? "success" : "error", JSON.stringify({
+      baseMode: result.baseMode,
+      permissionModes: result.permissionModes,
+      postExitWrite,
+    }));
   }
 });
 
@@ -2135,9 +2319,10 @@ test("sidecar host capability calls reconstruct plan/todo and host execution ser
   assert.equal(terminal?.result?.type, "success");
 });
 
-test("sidecar compaction rebuilds full requests through host context before and after routing", async () => {
+test("sidecar compaction rebuilds candidate requests through host context without rerunning model preparation", async () => {
   const inputs: Array<Record<string, unknown>> = [];
   const preparationInputs: Array<Record<string, unknown>> = [];
+  const modelPreparationRequests: Array<Record<string, unknown>> = [];
   const evaluatedRequests: Array<Record<string, unknown>> = [];
   const manifests: Array<Record<string, unknown>> = [];
   const moduleResponses: Array<Record<string, unknown>> = [];
@@ -2151,7 +2336,21 @@ test("sidecar compaction rebuilds full requests through host context before and 
     dependencies: {
       router: {} as never,
       ports: {
-        model: noopModel(),
+        model: {
+          async prepare({ request }) {
+            modelPreparationRequests.push(structuredClone(request as unknown as Record<string, unknown>));
+            return {
+              request: {
+                ...request,
+                systemPrompt: `host prepared: ${request.systemPrompt ?? ""}`,
+                metadata: { ...request.metadata, hostRouteMaterialized: true },
+              },
+              provider: request.provider,
+              model: request.model,
+            };
+          },
+          async *stream() {},
+        },
         tools: noopTools(),
         budget: {
           async evaluateRequestBudget(request, options) {
@@ -2221,15 +2420,19 @@ test("sidecar compaction rebuilds full requests through host context before and 
     events.push(event);
   }
 
-  assert.equal(inputs.length, 2, JSON.stringify(events));
+  assert.equal(inputs.length, 3, JSON.stringify(events));
   assert.equal(((manifests[0]?.budget as Record<string, unknown> | undefined)?.methods as unknown[]).includes("evaluate_request_budget"), true);
   assert.equal(inputs[0]?.maxContextTokens, 128_000);
   assert.equal(inputs[1]?.maxContextTokens, 32_000);
+  assert.equal(inputs[0]?.budgetStage, "pre_route");
+  assert.equal(inputs[1]?.budgetStage, "routed");
+  assert.equal(inputs[2]?.budgetStage, "recovery");
   assert.equal(inputs[0]?.sessionId, "compaction-host-session");
   assert.equal(inputs[0]?.turnId, "compaction-host-turn");
   assert.ok(moduleResponses.every((response) => response.ok === true), JSON.stringify(moduleResponses));
-  assert.equal(evaluatedRequests.length, 2);
-  assert.equal(preparationInputs.length, 2);
+  assert.equal(evaluatedRequests.length, 3);
+  assert.equal(preparationInputs.length, 3);
+  assert.equal(modelPreparationRequests.length, 0);
   assert.deepEqual((preparationInputs[0]?.messages as unknown[]), [{
     role: "user",
     content: [{ type: "text", text: "candidate" }],
@@ -2243,6 +2446,7 @@ test("sidecar compaction rebuilds full requests through host context before and 
   }]);
   assert.equal(preparationInputs[0]?.previewOnly, true);
   assert.equal((evaluatedRequests[0]?.request as Record<string, unknown>).systemPrompt, "host runtime context");
+  assert.equal(((evaluatedRequests[0]?.request as Record<string, unknown>).metadata as Record<string, unknown> | undefined)?.hostRouteMaterialized, undefined);
   assert.equal(((evaluatedRequests[0]?.request as Record<string, unknown>).tools as unknown[]).length, 1);
   assert.deepEqual((evaluatedRequests[0]?.request as Record<string, unknown>).messages, [{
     role: "user",
@@ -2254,6 +2458,7 @@ test("sidecar compaction rebuilds full requests through host context before and 
   assert.equal(JSON.stringify((evaluatedRequests[0]?.request as Record<string, unknown>).messages).includes("orphan tool result"), false);
   assert.equal((evaluatedRequests[0]?.options as Record<string, unknown>).maxContextTokens, 128_000);
   assert.equal((evaluatedRequests[1]?.options as Record<string, unknown>).maxContextTokens, 32_000);
+  assert.equal((evaluatedRequests[2]?.options as Record<string, unknown>).maxContextTokens, 16_000);
 });
 
 test("sidecar compaction rejects malformed or cross-route calibration before host context", async () => {
@@ -2396,6 +2601,78 @@ test("sidecar dispatcher advertises and serves a narrow host model metadata snap
       protocol: "anthropic",
       supportsPromptCache: true,
     },
+  });
+  await dispatcher.dispose();
+});
+
+test("sidecar dispatcher legacy stream uses its cached prepared request when omitted", async () => {
+  let streamedRequest: Record<string, unknown> | undefined;
+  const dispatcher = createSidecarDefaultModuleDispatcher({
+    config: config(),
+    input: { sessionId: "legacy-stream-session", turnId: "legacy-stream-turn", messages: [] },
+    checkpoint: new HostToolCheckpoint({}),
+    capabilityResultObserver: { onCapabilityResults: async () => undefined },
+    planTodoHandler: async () => ({}),
+    modules: {
+      model: {
+        execution: {
+          async prepare({ request }) {
+            return {
+              request: { ...request, systemPrompt: "cached prepared prompt" },
+              provider: request.provider,
+              model: request.model,
+            };
+          },
+          async *stream({ prepared }) {
+            streamedRequest = prepared.request as unknown as Record<string, unknown>;
+            yield { type: "message_start", role: "assistant" } as const;
+            yield { type: "message_end", finishReason: "stop" } as const;
+          },
+        },
+      },
+      capability: {
+        execution: noopTools(),
+        runtimeContext: {
+          bindTurn: () => ({
+            permissionContext: () => config().permissionContext,
+            toolRuntimeContext: () => ({} as never),
+            executionContext: () => ({} as never),
+            contextIdentity: (source) => ({ ...(source ?? {}) }),
+          }),
+        },
+      },
+    },
+  });
+  const handler = dispatcher.handlers.model!;
+  const identity = {
+    kind: "request",
+    method: "module_call",
+    runId: "legacy-stream-run",
+    operationId: "legacy-stream-operation",
+    requestId: "legacy-stream-request",
+    module: "model",
+  } as const;
+  await handler({
+    ...identity,
+    messageId: "legacy-stream-prepare",
+    payload: {
+      operation: "prepare",
+      preparationId: "legacy-preparation",
+      request: { provider: "host-provider", model: "host-model", messages: [] },
+    },
+  } as never);
+  const response = await handler({
+    ...identity,
+    messageId: "legacy-stream-call",
+    payload: { operation: "stream", preparationId: "legacy-preparation" },
+  } as never);
+
+  assert.equal(streamedRequest?.systemPrompt, "cached prepared prompt");
+  assert.deepEqual(response, {
+    events: [
+      { type: "message_start", role: "assistant" },
+      { type: "message_end", finishReason: "stop" },
+    ],
   });
   await dispatcher.dispose();
 });
@@ -2881,6 +3158,65 @@ test("production sidecar preserves host prepare request materialization through 
   assert.equal(streamedRequest?.maxOutputTokens, 321);
   assert.deepEqual(streamedRequest?.metadata, { preparedByHost: true });
   await session.dispose();
+});
+
+test("prepared output caps constrain normal native and sidecar requests before provider limits", async () => {
+  const run = async (
+    kind: "native" | "sidecar",
+    providerLimit?: number,
+  ): Promise<number | undefined> => {
+    let streamedCap: number | undefined;
+    const model: ModelInvokerPort = {
+      async prepare({ request }) {
+        return {
+          request: { ...request, maxOutputTokens: 64 },
+          provider: request.provider,
+          model: request.model,
+        };
+      },
+      async *stream({ prepared }) {
+        streamedCap = prepared.request.maxOutputTokens;
+        yield { type: "message_start", role: "assistant" } as const;
+        yield { type: "text_delta", text: "done" } as const;
+        yield { type: "message_end", finishReason: "stop" } as const;
+      },
+    };
+    const session = createAgentSession({
+      sessionId: `${kind}-prepared-cap-${providerLimit ?? "none"}`,
+      config: { ...config(), maxOutputTokens: 200 },
+      dependencies: {
+        router: {} as never,
+        ports: {
+          model,
+          tools: noopTools(),
+          ...(providerLimit === undefined ? {} : {
+            metadata: { getModelTokenLimits: () => ({ maxContextTokens: 8_192, maxOutputTokens: providerLimit }) },
+          }),
+        },
+        tools: { registry: { list: () => [] } as never, scheduler: { executeAll: async () => [] } as never },
+      },
+      ...(kind === "sidecar" ? {
+        agentLoopFactory: createAgentLoopSidecarRuntimeFactory({
+          connect: () => loopbackConnection(),
+          uuid: deterministicIds(),
+        }),
+      } : {}),
+    });
+    for await (const _event of session.submit({ type: "text", text: "respect the prepared cap" }, {
+      turnId: `${kind}-prepared-cap-turn-${providerLimit ?? "none"}`,
+    })) {}
+    await session.dispose();
+    return streamedCap;
+  };
+
+  assert.deepEqual(await Promise.all([
+    run("native"),
+    run("sidecar"),
+  ]), [64, 64]);
+  assert.deepEqual(await Promise.all([
+    run("native", 48),
+    run("sidecar", 48),
+  ]), [48, 48]);
 });
 
 test("production sidecar applies a steer attachment to host tools only after the steer is durable", async () => {
@@ -3575,7 +3911,35 @@ function compactionContextConnection(
         }));
         return;
       }
-      if (request.inReplyTo !== "routed-compact") return;
+      if (request.inReplyTo === "routed-compact") {
+        responses.push(moduleCall("recovery-compact", {
+          messages: [],
+          maxContextTokens: 16_000,
+          budgetRequest: {
+            provider: "recovery-provider",
+            model: "recovery-model",
+            systemPrompt: "S".repeat(256),
+            tools: [{ name: "large_tool", description: "T".repeat(256), inputSchema: { type: "object" } }],
+            maxOutputTokens: 8192,
+            messages: [],
+          },
+          budgetPreparation: {
+            sessionId: "compaction-host-session",
+            turnId: "compaction-host-turn",
+            cwd: "/workspace",
+            provider: "recovery-provider",
+            model: "recovery-model",
+            permissionMode: "default",
+            runMode: "agent",
+            additionalWorkingDirectories: [],
+            messages: [],
+            tools: [{ name: "large_tool", description: "T".repeat(256), inputSchema: { type: "object" } }],
+          },
+          budgetProjection: { stage: "recovery", trigger: "model_error", maxContextTokens: 16_000 },
+        }));
+        return;
+      }
+      if (request.inReplyTo !== "recovery-compact") return;
       responses.push({
         kind: "event",
         eventType: "agent.execute.completed",

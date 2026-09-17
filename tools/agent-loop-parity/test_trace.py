@@ -10,6 +10,7 @@ from trace import (
     validate_production_sidecar_proof,
     validate_trace_expectations,
 )
+from run import baseline_not_applicable_reason
 
 
 FIRST_SUBAGENT = "11111111-1111-4111-8111-111111111111"
@@ -46,6 +47,58 @@ def subagent_trace(subagent_id: str, message_id: str, turn_id: str, followup_id:
 
 
 class SubagentTraceNormalizationTests(unittest.TestCase):
+    def test_baseline_extension_suites_are_explicitly_not_applicable(self) -> None:
+        self.assertEqual(
+            baseline_not_applicable_reason({"suite": "sidecar-production"}),
+            "baseline lacks sidecar-production capability surface",
+        )
+        self.assertIsNone(baseline_not_applicable_reason({"suite": "core-regression"}))
+
+    def test_request_output_target_and_terminal_result_type_are_semantic(self) -> None:
+        left = [{
+            "kind": "model.request", "scenarioId": "output", "q": "output", "sequence": 0,
+            "modelView": {"provider": "openai", "model": "test", "maxOutputTokens": 64},
+        }, {
+            "kind": "terminal", "scenarioId": "output", "q": "output", "sequence": 1,
+            "outcome": "failed", "resultType": "aborted",
+        }]
+        right = [{
+            "kind": "model.request", "scenarioId": "output", "q": "output", "sequence": 0,
+            "modelView": {"provider": "openai", "model": "test", "maxOutputTokens": 128},
+        }, {
+            "kind": "terminal", "scenarioId": "output", "q": "output", "sequence": 1,
+            "outcome": "failed", "resultType": "failed",
+        }]
+        differences = compare_traces(left, right)
+        request_difference = next(item for item in differences if item.path.endswith("modelView"))
+        self.assertEqual(request_difference.left["maxOutputTokens"], 64)
+        self.assertEqual(request_difference.right["maxOutputTokens"], 128)
+        self.assertTrue(any("resultType" in item.path for item in differences))
+
+    def test_skipped_compaction_is_not_a_durable_replacement(self) -> None:
+        left = [{
+            "kind": "durable.compaction_completed", "scenarioId": "compact", "q": "compact", "sequence": 0,
+            "operationId": "one", "status": "skipped",
+        }]
+        right = [{
+            "kind": "durable.compaction_completed", "scenarioId": "compact", "q": "compact", "sequence": 0,
+            "operationId": "two", "status": "compacted",
+        }]
+        self.assertTrue(compare_traces(left, right))
+
+    def test_inserted_durable_status_does_not_cascade_across_later_events(self) -> None:
+        baseline = [
+            {"kind": "model.request", "scenarioId": "anchor", "q": "x", "sequence": 0, "attempt": 1},
+            {"kind": "terminal", "scenarioId": "anchor", "q": "x", "sequence": 1, "outcome": "completed"},
+        ]
+        current = [
+            {"kind": "durable.status", "scenarioId": "anchor", "q": "x", "sequence": 0, "event": "context_budget"},
+            {"kind": "model.request", "scenarioId": "anchor", "q": "x", "sequence": 1, "attempt": 1},
+            {"kind": "terminal", "scenarioId": "anchor", "q": "x", "sequence": 2, "outcome": "completed"},
+        ]
+        differences = compare_traces(baseline, current)
+        self.assertEqual(len(differences), 1)
+        self.assertEqual(differences[0].right["kind"], "durable.status")
     def test_compaction_identity_is_normalized_without_hiding_status_semantics(self) -> None:
         left = [{
             "kind": "agent.status",

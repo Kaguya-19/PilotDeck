@@ -136,6 +136,9 @@ export const createSidecarExecution: SidecarExecutionFactory = async ({ request,
     isSubagent: readOptionalBoolean(agent.isSubagent ?? payload.isSubagent),
     ...(subagentModel ? { subagentModel } : {}),
     permissionMode,
+    ...(isPermissionMode(agent.permissionModeBeforePlan)
+      ? { permissionModeBeforePlan: agent.permissionModeBeforePlan }
+      : {}),
     permissionContext: createDefaultPermissionContext({
       cwd,
       mode: permissionMode,

@@ -140,7 +140,7 @@ model module 优先通过 `stream_next` 逐批拉取 canonical events，并在 g
 负责关闭仍存活的 iterator，不把 provider stream state 放进 sidecar 或 Session durable state。
 
 runner 还会在同一存活 session 内回传一个可选、易失的 model-state projection，其中仅有 route-aware token
-calibration 与跨 turn 的 hard context/output cap。它随 execute/final 在 host 与 child 间往返，绝不进入 Session
+calibration、跨 turn 的 hard context/output cap，以及 large-file recovery 的 session output target。它随 execute/final 在 host 与 child 间往返，绝不进入 Session
 event、projection 或 checkpoint；新的 session/recovery 仍从保守基线开始。
 
 `model.get_metadata` 是可选的 host module operation。host 从 `ModelMetadataPort` 投影 provider/model、context/output
@@ -149,9 +149,15 @@ limits、protocol 和 prompt-cache capability；sidecar 只保留当前 turn 的
 而广告后返回 malformed 或 route identity 不匹配的 snapshot 必须失败关闭。
 
 compaction wire 只携带 canonical request template 与 `budgetStage`。host 将 candidate messages 替换进该 template，
-再用 active turn 的 `ModelBudgetPort`、abort signal、有效 context limit 和 reserved output tokens 重建 request-level
+重新运行 preview context preparation，但不会第二次调用 `ModelExecutionPort.prepare()` 或重跑 Router selection；再用 active
+turn 的 `ModelBudgetPort`、abort signal、有效 context limit 和 reserved output tokens 重建 request-level
 snapshot；未广告 budget capability 时才保留 message-only fallback。`seedReadState` 则由 native/sidecar runner 共同
 调用共享 helper，更新 host-owned read/write seed snapshot，下一 turn 仍经既有 seed projection 进入 sidecar。
+
+sidecar runner 是 host 与 child event 的唯一外部 timeline allocator：child-local wire position 不直接作为对外坐标；
+host buffer 经过同一 projector 后才输出，并从 child session tool events 派生 `subagent_status`/heartbeat。该投影仍是
+volatile live event，不成为 Session durable truth。compaction persistence callback 属于 durable boundary：拒绝会停止直接
+runner 的后续模型调用；Gateway `TurnRunner` 继续拥有 durable bracket cleanup 与 abort。
 
 `AgentTurnCapabilities.ts` 是纯 consumer view；native 的宽 dependency bag、Router 与 scheduler adapter
 只在 `nativeAgentTurnCapabilitiesAdapter.ts` 中保留为 deprecated compatibility facade。AgentLoop 不读取
@@ -237,18 +243,17 @@ normalization 规则隐藏 semantic diff。
 
 ## 当前验收状态
 
-- PilotDeck native vs sidecar 的正式 Gateway gate 当前为 52 个场景；2026-09-17 在 Node `22.23.1` 上最新重跑
+- PilotDeck native vs sidecar 的正式 Gateway gate 当前为 52 个 PilotDeck 场景；2026-09-17 在 Node `22.23.1` 上最新重跑
   **52/52 PASS**，`FAIL=0`、`BLOCKED=0`、oracle failure `=0`。`run.py` 维护独立必跑清单，缺少、重复或空场景会直接失败。sidecar adapter 必须通过
   `PILOTDECK_AGENT_LOOP_TRANSPORT=stdio` 进入 deployment profile 和
   `createAgentLoopSidecarRuntimeFactory`，并在原始 trace 中留下 transport selection、handshake/binding 和预期
   host module call 证据；任一证据缺失均为 `BLOCKED`。旧 adapter 自建 runner 或注入测试 factory 的结果已废止，
   不能作为生产 sidecar 验收。
-- budget、elicitation、live steer、durable compaction、full-request budget、seed read state、live model stream、model metadata、显式空 system prompt 与 additional working directories 已加入生产路径专项场景。mock model/tool 只是正式 host
-  dispatcher 的确定性依赖，不是外部 provider 或完整 deployment E2E。
-- `plan_mode_host_policy` 通过同一 Gateway session 的四轮提交验证 host-owned mode 生命周期：客户端省略 legacy `mode` 后，下一轮仍依次为
-  `default -> plan -> plan -> default`；plan 中的写操作以 `plan_mode_violation` 拒绝，退出后仅允许一次真实副作用。
+- budget、elicitation、live steer、durable compaction、full-request budget、seed read state、live model stream、model metadata、显式空 system prompt 与 additional working directories 已加入正式 Gateway matrix。mock model/tool 只是正式 host dispatcher 的确定性依赖，不是外部 provider 或完整 deployment E2E。
+- `plan_mode_host_policy` 与 `plan_mode_bypass_host_policy` 通过同一 Gateway session 的四轮提交验证 host-owned mode 生命周期：客户端省略 legacy `mode` 后，下一轮分别为
+  `default -> plan -> plan -> default` 与 `bypassPermissions -> plan -> plan -> bypassPermissions`；plan 中的写操作以 `plan_mode_violation` 拒绝，退出后仅允许一次真实副作用。
 - compaction 的 request-level 预算不再把 durable candidate messages 猜测式拼回已投影 request；host 以可序列化的
-  preparation intent 重新运行 preview context preparation，再共享 native 的 media/plan/cache request assembly。route calibration
+  preparation intent 重新运行 preview context preparation，但不重跑 model preparation 或 routing。route calibration
   仅以匹配 provider/model 的标量投影传递；不存在或不匹配时明确失败或按 capability 缺失走既有 message-only fallback。
 - `auto_compact` 已纳入 context host-module method；sidecar 只有在 capabilities 广告 `try_auto_compact` 时才启用该 consumer，未广告时保留原有 fallback。
 - `plan_todo` 已作为可选 capability host-module method 闭合；Session projection 是唯一 durable truth，sidecar 只持有按 active session/turn 校验后的 cache，不能演变为 generic workflow registry。

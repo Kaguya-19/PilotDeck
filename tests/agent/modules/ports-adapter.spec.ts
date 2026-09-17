@@ -4,12 +4,14 @@ import test from "node:test";
 import { AgentLoop } from "../../../src/agent/loop/AgentLoop.js";
 import { createSidecarAgentTurnCapabilities } from "../../../src/agent/loop/AgentTurnCapabilities.js";
 import { createAgentTurnCapabilities } from "../../../src/agent/loop/nativeAgentTurnCapabilitiesAdapter.js";
+import { createAgentSession } from "../../../src/agent/session/createAgentSession.js";
 import type { AgentRuntimeConfig } from "../../../src/agent/runtime/AgentRuntimeConfig.js";
 import type { AgentRuntimeDependencies } from "../../../src/agent/runtime/AgentRuntimeDependencies.js";
 import type { ModelInvokerPort, ToolPort } from "../../../src/agent/modules/index.js";
 import type { CanonicalModelEvent } from "../../../src/model/index.js";
 import { createDefaultPermissionContext } from "../../../src/permission/index.js";
 import type { LifecycleDispatchInput } from "../../../src/lifecycle/index.js";
+import { InMemoryTranscriptWriter } from "../../../src/session/transcript/InMemoryTranscriptWriter.js";
 
 const config: AgentRuntimeConfig = {
   provider: "openai",
@@ -116,6 +118,174 @@ test("AgentLoop capability adapters expose only turn context and lifecycle dispa
   assert.deepEqual(await dispatch?.dispatch({ event: "session_start" } as never), {
     marker: "session_start",
   });
+});
+
+test("compaction persistence failure prevents a direct runner from reaching the model", async () => {
+  let modelCalls = 0;
+  const loop = new AgentLoop(config, {
+    router: {} as AgentRuntimeDependencies["router"],
+    ports: {
+      model: {
+        async prepare({ request }) { return { request, provider: request.provider, model: request.model }; },
+        async *stream() {
+          modelCalls += 1;
+          yield { type: "message_end", finishReason: "stop" } as const;
+        },
+      },
+      tools: { list: () => [], executeAll: async () => [] },
+    },
+    tools: { registry: { list: () => [] } as never, scheduler: { executeAll: async () => [] } },
+    context: {
+      async prepareForModel(input) {
+        return { messages: input.messages, tools: input.tools, systemPromptParts: [], diagnostics: [], boundaries: [] };
+      },
+      async tryAutoCompact() {
+        return {
+          type: "compacted",
+          tier: "full",
+          messages: [{ role: "assistant", content: [{ type: "text", text: "summary" }] }],
+          snapshot: { tokens: 1, maxContextTokens: 32_768, warningRatio: 0.8, blockingRatio: 0.9, state: "ok", ratio: 0 },
+          result: {
+            compactionId: "persist-failure",
+            trigger: "auto",
+            preTokens: 10,
+            postTokens: 1,
+            messagesSummarized: 1,
+            boundaryMarker: { role: "assistant", content: [] },
+            messagesToKeep: [],
+            attachments: [],
+            hookResults: [],
+            diagnostics: [],
+          },
+        } as never;
+      },
+    },
+  });
+
+  await assert.rejects(async () => {
+    for await (const _event of loop.run({
+      sessionId: "persist-failure-session",
+      turnId: "persist-failure-turn",
+      messages: [{ role: "user", content: [{ type: "text", text: "compact" }] }],
+      onCompactPersisted: async () => { throw new Error("injected persistence failure"); },
+    })) {
+      // Drain until the durable callback rejects.
+    }
+  }, /injected persistence failure/);
+  assert.equal(modelCalls, 0);
+});
+
+test("session compaction persistence failure remains an aborted durable turn without a model call", async () => {
+  class FailingCompactionTranscript extends InMemoryTranscriptWriter {
+    override recordCompactionReplacement(): Promise<void> {
+      return Promise.reject(new Error("replacement unavailable"));
+    }
+  }
+
+  let modelCalls = 0;
+  const transcript = new FailingCompactionTranscript();
+  const session = createAgentSession({
+    sessionId: "persist-failure-session",
+    config,
+    transcript,
+    dependencies: {
+      router: {} as AgentRuntimeDependencies["router"],
+      ports: {
+        model: {
+          async prepare({ request }) { return { request, provider: request.provider, model: request.model }; },
+          async *stream() {
+            modelCalls += 1;
+            yield { type: "message_end", finishReason: "stop" } as const;
+          },
+        },
+        tools: { list: () => [], executeAll: async () => [] },
+      },
+      tools: { registry: { list: () => [] } as never, scheduler: { executeAll: async () => [] } as never },
+      context: {
+        async prepareForModel(input) {
+          return { messages: input.messages, tools: input.tools, systemPromptParts: [], diagnostics: [], boundaries: [] };
+        },
+        async tryAutoCompact() {
+          return {
+            type: "compacted",
+            tier: "full",
+            messages: [{ role: "assistant", content: [{ type: "text", text: "summary" }] }],
+            snapshot: { tokens: 1, maxContextTokens: 32_768, warningRatio: 0.8, blockingRatio: 0.9, state: "ok", ratio: 0 },
+            result: {
+              compactionId: "session-persist-failure",
+              trigger: "auto",
+              preTokens: 10,
+              postTokens: 1,
+              messagesSummarized: 1,
+              boundaryMarker: { role: "assistant", content: [] },
+              messagesToKeep: [],
+              attachments: [],
+              hookResults: [],
+              diagnostics: [],
+            },
+          } as never;
+        },
+      },
+    },
+  });
+
+  const events = [];
+  for await (const event of session.submit({ type: "text", text: "compact" }, {
+    turnId: "persist-failure-turn",
+  })) events.push(event);
+
+  assert.equal(modelCalls, 0);
+  assert.deepEqual(transcript.entries.filter((entry) => entry.type.startsWith("compaction_")).map((entry) => entry.type), [
+    "compaction_started",
+    "compaction_failed",
+  ]);
+  const terminal = events.find((event) => event.type === "turn_completed");
+  assert.equal(terminal?.type, "turn_completed");
+  assert.equal(terminal?.result.type, "aborted");
+  await session.dispose();
+});
+
+test("session output recovery caps survive sidecar state without overriding a prepared lower cap", async () => {
+  const run = async (preparedCap?: number): Promise<number | undefined> => {
+    let streamedCap: number | undefined;
+    const model: ModelInvokerPort = {
+      async prepare({ request }) {
+        return {
+          request: preparedCap === undefined ? request : { ...request, maxOutputTokens: preparedCap },
+          provider: request.provider,
+          model: request.model,
+        };
+      },
+      async *stream({ prepared }) {
+        streamedCap = prepared.request.maxOutputTokens;
+        yield { type: "message_start", role: "assistant" } as const;
+        yield { type: "message_end", finishReason: "stop" } as const;
+      },
+    };
+    const loop = new AgentLoop(
+      config,
+      contextDependencies({ model, tools: { list: () => [], executeAll: async () => [] } }),
+      undefined,
+      {
+        tokenCaps: [{
+          provider: config.provider,
+          model: config.model,
+          sessionMaxOutputTokens: 16_384,
+        }],
+      },
+    );
+    for await (const _event of loop.run({
+      sessionId: "session-output-cap",
+      turnId: `session-output-cap-${preparedCap ?? "default"}`,
+      messages: [{ role: "user", content: [{ type: "text", text: "continue" }] }],
+    })) {
+      // Drain the completed request.
+    }
+    return streamedCap;
+  };
+
+  assert.equal(await run(), 16_384);
+  assert.equal(await run(64), 64);
 });
 
 test("AgentLoop capability adapters expose consumer-specific ports and retain a read-only legacy view", () => {

@@ -103,6 +103,18 @@ function logAutoCompactFailure(
   );
 }
 
+/** Persistence is durable state, unlike a best-effort compaction estimate. */
+class CompactionPersistenceError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = "CompactionPersistenceError";
+  }
+}
+
+function isCompactionPersistenceError(error: unknown): error is CompactionPersistenceError {
+  return error instanceof CompactionPersistenceError;
+}
+
 type ActiveSubagentStatus = {
   subagentId: string;
   subagentType?: string;
@@ -174,6 +186,8 @@ export type AgentLoopSeedState = {
 
 type AgentLoopTokenCap = {
   maxContextTokens?: number;
+  /** Session-scoped recovery target, retained across sidecar child turns. */
+  sessionMaxOutputTokens?: number;
   requestedMaxOutputTokens?: number;
   attemptMaxOutputTokens?: number;
   hardMaxOutputTokens?: number;
@@ -191,6 +205,7 @@ export type AgentLoopModelSessionState = {
     provider: string;
     model: string;
     maxContextTokens?: number;
+    sessionMaxOutputTokens?: number;
     hardMaxOutputTokens?: number;
   }>;
 };
@@ -251,13 +266,16 @@ export class AgentLoop {
   snapshotModelSessionState(): AgentLoopModelSessionState {
     const tokenCalibration = [...this.tokenCalibrationByRoute.values()].map((calibration) => ({ ...calibration }));
     const tokenCaps = [...this.transientTokenCaps.entries()].flatMap(([key, cap]) => {
-      if (cap.maxContextTokens === undefined && cap.hardMaxOutputTokens === undefined) return [];
+      if (cap.maxContextTokens === undefined
+        && cap.sessionMaxOutputTokens === undefined
+        && cap.hardMaxOutputTokens === undefined) return [];
       const [provider, model] = key.split("\u0000");
       if (!provider || !model) return [];
       return [{
         provider,
         model,
         ...(cap.maxContextTokens !== undefined ? { maxContextTokens: cap.maxContextTokens } : {}),
+        ...(cap.sessionMaxOutputTokens !== undefined ? { sessionMaxOutputTokens: cap.sessionMaxOutputTokens } : {}),
         ...(cap.hardMaxOutputTokens !== undefined ? { hardMaxOutputTokens: cap.hardMaxOutputTokens } : {}),
       }];
     });
@@ -274,6 +292,7 @@ export class AgentLoop {
     for (const cap of state?.tokenCaps ?? []) {
       this.transientTokenCaps.set(this.tokenCapKey(cap.provider, cap.model), {
         ...(cap.maxContextTokens !== undefined ? { maxContextTokens: cap.maxContextTokens } : {}),
+        ...(cap.sessionMaxOutputTokens !== undefined ? { sessionMaxOutputTokens: cap.sessionMaxOutputTokens } : {}),
         ...(cap.hardMaxOutputTokens !== undefined ? { hardMaxOutputTokens: cap.hardMaxOutputTokens } : {}),
       });
     }
@@ -544,9 +563,11 @@ export class AgentLoop {
         }
       }
       pushTransientSyntheticPrompt(decision.prompt, decision.purpose);
-      if (this.config.maxOutputTokens !== undefined
-        && this.config.maxOutputTokens < largeFileRepair.recommendedMaxOutputTokens) {
-        this.config.maxOutputTokens = largeFileRepair.recommendedMaxOutputTokens;
+      if (this.currentMaxOutputTokens(this.config.provider, this.config.model) === undefined
+        || this.currentMaxOutputTokens(this.config.provider, this.config.model)! < largeFileRepair.recommendedMaxOutputTokens) {
+        this.setTransientTokenCap(this.config.provider, this.config.model, {
+          sessionMaxOutputTokens: largeFileRepair.recommendedMaxOutputTokens,
+        });
       }
       return {
         type: "continue",
@@ -635,6 +656,7 @@ export class AgentLoop {
           }
           pendingContextBudget = compact.snapshot;
         } catch (error: unknown) {
+          if (isCompactionPersistenceError(error)) throw error;
           logAutoCompactFailure("pre-routing", input, error);
           // Auto-compaction must never block the model call — proceed with
           // the original messages if evaluation or summarization fails.
@@ -772,6 +794,7 @@ export class AgentLoop {
             };
             emittedContextBudget = true;
           } catch (error: unknown) {
+            if (isCompactionPersistenceError(error)) throw error;
             logAutoCompactFailure("post-routing", input, error);
             // Post-routing compaction must never block the model call.
           }
@@ -1523,6 +1546,7 @@ export class AgentLoop {
                 this.tokenCalibrationByRoute.clear();
               }
             } catch (error: unknown) {
+              if (isCompactionPersistenceError(error)) throw error;
               logAutoCompactFailure("model-error-recovery", input, error);
               messages = truncateHeadKeepRatio(messages, 0.5);
               this.tokenCalibrationByRoute.clear();
@@ -2258,7 +2282,10 @@ export class AgentLoop {
         systemPrompt: this.config.systemPrompt,
         tools: [],
         toolChoice: this.config.toolChoice,
-        maxOutputTokens: this.config.maxOutputTokens,
+        // Recovery state is session-owned and must become the request baseline
+        // before a provider applies a narrower explicit cap.
+        maxOutputTokens: this.currentMaxOutputTokens(prepareInput.provider, prepareInput.model)
+          ?? this.config.maxOutputTokens,
         speed: input.modelOverride?.speed,
         thinking: input.modelOverride?.thinking ?? this.config.thinking,
         stream: true,
@@ -2445,7 +2472,12 @@ export class AgentLoop {
       candidateRequest = this.capabilities.model.routing?.materializeRequest
         ? this.capabilities.model.routing.materializeRequest(options.prepared, materializedRequest)
         : {
-            ...materializedRequest,
+            // Direct execution ports have already materialized provider-owned
+            // request fields. Compaction replaces only its candidate context.
+            ...options.prepared.request,
+            messages: candidateRequest.messages,
+            cacheBreakpoints: candidateRequest.cacheBreakpoints,
+            cachePlan: candidateRequest.cachePlan,
             provider: options.prepared.provider,
             model: options.prepared.model,
           };
@@ -2518,6 +2550,7 @@ export class AgentLoop {
     const modelMaxOutputTokens = this.getModelTokenLimits(provider, model)?.maxOutputTokens;
     const requested = transient?.attemptMaxOutputTokens
       ?? transient?.requestedMaxOutputTokens
+      ?? transient?.sessionMaxOutputTokens
       ?? this.getBaselineSubagentTokenLimits(provider, model)?.maxOutputTokens
       ?? this.currentConfigMaxOutputTokens();
     const candidates = [requested, transient?.hardMaxOutputTokens]
@@ -2577,7 +2610,9 @@ export class AgentLoop {
         attemptMaxOutputTokens: _attemptMaxOutputTokens,
         ...sessionCaps
       } = cap;
-      if (sessionCaps.maxContextTokens === undefined && sessionCaps.hardMaxOutputTokens === undefined) {
+      if (sessionCaps.maxContextTokens === undefined
+        && sessionCaps.sessionMaxOutputTokens === undefined
+        && sessionCaps.hardMaxOutputTokens === undefined) {
         this.transientTokenCaps.delete(key);
       } else {
         this.transientTokenCaps.set(key, sessionCaps);
@@ -2620,19 +2655,36 @@ export class AgentLoop {
         },
       },
     };
-    await Promise.resolve(input.onCompactPersisted({
-      boundary,
-      messages: markCompactReplacementMessages(compact.messages, compact.result.compactionId),
-    })).catch(() => {});
+    try {
+      await input.onCompactPersisted({
+        boundary,
+        messages: markCompactReplacementMessages(compact.messages, compact.result.compactionId),
+      });
+    } catch (error) {
+      throw new CompactionPersistenceError(error);
+    }
   }
 
   private applyTokenCapsToRequest(request: CanonicalModelRequest, provider: string, model: string): CanonicalModelRequest {
     const maxOutputTokens = this.currentMaxOutputTokens(provider, model);
+    const transient = this.transientTokenCaps.get(this.tokenCapKey(provider, model));
+    // A provider-directed retry cap is an explicit attempt override. The
+    // session recovery target only establishes the default for requests that
+    // do not already carry a prepared cap; it must not enlarge an adapter's
+    // deliberate smaller request cap on a normal turn.
+    const attemptOverride = transient?.attemptMaxOutputTokens
+      ?? transient?.requestedMaxOutputTokens;
+    const preparedCap = request.maxOutputTokens;
+    const effectiveMaxOutputTokens = attemptOverride === undefined
+      && typeof preparedCap === "number" && Number.isFinite(preparedCap) && preparedCap > 0
+      && maxOutputTokens !== undefined
+      ? Math.min(maxOutputTokens, Math.floor(preparedCap))
+      : maxOutputTokens ?? preparedCap;
     return {
       ...request,
       provider,
       model,
-      ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
+      ...(effectiveMaxOutputTokens !== undefined ? { maxOutputTokens: effectiveMaxOutputTokens } : {}),
     };
   }
 
@@ -3866,14 +3918,16 @@ export function parseAgentLoopModelSessionStateProjection(value: unknown): Agent
   const tokenCaps = readArray(value.tokenCaps, "modelState.tokenCaps").map((entry) => {
     if (!isPlainRecord(entry)) throw new Error("Invalid sidecar modelState cap entry.");
     const maxContextTokens = readOptionalPositiveFiniteNumber(entry.maxContextTokens, "modelState cap maxContextTokens");
+    const sessionMaxOutputTokens = readOptionalPositiveFiniteNumber(entry.sessionMaxOutputTokens, "modelState cap sessionMaxOutputTokens");
     const hardMaxOutputTokens = readOptionalPositiveFiniteNumber(entry.hardMaxOutputTokens, "modelState cap hardMaxOutputTokens");
-    if (maxContextTokens === undefined && hardMaxOutputTokens === undefined) {
+    if (maxContextTokens === undefined && sessionMaxOutputTokens === undefined && hardMaxOutputTokens === undefined) {
       throw new Error("Invalid sidecar modelState cap entry without a persistent cap.");
     }
     return {
       provider: readNonEmptyString(entry.provider, "modelState cap provider"),
       model: readNonEmptyString(entry.model, "modelState cap model"),
       ...(maxContextTokens !== undefined ? { maxContextTokens } : {}),
+      ...(sessionMaxOutputTokens !== undefined ? { sessionMaxOutputTokens } : {}),
       ...(hardMaxOutputTokens !== undefined ? { hardMaxOutputTokens } : {}),
     };
   });

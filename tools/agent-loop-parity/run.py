@@ -45,6 +45,28 @@ REQUIRED_GATEWAY_SCENARIOS = frozenset({
     "sidecar_one_shot_parent_abort_after_admission", "sidecar_one_shot_parent_close_after_admission",
 })
 
+# These scenarios exercise SDK and sidecar capabilities that did not exist in
+# the pinned main baseline. They remain required for current native/sidecar
+# parity, but a baseline run must report them explicitly rather than running
+# an ignored option and calling the result a product difference.
+BASELINE_UNSUPPORTED_SUITES = frozenset({"sidecar-production", "subagent-parity"})
+
+
+def baseline_not_applicable_reason(scenario: dict[str, Any]) -> str | None:
+    suite = scenario.get("suite")
+    if suite in BASELINE_UNSUPPORTED_SUITES:
+        return f"baseline lacks {suite} capability surface"
+    return None
+
+
+def resolve_ref(root: Path, ref: str) -> str:
+    result = subprocess.run(
+        ["git", "rev-parse", ref], cwd=root, text=True, capture_output=True, check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"cannot resolve PilotDeck ref {ref}: {result.stderr.strip()}")
+    return result.stdout.strip()
+
 
 def load_scenarios(path: Path, selected: str, suite: str) -> list[dict[str, Any]]:
     document = json.loads(path.read_text(encoding="utf-8"))
@@ -243,6 +265,7 @@ def main() -> int:
     failed: list[str] = []
     oracle_failures: list[str] = []
     known_gaps: list[str] = []
+    not_applicable: list[str] = []
     warnings: list[str] = []
     try:
         with tempfile.TemporaryDirectory(prefix="pilotdeck-agent-loop-parity-") as temporary:
@@ -259,10 +282,14 @@ def main() -> int:
                             ("pilotdeck-sidecar", "sidecar", args.pilotdeck_root, "working-tree", args.pilotdeck_sidecar_cmd),
                         ])
                     if args.comparison in {"baseline", "both"}:
-                        jobs.extend([
-                            ("pilotdeck-baseline-native", "native", baseline, args.pilotdeck_baseline, args.pilotdeck_native_cmd),
-                            ("pilotdeck-current-native", "native", args.pilotdeck_root, "working-tree", args.pilotdeck_native_cmd),
-                        ])
+                        reason = baseline_not_applicable_reason(scenario)
+                        if reason:
+                            not_applicable.append(f"{sid}: {reason}")
+                        else:
+                            jobs.extend([
+                                ("pilotdeck-baseline-native", "native", baseline, args.pilotdeck_baseline, args.pilotdeck_native_cmd),
+                                ("pilotdeck-current-native", "native", args.pilotdeck_root, "working-tree", args.pilotdeck_native_cmd),
+                            ])
                     traces: dict[str, Path] = {}
                     for name, mode, source, ref, override in jobs:
                         trace_path = args.output / f"{sid}.{name}.jsonl"
@@ -302,10 +329,18 @@ def main() -> int:
             mock_process.kill()
     summary = {
         "scenarios": len(scenarios),
+        "provenance": {
+            "current": resolve_ref(args.pilotdeck_root, "HEAD"),
+            "baseline": resolve_ref(args.pilotdeck_root, args.pilotdeck_baseline)
+                if args.comparison in {"baseline", "both"} else None,
+            "python": sys.version,
+            "node": subprocess.run(["node", "--version"], text=True, capture_output=True, check=False).stdout.strip(),
+        },
         "blocked": blocked,
         "failed": failed,
         "oracleFailures": oracle_failures,
         "knownGaps": known_gaps,
+        "notApplicable": not_applicable,
         "formatWarnings": warnings,
         "output": str(args.output),
     }

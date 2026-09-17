@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { access, mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -36,10 +36,22 @@ const { sanitizeSessionIdForPath } = await importFrom(
   sourceRoot,
   "dist/src/session/storage/ProjectSessionStorage.js",
 );
-const { nodeProjectSessionStorageProvider } = await importFrom(
+// The core branch has a narrow storage-provider seam. `origin/main` still
+// owns the native JSONL storage directly, so a baseline run must not require
+// this newer composition export merely to launch its Gateway.
+const storageProviderEntrypoint = path.join(
   sourceRoot,
   "dist/src/session/storage/ProjectSessionStorageProvider.js",
 );
+const nodeProjectSessionStorageProvider = await access(storageProviderEntrypoint)
+  .then(() => import(pathToFileURL(storageProviderEntrypoint).href))
+  .then((module) => module.nodeProjectSessionStorageProvider)
+  .catch((error) => {
+    // Only the optional entrypoint itself may be absent on the main baseline.
+    // A broken dependency inside that module must remain a blocked run.
+    if (error?.code === "ENOENT") return undefined;
+    throw error;
+  });
 
 let sequence = 0;
 const trace = [];
@@ -59,9 +71,13 @@ const push = (kind, extra = {}) => {
   trace.push({ kind, scenarioId: scenario.scenarioId, q: scenario.q, invocationId, sequence: sequence++, ...extra });
 };
 const modelView = (request) => ({
+  provider: request.provider,
+  model: request.model,
+  maxOutputTokens: request.maxOutputTokens,
   systemPrompt: request.systemPrompt,
   messages: request.messages,
   tools: request.tools,
+  cache: request.cache,
   metadata: request.metadata,
 });
 const faultAt = (target, attempt, stage) => (scenario.faults?.[target] ?? []).find(
@@ -402,6 +418,7 @@ function createParityCompactionProvider() {
 }
 
 function createObservedPersistenceProvider() {
+  if (!nodeProjectSessionStorageProvider) return undefined;
   return {
     ...nodeProjectSessionStorageProvider,
     create(input) {
@@ -426,8 +443,12 @@ function createObservedPersistenceProvider() {
                 metadata: entry.boundary.compactMetadata,
               });
             }
-            if (entry.type === "compaction_completed") {
-              push("durable.compaction_completed", { agentScope, operationId: entry.operationId });
+            if (entry.type === "compaction_completed" && entry.status !== "skipped") {
+              push("durable.compaction_completed", {
+                agentScope,
+                operationId: entry.operationId,
+                status: entry.status,
+              });
             }
           },
           load: () => backends.persistence.load(),
@@ -481,6 +502,7 @@ const gatewayEnv = {
 };
 push("harness.proof", { state: "transport_selected", transport: mode === "sidecar" ? "stdio" : "native" });
 
+const observedPersistenceProvider = createObservedPersistenceProvider();
 const local = createLocalGateway({
   projectRoot,
   pilotHome,
@@ -494,7 +516,7 @@ const local = createLocalGateway({
     ? { __testAgentConfigOverrides: { maxContextMessages: configuredMaxContextMessages } }
     : {}),
   autoElicitation: scenario.permission?.answer === "allow" || scenario.interaction?.elicitationAvailable === true,
-  storageProvider: createObservedPersistenceProvider(),
+  ...(observedPersistenceProvider ? { storageProvider: observedPersistenceProvider } : {}),
   ...(["sidecar_durable_compaction", "sidecar_full_request_compaction_budget", "sidecar_projected_request_compaction_budget"].includes(scenario.scenarioId)
     ? { compactionProviderFactory: () => createParityCompactionProvider() }
     : {}),
@@ -676,6 +698,7 @@ try {
       stopReason: finishReason,
       output: visibleOutput,
       usage: terminal?.usage,
+      resultType: terminal?.result?.type,
     });
     await writeFile(traceOut, `${trace.map((item) => JSON.stringify(item)).join("\n")}\n`, "utf8");
   } else {
@@ -860,7 +883,13 @@ try {
   const compactionBoundaryCount = transcriptEntries.filter((entry) =>
     entry.type === "control_boundary" && entry.boundary?.subtype === "compact_boundary"
   ).length;
-  const compactionCompletedCount = transcriptEntries.filter((entry) => entry.type === "compaction_completed").length;
+  // A completed `skipped` bracket records a budget decision, not a durable
+  // replacement. Counting it as compaction made main/current comparisons
+  // report a fake behavioral drift whenever the newer context wrapper was
+  // present.
+  const compactionCompletedCount = transcriptEntries.filter((entry) =>
+    entry.type === "compaction_completed" && entry.status !== "skipped"
+  ).length;
   let replayedStatusCount;
   if (scenario.verifyStatusReplay === true) {
     const replayClient = new GatewayWsClient({ url: server.wsUrl, token: server.token, clientName: "test-replay" });
@@ -889,6 +918,7 @@ try {
     stopReason: finishReason,
     output: visibleOutput,
     usage: terminal?.usage,
+    resultType: terminal?.result?.type,
   });
   await writeFile(traceOut, `${trace.map((item) => JSON.stringify(item)).join("\n")}\n`, "utf8");
   }

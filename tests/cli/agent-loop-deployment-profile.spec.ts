@@ -90,7 +90,10 @@ test("deployment factory forwards a passive observer to the bundled stdio sideca
   })) events.push(event);
 
   assert.equal(events.filter((event) => event.type === "turn_completed").length, 1);
-  assert.deepEqual(observations, ["stream_accepted"]);
+  assert.equal(observations[0], "handshake_completed");
+  assert.equal(observations.includes("stream_accepted"), true);
+  assert.equal(observations.some((type) => type === "module_call_received"), true);
+  assert.ok(observations.indexOf("handshake_completed") < observations.indexOf("stream_accepted"));
 });
 
 test("agent loop deployment profile rejects incomplete or unknown transport configuration", () => {

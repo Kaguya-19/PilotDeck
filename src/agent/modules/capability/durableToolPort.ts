@@ -7,6 +7,7 @@ export function createDurableToolPort(
 ): ToolPort {
   return {
     list: () => delegate.list(),
+    ...(delegate.refresh ? { refresh: () => delegate.refresh!.call(delegate) } : {}),
     async executeAll(calls, context, execution) {
       await recorder.recordToolCalls(execution.sessionId, execution.turnId, calls);
       const results = await delegate.executeAll(calls, context, execution);

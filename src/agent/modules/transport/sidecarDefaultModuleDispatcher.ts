@@ -92,7 +92,12 @@ export function createSidecarDefaultModuleDispatcher(options: {
         const prepared = preparations.get(preparationId);
         if (!prepared) throw new Error(`Unknown sidecar model preparation: ${preparationId}`);
         const events: CanonicalModelEvent[] = [];
-        const currentPrepared = { ...prepared, request: canonicalModelRequest(call.payload.request) };
+        const currentPrepared = {
+          ...prepared,
+          request: call.payload.request === undefined
+            ? prepared.request
+            : canonicalModelRequest(call.payload.request),
+        };
         for await (const event of options.modules.model.execution.stream({ prepared: currentPrepared, context })) events.push(event);
         return { events };
       }
@@ -134,6 +139,7 @@ export function createSidecarDefaultModuleDispatcher(options: {
       const operation = stringField(call.payload, "operation");
       if (operation === "plan_todo") return options.planTodoHandler(call);
       if (operation === "list_tools") {
+        await options.modules.capability.execution.refresh?.();
         return { tools: options.modules.capability.execution.list().map(serializeToolDescriptor) };
       }
       const planTodo = options.modules.planTodo?.forSession(options.input.sessionId);
@@ -281,6 +287,12 @@ function rememberSteerAuthorizations(
 
 async function dispatchContext(options: Parameters<typeof createSidecarDefaultModuleDispatcher>[0], input: Record<string, unknown>, call: ModuleCallRequest): Promise<Record<string, unknown>> {
   const operation = stringField(call.payload, "operation");
+  if (operation === "try_auto_compact" && input.budgetStage === undefined) {
+    const stage = asRecord(input.budgetProjection)?.stage;
+    if (stage === "pre_route" || stage === "routed" || stage === "recovery") {
+      input.budgetStage = stage;
+    }
+  }
   if (operation === "try_auto_compact" && input.maxContextTokens === undefined && options.config.maxContextTokens !== undefined) input.maxContextTokens = options.config.maxContextTokens;
   if (operation === "try_auto_compact" && input.budgetRequest !== undefined) {
     const request = canonicalModelRequest(input.budgetRequest);
@@ -440,7 +452,6 @@ function budgetPreparation(value: unknown): Record<string, unknown> {
   }
   return preparation;
 }
-
 function budgetCalibration(value: unknown, provider: string, model: string): {
   provider: string; model: string; actualInputTokens: number; estimatedInputTokens: number;
 } | undefined {
@@ -469,6 +480,8 @@ async function createCompactionBudgetRequest(input: {
     previewOnly: true,
     ...(input.signal ? { abortSignal: input.signal } : {}),
   } as never);
+  // Context preparation is required for the candidate. Do not call model
+  // prepare here: that would rerun routing after the stream route is fixed.
   return (await finalizePreparedModelRequest({
     request: input.request,
     prepared,
@@ -476,5 +489,6 @@ async function createCompactionBudgetRequest(input: {
     fallbackSystemPrompt: input.request.systemPrompt,
   })).request;
 }
+
 function asRecord(value: unknown): Record<string, unknown> | undefined { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined; }
 function safely(value: () => boolean, fallback: boolean): boolean { try { return value(); } catch { return fallback; } }

@@ -101,7 +101,10 @@ test("local Gateway selects the TCP sidecar profile and keeps model/tool executi
   assert.equal(operationDeadlines.length, 1);
   assert.ok(operationDeadlines[0] && Number.isFinite(Date.parse(operationDeadlines[0])));
   assert.ok(Date.parse(operationDeadlines[0]!) > Date.now());
-  assert.deepEqual(transportObservations, ["stream_accepted"]);
+  assert.equal(transportObservations[0], "handshake_completed");
+  assert.equal(transportObservations.includes("stream_accepted"), true);
+  assert.equal(transportObservations.some((type) => type === "module_call_received"), true);
+  assert.ok(transportObservations.indexOf("handshake_completed") < transportObservations.indexOf("stream_accepted"));
 });
 
 test("local Gateway executes a sidecar agent-tool delegation through the host one-shot subagent port", async (t) => {
