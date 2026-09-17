@@ -226,6 +226,7 @@ def load_trace(path: Path) -> list[dict[str, Any]]:
 def validate_production_sidecar_proof(
     records: list[dict[str, Any]],
     required_modules: set[str] | None = None,
+    required_operations: set[str] | None = None,
 ) -> list[str]:
     proofs = [record for record in records if record.get("kind") == "harness.proof"]
     states = {str(record.get("state")) for record in proofs}
@@ -242,6 +243,14 @@ def validate_production_sidecar_proof(
     missing_modules = sorted((required_modules or set()) - observed_modules)
     if missing_modules:
         errors.append(f"production sidecar module proof is missing: {', '.join(missing_modules)}")
+    observed_operations = {
+        f"{record.get('module')}:{record.get('operation')}"
+        for record in proofs
+        if record.get("state") == "module_call_received" and isinstance(record.get("operation"), str)
+    }
+    missing_operations = sorted((required_operations or set()) - observed_operations)
+    if missing_operations:
+        errors.append(f"production sidecar operation proof is missing: {', '.join(missing_operations)}")
     return errors
 
 
@@ -263,6 +272,9 @@ _SEMANTIC_EVENT_FIELDS = {
     "tool.start": {"name", "toolName", "toolCallId", "order", "attempt", "concurrencySafe"},
     "tool.finish": {"name", "toolName", "toolCallId", "order", "success", "error", "sideEffectCount", "attempt", "concurrencySafe"},
     "tool.result": {"result", "data", "error", "toolName", "toolCallId", "success", "sideEffectCount", "attempt", "concurrencySafe"},
+    "tool.progress": {"toolCallId", "toolName", "message", "metadata"},
+    "policy.turn": {"permissionMode", "runMode"},
+    "policy.context": {"toolName", "permissionMode", "runMode"},
     "permission.request": {"toolName", "toolCallId", "mode", "canPrompt"},
     "permission.answer": {"toolName", "toolCallId", "allowed", "code"},
     "permission.decision": {"toolName", "toolCallId", "allowed", "code", "retryable"},
@@ -283,7 +295,7 @@ _SEMANTIC_EVENT_FIELDS = {
     "fault.injected": {"target", "action", "stage", "attempt"},
     "side_effect.state": {"counts", "sideEffectCount"},
     "compact.boundary": {"compactionId", "reason", "messages", "metadata"},
-    "compaction.budget": {"tokens", "systemTokens", "toolTokens", "messageTokens"},
+    "compaction.budget": {"phase", "tokens", "systemTokens", "toolTokens", "messageTokens"},
     "seed.state": {"applied", "fileContent"},
     "checkpoint": {"status", "seedState", "messages", "activeStepId", "taskFrameId", "slots", "knowledgeBudget", "recoveryPoint", "sideEffectCount"},
     "taskframe": {"taskFrame", "status", "stepId", "nextStepId", "slots", "requiredCapabilities", "knowledgeBudget", "priorTaskResults"},
@@ -543,13 +555,15 @@ def _record_value(records: list[dict[str, Any]], key: str) -> Any:
         model_index = next((index for index, record in enumerate(records) if record.get("kind") == "model.request"), None)
         return compact_index is not None and model_index is not None and compact_index < model_index
     if key == "fullRequestBudgetUsed":
-        budget = _last(records, "compaction.budget") or {}
+        budget = next((record for record in records if record.get("kind") == "compaction.budget" and record.get("phase") == "replacement"), {})
         return (
             isinstance(budget.get("systemTokens"), (int, float))
             and budget.get("systemTokens", 0) > 0
             and isinstance(budget.get("toolTokens"), (int, float))
             and budget.get("toolTokens", 0) > 0
         )
+    if key == "budgetEvaluationCount":
+        return sum(record.get("kind") == "compaction.budget" for record in records)
     if key == "seedReadApplied":
         return (_last(records, "seed.state") or {}).get("applied")
     if key == "seededFileContent":
@@ -590,6 +604,12 @@ def _record_value(records: list[dict[str, Any]], key: str) -> Any:
                     if isinstance(item, dict) and isinstance(item.get("function"), dict)
                 ]
         return []
+    if key == "policyModes":
+        return [
+            record.get("permissionMode")
+            for record in records
+            if record.get("kind") == "policy.turn" and isinstance(record.get("permissionMode"), str)
+        ]
     if key == "toolCallCount":
         calls = [record for record in records if record.get("kind") == "tool.call"]
         if calls:
@@ -599,6 +619,8 @@ def _record_value(records: list[dict[str, Any]], key: str) -> Any:
             for record in records
             if record.get("kind") == "model.response" and isinstance(record.get("modelView") or {}, dict)
         )
+    if key == "toolProgressCount":
+        return sum(record.get("kind") == "tool.progress" for record in records)
     if key == "sideEffectCount":
         state = _last(records, "side_effect.state") or {}
         if isinstance(state.get("sideEffectCount"), int):
@@ -688,6 +710,18 @@ def validate_trace_expectations(
         elif key == "modelInputContains":
             requests = [record for record in records if record.get("kind") == "model.request"]
             actual = any(str(wanted) in str(node) for request in requests for node in _walk(request.get("modelView") or request.get("request")))
+            wanted = True
+        elif key == "modelInputExcludes":
+            requests = [record for record in records if record.get("kind") == "model.request"]
+            actual = all(str(wanted) not in str(node) for request in requests for node in _walk(request.get("modelView") or request.get("request")))
+            wanted = True
+        elif key in {"modelInputAfterCompactionContains", "modelInputAfterCompactionExcludes"}:
+            boundary_index = next((index for index, record in enumerate(records) if record.get("kind") == "compact.boundary"), None)
+            requests = [] if boundary_index is None else [record for record in records[boundary_index + 1:] if record.get("kind") == "model.request"]
+            if key == "modelInputAfterCompactionContains":
+                actual = bool(requests) and any(str(wanted) in str(node) for request in requests for node in _walk(request.get("modelView") or request.get("request")))
+            else:
+                actual = bool(requests) and all(str(wanted) not in str(node) for request in requests for node in _walk(request.get("modelView") or request.get("request")))
             wanted = True
         else:
             actual = _record_value(records, key)

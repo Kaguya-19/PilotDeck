@@ -146,6 +146,81 @@ test("agent loop respects agent maxContextTokens before and after routing", asyn
   assert.ok(events.some((event) => event.type === "context_budget"));
 });
 
+test("pre-route compaction carries calibration for an explicit model override", async () => {
+  const calibrations: unknown[] = [];
+  const context: AgentRuntimeDependencies["context"] = {
+    prepareForModel: async (input) => ({
+      messages: input.messages,
+      systemPrompt: undefined,
+      systemPromptParts: [],
+      tools: input.tools,
+      diagnostics: [],
+      boundaries: [],
+    }),
+    tryAutoCompact: async (input) => {
+      calibrations.push(input.budgetCalibration);
+      return {
+        type: "skipped",
+        snapshot: new TokenBudgetManager().snapshotFromTokens(1, input.maxContextTokens ?? 1),
+      };
+    },
+  };
+  const router: AgentRouterRuntime = {
+    decide: async ({ request }) => ({
+      provider: request.provider,
+      model: request.model,
+      scenarioType: "default",
+      isSubagent: false,
+      orchestrating: false,
+      resolvedFrom: "explicit",
+      mutations: {},
+    }),
+    execute: async function* (): AsyncIterable<CanonicalModelEvent> {
+      yield { type: "message_start", role: "assistant" };
+      yield { type: "text_delta", text: "completed" };
+      yield { type: "message_end", finishReason: "stop" };
+    },
+    stream: async function* (): AsyncIterable<CanonicalModelEvent> {},
+  };
+  const loop = AgentLoop.fromDependencies({
+    provider: "default-provider",
+    model: "default-model",
+    cwd: "/workspace/project",
+    maxContextTokens: 8_000,
+    permissionMode: "bypassPermissions",
+    permissionContext: createDefaultPermissionContext({
+      cwd: "/workspace/project",
+      mode: "bypassPermissions",
+      canPrompt: false,
+      bypassAvailable: true,
+    }),
+  }, {
+    router,
+    context,
+    tools: { registry: new ToolRegistry(), scheduler: { async executeAll() { return []; } } },
+  });
+  const calibration = {
+    provider: "override-provider",
+    model: "override-model",
+    actualInputTokens: 100,
+    estimatedInputTokens: 90,
+  };
+  (loop as unknown as { tokenCalibrationByRoute: Map<string, unknown> }).tokenCalibrationByRoute
+    .set("override-provider\u0000override-model", calibration);
+
+  for await (const _event of loop.run({
+    sessionId: "override-calibration-session",
+    turnId: "override-calibration-turn",
+    messages: [{ role: "user", content: [{ type: "text", text: "continue" }] }],
+    modelOverride: { provider: "override-provider", model: "override-model" },
+  })) {
+    // Drain the turn.
+  }
+
+  assert.equal(calibrations.length, 1);
+  assert.deepEqual(calibrations[0], calibration);
+});
+
 test("main agent loop ignores matching subagent baseline caps", async () => {
   const tokenBudget = new TokenBudgetManager();
   const budgetEvaluations: Array<{ maxContextTokens?: number; reservedOutputTokens?: number }> = [];

@@ -93,6 +93,17 @@ class SubagentTraceNormalizationTests(unittest.TestCase):
         ]
         self.assertEqual(validate_production_sidecar_proof(records, {"budget", "turn"}), [])
 
+    def test_production_sidecar_proof_rejects_the_wrong_operation(self) -> None:
+        records = [
+            {"kind": "harness.proof", "state": "transport_selected", "transport": "stdio"},
+            {"kind": "harness.proof", "state": "handshake_completed"},
+            {"kind": "harness.proof", "state": "module_call_received", "module": "capability", "operation": "plan_todo"},
+        ]
+        self.assertEqual(
+            validate_production_sidecar_proof(records, {"capability"}, {"capability:execute_batch"}),
+            ["production sidecar operation proof is missing: capability:execute_batch"],
+        )
+
     def test_sidecar_production_oracles_cover_durable_and_model_evidence(self) -> None:
         scenario = {
             "expected": {
@@ -118,6 +129,35 @@ class SubagentTraceNormalizationTests(unittest.TestCase):
             },
         ]
         self.assertEqual(validate_trace_expectations(records, scenario, "pilotdeck", "sidecar"), [])
+
+    def test_plan_mode_oracle_requires_host_owned_mode_across_turns(self) -> None:
+        scenario = {
+            "expected": {
+                "terminalOutcome": "completed",
+                "policyModes": ["default", "plan", "plan", "default"],
+                "toolErrorCode": "plan_mode_violation",
+                "sideEffectCount": 1,
+            },
+        }
+        records = [
+            {"kind": "policy.turn", "permissionMode": "default", "runMode": "agent"},
+            {"kind": "policy.turn", "permissionMode": "plan", "runMode": "plan"},
+            {
+                "kind": "tool.finish",
+                "name": "parity_write_probe",
+                "success": False,
+                "error": {"code": "plan_mode_violation"},
+            },
+            {"kind": "policy.turn", "permissionMode": "plan", "runMode": "plan"},
+            {"kind": "policy.turn", "permissionMode": "default", "runMode": "agent"},
+            {"kind": "side_effect.state", "sideEffectCount": 1},
+            {"kind": "terminal", "outcome": "completed"},
+        ]
+        self.assertEqual(validate_trace_expectations(records, scenario, "pilotdeck", "sidecar"), [])
+
+        stale_plan_mode = [dict(record) for record in records]
+        stale_plan_mode[4]["permissionMode"] = "plan"
+        self.assertTrue(validate_trace_expectations(stale_plan_mode, scenario, "pilotdeck", "sidecar"))
 
     def test_subagent_duration_is_volatile_in_objects_and_embedded_report_json(self) -> None:
         def record(duration_ms: int) -> dict[str, object]:

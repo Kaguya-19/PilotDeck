@@ -91,6 +91,7 @@ export type ProjectSessionFactoryOptions<Runtime extends ProjectSessionFactoryRu
   now: () => Date;
   continuations: GatewaySubagentContinuations;
   agentLoopFactory?: AgentLoopRuntimeFactory;
+  testAgentConfigOverrides?: Pick<AgentRuntimeConfig, "maxContextMessages">;
   testAgentLoopFactory?: CreateAgentSessionOptions["__agentLoopFactory"];
   shouldCollectFileArtifacts(runtime: Runtime): boolean;
   onDiagnostic?: (message: string, error?: unknown) => void;
@@ -267,6 +268,7 @@ export class ProjectSessionFactory<Runtime extends ProjectSessionFactoryRuntime>
       now: this.options.now,
       continuations: this.options.continuations,
       agentLoopFactory: this.options.agentLoopFactory,
+      testAgentConfigOverrides: this.options.testAgentConfigOverrides,
       testAgentLoopFactory: this.options.testAgentLoopFactory,
       collectFileArtifacts: this.options.shouldCollectFileArtifacts(runtime),
       onDiagnostic: this.options.onDiagnostic,

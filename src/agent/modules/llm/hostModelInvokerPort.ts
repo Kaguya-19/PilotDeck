@@ -1,6 +1,8 @@
 import {
   snapshotCanonicalModelRequest,
+  ModelProviderError,
   type CanonicalModelEvent,
+  type CanonicalModelError,
   type CanonicalModelRequest,
 } from "../../../model/index.js";
 import type {
@@ -23,6 +25,8 @@ export type HostModelInvokerPortOptions = {
   uuid?: () => string;
   /** A host must explicitly advertise prepare before the consumer calls it remotely. */
   methods?: readonly HostModelModuleMethod[];
+  /** Receives an optional host-owned metadata snapshot returned with prepare. */
+  onPreparedMetadata?: (metadata: unknown, prepared: PreparedModelInvocation) => void;
 };
 
 const preparationIdSymbol = Symbol("pilotdeck.hostModelPreparationId");
@@ -69,6 +73,7 @@ export function createHostModelInvokerPort(
         },
       });
       const prepared = readPreparedInvocation(response, fallback);
+      options.onPreparedMetadata?.(response.payload?.metadata, prepared);
       rememberPreparationId(prepared, preparationId, preparationIds);
       return prepared;
     },
@@ -200,6 +205,10 @@ function readPreparedInvocation(
 }
 
 function moduleFailure(response: ModuleResponse, fallback: string): Error & { code?: string; retryable?: boolean; retryAfterMs?: number } {
+  const canonical = response.error?.canonical;
+  if (isCanonicalModelError(canonical)) {
+    return new ModelProviderError(canonical) as Error & { code?: string; retryable?: boolean; retryAfterMs?: number };
+  }
   const failure = new Error(
     String(response.error?.message ?? response.code ?? fallback),
   ) as Error & { code?: string; retryable?: boolean; retryAfterMs?: number };
@@ -207,6 +216,13 @@ function moduleFailure(response: ModuleResponse, fallback: string): Error & { co
   if (typeof response.error?.retryable === "boolean") failure.retryable = response.error.retryable;
   if (typeof response.error?.retryAfterMs === "number") failure.retryAfterMs = response.error.retryAfterMs;
   return failure;
+}
+
+function isCanonicalModelError(value: unknown): value is CanonicalModelError {
+  return !!value
+    && typeof value === "object"
+    && typeof (value as { code?: unknown }).code === "string"
+    && typeof (value as { message?: unknown }).message === "string";
 }
 
 function positiveInteger(value: unknown): number | undefined {

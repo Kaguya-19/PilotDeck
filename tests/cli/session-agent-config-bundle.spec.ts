@@ -53,6 +53,18 @@ test("session agent config bundle freezes model, permission, workspace, and suba
   assert.equal(config.runtimeContextSurface, "user_message");
 });
 
+test("session agent config bundle accepts the internal max-message parity override only at composition", () => {
+  const config = new SessionAgentConfigBundle({
+    runtime: { projectRoot: "/project", snapshot: snapshot(), profile: { runtimeContextSurface: "system_prompt" }, model: model() },
+    permissionRules: { allow: [], deny: [], ask: [] },
+    interaction: { canPrompt: false },
+    permissionMode: "default",
+    env: {},
+    testAgentConfigOverrides: { maxContextMessages: 1 },
+  }).compose();
+  assert.equal(config.maxContextMessages, 1);
+});
+
 function snapshot(): PilotConfigSnapshot {
   return {
     version: 1,

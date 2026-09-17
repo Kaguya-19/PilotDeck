@@ -10,6 +10,7 @@ import type {
   HostCapabilityModuleMethod,
   HostModelModuleMethod,
   ModelInvokerPort,
+  PreparedModelInvocation,
   ModuleCallRequest,
   ModuleResponse,
   ToolPort,
@@ -46,6 +47,7 @@ export function createSidecarPorts(
     binding?: SidecarModuleBinding;
     uuid?: () => string;
     modelMethods?: readonly HostModelModuleMethod[];
+    onPreparedMetadata?: (metadata: unknown, prepared: PreparedModelInvocation) => void;
     capabilityMethods?: readonly HostCapabilityModuleMethod[];
     onAbort?: (reason: string) => void;
   } = {},
@@ -61,7 +63,11 @@ export function createSidecarPorts(
   const authorization = options.authorization
     ?? (options.permission ? createPermissionToolAuthorizationPort({ tools: options.tools, permission: options.permission }) : undefined);
   return {
-    model: createHostModelInvokerPort(callModule, { uuid, methods: options.modelMethods }),
+    model: createHostModelInvokerPort(callModule, {
+      uuid,
+      methods: options.modelMethods,
+      onPreparedMetadata: options.onPreparedMetadata,
+    }),
     toolExecution: createPermissionAwareToolPort(capability, {
     tools: options.tools,
     authorization,

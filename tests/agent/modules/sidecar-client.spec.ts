@@ -6,6 +6,7 @@ import test from "node:test";
 import {
   AgentLoopSidecarServer,
   createAgentLoopSidecarRuntimeFactory,
+  createSidecarDefaultModuleDispatcher,
   createStdioAgentLoopSidecarConnectionFactory,
   SessionAgentLoopOperationLedger,
 } from "../../../src/agent/index.js";
@@ -14,6 +15,7 @@ import { createAgentSession } from "../../../src/agent/session/createAgentSessio
 import { createDefaultPermissionContext, PermissionRuntime } from "../../../src/permission/index.js";
 import type { AgentLoopSeedState } from "../../../src/agent/loop/AgentLoop.js";
 import type { AgentRuntimeConfig } from "../../../src/agent/runtime/AgentRuntimeConfig.js";
+import { HostToolCheckpoint } from "../../../src/agent/modules/checkpoint/hostToolCheckpoint.js";
 import type { OneShotSubagentPort } from "../../../src/agent/sub/OneShotSubagentPort.js";
 import type { ModelInvokerPort, ToolPort } from "../../../src/agent/modules/protocol.js";
 import type { CanonicalModelEvent } from "../../../src/model/index.js";
@@ -2130,11 +2132,14 @@ test("sidecar host capability calls reconstruct plan/todo and host execution ser
   assert.equal(terminal?.result?.type, "success");
 });
 
-test("sidecar context compaction uses the host default before routing and preserves a routed override", async () => {
+test("sidecar compaction rebuilds full requests through host context before and after routing", async () => {
   const inputs: Array<Record<string, unknown>> = [];
+  const preparationInputs: Array<Record<string, unknown>> = [];
   const evaluatedRequests: Array<Record<string, unknown>> = [];
+  const manifests: Array<Record<string, unknown>> = [];
+  const moduleResponses: Array<Record<string, unknown>> = [];
   const factory = createAgentLoopSidecarRuntimeFactory({
-    connect: () => compactionContextConnection(),
+    connect: () => compactionContextConnection(manifests, moduleResponses),
     uuid: deterministicIds(),
   });
   const session = createAgentSession({
@@ -2147,7 +2152,7 @@ test("sidecar context compaction uses the host default before routing and preser
         tools: noopTools(),
         budget: {
           async evaluateRequestBudget(request, options) {
-            evaluatedRequests.push({ request: structuredClone(request), options: { ...options, signal: undefined } });
+            evaluatedRequests.push({ request: request as unknown as Record<string, unknown>, options: { ...options, signal: undefined } });
             return {
               tokens: 240,
               maxContextTokens: options.maxContextTokens,
@@ -2161,14 +2166,33 @@ test("sidecar context compaction uses the host default before routing and preser
       },
       tools: { registry: { list: () => [] } as never, scheduler: { executeAll: async () => [] } as never },
       context: {
-        async prepareForModel() {
-          return { messages: [], systemPromptParts: [], tools: [], diagnostics: [], boundaries: [] };
+        async prepareForModel(input) {
+          preparationInputs.push(structuredClone(input as unknown as Record<string, unknown>));
+          return {
+            messages: [
+              { role: "user", content: [{ type: "text", text: "host runtime prefix" }] },
+              ...input.messages.filter((message) => !message.content.some((block) => block.type === "tool_result")),
+            ],
+            systemPrompt: "host runtime context",
+            systemPromptParts: [],
+            tools: input.tools,
+            diagnostics: [],
+            boundaries: [],
+          };
         },
         async tryAutoCompact(input) {
           inputs.push(input as unknown as Record<string, unknown>);
+          assert.equal(typeof input.budgetEvaluator, "function");
           const snapshot = await input.budgetEvaluator?.([{
             role: "user",
             content: [{ type: "text", text: "candidate" }],
+          }, {
+            role: "user",
+            content: [{
+              type: "tool_result",
+              toolCallId: "orphan-result",
+              content: [{ type: "text", text: "orphan tool result" }],
+            }],
           }]);
           return {
             type: "skipped" as const,
@@ -2187,26 +2211,190 @@ test("sidecar context compaction uses the host default before routing and preser
     agentLoopFactory: factory,
   });
 
-  for await (const _event of session.submit({ type: "text", text: "compact" }, {
+  const events = [];
+  for await (const event of session.submit({ type: "text", text: "compact" }, {
     turnId: "compaction-host-turn",
   })) {
-    // The protocol fixture only exercises host context dispatch.
+    events.push(event);
   }
 
-  assert.equal(inputs.length, 2);
+  assert.equal(inputs.length, 2, JSON.stringify(events));
+  assert.equal(((manifests[0]?.budget as Record<string, unknown> | undefined)?.methods as unknown[]).includes("evaluate_request_budget"), true);
   assert.equal(inputs[0]?.maxContextTokens, 128_000);
   assert.equal(inputs[1]?.maxContextTokens, 32_000);
   assert.equal(inputs[0]?.sessionId, "compaction-host-session");
   assert.equal(inputs[0]?.turnId, "compaction-host-turn");
+  assert.ok(moduleResponses.every((response) => response.ok === true), JSON.stringify(moduleResponses));
   assert.equal(evaluatedRequests.length, 2);
-  assert.equal((evaluatedRequests[0]?.request as Record<string, unknown>).systemPrompt, "S".repeat(256));
+  assert.equal(preparationInputs.length, 2);
+  assert.deepEqual((preparationInputs[0]?.messages as unknown[]), [{
+    role: "user",
+    content: [{ type: "text", text: "candidate" }],
+  }, {
+    role: "user",
+    content: [{
+      type: "tool_result",
+      toolCallId: "orphan-result",
+      content: [{ type: "text", text: "orphan tool result" }],
+    }],
+  }]);
+  assert.equal(preparationInputs[0]?.previewOnly, true);
+  assert.equal((evaluatedRequests[0]?.request as Record<string, unknown>).systemPrompt, "host runtime context");
   assert.equal(((evaluatedRequests[0]?.request as Record<string, unknown>).tools as unknown[]).length, 1);
   assert.deepEqual((evaluatedRequests[0]?.request as Record<string, unknown>).messages, [{
     role: "user",
+    content: [{ type: "text", text: "host runtime prefix" }],
+  }, {
+    role: "user",
     content: [{ type: "text", text: "candidate" }],
   }]);
+  assert.equal(JSON.stringify((evaluatedRequests[0]?.request as Record<string, unknown>).messages).includes("orphan tool result"), false);
   assert.equal((evaluatedRequests[0]?.options as Record<string, unknown>).maxContextTokens, 128_000);
   assert.equal((evaluatedRequests[1]?.options as Record<string, unknown>).maxContextTokens, 32_000);
+});
+
+test("sidecar compaction rejects malformed or cross-route calibration before host context", async () => {
+  let contextCalls = 0;
+  const dispatcher = createSidecarDefaultModuleDispatcher({
+    config: config(),
+    input: {
+      sessionId: "calibration-host-session",
+      turnId: "calibration-host-turn",
+      messages: [],
+    },
+    checkpoint: new HostToolCheckpoint({}),
+    capabilityResultObserver: { onCapabilityResults: async () => undefined },
+    planTodoHandler: async () => ({}),
+    modules: {
+      model: { execution: noopModel() },
+      budget: {
+        async evaluateRequestBudget() {
+          throw new Error("must not evaluate invalid calibration");
+        },
+      },
+      capability: {
+        execution: noopTools(),
+        runtimeContext: {
+          bindTurn: () => ({
+            permissionContext: () => config().permissionContext,
+            toolRuntimeContext: () => ({} as never),
+            executionContext: () => ({} as never),
+            contextIdentity: (source) => ({ ...(source ?? {}) }),
+          }),
+        },
+      },
+      context: {
+        execution: {
+          async prepareForModel(input) {
+            return { messages: input.messages, systemPromptParts: [], tools: input.tools, diagnostics: [], boundaries: [] };
+          },
+          async tryAutoCompact() {
+            contextCalls += 1;
+            throw new Error("must not reach context for invalid calibration");
+          },
+        },
+        requestIdentity: {
+          bindTurn: () => ({ contextIdentity: (source) => ({ ...(source ?? {}) }) }),
+        },
+      },
+    },
+  });
+  const handler = dispatcher.handlers.context!;
+  const request = (calibration: Record<string, unknown>) => handler({
+    kind: "request",
+    messageId: `calibration-${String(calibration.provider)}`,
+    method: "module_call",
+    runId: "run-calibration",
+    operationId: "operation-calibration",
+    requestId: "request-calibration",
+    module: "context",
+    payload: {
+      operation: "try_auto_compact",
+      input: {
+        messages: [],
+        maxContextTokens: 1_024,
+        budgetRequest: { provider: "provider-a", model: "model-a", messages: [], tools: [] },
+        budgetPreparation: {
+          sessionId: "calibration-host-session",
+          turnId: "calibration-host-turn",
+          provider: "provider-a",
+          model: "model-a",
+          tools: [],
+        },
+        budgetCalibration: calibration,
+      },
+    },
+  } as never);
+
+  await assert.rejects(
+    () => request({ provider: "provider-b", model: "model-a", actualInputTokens: 10, estimatedInputTokens: 8 }),
+    /does not match the request route/,
+  );
+  await assert.rejects(
+    () => request({ provider: "provider-a", model: "model-a", actualInputTokens: -1, estimatedInputTokens: 8 }),
+    /actualInputTokens must be positive/,
+  );
+  assert.equal(contextCalls, 0);
+  await dispatcher.dispose();
+});
+
+test("sidecar dispatcher advertises and serves a narrow host model metadata snapshot", async () => {
+  const dispatcher = createSidecarDefaultModuleDispatcher({
+    config: config(),
+    input: { sessionId: "metadata-host-session", turnId: "metadata-host-turn", messages: [] },
+    checkpoint: new HostToolCheckpoint({}),
+    capabilityResultObserver: { onCapabilityResults: async () => undefined },
+    planTodoHandler: async () => ({}),
+    modules: {
+      model: {
+        execution: noopModel(),
+        metadata: {
+          getModelMaxContextTokens: () => 4096,
+          getModelMaxOutputTokens: () => 1024,
+          getModelTokenLimits: () => ({ maxContextTokens: 4096, maxOutputTokens: 1024 }),
+          getModelProtocol: () => "anthropic",
+          getModelSupportsPromptCache: () => true,
+        },
+      },
+      capability: {
+        execution: noopTools(),
+        runtimeContext: {
+          bindTurn: () => ({
+            permissionContext: () => config().permissionContext,
+            toolRuntimeContext: () => ({} as never),
+            executionContext: () => ({} as never),
+            contextIdentity: (source) => ({ ...(source ?? {}) }),
+          }),
+        },
+      },
+    },
+  });
+
+  assert.deepEqual((dispatcher.manifest.hostModules.model as { methods: string[] }).methods, [
+    "prepare", "stream", "stream_next", "close_stream", "get_metadata",
+  ]);
+  const response = await dispatcher.handlers.model!({
+    kind: "request",
+    messageId: "metadata-call",
+    method: "module_call",
+    runId: "metadata-run",
+    operationId: "metadata-operation",
+    requestId: "metadata-request",
+    module: "model",
+    payload: { operation: "get_metadata", provider: "provider-a", model: "model-a" },
+  } as never);
+  assert.deepEqual(response, {
+    metadata: {
+      provider: "provider-a",
+      model: "model-a",
+      maxContextTokens: 4096,
+      maxOutputTokens: 1024,
+      tokenLimits: { maxContextTokens: 4096, maxOutputTokens: 1024 },
+      protocol: "anthropic",
+      supportsPromptCache: true,
+    },
+  });
+  await dispatcher.dispose();
 });
 
 test("sidecar agent tool delegates through the host-owned one-shot subagent port", async () => {
@@ -2723,7 +2911,10 @@ function lifecycleFenceConnection(moduleResponses: Array<Record<string, unknown>
   };
 }
 
-function compactionContextConnection() {
+function compactionContextConnection(
+  manifests: Array<Record<string, unknown>> = [],
+  moduleResponses: Array<Record<string, unknown>> = [],
+) {
   const responses = queue<unknown>();
   let runId = "";
   let operationId = "";
@@ -2754,6 +2945,10 @@ function compactionContextConnection() {
         return;
       }
       if (request.method === "execute") {
+        const payload = request.payload as Record<string, unknown> | undefined;
+        if (payload?.hostModules && typeof payload.hostModules === "object") {
+          manifests.push(payload.hostModules as Record<string, unknown>);
+        }
         runId = String(request.runId);
         operationId = String(request.operationId);
         requestId = String(request.requestId);
@@ -2777,11 +2972,24 @@ function compactionContextConnection() {
             maxOutputTokens: 8192,
             messages: [],
           },
+          budgetPreparation: {
+            sessionId: "compaction-host-session",
+            turnId: "compaction-host-turn",
+            cwd: "/workspace",
+            provider: "host-provider",
+            model: "host-model",
+            permissionMode: "default",
+            runMode: "agent",
+            additionalWorkingDirectories: [],
+            messages: [],
+            tools: [{ name: "large_tool", description: "T".repeat(256), inputSchema: { type: "object" } }],
+          },
           budgetProjection: { stage: "pre_route", trigger: "auto", reservedOutputTokens: 8192 },
         }));
         return;
       }
       if (request.kind !== "response") return;
+      moduleResponses.push(structuredClone(request));
       if (request.inReplyTo === "pre-route-compact") {
         responses.push(moduleCall("routed-compact", {
           messages: [],
@@ -2793,6 +3001,18 @@ function compactionContextConnection() {
             tools: [{ name: "large_tool", description: "T".repeat(256), inputSchema: { type: "object" } }],
             maxOutputTokens: 8192,
             messages: [],
+          },
+          budgetPreparation: {
+            sessionId: "compaction-host-session",
+            turnId: "compaction-host-turn",
+            cwd: "/workspace",
+            provider: "routed-provider",
+            model: "routed-model",
+            permissionMode: "default",
+            runMode: "agent",
+            additionalWorkingDirectories: [],
+            messages: [],
+            tools: [{ name: "large_tool", description: "T".repeat(256), inputSchema: { type: "object" } }],
           },
           budgetProjection: { stage: "routed", trigger: "auto", maxContextTokens: 32_000 },
         }));

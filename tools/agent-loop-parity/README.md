@@ -46,8 +46,9 @@ python tools/agent-loop-parity/run.py \
 Gateway sidecar adapter 必须设置 `PILOTDECK_AGENT_LOOP_TRANSPORT=stdio` 并进入正式 deployment profile 和
 `createAgentLoopSidecarRuntimeFactory`。trace 中必须存在 transport selection、sidecar handshake/binding，以及场景
 声明的 host module-call 证据；缺失时 runner 直接分类为 `BLOCKED`。禁止通过自建 runner 或
-`__testAgentLoopFactory` 绕过生产 factory。当前完整 gate 为 45 个场景，其中包含 budget、elicitation、live steer、
-durable compaction、full-request compaction budget、sidecar seed read state 和 live model streaming。production proof
+`__testAgentLoopFactory` 绕过生产 factory。当前完整 gate 为 52 个场景，其中包含 host-owned plan-mode 四 turn、budget、
+elicitation、live steer、durable compaction、完整及 projected-request compaction budget、sidecar seed read state、live
+model streaming、model metadata、empty SDK system prompt 和 additional working directories。production proof
 记录 module 与 operation；例如增量流场景必须实际出现 `model.stream_next`，只有 `model` 模块名不足以通过 oracle。
 
 ## 比较和验收

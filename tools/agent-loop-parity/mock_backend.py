@@ -109,6 +109,26 @@ class MockHandler(BaseHTTPRequestHandler):
         if delay_ms > 0:
             time.sleep(delay_ms / 1000)
         has_tool_result = any(_is_tool_result(item) for item in messages)
+        if scenario == "plan_mode_host_policy":
+            turn_index = int(request.get("turnIndex") or 0)
+            turn_model_attempt = int(request.get("turnModelAttempt") or 1)
+            if turn_index == 3:
+                if turn_model_attempt == 1:
+                    self._json(200, _tool_completion([("todo_write", {"markdown": "- [ ] Run the write probe"})]))
+                    return
+                if turn_model_attempt == 2:
+                    self._json(200, _tool_completion([("parity_write_probe", {})]))
+                    return
+                self._json(200, _completion(f"MOCK_PLAN_MODE_TURN[{turn_index}]::{q}"))
+                return
+            if turn_model_attempt == 1:
+                tool_names = ["enter_plan_mode", "parity_write_probe", "exit_plan_mode"]
+                tool_name = tool_names[turn_index]
+                arguments = {"plan_file_path": ".pilotdeck/plans/parity-plan.md"} if tool_name == "exit_plan_mode" else {}
+                self._json(200, _tool_completion([(tool_name, arguments)]))
+                return
+            self._json(200, _completion(f"MOCK_PLAN_MODE_TURN[{turn_index}]::{q}"))
+            return
         image_present = any(
             "image_url" in item
             or (item.get("type") == "image" and item.get("source") == "base64")
@@ -183,7 +203,12 @@ class MockHandler(BaseHTTPRequestHandler):
             content = "MOCK_STEER_DRAFT" if attempt == 1 else f"MOCK_STEER_REVISED::{q}"
             self._json(200, _completion(content))
             return
-        if scenario == "pure_text" or scenario in {"image", "checkpoint_resume", "multimodal_image_and_text", "stale_event", "write_snapshot_resume", "duplicate_execute", "sop_scheduled_task", "sop_handoff_resume", "sidecar_elicitation", "sidecar_durable_compaction", "sidecar_full_request_compaction_budget", "sidecar_live_model_stream"}:
+        if scenario == "sidecar_elicitation_execution" and not has_tool_result:
+            self._json(200, _tool_completion([("ask_user_question", {
+                "questions": [{"question": "Continue?", "header": "Parity", "options": [{"label": "yes", "description": "Continue"}, {"label": "no", "description": "Stop"}]}],
+            })]))
+            return
+        if scenario == "pure_text" or scenario in {"image", "checkpoint_resume", "multimodal_image_and_text", "stale_event", "write_snapshot_resume", "duplicate_execute", "sop_scheduled_task", "sop_handoff_resume", "sidecar_elicitation", "sidecar_durable_compaction", "sidecar_full_request_compaction_budget", "sidecar_projected_request_compaction_budget", "sidecar_live_model_stream", "sidecar_model_metadata", "sidecar_empty_system_prompt", "sidecar_additional_working_directories"}:
             content = f"MOCK_ANSWER[{scenario}]::{q}"
             if scenario == "image" and not image_present:
                 content = "MOCK_IMAGE_MISSING"
@@ -199,7 +224,7 @@ class MockHandler(BaseHTTPRequestHandler):
         if scenario == "sop_multi_action_budget":
             self._json(200, _tool_completion([("loop", {"q": q})]))
             return
-        if scenario in {"single_tool", "tool_error", "permission_denial", "max_turns", "permission_allow", "permission_ask_approve", "permission_ask_deny", "allowed_read_files", "denied_read_files", "cancel_during_tool", "deadline_during_tool", "sidecar_restart_before_effect", "sidecar_restart_after_effect", "sop_single_step_complete", "sop_step_advance", "sop_conditional_transition", "sop_slot_update_and_resume", "sop_known_slot_reuse", "sop_required_capability_gate", "sop_required_capability_failure", "sop_required_knowledge_search", "sop_knowledge_budget_exhausted", "sop_checkpoint_resume", "sop_failed_step_recovery", "sop_team_task", "sop_cancel_during_tool", "sop_deadline_during_tool", "sop_unknown_requeue", "large_tool_result", "tool_retryable_error", "tool_non_retryable_error", "sidecar_budget_limit", "sidecar_seed_read_state"} and not has_tool_result:
+        if scenario in {"single_tool", "tool_error", "permission_denial", "max_turns", "permission_allow", "permission_ask_approve", "permission_ask_deny", "allowed_read_files", "denied_read_files", "cancel_during_tool", "deadline_during_tool", "sidecar_restart_before_effect", "sidecar_restart_after_effect", "sop_single_step_complete", "sop_step_advance", "sop_conditional_transition", "sop_slot_update_and_resume", "sop_known_slot_reuse", "sop_required_capability_gate", "sop_required_capability_failure", "sop_required_knowledge_search", "sop_knowledge_budget_exhausted", "sop_checkpoint_resume", "sop_failed_step_recovery", "sop_team_task", "sop_cancel_during_tool", "sop_deadline_during_tool", "sop_unknown_requeue", "large_tool_result", "tool_retryable_error", "tool_non_retryable_error", "sidecar_budget_limit", "sidecar_seed_read_state", "sidecar_sdk_tool_progress"} and not has_tool_result:
             tool = {
                 "single_tool": "lookup", "tool_error": "lookup_error", "permission_denial": "restricted", "max_turns": "loop",
                 "permission_allow": "lookup", "permission_ask_approve": "lookup", "permission_ask_deny": "lookup",
@@ -210,7 +235,7 @@ class MockHandler(BaseHTTPRequestHandler):
                 "sop_required_capability_failure": "lookup_error", "sop_required_knowledge_search": "knowledge_search",
                 "sop_knowledge_budget_exhausted": "knowledge_search", "sop_checkpoint_resume": "lookup", "sop_failed_step_recovery": "retryable_error",
                 "sop_team_task": "lookup", "large_tool_result": "large_result", "tool_retryable_error": "retryable_error",
-                "tool_non_retryable_error": "non_retryable_error", "sidecar_budget_limit": "lookup", "sidecar_seed_read_state": "write_file", "sop_cancel_during_tool": "slow_side_effect",
+                "tool_non_retryable_error": "non_retryable_error", "sidecar_budget_limit": "lookup", "sidecar_seed_read_state": "write_file", "sidecar_sdk_tool_progress": "progress_tool", "sop_cancel_during_tool": "slow_side_effect",
                 "sop_deadline_during_tool": "slow_side_effect", "sop_unknown_requeue": "side_effect",
             }[scenario]
             if scenario == "sidecar_seed_read_state":

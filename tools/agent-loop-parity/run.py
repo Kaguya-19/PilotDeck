@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,27 @@ from trace import (
 
 ROOT = Path(__file__).resolve().parent
 
+# The production Gateway suite is a release gate. Keep this list separate
+# from filters so deleting or silently renaming a scenario cannot turn a full
+# run into a smaller passing run.
+REQUIRED_GATEWAY_SCENARIOS = frozenset({
+    "pure_text", "single_tool", "multiple_tool", "tool_error", "permission_denial",
+    "max_turns", "deadline", "cancel", "image", "checkpoint_resume",
+    "permission_allow", "permission_ask_approve", "permission_ask_deny", "can_prompt_false",
+    "multi_tool_ordered", "multi_tool_mixed_permission", "multi_tool_mixed_error", "large_tool_result",
+    "tool_retryable_error", "tool_non_retryable_error", "model_retryable_error", "model_non_retryable_error",
+    "malformed_model_response", "stream_interruption", "cancel_during_tool", "deadline_during_tool",
+    "multimodal_image_and_text", "allowed_read_files", "denied_read_files", "write_snapshot_resume", "auto_compact",
+    "plan_mode_host_policy",
+    "sidecar_budget_limit", "sidecar_elicitation", "sidecar_elicitation_execution", "sidecar_sdk_tool_progress",
+    "sidecar_live_steer", "sidecar_durable_compaction", "sidecar_full_request_compaction_budget",
+    "sidecar_projected_request_compaction_budget", "sidecar_seed_read_state", "sidecar_live_model_stream",
+    "sidecar_model_metadata", "sidecar_empty_system_prompt", "sidecar_additional_working_directories",
+    "sidecar_continuable_followup_live", "sidecar_continuable_followup_cold", "sidecar_parent_close_after_admission",
+    "sidecar_one_shot_subagent_success", "sidecar_one_shot_subagent_failure",
+    "sidecar_one_shot_parent_abort_after_admission", "sidecar_one_shot_parent_close_after_admission",
+})
+
 
 def load_scenarios(path: Path, selected: str, suite: str) -> list[dict[str, Any]]:
     document = json.loads(path.read_text(encoding="utf-8"))
@@ -30,16 +52,28 @@ def load_scenarios(path: Path, selected: str, suite: str) -> list[dict[str, Any]
     if not isinstance(candidates, list):
         raise TypeError("scenario file must contain a scenarios list")
     result: list[dict[str, Any]] = []
+    seen: set[str] = set()
     for scenario in candidates:
         if not isinstance(scenario, dict) or "pilotdeck" not in (scenario.get("pairs") or []):
             continue
-        if selected != "all" and scenario.get("scenarioId") != selected:
+        scenario_id = scenario.get("scenarioId")
+        if not isinstance(scenario_id, str) or not scenario_id:
+            raise ValueError("PilotDeck scenario is missing a non-empty scenarioId")
+        if scenario_id in seen:
+            raise ValueError(f"duplicate PilotDeck scenario: {scenario_id}")
+        seen.add(scenario_id)
+        if selected != "all" and scenario_id != selected:
             continue
         if suite != "all" and scenario.get("suite") != suite:
             continue
         result.append(scenario)
     if selected != "all" and not result:
         raise ValueError(f"unknown PilotDeck scenario: {selected}")
+    if selected == "all" and suite == "all":
+        actual = {str(s["scenarioId"]) for s in result}
+        missing = sorted(REQUIRED_GATEWAY_SCENARIOS - actual)
+        if missing:
+            raise ValueError(f"required PilotDeck scenarios are missing: {', '.join(missing)}")
     return result
 
 
@@ -103,7 +137,7 @@ def prepare_baseline(root: Path) -> None:
             raise RuntimeError(f"PilotDeck baseline build failed: {detail}")
 
 
-def adapter_env(scenario: dict[str, Any], mode: str, source: Path, mock: str, output: Path, ref: str) -> dict[str, str]:
+def adapter_env(scenario: dict[str, Any], mode: str, source: Path, mock: str, output: Path, ref: str, invocation_id: str) -> dict[str, str]:
     env = os.environ.copy()
     env.update({
         "PARITY_SCENARIO_FILE": str(ROOT / "scenarios.json"),
@@ -120,6 +154,7 @@ def adapter_env(scenario: dict[str, Any], mode: str, source: Path, mock: str, ou
         # invocation. The mock server is shared across a run, but a trace must
         # never inherit effects from another scenario or comparison pair.
         "PARITY_RUN_KEY": f"{mode}-{scenario['scenarioId']}-{ref.replace('/', '_')}",
+        "PARITY_INVOCATION_ID": invocation_id,
     })
     if mode in {"native", "sidecar"}:
         env["PARITY_RUNTIME_ROOT"] = str(output.parent / ".runtime" / str(scenario["scenarioId"]))
@@ -137,6 +172,10 @@ def run_adapter(
     timeout_seconds: float,
     override: str | None,
 ) -> str:
+    invocation_id = uuid.uuid4().hex
+    if output.exists():
+        output.unlink()
+    started_ns = time.time_ns()
     if override:
         command = override
     elif surface == "gateway":
@@ -149,7 +188,7 @@ def run_adapter(
         result = subprocess.run(
             shlex.split(command),
             cwd=source,
-            env=adapter_env(scenario, mode, source, mock, output, ref),
+            env=adapter_env(scenario, mode, source, mock, output, ref, invocation_id),
             text=True,
             capture_output=True,
             check=False,
@@ -163,10 +202,15 @@ def run_adapter(
         return f"BLOCKED: adapter exited {result.returncode}: {' | '.join(detail)}"
     if not output.exists():
         return "BLOCKED: adapter did not write trace"
+    if output.stat().st_mtime_ns < started_ns:
+        return "BLOCKED: adapter trace predates this invocation"
+    records = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if not records or any(record.get("invocationId") != invocation_id for record in records):
+        return "BLOCKED: adapter trace does not match this invocation"
     if surface == "gateway" and mode == "sidecar":
-        records = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines() if line.strip()]
         required_modules = {str(module) for module in scenario.get("requiredSidecarModules") or []}
-        proof_errors = validate_production_sidecar_proof(records, required_modules)
+        required_operations = {str(operation) for operation in scenario.get("requiredSidecarOperations") or []}
+        proof_errors = validate_production_sidecar_proof(records, required_modules, required_operations)
         if proof_errors:
             return f"BLOCKED: {'; '.join(proof_errors)}"
     return "PASS"
@@ -227,9 +271,8 @@ def main() -> int:
                             blocked.append(f"{sid}/{name}: {status}")
                             continue
                         traces[name] = trace_path
-                        if "baseline-" not in name:
-                            for failure in validate_trace_expectations(load_trace(trace_path), scenario, "pilotdeck", name):
-                                oracle_failures.append(f"{sid}/{name}: {failure.path} expected={failure.left!r} actual={failure.right!r}")
+                        for failure in validate_trace_expectations(load_trace(trace_path), scenario, "pilotdeck", name):
+                            oracle_failures.append(f"{sid}/{name}: {failure.path} expected={failure.left!r} actual={failure.right!r}")
                     comparisons = [
                         ("PilotDeck", "pilotdeck-native", "pilotdeck-sidecar", False),
                         ("PilotDeck baseline drift", "pilotdeck-baseline-native", "pilotdeck-current-native", True),
@@ -242,8 +285,6 @@ def main() -> int:
                         write_report(report, f"{sid} {label}", traces[left_name], traces[right_name], comparison)
                         if comparison.format_warnings:
                             warnings.append(f"{sid}/{label}: {len(comparison.format_warnings)} warning(s)")
-                        if is_baseline:
-                            continue
                         if scenario.get("suite") == "known-gap":
                             if known_gap_matches(scenario, comparison.semantic):
                                 known_gaps.append(f"{sid}/{label}: reproduced {len(comparison.semantic)} expected difference(s)")

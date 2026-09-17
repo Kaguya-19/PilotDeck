@@ -29,7 +29,7 @@ import {
   readHostTurnModuleMethods,
 } from "../agent/modules/protocol.js";
 import { AgentLoop } from "../agent/loop/AgentLoop.js";
-import { createSidecarAgentTurnCapabilities } from "../agent/loop/AgentTurnCapabilities.js";
+import { createSidecarAgentTurnCapabilities, type ModelMetadataPort } from "../agent/loop/AgentTurnCapabilities.js";
 import type { AgentRuntimeConfig } from "../agent/runtime/AgentRuntimeConfig.js";
 import { parseAgentRunMode } from "../agent/protocol/input.js";
 import {
@@ -112,7 +112,7 @@ export const createSidecarExecution: SidecarExecutionFactory = async ({ request,
     provider: String(agent.provider ?? payload.provider ?? "default"),
     model: String(agent.model ?? payload.model ?? "default"),
     cwd,
-    systemPrompt: asString(
+    systemPrompt: asOptionalString(
       contextOverride.systemPrompt ?? agent.systemPrompt ?? payload.systemPrompt,
     ),
     appendSystemPrompt: asString(agent.appendSystemPrompt ?? payload.appendSystemPrompt),
@@ -137,6 +137,7 @@ export const createSidecarExecution: SidecarExecutionFactory = async ({ request,
       canPrompt,
       bypassAvailable,
       rules: asPermissionRules(permissionContextInput.rules),
+      additionalWorkingDirectories: asStringArray(permissionContextInput.additionalWorkingDirectories),
     }),
     metadata: mergeMetadata(
       asRecord(agent.metadata),
@@ -166,10 +167,16 @@ export const createSidecarExecution: SidecarExecutionFactory = async ({ request,
   const eventBridge = createSidecarEventComposition(callModule, moduleBinding, eventMethods);
   const planTodo = createSidecarPlanTodoComposition(callModule, moduleBinding, capabilityMethods);
   if (planTodo) await planTodo.initialize(sessionId, turnId);
+  const metadata = createHostModelMetadataPort(callModule, moduleBinding, modelMethods);
+  const modelOverride = asModelOverride(agent.modelOverride ?? payload.modelOverride);
+  if (metadata) {
+    await metadata.refresh(modelOverride?.provider ?? config.provider, modelOverride?.model ?? config.model);
+  }
   const sidecarPorts = createSidecarCapabilityComposition(callModule, {
     tools,
     binding: moduleBinding,
     modelMethods,
+    ...(metadata ? { onPreparedMetadata: metadata.apply } : {}),
     capabilityMethods,
     onAbort: abortExecution,
   });
@@ -178,6 +185,7 @@ export const createSidecarExecution: SidecarExecutionFactory = async ({ request,
       model: sidecarPorts.model,
       toolExecution: sidecarPorts.toolExecution,
       ...(budget ? { budget } : {}),
+      ...(metadata ? { metadata } : {}),
     },
     ...(context ? { context } : {}),
     ...(permissionPort ? { permission: permissionPort } : {}),
@@ -217,7 +225,7 @@ export const createSidecarExecution: SidecarExecutionFactory = async ({ request,
       canElicit: payload.canElicit === true,
       ...turnCallbacks,
       permissionRules: asPermissionRules(permissionContextInput.rules),
-      modelOverride: asModelOverride(agent.modelOverride ?? payload.modelOverride),
+      modelOverride,
       execution: {
         runId: request.runId,
         operationId: request.operationId,
@@ -303,6 +311,118 @@ function createSidecarCapabilityComposition(
   options: Parameters<typeof createSidecarPorts>[1],
 ) {
   return createSidecarPorts(callModule, options);
+}
+
+type HostModelMetadataPort = ModelMetadataPort & Readonly<{
+  refresh(provider: string, model: string): Promise<void>;
+  apply(value: unknown, expectedRoute?: { provider: string; model: string }): void;
+}>;
+
+function createHostModelMetadataPort(
+  callModule: Parameters<typeof createSidecarPorts>[0],
+  binding: SidecarModuleBindingInput,
+  methods: ReturnType<typeof readHostModelModuleMethods>,
+): HostModelMetadataPort | undefined {
+  if (!methods.includes("get_metadata")) return undefined;
+  const snapshots = new Map<string, ReturnType<typeof readModelMetadataSnapshot>>();
+  const key = (provider: string, model: string) => `${provider}\u0000${model}`;
+  const apply = (value: unknown, expectedRoute?: { provider: string; model: string }): void => {
+    const snapshot = readModelMetadataSnapshot(value);
+    if (expectedRoute && (snapshot.provider !== expectedRoute.provider || snapshot.model !== expectedRoute.model)) {
+      throw new Error("Host model metadata response does not match the prepared route.");
+    }
+    snapshots.set(key(snapshot.provider, snapshot.model), snapshot);
+  };
+  const read = (provider: string, model: string) => snapshots.get(key(provider, model));
+  return Object.freeze({
+    async refresh(provider, model) {
+      const response = await callModule({
+        runId: binding.runId,
+        operationId: binding.operationId,
+        idempotencyKey: binding.idempotencyKey,
+        requestId: `model-metadata-${provider}-${model}`,
+        module: "model",
+        payload: { operation: "get_metadata", provider, model },
+      });
+      if (!response.ok) {
+        throw new Error(
+          typeof response.error?.message === "string"
+            ? response.error.message
+            : response.code ?? "Host model metadata lookup failed.",
+        );
+      }
+      const snapshot = readModelMetadataSnapshot(response.payload?.metadata);
+      if (snapshot.provider !== provider || snapshot.model !== model) {
+        throw new Error("Host model metadata response does not match the requested route.");
+      }
+      snapshots.set(key(provider, model), snapshot);
+    },
+    apply,
+    getModelMaxContextTokens: (provider, model) => read(provider, model)?.maxContextTokens,
+    getModelMaxOutputTokens: (provider, model) => read(provider, model)?.maxOutputTokens,
+    getModelTokenLimits: (provider, model) => read(provider, model)?.tokenLimits,
+    getModelProtocol: (provider) => {
+      for (const snapshot of snapshots.values()) {
+        if (snapshot.provider === provider && snapshot.protocol !== undefined) return snapshot.protocol;
+      }
+      return undefined;
+    },
+    getModelSupportsPromptCache: (provider, model) => read(provider, model)?.supportsPromptCache,
+  });
+}
+
+function readModelMetadataSnapshot(value: unknown): {
+  provider: string;
+  model: string;
+  maxContextTokens?: number;
+  maxOutputTokens?: number;
+  tokenLimits?: { maxContextTokens: number; maxOutputTokens?: number };
+  protocol?: "anthropic" | "openai" | "openai-responses" | "google";
+  supportsPromptCache?: boolean;
+} {
+  const record = asRecord(value);
+  const provider = asString(record?.provider);
+  const model = asString(record?.model);
+  if (!provider || !model) throw new Error("Host model metadata response must include provider and model.");
+  const maxContextTokens = optionalPositiveInteger(record?.maxContextTokens, "maxContextTokens");
+  const maxOutputTokens = optionalPositiveInteger(record?.maxOutputTokens, "maxOutputTokens");
+  const tokenLimitsRecord = asRecord(record?.tokenLimits);
+  const tokenLimits = tokenLimitsRecord
+    ? {
+        maxContextTokens: requiredPositiveInteger(tokenLimitsRecord.maxContextTokens, "tokenLimits.maxContextTokens"),
+        ...(tokenLimitsRecord.maxOutputTokens !== undefined
+          ? { maxOutputTokens: requiredPositiveInteger(tokenLimitsRecord.maxOutputTokens, "tokenLimits.maxOutputTokens") }
+          : {}),
+      }
+    : undefined;
+  const protocol = record?.protocol;
+  if (protocol !== undefined && protocol !== "anthropic" && protocol !== "openai" && protocol !== "openai-responses" && protocol !== "google") {
+    throw new Error("Host model metadata response contains an invalid protocol.");
+  }
+  if (record?.supportsPromptCache !== undefined && typeof record.supportsPromptCache !== "boolean") {
+    throw new Error("Host model metadata response contains an invalid prompt-cache capability.");
+  }
+  return {
+    provider,
+    model,
+    ...(maxContextTokens !== undefined ? { maxContextTokens } : {}),
+    ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
+    ...(tokenLimits ? { tokenLimits } : {}),
+    ...(protocol !== undefined ? { protocol } : {}),
+    ...(typeof record?.supportsPromptCache === "boolean" ? { supportsPromptCache: record.supportsPromptCache } : {}),
+  };
+}
+
+function optionalPositiveInteger(value: unknown, field: string): number | undefined {
+  if (value === undefined) return undefined;
+  return requiredPositiveInteger(value, field);
+}
+
+function requiredPositiveInteger(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`Host model metadata response contains an invalid ${field}.`);
+  }
+  return value;
 }
 
 type ToolDescriptor = {
@@ -607,6 +727,16 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 
 function asString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function asOptionalString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function asStringArray(value: unknown): string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string")
+    ? [...value]
+    : [];
 }
 
 function asPositiveInteger(value: unknown): number | undefined {

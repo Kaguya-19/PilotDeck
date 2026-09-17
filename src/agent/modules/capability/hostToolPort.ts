@@ -316,6 +316,7 @@ function serializeToolContext(context: PilotDeckToolRuntimeContext): Record<stri
     runMode: context.runMode,
     currentToolCallId: context.currentToolCallId,
     maxResultBytes: context.maxResultBytes,
+    ...(context.outputTruncated !== undefined ? { outputTruncated: context.outputTruncated } : {}),
   };
 }
 

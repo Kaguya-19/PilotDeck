@@ -28,6 +28,8 @@ export type SessionAgentConfigBundleOptions = {
   additionalWorkingDirectories?: string[];
   organizationPolicy?: ResolvedGatewayOrganizationPolicy;
   env: Record<string, string | undefined>;
+  /** Internal parity-test override; production configuration remains unchanged. */
+  testAgentConfigOverrides?: Pick<AgentRuntimeConfig, "maxContextMessages">;
 };
 
 /**
@@ -144,6 +146,7 @@ export class SessionAgentConfigBundle {
         this.options.organizationPolicy?.limits?.maxSubagentDepth,
       ),
       maxContextTokens,
+      ...(this.options.testAgentConfigOverrides ?? {}),
       maxOutputTokens,
       runtimeContextSurface: runtime.profile.runtimeContextSurface,
       thinking: capThinking(

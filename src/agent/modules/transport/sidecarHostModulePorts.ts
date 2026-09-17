@@ -6,6 +6,7 @@ import type {
   InteractionPort,
   LifecycleDispatchPort,
   ModelBudgetPort,
+  ModelMetadataPort,
   PermissionPort,
   PlanModePort,
   SubagentPort,
@@ -32,6 +33,7 @@ import {
 
 export type SidecarModelModulePort = Readonly<{
   execution: ModelExecutionPort;
+  metadata?: ModelMetadataPort;
 }>;
 
 export type SidecarBudgetModulePort = ModelBudgetPort;
@@ -113,6 +115,8 @@ export type SidecarToolContextPorts = Readonly<{
   subagent?: SubagentPort;
   goal?: GoalPort;
   toolExecution?: Pick<ToolExecutionPort, "auditRecorder" | "fileHistory" | "fileUpdateNotifier">;
+  /** Host event sink used for transient tool progress. */
+  eventEmitter?: AgentEventEmitter;
   clock?: Readonly<{ now?: () => Date }>;
 }>;
 
@@ -137,6 +141,7 @@ export type SidecarModuleComposition = Readonly<{
  */
 export type SidecarHostModulePorts = Readonly<{
   model: ModelExecutionPort;
+  metadata?: ModelMetadataPort;
   budget?: ModelBudgetPort;
   toolExecution: ToolExecutionPort;
   toolResultObserver?: ToolResultObserver;
@@ -181,13 +186,17 @@ export function createSidecarModuleComposition(
     subagent: ports.subagent,
     goal: ports.goal,
     toolExecution: ports.toolRuntimeServices,
+    eventEmitter: ports.eventEmitter,
     clock: ports.clock,
   });
   const runtimeContext = createSidecarToolRuntimeServices(toolContext);
   const permissionContext = createSidecarPermissionRequestContextServices(toolContext);
   const contextIdentity = createSidecarContextRequestIdentityServices(toolContext);
   return Object.freeze({
-    model: Object.freeze({ execution: ports.model }),
+    model: Object.freeze({
+      execution: ports.model,
+      ...(hasModelMetadata(ports.metadata) ? { metadata: ports.metadata } : {}),
+    }),
     ...(ports.budget ? { budget: ports.budget } : {}),
     ...(ports.interaction?.elicitationAvailable === true || ports.interaction?.elicitation
       ? { interaction: Object.freeze({ elicitationAvailable: true }) }
@@ -228,6 +237,7 @@ export function createSidecarHostModulePorts(
 ): SidecarHostModulePorts {
   return Object.freeze({
     model: capabilities.model.execution,
+    ...(hasModelMetadata(capabilities.model.metadata) ? { metadata: capabilities.model.metadata } : {}),
     budget: capabilities.model.budget,
     toolExecution: capabilities.toolExecution,
     toolResultObserver: capabilities.toolResultObserver,
@@ -244,4 +254,12 @@ export function createSidecarHostModulePorts(
     toolRuntimeServices: capabilities.toolExecution,
     clock: capabilities.clock,
   });
+}
+
+function hasModelMetadata(metadata: ModelMetadataPort | undefined): metadata is ModelMetadataPort {
+  return metadata?.getModelMaxContextTokens !== undefined
+    || metadata?.getModelMaxOutputTokens !== undefined
+    || metadata?.getModelTokenLimits !== undefined
+    || metadata?.getModelProtocol !== undefined
+    || metadata?.getModelSupportsPromptCache !== undefined;
 }

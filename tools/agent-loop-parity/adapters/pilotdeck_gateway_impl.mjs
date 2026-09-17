@@ -10,12 +10,13 @@ const mockBaseUrl = process.env.PARITY_MOCK_BASE_URL;
 const traceOut = process.env.PARITY_TRACE_OUT;
 const mode = process.env.PARITY_MODE;
 const runKey = process.env.PARITY_RUN_KEY ?? `${mode}-parity`;
+const invocationId = process.env.PARITY_INVOCATION_ID;
 const keepRuntime = process.env.PARITY_KEEP_RUNTIME === "1";
 const debug = (...values) => {
   if (process.env.PARITY_DEBUG === "1") console.error("[parity-gateway]", ...values);
 };
 
-if (!sourceRoot || !sidecarRoot || !mockBaseUrl || !traceOut) {
+if (!sourceRoot || !sidecarRoot || !mockBaseUrl || !traceOut || !invocationId) {
   throw new Error("PilotDeck gateway parity environment is incomplete.");
 }
 
@@ -43,6 +44,8 @@ const { nodeProjectSessionStorageProvider } = await importFrom(
 let sequence = 0;
 const trace = [];
 let modelAttempt = 0;
+let scenarioTurnIndex = 0;
+let scenarioTurnModelAttempt = 0;
 const scopedModelAttempts = new Map();
 let markModelStarted;
 const modelStarted = new Promise((resolve) => {
@@ -53,7 +56,7 @@ const toolStarted = new Promise((resolve) => {
   markToolStarted = resolve;
 });
 const push = (kind, extra = {}) => {
-  trace.push({ kind, scenarioId: scenario.scenarioId, q: scenario.q, sequence: sequence++, ...extra });
+  trace.push({ kind, scenarioId: scenario.scenarioId, q: scenario.q, invocationId, sequence: sequence++, ...extra });
 };
 const modelView = (request) => ({
   systemPrompt: request.systemPrompt,
@@ -105,6 +108,7 @@ async function waitForScopedModelResponses({ timeoutMs = 5000, agentScope, count
 class MockModelRuntime {
   async *stream(request, options = {}) {
     modelAttempt += 1;
+    scenarioTurnModelAttempt += 1;
     const invocationAttempt = modelAttempt;
     const agentScope = isSubagentModelRequest(request) ? "child" : "parent";
     const attempt = (scopedModelAttempts.get(agentScope) ?? 0) + 1;
@@ -144,6 +148,8 @@ class MockModelRuntime {
       // Do not forward them to the backend: its request counter excludes a
       // locally injected attempt and would fault a later parent request again.
       faults: { ...(scenario.faults ?? {}), model: [] },
+      turnIndex: scenarioTurnIndex,
+      turnModelAttempt: scenarioTurnModelAttempt,
       runKey,
     }, options.signal);
     if (scenario.scenarioId === "sidecar_live_model_stream") {
@@ -222,16 +228,19 @@ function isSubagentModelRequest(request) {
 }
 
 function createTools() {
-  return (scenario.tools ?? []).filter((name) => !["ask_user_question", "read_file", "write_file"].includes(name)).map((name) => ({
+  return (scenario.tools ?? []).filter((name) =>
+    !["ask_user_question", "read_file", "write_file", "enter_plan_mode", "exit_plan_mode"].includes(name),
+  ).map((name) => ({
     name,
     description: scenario.toolDescription ?? name,
     kind: "custom",
     inputSchema: { type: "object" },
-    isReadOnly: () => !["restricted", "loop"].includes(name),
+    isReadOnly: () => !["restricted", "loop", "parity_write_probe"].includes(name),
     isConcurrencySafe: () => ["lookup", "summarize"].includes(name),
     requiresUserInteraction: () => name === "ask_user_question",
-    checkPermissions: async () => {
-      push("permission.request", { toolName: name, mode: scenario.permission?.mode ?? "default", canPrompt: scenario.permission?.canPrompt ?? false });
+    checkPermissions: async (_input, context) => {
+      push("policy.context", { toolName: name, permissionMode: context.permissionMode, runMode: context.runMode });
+      push("permission.request", { toolName: name, mode: context.permissionMode, canPrompt: scenario.permission?.canPrompt ?? false });
       const deniedByRule = scenario.permission?.deny?.includes(name) ?? false;
       const deniedByAnswer = scenario.permission?.ask?.includes(name) && scenario.permission?.answer === "deny";
       const denied = deniedByRule || deniedByAnswer;
@@ -256,6 +265,15 @@ function createTools() {
       push("tool.call", { name, arguments: input, toolCallId, concurrencySafe, sideEffectCount: 0 });
       push("tool.start", { name, toolCallId, concurrencySafe, sideEffectCount: 0 });
       markToolStarted();
+      if (name === "progress_tool") {
+        context.progress?.({
+          toolCallId,
+          toolName: name,
+          message: "deterministic progress",
+          metadata: { source: "parity" },
+          createdAt: new Date().toISOString(),
+        });
+      }
       const forwardCancellation = () => {
         void post("/control/cancel", { runKey }).catch(() => undefined);
       };
@@ -304,6 +322,13 @@ function createParityCompactionProvider() {
   let compacted = false;
   return {
     async autoCompact(input) {
+      if (scenario.historyTurns?.length && !input.messages.some((message) =>
+        message.content?.some((block) => block.type === "text" && block.text === scenario.q))) {
+        return {
+          type: "skipped",
+          snapshot: { tokens: 20, maxContextTokens: input.maxContextTokens ?? 1_024, warningRatio: 0.8, blockingRatio: 0.9, state: "ok", ratio: 0.02 },
+        };
+      }
       if (compacted) {
         return {
           type: "skipped",
@@ -317,10 +342,34 @@ function createParityCompactionProvider() {
           },
         };
       }
-      if (scenario.scenarioId === "sidecar_full_request_compaction_budget") {
+      if (["sidecar_full_request_compaction_budget", "sidecar_projected_request_compaction_budget"].includes(scenario.scenarioId)) {
         if (!input.budgetEvaluator) throw new Error("Full-request compaction scenario requires a request budget evaluator.");
         const budget = await input.budgetEvaluator(input.messages);
         push("compaction.budget", {
+          phase: "source",
+          tokens: budget.tokens,
+          systemTokens: budget.breakdown?.system ?? 0,
+          toolTokens: budget.breakdown?.tools ?? 0,
+          messageTokens: budget.breakdown?.messages ?? 0,
+        });
+      }
+      const messages = [
+        { role: "assistant", content: [{ type: "text", text: "durable compact summary" }] },
+        { role: "user", content: [{ type: "text", text: scenario.q }] },
+      ];
+      let snapshot = {
+        tokens: 20,
+        maxContextTokens: input.maxContextTokens ?? 1_024,
+        warningRatio: 0.8,
+        blockingRatio: 0.9,
+        state: "ok",
+        ratio: 0.02,
+      };
+      if (["sidecar_full_request_compaction_budget", "sidecar_projected_request_compaction_budget"].includes(scenario.scenarioId)) {
+        const budget = await input.budgetEvaluator(messages);
+        snapshot = budget;
+        push("compaction.budget", {
+          phase: "replacement",
           tokens: budget.tokens,
           systemTokens: budget.breakdown?.system ?? 0,
           toolTokens: budget.breakdown?.tools ?? 0,
@@ -328,22 +377,11 @@ function createParityCompactionProvider() {
         });
       }
       compacted = true;
-      const messages = [
-        { role: "assistant", content: [{ type: "text", text: "durable compact summary" }] },
-        { role: "user", content: [{ type: "text", text: scenario.q }] },
-      ];
       return {
         type: "compacted",
         tier: "full",
         messages,
-        snapshot: {
-          tokens: 20,
-          maxContextTokens: input.maxContextTokens ?? 1_024,
-          warningRatio: 0.8,
-          blockingRatio: 0.9,
-          state: "ok",
-          ratio: 0.02,
-        },
+        snapshot,
         result: {
           compactionId: "parity-durable-compaction",
           trigger: "auto",
@@ -420,8 +458,17 @@ process.env.PILOT_HOME = pilotHome;
 const projectRoot = pilotHome;
 const configuredContextTokens = scenario.limits?.maxContextTokens ?? 65536;
 const configuredOutputTokens = scenario.limits?.maxOutputTokens ?? 8192;
-await writeFile(path.join(pilotHome, "pilotdeck.yaml"), `schemaVersion: 1\nagent:\n  model: parity/deterministic\n  maxContextTokens: ${configuredContextTokens}\n  maxOutputTokens: ${configuredOutputTokens}\nmodel:\n  providers:\n    parity:\n      protocol: openai\n      url: ${mockBaseUrl}\n      apiKey: parity-test\n      models:\n        deterministic:\n          capabilities:\n            supportsToolUse: true\n            maxContextTokens: ${configuredContextTokens}\n            maxOutputTokens: ${configuredOutputTokens}\ntelemetry:\n  enabled: false\n`, "utf8");
+const configuredMaxContextMessages = scenario.limits?.maxContextMessages;
+await writeFile(path.join(pilotHome, "pilotdeck.yaml"), `schemaVersion: 1\nagent:\n  model: parity/deterministic\n  maxContextTokens: ${configuredContextTokens}\n  maxOutputTokens: ${configuredOutputTokens}${configuredMaxContextMessages ? `\n  maxContextMessages: ${configuredMaxContextMessages}` : ""}\nmodel:\n  providers:\n    parity:\n      protocol: openai\n      url: ${mockBaseUrl}\n      apiKey: parity-test\n      models:\n        deterministic:\n          capabilities:\n            supportsToolUse: true\n            maxContextTokens: ${configuredContextTokens}\n            maxOutputTokens: ${configuredOutputTokens}\ntelemetry:\n  enabled: false\n`, "utf8");
 await writeFile(path.join(projectRoot, "parity-input.txt"), "deterministic file content\n", "utf8");
+if (scenario.scenarioId === "plan_mode_host_policy") {
+  await mkdir(path.join(projectRoot, ".pilotdeck", "plans"), { recursive: true });
+  await writeFile(
+    path.join(projectRoot, ".pilotdeck", "plans", "parity-plan.md"),
+    "# Parity plan\n\nExecute the deterministic plan.\n",
+    "utf8",
+  );
+}
 const gatewayEnv = {
   ...process.env,
   ...(mode === "sidecar" ? {
@@ -443,9 +490,12 @@ const local = createLocalGateway({
     ...createTools(),
   ],
   __testModelFactory: () => new MockModelRuntime(),
+  ...(Number.isInteger(configuredMaxContextMessages) && configuredMaxContextMessages > 0
+    ? { __testAgentConfigOverrides: { maxContextMessages: configuredMaxContextMessages } }
+    : {}),
   autoElicitation: scenario.permission?.answer === "allow" || scenario.interaction?.elicitationAvailable === true,
   storageProvider: createObservedPersistenceProvider(),
-  ...(["sidecar_durable_compaction", "sidecar_full_request_compaction_budget"].includes(scenario.scenarioId)
+  ...(["sidecar_durable_compaction", "sidecar_full_request_compaction_budget", "sidecar_projected_request_compaction_budget"].includes(scenario.scenarioId)
     ? { compactionProviderFactory: () => createParityCompactionProvider() }
     : {}),
   ...(mode === "sidecar" ? {
@@ -487,6 +537,17 @@ try {
   const sessionKey = `full-${scenario.scenarioId}-${mode}`;
   const runId = `run-${scenario.scenarioId}`;
   let seedReadResult;
+  for (const message of scenario.historyTurns ?? []) {
+    for await (const _event of client.stream("submit_turn", {
+      sessionKey,
+      channelKey: "test",
+      message,
+      mode: "default",
+      canPrompt: false,
+    })) {
+      // Build durable history through the production Gateway path.
+    }
+  }
   if (scenario.scenarioId === "checkpoint_resume") {
     for await (const _event of client.stream("submit_turn", {
       sessionKey,
@@ -518,6 +579,106 @@ try {
     attachments.push({ type: "image", name: "parity-image.png", path: imagePath, mimeType: match[1] });
   }
   const limits = scenario.limits ?? {};
+  if (Array.isArray(scenario.turns) && scenario.turns.length > 0) {
+    let visibleOutput = "";
+    let terminal;
+    let terminalErrorCode;
+    let observedPermissionMode = scenario.permission?.mode ?? "default";
+    const builtinToolLifecycleNames = new Set(["enter_plan_mode", "exit_plan_mode", "todo_write"]);
+
+    for (const [turnIndex, turn] of scenario.turns.entries()) {
+      scenarioTurnIndex = turnIndex;
+      scenarioTurnModelAttempt = 0;
+      push("policy.turn", { permissionMode: observedPermissionMode, runMode: observedPermissionMode === "plan" ? "plan" : "agent" });
+
+      const stream = client.stream("submit_turn", {
+        sessionKey,
+        channelKey: "test",
+        message: typeof turn.message === "string" ? turn.message : scenario.q,
+        attachments: turnIndex === 0 ? attachments : [],
+        canPrompt: scenario.permission?.canPrompt ?? false,
+        canElicit: scenario.permission?.canElicit ?? false,
+        ...((scenario.systemPrompt !== undefined || scenario.sdkSessionConfig)
+          ? { sdkSessionConfig: { ...(scenario.sdkSessionConfig ?? {}), ...(scenario.systemPrompt !== undefined ? { systemPrompt: scenario.systemPrompt } : {}) } }
+          : {}),
+        ...(turn.allowPlanModeTools ? { allowPlanModeTools: true } : {}),
+        ...(turn.omitClientMode ? {} : { mode: scenario.permission?.mode ?? "default" }),
+      });
+
+      for await (const event of stream) {
+        if (event.type === "tool_call_started" && builtinToolLifecycleNames.has(event.name)) {
+          push("tool.call", { name: event.name, toolCallId: event.toolCallId });
+          push("tool.start", { name: event.name, toolCallId: event.toolCallId });
+        }
+        if (event.type === "tool_call_finished" && builtinToolLifecycleNames.has(event.toolName)) {
+          push("tool.finish", {
+            name: event.toolName,
+            toolCallId: event.toolCallId,
+            success: event.ok,
+            error: event.errorCode ? { code: event.errorCode, message: event.resultPreview } : undefined,
+          });
+          push("tool.result", {
+            toolCallId: event.toolCallId,
+            result: event.ok
+              ? { type: "success", data: { preview: event.resultPreview } }
+              : { type: "error", error: { code: event.errorCode, message: event.resultPreview } },
+          });
+        }
+        if (event.type === "tool_call_finished" && event.errorCode === "plan_mode_violation") {
+          push("tool.finish", {
+            name: event.toolName,
+            toolCallId: event.toolCallId,
+            success: false,
+            error: { code: event.errorCode, message: event.resultPreview },
+          });
+          push("tool.result", {
+            toolCallId: event.toolCallId,
+            result: { type: "error", error: { code: event.errorCode, message: event.resultPreview } },
+          });
+        }
+        if (event.type === "elicitation_request" && event.toolName === "exit_plan_mode") {
+          const question = event.questions[0]?.question;
+          if (typeof question !== "string") {
+            throw new Error("exit_plan_mode elicitation did not include a question.");
+          }
+          const response = await client.request("elicitation_respond", {
+            sessionKey,
+            requestId: event.requestId,
+            answer: { type: "answered", answers: { [question]: "execute_plan" } },
+          });
+          if (!response || response.delivered !== true) {
+            throw new Error("Deterministic exit_plan_mode approval was not delivered.");
+          }
+        }
+        if (event.type === "assistant_text_delta") {
+          visibleOutput += event.text;
+          push("user.output", { text: event.text });
+        }
+        if (event.type === "plan_mode_changed") observedPermissionMode = event.mode;
+        if (event.type === "turn_completed") terminal = event;
+        if (event.type === "error") {
+          terminalErrorCode = event.code;
+          push("gateway.error", { code: event.code, message: event.message });
+        }
+      }
+    }
+
+    const mockState = await post("/control/state", { runKey });
+    const sideEffectCounts = mockState.sideEffects ?? {};
+    push("side_effect.state", {
+      counts: sideEffectCounts,
+      sideEffectCount: Object.values(sideEffectCounts).reduce((total, value) => total + Number(value || 0), 0),
+    });
+    const finishReason = terminal?.finishReason ?? "unknown";
+    push("terminal", {
+      outcome: finishReason === "completed" ? "completed" : finishReason.includes("abort") ? "cancelled" : "failed",
+      code: terminalErrorCode ?? (finishReason === "max_turns" ? "agent_max_turns_reached" : undefined),
+      stopReason: finishReason,
+      output: visibleOutput,
+      usage: terminal?.usage,
+    });
+    await writeFile(traceOut, `${trace.map((item) => JSON.stringify(item)).join("\n")}\n`, "utf8");
+  } else {
   const stream = client.stream("submit_turn", {
     sessionKey,
     channelKey: "test",
@@ -526,7 +687,9 @@ try {
     mode: scenario.permission?.mode ?? "default",
     canPrompt: scenario.permission?.canPrompt ?? false,
     canElicit: scenario.permission?.canElicit ?? false,
-    ...(scenario.systemPrompt ? { sdkSessionConfig: { systemPrompt: scenario.systemPrompt } } : {}),
+    ...((scenario.systemPrompt !== undefined || scenario.sdkSessionConfig)
+      ? { sdkSessionConfig: { ...(scenario.sdkSessionConfig ?? {}), ...(scenario.systemPrompt !== undefined ? { systemPrompt: scenario.systemPrompt } : {}) } }
+      : {}),
     runId,
     maxTurns: limits.maxTurns,
     maxBudgetUsd: limits.maxBudgetUsd,
@@ -595,7 +758,7 @@ try {
   let terminal;
   let terminalCount = 0;
   let terminalErrorCode;
-  const builtinToolLifecycleNames = new Set(["agent", "read_file", "write_file", "subagent", "send_message"]);
+  const builtinToolLifecycleNames = new Set(["agent", "ask_user_question", "read_file", "write_file", "subagent", "send_message"]);
   for await (const event of stream) {
     // These built-ins emit lifecycle only through the Gateway stream. Keep
     // their port-level effects in the same trace vocabulary as parity tools.
@@ -635,6 +798,9 @@ try {
     }
     if (event.type === "agent_status") {
       push("agent.status", { event: event.event, detail: event.detail });
+    }
+    if (event.type === "tool_progress") {
+      push("tool.progress", { toolCallId: event.toolCallId, toolName: event.toolName, message: event.message, metadata: event.metadata });
     }
     if (event.type === "assistant_text_delta") {
       visibleOutput += event.text;
@@ -725,6 +891,7 @@ try {
     usage: terminal?.usage,
   });
   await writeFile(traceOut, `${trace.map((item) => JSON.stringify(item)).join("\n")}\n`, "utf8");
+  }
 } finally {
   debug("closing deployment");
   client.close();

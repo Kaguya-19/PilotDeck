@@ -18,6 +18,10 @@ import type {
   SidecarModuleHandlerRegistry,
 } from "./agentLoopSidecarClient.js";
 import type { SidecarModuleComposition } from "./sidecarHostModulePorts.js";
+import {
+  finalizePreparedModelRequest,
+  normalizeMessagesForModelRequest,
+} from "../../loop/modelRequestAssembly.js";
 
 export type SidecarModuleManifest = Readonly<{
   tools: readonly Record<string, unknown>[];
@@ -58,12 +62,28 @@ export function createSidecarDefaultModuleDispatcher(options: {
   const handlers: SidecarModuleHandlerRegistry = Object.freeze({
     model: async (call) => {
       const operation = stringField(call.payload, "operation");
+      if (operation === "get_metadata") {
+        const metadata = options.modules.model.metadata;
+        if (!metadata) throw new Error("Host model metadata capability is unavailable.");
+        return {
+          metadata: serializeModelMetadata(
+            metadata,
+            stringField(call.payload, "provider"),
+            stringField(call.payload, "model"),
+          ),
+        };
+      }
       const preparationId = stringField(call.payload, "preparationId");
       const context = modelExecutionContext(call, options.input, options.input.abortSignal);
       if (operation === "prepare") {
         const prepared = await options.modules.model.execution.prepare({ request: canonicalModelRequest(call.payload.request), context });
         preparations.set(preparationId, prepared);
-        return { prepared: serializablePreparedInvocation(prepared) };
+        return {
+          prepared: serializablePreparedInvocation(prepared),
+          ...(options.modules.model.metadata
+            ? { metadata: serializeModelMetadata(options.modules.model.metadata, prepared.provider, prepared.model) }
+            : {}),
+        };
       }
       if (operation === "stream") {
         const prepared = preparations.get(preparationId);
@@ -234,20 +254,26 @@ async function dispatchContext(options: Parameters<typeof createSidecarDefaultMo
   if (operation === "try_auto_compact" && input.maxContextTokens === undefined && options.config.maxContextTokens !== undefined) input.maxContextTokens = options.config.maxContextTokens;
   if (operation === "try_auto_compact" && input.budgetRequest !== undefined) {
     const request = canonicalModelRequest(input.budgetRequest);
-    const sourceMessages = canonicalMessages(input.messages, "Compaction source messages");
     const budget = options.modules.budget;
     if (budget?.evaluateRequestBudget) {
       const maxContextTokens = positiveFinite(input.maxContextTokens, "maxContextTokens");
       const reservedOutputTokens = optionalNonNegativeFinite(input.reservedOutputTokens, "reservedOutputTokens");
+      const preparation = budgetPreparation(input.budgetPreparation);
+      const calibration = budgetCalibration(input.budgetCalibration, request.provider, request.model);
       input.budgetEvaluator = async (messages: unknown) => {
         const candidateMessages = canonicalMessages(messages, "Compaction budget messages");
-        const snapshot = await budget.evaluateRequestBudget!({
-          ...request,
-          messages: replaceBudgetRequestMessages(request.messages, sourceMessages, candidateMessages),
-        }, {
+        const snapshot = await budget.evaluateRequestBudget!(await createCompactionBudgetRequest({
+          request,
+          preparation,
+          candidateMessages,
+          config: options.config,
+          context: options.modules.context?.execution,
+          signal: options.input.abortSignal,
+        }), {
           maxContextTokens,
           ...(reservedOutputTokens !== undefined ? { reservedOutputTokens } : {}),
           ...(options.input.abortSignal ? { signal: options.input.abortSignal } : {}),
+          ...(calibration ? { calibration } : {}),
         });
         validateBudgetSnapshot(snapshot);
         return snapshot;
@@ -284,7 +310,9 @@ function hostModuleCapabilities(modules: SidecarModuleComposition, input: AgentL
   const context = modules.context?.execution;
   const contextMethods = context ? ["prepare_for_model", ...(context.applyToolResults ? ["apply_tool_results"] : []), ...(context.recoverFromModelError ? ["recover_from_model_error"] : []), ...(context.captureTurn ? ["capture_turn"] : []), ...(context.tryAutoCompact ? ["try_auto_compact"] : [])] : [];
   return {
-    model: { methods: ["prepare", "stream", "stream_next", "close_stream"] },
+    model: {
+      methods: ["prepare", "stream", "stream_next", "close_stream", ...(modules.model.metadata ? ["get_metadata"] : [])],
+    },
     ...(modules.budget ? {
       budget: {
         methods: [
@@ -320,6 +348,32 @@ function modelExecutionContext(call: ModuleCallRequest, input: AgentLoopInput, a
 function parseToolCall(value: unknown): PilotDeckToolCall { const record = asRecord(value); return { id: stringField(record, "toolCallId"), name: stringField(record, "name"), input: record?.arguments ?? {} }; }
 function canonicalModelRequest(value: unknown): CanonicalModelRequest { const request = asRecord(value); if (!request || typeof request.provider !== "string" || typeof request.model !== "string" || !Array.isArray(request.messages)) throw new Error("Sidecar model call contains an invalid canonical request."); return request as unknown as CanonicalModelRequest; }
 function serializablePreparedInvocation(prepared: PreparedModelInvocation): Record<string, unknown> { return { request: prepared.request, provider: prepared.provider, model: prepared.model, ...(prepared.maxContextTokens ? { maxContextTokens: prepared.maxContextTokens } : {}), ...(prepared.maxOutputTokens ? { maxOutputTokens: prepared.maxOutputTokens } : {}) }; }
+function serializeModelMetadata(metadata: NonNullable<SidecarModuleComposition["model"]["metadata"]>, provider: string, model: string): Record<string, unknown> {
+  const maxContextTokens = metadata.getModelMaxContextTokens?.(provider, model);
+  const maxOutputTokens = metadata.getModelMaxOutputTokens?.(provider, model);
+  const tokenLimits = metadata.getModelTokenLimits?.(provider, model);
+  const protocol = metadata.getModelProtocol?.(provider);
+  const supportsPromptCache = metadata.getModelSupportsPromptCache?.(provider, model);
+  validateMetadataNumber(maxContextTokens, "maxContextTokens");
+  validateMetadataNumber(maxOutputTokens, "maxOutputTokens");
+  if (tokenLimits) {
+    validateMetadataNumber(tokenLimits.maxContextTokens, "tokenLimits.maxContextTokens");
+    validateMetadataNumber(tokenLimits.maxOutputTokens, "tokenLimits.maxOutputTokens");
+  }
+  if (protocol !== undefined && protocol !== "anthropic" && protocol !== "openai" && protocol !== "openai-responses" && protocol !== "google") {
+    throw new Error("Host model metadata returned an invalid protocol.");
+  }
+  return {
+    provider,
+    model,
+    ...(maxContextTokens !== undefined ? { maxContextTokens } : {}),
+    ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
+    ...(tokenLimits ? { tokenLimits } : {}),
+    ...(protocol !== undefined ? { protocol } : {}),
+    ...(supportsPromptCache !== undefined ? { supportsPromptCache } : {}),
+  };
+}
+function validateMetadataNumber(value: unknown, field: string): void { if (value !== undefined && (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0)) throw new Error(`Host model metadata returned an invalid ${field}.`); }
 function readHostEmittedEvent(value: unknown, input: AgentLoopInput): AgentEvent { const event = asRecord(value); if (!event || typeof event.type !== "string" || event.sessionId !== input.sessionId || ("turnId" in event && event.turnId !== input.turnId)) throw new Error("Sidecar host event does not match the active turn."); return event as unknown as AgentEvent; }
 function serializeLifecycleDispatchResult(result: LifecycleDispatchResult): Record<string, unknown> { return { effects: result.effects, messages: result.messages, events: result.events, blockingErrors: result.blockingErrors, nonBlockingErrors: result.nonBlockingErrors, ...(result.pendingAsyncHooks ? { pendingAsyncHooks: result.pendingAsyncHooks } : {}) }; }
 function modelOverride(value: unknown): { provider: string; model: string } | undefined { const record = asRecord(value); return record && typeof record.provider === "string" && typeof record.model === "string" ? { provider: record.provider, model: record.model } : undefined; }
@@ -347,38 +401,48 @@ function canonicalMessages(value: unknown, label: string): CanonicalModelRequest
   }
   return value as CanonicalModelRequest["messages"];
 }
-function replaceBudgetRequestMessages(
-  template: CanonicalModelRequest["messages"],
-  source: CanonicalModelRequest["messages"],
-  candidate: CanonicalModelRequest["messages"],
-): CanonicalModelRequest["messages"] {
-  const staticMessages: Array<{ anchorFromEnd: number; message: CanonicalModelRequest["messages"][number] }> = [];
-  let sourceIndex = 0;
-  for (const message of template) {
-    if (sourceIndex < source.length && canonicalMessageEqual(message, source[sourceIndex]!)) {
-      sourceIndex += 1;
-    } else {
-      staticMessages.push({ anchorFromEnd: source.length - sourceIndex, message });
-    }
+function budgetPreparation(value: unknown): Record<string, unknown> {
+  const preparation = asRecord(value);
+  if (!preparation || !Array.isArray(preparation.tools) || typeof preparation.provider !== "string" || typeof preparation.model !== "string") {
+    throw new Error("Sidecar compaction budget preparation is missing or invalid.");
   }
-  if (sourceIndex !== source.length) {
-    throw new Error("Compaction budget request does not contain the projected source messages.");
-  }
-  const result: CanonicalModelRequest["messages"] = [];
-  for (let index = 0; index <= candidate.length; index += 1) {
-    const anchorFromEnd = candidate.length - index;
-    for (const item of staticMessages) {
-      if (item.anchorFromEnd === anchorFromEnd) result.push(item.message);
-    }
-    if (index < candidate.length) result.push(candidate[index]!);
-  }
-  return result;
+  return preparation;
 }
-function canonicalMessageEqual(
-  left: CanonicalModelRequest["messages"][number],
-  right: CanonicalModelRequest["messages"][number],
-): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
+
+function budgetCalibration(value: unknown, provider: string, model: string): {
+  provider: string; model: string; actualInputTokens: number; estimatedInputTokens: number;
+} | undefined {
+  if (value === undefined) return undefined;
+  const calibration = asRecord(value);
+  if (!calibration || calibration.provider !== provider || calibration.model !== model) {
+    throw new Error("Sidecar compaction budget calibration does not match the request route.");
+  }
+  const actualInputTokens = positiveFinite(calibration.actualInputTokens, "calibration.actualInputTokens");
+  const estimatedInputTokens = positiveFinite(calibration.estimatedInputTokens, "calibration.estimatedInputTokens");
+  return { provider, model, actualInputTokens, estimatedInputTokens };
+}
+
+async function createCompactionBudgetRequest(input: {
+  request: CanonicalModelRequest;
+  preparation: Record<string, unknown>;
+  candidateMessages: CanonicalModelRequest["messages"];
+  config: AgentRuntimeConfig;
+  context: NonNullable<SidecarModuleComposition["context"]>["execution"] | undefined;
+  signal?: AbortSignal;
+}): Promise<CanonicalModelRequest> {
+  if (!input.context) throw new Error("Host context capability is unavailable for request-level compaction budgeting.");
+  const prepared = await input.context.prepareForModel({
+    ...input.preparation,
+    messages: normalizeMessagesForModelRequest(input.candidateMessages),
+    previewOnly: true,
+    ...(input.signal ? { abortSignal: input.signal } : {}),
+  } as never);
+  return (await finalizePreparedModelRequest({
+    request: input.request,
+    prepared,
+    permissionMode: input.config.permissionMode,
+    fallbackSystemPrompt: input.request.systemPrompt,
+  })).request;
 }
 function asRecord(value: unknown): Record<string, unknown> | undefined { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined; }
 function safely(value: () => boolean, fallback: boolean): boolean { try { return value(); } catch { return fallback; } }

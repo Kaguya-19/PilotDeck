@@ -1135,10 +1135,21 @@ function moduleResponse(
     code: errorCode(error) ?? "HOST_MODULE_FAILED",
     error: {
       message: error instanceof Error ? error.message : String(error),
+      ...(canonicalModelError(error) ? { canonical: canonicalModelError(error) } : {}),
       ...(errorBoolean(error, "retryable") !== undefined ? { retryable: errorBoolean(error, "retryable") } : {}),
       ...(errorNumber(error, "retryAfterMs") !== undefined ? { retryAfterMs: errorNumber(error, "retryAfterMs") } : {}),
     },
   };
+}
+
+function canonicalModelError(error: unknown): Record<string, unknown> | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  const candidate = (error as { error?: unknown }).error;
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return undefined;
+  const record = candidate as Record<string, unknown>;
+  return typeof record.code === "string" && typeof record.message === "string"
+    ? record
+    : undefined;
 }
 
 function errorCode(error: unknown): string | undefined {
@@ -1164,7 +1175,7 @@ function serializeAgentConfig(config: AgentRuntimeConfig): Record<string, unknow
     provider: config.provider,
     model: config.model,
     cwd: config.cwd,
-    ...(config.systemPrompt ? { systemPrompt: config.systemPrompt } : {}),
+    ...(config.systemPrompt !== undefined ? { systemPrompt: config.systemPrompt } : {}),
     ...(config.appendSystemPrompt ? { appendSystemPrompt: config.appendSystemPrompt } : {}),
     ...(config.planModeInstructions ? { planModeInstructions: config.planModeInstructions } : {}),
     ...(config.runtimeContextSurface ? { runtimeContextSurface: config.runtimeContextSurface } : {}),

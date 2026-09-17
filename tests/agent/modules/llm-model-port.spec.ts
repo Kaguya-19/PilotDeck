@@ -6,7 +6,7 @@ import {
   createRouterModelInvokerPort,
 } from "../../../src/agent/modules/llm/index.js";
 import type { AgentRouterRuntime } from "../../../src/agent/runtime/AgentRuntimeDependencies.js";
-import type { CanonicalModelRequest } from "../../../src/model/index.js";
+import { ModelProviderError, type CanonicalModelRequest } from "../../../src/model/index.js";
 
 const request = {
   provider: "provider-a",
@@ -497,5 +497,38 @@ test("host model consumer rejects malformed pulled stream responses", async () =
       }
     },
     (error: Error & { code?: string }) => error.code === "INVALID_MODEL_RESPONSE",
+  );
+});
+
+test("host model consumer restores a canonical provider error from the module response", async () => {
+  const port = createHostModelInvokerPort(async (moduleCall) => {
+    const operation = (moduleCall.payload as Record<string, unknown>).operation;
+    if (operation === "prepare") {
+      return {
+        kind: "response", messageId: "prepared", inReplyTo: "prepare", ok: true,
+        payload: { prepared: { request, provider: request.provider, model: request.model } },
+      };
+    }
+    return {
+      kind: "response", messageId: "failure", inReplyTo: "next", ok: false,
+      code: "agent_model_error",
+      error: {
+        message: "credentials rejected",
+        canonical: {
+          code: "auth_error", message: "credentials rejected", retryable: false,
+          provider: "provider-a", model: "model-a", protocol: "openai",
+          userHint: "Update the API key.", settingsFix: { description: "Update the API key.", configPath: "model.providers.provider-a.apiKey" },
+        },
+      },
+    };
+  }, { methods: ["prepare", "stream_next"], uuid: () => "canonical-error" });
+  const prepared = await port.prepare({ request, context });
+
+  await assert.rejects(
+    async () => { for await (const _event of port.stream({ prepared, context })) { /* consume */ } },
+    (error: unknown) => error instanceof ModelProviderError
+      && error.error.code === "auth_error"
+      && error.error.userHint === "Update the API key."
+      && error.error.settingsFix?.configPath === "model.providers.provider-a.apiKey",
   );
 });

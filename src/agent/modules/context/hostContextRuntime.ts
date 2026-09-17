@@ -92,10 +92,12 @@ function serializeContextInput(operation: HostContextModuleMethod, input: object
   } = source;
   if (operation === "try_auto_compact") {
     const projection = projectCompactionBudget(input as CompactionAutoCompactInput);
-    const { request, ...budgetProjection } = projection;
+    const { request, preparation, calibration, ...budgetProjection } = projection;
     return {
       ...serializable,
       ...(request ? { budgetRequest: snapshotCanonicalModelRequest(request) } : {}),
+      ...(preparation ? { budgetPreparation: preparation } : {}),
+      ...(calibration ? { budgetCalibration: calibration } : {}),
       budgetProjection,
     };
   }

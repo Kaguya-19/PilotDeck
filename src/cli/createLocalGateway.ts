@@ -187,6 +187,8 @@ export type CreateLocalGatewayOptions = {
    * end-to-end against a deterministic transport. NOT part of the public API.
    */
   __testModelFactory?: (snapshot: PilotConfigSnapshot) => ModelRuntime;
+  /** @internal Narrow session-config override for production-path Gateway tests. */
+  __testAgentConfigOverrides?: Pick<AgentRuntimeConfig, "maxContextMessages">;
   /** Application-selected model invocation providers for each project generation. */
   modelInvocationProviderFactory?: (snapshot: PilotConfigSnapshot) => readonly ModelInvocationProvider[];
   /** Application-selected project execution-world provider. */
@@ -634,6 +636,7 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
     sessionOverrides,
     additionalWorkingDirectories: options.additionalWorkingDirectories,
     modelFactory: options.__testModelFactory,
+    testAgentConfigOverrides: options.__testAgentConfigOverrides,
     modelInvocationProviderFactory:
       options.modelInvocationProviderFactory ?? options.__testModelInvocationProviderFactory,
     executionWorldBundleFactory: options.executionWorldBundleFactory ?? options.__testExecutionWorldBundleFactory,

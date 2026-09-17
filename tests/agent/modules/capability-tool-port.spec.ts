@@ -110,6 +110,21 @@ test("host capability consumer runs concurrency-safe calls in parallel and prese
   assert.equal(started.length, 2);
 });
 
+test("host capability consumer projects output truncation to the host tool", async () => {
+  let context: Record<string, unknown> | undefined;
+  const port = createHostCapabilityToolPort(async (request) => {
+    context = request.payload.context as Record<string, unknown>;
+    return { kind: "response", messageId: "response", inReplyTo: "call", ok: true, payload: { type: "success", toolCallId: "call-1", toolName: "lookup", content: [], startedAt: "now", completedAt: "now" } };
+  }, { tools: [tool("lookup")] });
+
+  await port.executeAll(
+    [{ id: "call-1", name: "lookup", input: {} }],
+    { ...runtimeContext, outputTruncated: true },
+    executionContext,
+  );
+  assert.equal(context?.outputTruncated, true);
+});
+
 test("host capability consumer gates side effects through the host permission port", async () => {
   const capabilityCalls: Array<Record<string, unknown>> = [];
   const permissionCalls: string[] = [];

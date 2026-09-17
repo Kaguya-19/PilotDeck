@@ -23,7 +23,10 @@ Gateway/WebSocket、module protocol 和 durable callback 的确定性语义一�
 | Protocol/ports/sidecar/Gateway focused tests | 下方明确文件列表 | 109/109 PASS |
 | SDK package tests | `pnpm --filter @pilotdeck/sdk test` | 123/123 PASS |
 | Harness contract/negative-control | `cd tools/agent-loop-parity && python3 -m unittest test_trace.py` | 18/18 PASS |
-| Gateway 全量生产路径对拍 | `run.py --comparison same-version --surface gateway --scenario all` | 45/45 PASS；`FAIL=0`、`BLOCKED=0`、oracle failure `=0` |
+| Gateway 旧生产路径基线 | `run.py --comparison same-version --surface gateway --scenario all` | 48/48 PASS；仅证明当时的 scenario 集合 |
+| Gateway 当前生产路径 gate（2026-09-17） | `run.py --comparison same-version --surface gateway --scenario all` | 49/49 PASS；`FAIL=0`、`BLOCKED=0`、oracle failure `=0` |
+| Gateway metadata/configuration gate（2026-09-17） | `run.py --comparison same-version --surface gateway --scenario all` | 52/52 PASS；`FAIL=0`、`BLOCKED=0`、oracle failure `=0` |
+| 本轮 metadata focused suites | `default-factory`、`llm-model-port`、`sidecar-client` | 72/72 PASS |
 
 全量命令：
 
@@ -49,11 +52,11 @@ python3 tools/agent-loop-parity/run.py \
   --scenario all
 ```
 
-全量摘要：
+当前全量摘要：
 
 ```json
 {
-  "scenarios": 45,
+  "scenarios": 52,
   "blocked": [],
   "failed": [],
   "oracleFailures": [],
@@ -78,18 +81,25 @@ sidecar oracle 要求每个适用场景同时出现：
 | --- | --- | --- |
 | `sidecar_budget_limit` | `budget` | 1 次 model request；预算状态写入一次；replay 可见一次；工具副作用为 0 |
 | `sidecar_elicitation` | manifest interaction availability + host capability path | `canPrompt=false, canElicit=true` 时两侧均暴露询问工具；wire 不传 channel 对象 |
+| `sidecar_elicitation_execution` | `capability.execute_batch` | 真实 `ask_user_question` 经 host channel 完成，工具结果进入第二次 model request |
+| `sidecar_sdk_tool_progress` | `capability.execute_batch` | SDK `agentProgressSummaries` 开启后，host progress callback 恰好投影一条 Gateway `tool_progress` |
 | `sidecar_live_steer` | `turn` | 2 次 model request；accepted guidance 与 `steer_applied` durable 一次 |
 | `sidecar_durable_compaction` | `turn.persist_compaction` | replacement/boundary 先于后续 model request；1 次 boundary、1 次 completion |
 | `sidecar_full_request_compaction_budget` | `context.try_auto_compact`、`budget`、`turn.persist_compaction` | host 用完整 canonical request template 重建预算；system prompt/tool schema 参与估算；1 次 boundary、1 次 completion |
+| `sidecar_projected_request_compaction_budget` | `context.try_auto_compact` | history 经 `maxContextMessages=1` 投影后仍执行 request-level estimator，不得静默跳过预算 |
 | `sidecar_seed_read_state` | production runner seed-state projection、`model.stream_next` | seed 在 host runner 应用并投影到下一 turn；写文件前 freshness gate 与 native 一致 |
 | `sidecar_live_model_stream` | `model.stream_next` | 首个 text delta 的 trace sequence 早于 provider completion；event 顺序与 terminal 一致 |
+| `sidecar_model_metadata` | `model.get_metadata`、`model.prepare` | 初始 effective route 的 limits/protocol/cache snapshot 由 host 提供；prepare 后可刷新路由结果 |
+| `sidecar_empty_system_prompt` | `model.get_metadata` | SDK 显式空 system prompt 不会被当作未配置或恢复默认 product prompt |
+| `sidecar_additional_working_directories` | `model.get_metadata` | SDK additional working directories 进入 model-visible prompt；工具授权仍由 host permission context 拥有 |
 
 ## 结论
 
-当前 45 个 Gateway 场景没有未声明 semantic difference、BLOCKED、oracle failure 或 known gap。`auto_compact`
-已纳入正式 sidecar capability，不再是旧基线中的预期差异。budget、elicitation、live steer、compaction/status
-persistence、full-request budget reconstruction、seed read state 和增量 model streaming 均通过生产 factory 与
-durable/时序 oracle 验证。model pull stream 使用 `stream_next`，旧 `stream` 仅保留 batched compatibility fallback。
+`48/48` 与 `49/49` 是历史基线；当前 `52/52` 已在正式 stdio factory 下重跑，并补充 metadata/configuration 生产路径覆盖。`plan_mode_host_policy` 验证四轮 host-owned
+permission mode 生命周期、plan-mode 写拒绝和退出后的一次副作用；projected-history 场景同时验证实际 `maxContextMessages`
+投影与原始/replacement request-level budget。trace invocation identity、必跑场景清单和 baseline oracle 缺失均为
+`BLOCKED` 或失败，不能以 comparator 的空差异替代。model pull stream 使用 `stream_next`，旧 `stream` 仅保留 batched
+compatibility fallback。
 
 报告中的 format warning 只涉及已声明的 transport/envelope、随机 identity 或 actor-local sequence 差异；terminal、
 错误码、模型请求、工具调用与副作用、permission、checkpoint、mailbox、boundary 和 transcript 可见状态仍严格比较。

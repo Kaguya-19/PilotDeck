@@ -1115,7 +1115,7 @@ Router 作为 legacy 必填/默认资源，这两个层次不能混为一谈。
 
 | 阶段 | Definition / Provider | Consumer / Composition | 退出条件 |
 | --- | --- | --- | --- |
-| R4-A execution/routing seam（已完成） | `ModelExecutionPort`、`AgentTurnRoutingPort`、prepared invocation snapshot；legacy Router adapter | `createAgentTurnCapabilities()` 冻结 ports，AgentLoop 只消费 execution；Router 为可选 facade | 直接 capabilities composition 可无 Router；legacy provider selection、retry、compaction 与 parity 不变 |
+| R4-A execution/routing seam（已完成） | `ModelExecutionPort`、`AgentTurnRoutingPort`、`ModelMetadataPort`、prepared invocation snapshot；legacy Router adapter | `createAgentTurnCapabilities()` 冻结 ports，AgentLoop 只消费 execution；Router 为可选 facade。sidecar 以可选 `model.get_metadata` 传递 turn-local limits/protocol/cache snapshot | 直接 capabilities composition 可无 Router；legacy provider selection、retry、compaction 与 parity 不变；metadata 缺失保持 conservative fallback |
 | R4-B external provider adapter contract（按需） | 第三方 provider adapter；canonical request/event、usage/error/abort/deadline mapping | provider client 只依赖 adapter；core 不 import SDK | adapter 不暴露 registry/session/lifecycle，不把 provider state 放入 wire 或 durable event |
 
 职责矩阵保持稳定：execution provider 做单次模型调用，routing provider 做 selection/materialization/sticky policy，metadata
@@ -1162,12 +1162,23 @@ semantic difference 或 cleanup BLOCKED。
 handshake/binding 与场景要求的 module calls，缺失即 `BLOCKED`。旧 harness 即使 comparator PASS，也因没有证明
 production factory 而被本基线取代。确定性 mock model/tool 仍经正式 host dispatcher 调用，因此不是完整外部服务 E2E。
 
-当前证据（2026-09-16）：Node `22.23.1` 下 `pnpm build` 通过；protocol/ports/sidecar/Gateway focused suites
-**109/109**，SDK package tests **123/123**，harness contract/negative-control **18/18**。正式 Gateway stdio factory
-matrix **45/45**，`failed=0`、`blocked=0`、`oracleFailures=0`、`knownGaps=0`。七个新增场景均有 transport
+历史证据（2026-09-16）：Node `22.23.1` 下 `pnpm build` 通过；protocol/ports/sidecar/Gateway focused suites
+**109/109**，SDK package tests **123/123**，harness contract/negative-control **18/18**。当时正式 Gateway stdio factory
+matrix 为 **45/45**。七个新增场景均有 transport
 selection、handshake/binding 与预期 module + operation 原始 trace；full-request budget、host-owned seed state 和
-first-delta-before-provider-completion 也有专项 oracle。这证明当前 seam 的行为兼容，不代表第三方
+first-delta-before-provider-completion 也有专项 oracle。
+
+当前证据（2026-09-17）：Node `22.23.1` `pnpm build` 通过；context/sidecar/TCP focused suites **53/53**，harness
+contract/negative-control **20/20**。正式 Gateway stdio factory matrix 为 **49/49**，`failed=0`、`blocked=0`、
+`oracleFailures=0`、`knownGaps=0`。新增恢复的 `plan_mode_host_policy` 不传下一轮 legacy `mode`，仍验证
+`default -> plan -> plan -> default`、plan 中 `plan_mode_violation` 与退出后唯一副作用；projected request budget
+继续通过 host context/budget 的生产 module path。上述结果证明当前 seam 的行为兼容，不代表第三方
 或远程 provider 已成为产品默认，也不代表真实外部服务 deployment E2E 或 Local Gateway 已完全移除 Router。
+
+metadata/configuration 收口后，default-factory、model-port、sidecar-client focused suites **72/72**，harness contract
+**20/20**，Gateway stdio matrix **52/52**；三个新增 production cases 均实际调用 `model.get_metadata`，分别覆盖初始
+snapshot、显式空 SDK system prompt 与 additional working directories。路由后 snapshot 刷新和 malformed/identity fail-closed
+由 host dispatcher/default-factory contract 覆盖；当前确定性 Gateway fixture 不宣称提供第二 routing provider 的产品 E2E。
 
 ### R5：按产品需求独立立项
 
@@ -1378,8 +1389,8 @@ reconciliation，也不证明远程 subagent，因此不改变 R2/R3 的开始�
 | R1.3 | host 是 hook/plugin lifecycle 唯一 owner；sidecar 不泄露环境；dispatch result 保留 blocking 语义 | Node 22 build + host lifecycle runtime、default factory、sidecar client、module protocol focused tests |
 | R1.4 | host ToolRuntime 获得 native 等价的 execution services，wire 不决定 env/storage/service owner | Node 22 build + sidecar capability context reconstruction focused test |
 | R1.5 | host 收到有序 AgentLoop live event，且 event failure/restart 不改写业务 terminal 或 durable truth | Node 22 build + host event bridge、default factory、loopback sidecar final-before-flush focused tests |
-| R4.2 sidecar production closure | budget、elicitation、live steer、compaction/status persistence、full-request budget、seed read state 与 incremental model stream 经正式 factory；callback failure/reconnect/capability absence fail closed；production proof 不可缺失 | Node 22 build + protocol/default-factory/sidecar/TCP focused suites + SDK tests + Gateway matrix **45/45**；`FAIL=0`、`BLOCKED=0`、oracle failure `=0`；negative-control 缺 handshake/fake runner 必须 `BLOCKED` |
-| R5-Z（实现已完成；P1 已验收） | host-confirmed enter/exit-plan transition 是唯一 live permission owner；submit-time run mode、context prompt、ToolRuntime 与 lifecycle 也只能读取 host config；forged/stale wire mode 无法绕过 ask gate；reconnect replay 不重复 transition | 已通过 Node 22 build + host permission-mode state、sidecar client 与 TCP replay focused suites；完整 PilotDeck matrix 纳入 R4.2 的 45 场景生产 gate |
+| R4.2 sidecar production closure | budget、elicitation、live steer、compaction/status persistence、完整/projected request budget、seed read state、incremental model stream 与 metadata snapshot 经正式 factory；callback failure/reconnect/capability absence fail closed；production proof 不可缺失 | Node 22 build + protocol/default-factory/sidecar/TCP focused suites + Gateway matrix **52/52**；`FAIL=0`、`BLOCKED=0`、oracle failure `=0`；negative-control 缺 handshake/fake runner 必须 `BLOCKED` |
+| R5-Z（实现已完成；P1 已验收） | host-confirmed enter/exit-plan transition 是唯一 live permission owner；submit-time run mode、context prompt、ToolRuntime 与 lifecycle 也只能读取 host config；forged/stale wire mode 无法绕过 ask gate；reconnect replay 不重复 transition | 已通过 Node 22 build + host permission-mode state、sidecar client 与 TCP replay focused suites；完整 PilotDeck matrix 纳入 R4.2 的 49 场景生产 gate，且 `plan_mode_host_policy` 覆盖省略 legacy mode 的四 turn 生命周期 |
 | R2 | 单终态、cancel/deadline、reconnect/replay、unknown reconciliation | protocol fault-injection + host operation integration test；无 durable status-query consumer 时不得宣称可恢复 |
 | R3 | child owner 未迁移；one-shot host callback、TCP/stdio parent-abort、TCP/stdio deadline/late terminal 和 host sidechain reference 已通过；剩余 remote/queued provider parity | native vs sidecar/remote canonical trace parity + TCP/stdio parent-abort/deadline E2E |
 | R3.1（已完成） | Gateway timeout 投影同一 absolute operation deadline；effective one-shot child budget 不超过它；timeout 与 parent abort 可区分；host callback 不重复 terminal | Node 22 build + Gateway deadline contract + deterministic adapter/unit regression + one-shot timeout regression + host capability focused contract |

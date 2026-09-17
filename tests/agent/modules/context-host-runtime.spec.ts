@@ -117,6 +117,36 @@ test("host context consumer forwards auto compaction without local evaluator sta
   });
 });
 
+test("host context consumer projects compaction preparation without an abort signal", async () => {
+  let captured: Record<string, unknown> | undefined;
+  const runtime = createHostContextRuntime(async (request) => {
+    captured = request as unknown as Record<string, unknown>;
+    return response({ type: "skipped", snapshot: { tokens: 10, maxContextTokens: 100, ratio: 0.1 } });
+  }, binding, ["prepare_for_model", "try_auto_compact"]);
+
+  await runtime.tryAutoCompact?.({
+    messages: [],
+    budgetRequest: { provider: "provider", model: "model", messages: [], tools: [], stream: true },
+    budgetPreparation: {
+      sessionId: "session-1",
+      turnId: "turn-1",
+      cwd: "/workspace",
+      provider: "provider",
+      model: "model",
+      permissionMode: "default",
+      runMode: "agent",
+      additionalWorkingDirectories: [],
+      messages: [],
+      tools: [],
+    },
+  });
+
+  const input = ((captured?.payload as Record<string, unknown>).input ?? {}) as Record<string, unknown>;
+  const preparation = input.budgetPreparation as Record<string, unknown>;
+  assert.equal(preparation.provider, "provider");
+  assert.equal("abortSignal" in preparation, false);
+});
+
 test("host context consumer preserves module failure code", async () => {
   const runtime = createHostContextRuntime(async () => ({
     kind: "response",

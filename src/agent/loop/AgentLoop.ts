@@ -18,7 +18,6 @@ import {
   type CanonicalModelRequest,
   type CanonicalToolSchema,
   type CanonicalUsage,
-  materializeMediaReferences,
 } from "../../model/index.js";
 import type {
   PilotDeckToolDefinition,
@@ -32,9 +31,9 @@ import { agentError } from "../protocol/errors.js";
 import type { AgentEvent } from "../protocol/events.js";
 import type { AgentPermissionDenial, AgentTurnResult } from "../protocol/result.js";
 import type { AgentRuntimeConfig } from "../runtime/AgentRuntimeConfig.js";
+import type { AgentContextPrepareInput } from "../../context/ContextRuntime.js";
 import type { LifecycleDispatchResult } from "../../lifecycle/index.js";
 import type { PilotDeckHookEvent } from "../../extension/hooks/protocol/events.js";
-import { buildCachePlan } from "../../context/cache/CachePlan.js";
 import { truncateHeadPreservingCheckpoint } from "../../context/compaction/CompactionEngine.js";
 import type {
   CompactionResult,
@@ -73,6 +72,10 @@ import { buildAskModeAgentToolSchema } from "../../tool/builtin/agent.js";
 import { requestFingerprint } from "../../model/streaming/requestFingerprint.js";
 import { seedAgentReadState } from "./seedReadState.js";
 import {
+  finalizePreparedModelRequest,
+  normalizeMessagesForModelRequest,
+} from "./modelRequestAssembly.js";
+import {
   createAgentStatusDetail,
   createVisibleErrorStatusDetail,
   type AgentStatusI18nDescriptor,
@@ -88,13 +91,6 @@ const CIRCUIT_BREAKER_GRACE_PROMPT = [
   "(2) explain the situation in text without calling tools,",
   "(3) if you believe the tool should work, try once more with corrected input.",
 ].join(" ");
-const PLAN_MODE_REMINDER_MESSAGE = [
-  "Plan mode is active.",
-  "Read first using read-only tools, then write or refine plan markdown only under `.pilotdeck/plans/`.",
-  "Do not make implementation changes while planning.",
-  "When the plan is ready for user review, call `exit_plan_mode` with the plan file path.",
-].join("\n");
-
 function logAutoCompactFailure(
   stage: string,
   input: { sessionId: string; turnId: string },
@@ -542,6 +538,10 @@ export class AgentLoop {
       if (ctx?.tryAutoCompact) {
         try {
           const reservedOutputTokens = this.getReservedOutputTokens();
+          const preRouteBudgetRequest = await this.createBudgetRequest(input, messages, {
+            maxContextTokens: preRoutingMaxContextTokens,
+            reservedOutputTokens,
+          });
           const compact = yield* this.awaitCompactionWithEvents(ctx.tryAutoCompact({
             sessionId: input.sessionId,
             turnId: input.turnId,
@@ -550,10 +550,12 @@ export class AgentLoop {
             budgetStage: "pre_route",
             maxContextTokens: preRoutingMaxContextTokens,
             reservedOutputTokens,
-            budgetRequest: await this.createBudgetRequest(input, messages, {
-              maxContextTokens: preRoutingMaxContextTokens,
-              reservedOutputTokens,
-            }),
+            budgetRequest: preRouteBudgetRequest,
+            budgetPreparation: this.createBudgetPreparation(messages, input),
+            budgetCalibration: this.budgetCalibrationFor(
+              preRouteBudgetRequest.provider,
+              preRouteBudgetRequest.model,
+            ),
             budgetEvaluator: this.createBudgetEvaluator(input, {
               maxContextTokens: preRoutingMaxContextTokens,
               reservedOutputTokens,
@@ -667,6 +669,8 @@ export class AgentLoop {
                 maxContextTokens: routedMaxCtx,
                 reservedOutputTokens,
               }),
+              budgetPreparation: this.createBudgetPreparation(messages, input),
+              budgetCalibration: this.budgetCalibrationFor(routedProvider, routedModel),
               budgetEvaluator: this.createBudgetEvaluator(input, {
                 decision,
                 baseRequest: request,
@@ -1433,6 +1437,8 @@ export class AgentLoop {
                   maxContextTokens,
                   reservedOutputTokens,
                 }),
+                budgetPreparation: this.createBudgetPreparation(messages, input),
+                budgetCalibration: this.budgetCalibrationFor(target.provider, target.model),
                 budgetEvaluator: this.createBudgetEvaluator(input, {
                   decision: recoveryDecision,
                   baseRequest: { ...request, provider: target.provider, model: target.model },
@@ -2165,6 +2171,57 @@ export class AgentLoop {
     options: { emitInstructionEvents?: boolean; previewOnly?: boolean } = {},
   ): Promise<CanonicalModelRequest> {
     const contextRuntime = this.capabilities.contextPreparation;
+    const prepareInput = this.createContextPrepareInput(messages, input);
+    const prepared = await contextRuntime.prepareForModel({
+      ...prepareInput,
+      previewOnly: options.previewOnly,
+    });
+
+    if (options.emitInstructionEvents !== false) {
+      this.dispatchLifecycle(input, "InstructionsLoaded", {
+        hasSystemPrompt: !!prepared.systemPrompt,
+      }).catch(() => {});
+      this.capabilities.events.emit?.({
+        type: "instructions_loaded",
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        hasSystemPrompt: !!prepared.systemPrompt,
+      });
+    }
+
+    const assembled = await finalizePreparedModelRequest({
+      request: {
+        provider: prepareInput.provider,
+        model: prepareInput.model,
+        messages: [],
+        systemPrompt: this.config.systemPrompt,
+        tools: [],
+        toolChoice: this.config.toolChoice,
+        maxOutputTokens: this.config.maxOutputTokens,
+        speed: input.modelOverride?.speed,
+        thinking: input.modelOverride?.thinking ?? this.config.thinking,
+        stream: true,
+        metadata: this.config.metadata,
+      },
+      prepared,
+      permissionMode: this.config.permissionMode,
+      fallbackSystemPrompt: this.config.systemPrompt,
+    });
+    for (const diagnostic of assembled.diagnostics) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[pilotdeck] ${diagnostic.code}: ${diagnostic.message} (${diagnostic.mediaType}, ${diagnostic.path})`,
+      );
+    }
+
+    return assembled.request;
+  }
+
+  /** Build the serializable prompt intent used by normal and preview requests. */
+  private createContextPrepareInput(
+    messages: CanonicalMessage[],
+    input: AgentLoopInput,
+  ): AgentContextPrepareInput {
     const planTodo = this.capabilities.planMode.planTodoManager?.forSession(input.sessionId);
     const canPrompt = input.canPrompt ?? this.config.permissionContext.canPrompt;
     const canElicit = input.canElicit === true && this.capabilities.interaction.elicitationAvailable === true;
@@ -2190,8 +2247,7 @@ export class AgentLoop {
     }
     const requestProvider = input.modelOverride?.provider ?? this.config.provider;
     const requestModel = input.modelOverride?.model ?? this.config.model;
-    const prepared = await contextRuntime.prepareForModel({
-      previewOnly: options.previewOnly,
+    return {
       sessionId: input.sessionId,
       turnId: input.turnId,
       cwd: this.config.cwd,
@@ -2213,60 +2269,19 @@ export class AgentLoop {
         planTodo?.buildPromptAddendum(),
       ),
       abortSignal: input.abortSignal,
-    });
-
-    if (options.emitInstructionEvents !== false) {
-      this.dispatchLifecycle(input, "InstructionsLoaded", {
-        hasSystemPrompt: !!prepared.systemPrompt,
-      }).catch(() => {});
-      this.capabilities.events.emit?.({
-        type: "instructions_loaded",
-        sessionId: input.sessionId,
-        turnId: input.turnId,
-        hasSystemPrompt: !!prepared.systemPrompt,
-      });
-    }
-
-    const materialized = await materializeMediaReferences(prepared.messages);
-    for (const diagnostic of materialized.diagnostics) {
-      // eslint-disable-next-line no-console
-      console.warn(
-        `[pilotdeck] ${diagnostic.code}: ${diagnostic.message} (${diagnostic.mediaType}, ${diagnostic.path})`,
-      );
-    }
-
-    const finalMessages = this.config.permissionMode === "plan"
-      ? appendPlanModeReminder(materialized.messages)
-      : materialized.messages;
-    const finalCachePlan = prepared.cachePlan
-      ? buildCachePlan({
-          provider: requestProvider,
-          model: requestModel,
-          systemPrompt: prepared.systemPrompt,
-          tools: prepared.tools,
-          messages: finalMessages,
-          enabled: true,
-        }, prepared.cachePlan.generation)
-      : undefined;
-    const finalCacheBreakpoints = finalCachePlan?.messages ?? (
-      this.config.permissionMode === "plan" ? undefined : prepared.cacheBreakpoints
-    );
-
-    return {
-      provider: requestProvider,
-      model: requestModel,
-      messages: finalMessages,
-      systemPrompt: prepared.systemPrompt ?? this.config.systemPrompt,
-      tools: prepared.tools,
-      toolChoice: this.config.toolChoice,
-      maxOutputTokens: this.config.maxOutputTokens,
-      speed: input.modelOverride?.speed,
-      thinking: input.modelOverride?.thinking ?? this.config.thinking,
-      stream: true,
-      metadata: this.config.metadata,
-      cacheBreakpoints: finalCacheBreakpoints,
-      cachePlan: finalCachePlan,
     };
+  }
+
+  private createBudgetPreparation(
+    messages: CanonicalMessage[],
+    input: AgentLoopInput,
+  ): Omit<AgentContextPrepareInput, "abortSignal"> {
+    const { abortSignal: _abortSignal, ...preparation } = this.createContextPrepareInput(messages, input);
+    return preparation;
+  }
+
+  private budgetCalibrationFor(provider: string | undefined, model: string | undefined): TokenCalibrationBaseline | undefined {
+    return provider && model ? this.tokenCalibrationByRoute.get(tokenCalibrationKey(provider, model)) : undefined;
   }
 
   private async estimateUsageCost(
@@ -3045,17 +3060,6 @@ function hasReplayableReasoningContent(message: CanonicalMessage): boolean {
   );
 }
 
-function appendPlanModeReminder(messages: CanonicalMessage[]): CanonicalMessage[] {
-  return [
-    ...messages,
-    {
-      role: "user",
-      content: [{ type: "text", text: PLAN_MODE_REMINDER_MESSAGE }],
-      metadata: { synthetic: true, purpose: "plan_mode_reminder" },
-    },
-  ];
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -3170,54 +3174,6 @@ function removeTransientPromptsById(
   });
 }
 
-function normalizeMessagesForModelRequest(messages: CanonicalMessage[]): CanonicalMessage[] {
-  const out: CanonicalMessage[] = [];
-  for (const rawMessage of messages) {
-    const message: CanonicalMessage = {
-      ...rawMessage,
-      content: messageContent(rawMessage),
-    };
-    const last = out[out.length - 1];
-    if (
-      last?.role === "assistant" &&
-      message.role === "assistant" &&
-      canMergeAssistantMessages(last, message)
-    ) {
-      out[out.length - 1] = {
-        role: "assistant",
-        content: [...messageContent(last), ...messageContent(message)],
-        metadata: mergeMessageMetadata(last.metadata, message.metadata),
-      };
-      continue;
-    }
-    if (message.role === "assistant" && message.content.length === 0) {
-      continue;
-    }
-    out.push(message);
-  }
-  return out;
-}
-
-function canMergeAssistantMessages(first: CanonicalMessage, second: CanonicalMessage): boolean {
-  return !hasToolCallBlock(first) && !hasToolCallBlock(second);
-}
-
-function hasToolCallBlock(message: CanonicalMessage): boolean {
-  return messageContent(message).some((block) => block.type === "tool_call");
-}
-
-function mergeMessageMetadata(
-  first: CanonicalMessage["metadata"],
-  second: CanonicalMessage["metadata"],
-): CanonicalMessage["metadata"] {
-  if (!first && !second) {
-    return undefined;
-  }
-  return {
-    ...(first ?? {}),
-    ...(second ?? {}),
-  };
-}
 
 function detectRepeatedToolFailure(
   results: PilotDeckToolResult[],

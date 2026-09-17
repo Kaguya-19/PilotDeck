@@ -169,6 +169,7 @@ export type ProjectSessionRuntimeBundleOptions = {
     readonly providers: SubagentProviderRegistry;
   };
   agentLoopFactory?: AgentLoopRuntimeFactory;
+  testAgentConfigOverrides?: Pick<AgentRuntimeConfig, "maxContextMessages">;
   testAgentLoopFactory?: CreateAgentSessionOptions["__agentLoopFactory"];
   collectFileArtifacts: boolean;
   onDiagnostic?: (message: string, error?: unknown) => void;
@@ -322,6 +323,7 @@ export class ProjectSessionRuntimeBundle {
         additionalWorkingDirectories: this.options.additionalWorkingDirectories,
         organizationPolicy: this.options.organizationPolicy,
         env: this.options.env,
+        testAgentConfigOverrides: this.options.testAgentConfigOverrides,
       }).compose();
       const baseDependencies: CreateAgentSessionOptions["dependencies"] = {
         router: runtime.router,

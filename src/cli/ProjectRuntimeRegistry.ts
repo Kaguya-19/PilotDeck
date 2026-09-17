@@ -152,6 +152,7 @@ export type ProjectRuntimeRegistryOptions = {
   sessionOverrides?: SessionConfigOverrides;
   additionalWorkingDirectories?: string[];
   modelFactory?: (snapshot: PilotConfigSnapshot) => ModelRuntime;
+  testAgentConfigOverrides?: Pick<AgentRuntimeConfig, "maxContextMessages">;
   modelInvocationProviderFactory?: (snapshot: PilotConfigSnapshot) => readonly ModelInvocationProvider[];
   executionWorldBundleFactory?: (input: {
     projectRoot: string;
@@ -345,6 +346,7 @@ export class ProjectRuntimeRegistry {
       now: options.now,
       continuations: options.continuations,
       agentLoopFactory: options.agentLoopFactory,
+      testAgentConfigOverrides: options.testAgentConfigOverrides,
       testAgentLoopFactory: options.testAgentLoopFactory,
       shouldCollectFileArtifacts: (runtime) => resolve(runtime.projectRoot) !== resolve(options.pilotHome),
       onDiagnostic: (message, error) => {

@@ -79,6 +79,11 @@ export function createSidecarToolContextBuilder(options: {
         ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
         ...(config.subagentTimeoutMs ? { subagentTimeoutMs: config.subagentTimeoutMs } : {}),
         ...(typeof remote?.currentToolCallId === "string" ? { currentToolCallId: remote.currentToolCallId } : {}),
+        ...(remote?.outputTruncated === undefined
+          ? {}
+          : typeof remote.outputTruncated === "boolean"
+            ? { outputTruncated: remote.outputTruncated }
+            : (() => { throw new Error("Sidecar tool context outputTruncated must be a boolean."); })()),
         ...(config.toolAliases ? { toolAliases: config.toolAliases } : {}),
         permissionMode: config.permissionMode,
         permissionContext: {
@@ -86,8 +91,28 @@ export function createSidecarToolContextBuilder(options: {
           ...(planDirectoryPath ? { planDirectoryPath } : {}),
         },
         runMode: config.runMode ?? "agent",
+        // This is host-owned availability, not a channel serialized over the
+        // wire. ToolRuntime needs it to distinguish dedicated elicitation from
+        // ordinary prompt-based interaction.
+        canElicit: input.canElicit === true && ports.interaction?.elicitation !== undefined,
         ...(ports.toolExecution?.auditRecorder ? { auditRecorder: ports.toolExecution.auditRecorder } : {}),
         ...(ports.clock?.now ? { now: ports.clock.now } : {}),
+        ...(config.includeToolProgress === true && ports.eventEmitter
+          ? {
+              progress: (event) => {
+                ports.eventEmitter?.({
+                  type: "tool_progress",
+                  sessionId: input.sessionId,
+                  turnId: input.turnId,
+                  toolCallId: event.toolCallId,
+                  toolName: event.toolName,
+                  message: event.message,
+                  ...(event.metadata ? { metadata: event.metadata } : {}),
+                  createdAt: event.createdAt,
+                });
+              },
+            }
+          : {}),
         env: buildTurnEnvironment(config.env, config.cwd, input.sessionId, input.turnId),
         ...(config.maxResultBytes ? { maxResultBytes: config.maxResultBytes } : {}),
         ...(ports.model ? { model: ports.model } : {}),

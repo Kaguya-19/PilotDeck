@@ -1,6 +1,8 @@
 import type { CanonicalMessage, CanonicalModelRequest } from "../../model/index.js";
+import type { ContextPrepareInput } from "../protocol/types.js";
 import type { ContextRecoveryDecision, ContextRecoveryInput } from "../protocol/types.js";
 import type { TokenBudgetEvaluateOptions, TokenBudgetSnapshot } from "../budget/TokenBudgetManager.js";
+import type { TokenCalibrationBaseline } from "../budget/TokenAccountingRuntime.js";
 import type { AutoCompactionDecision } from "./AutoCompactionPolicy.js";
 import {
   type CompactionInput,
@@ -28,8 +30,8 @@ export type AutoCompactResult =
 /**
  * Serializable budget intent sent from a sidecar context consumer to its
  * host. It deliberately contains no callback, abort signal, router decision,
- * session state, or calibrated token state. The host reconstructs those from
- * its current run and provider composition.
+ * or session state. A route-bound calibration snapshot is safe scalar data and
+ * preserves native request-budget accounting when one has been observed.
  */
 export type CompactionBudgetProjection = {
   stage: "pre_route" | "routed" | "recovery";
@@ -39,6 +41,13 @@ export type CompactionBudgetProjection = {
   manualForce?: boolean;
   allowFallbackOnFailure?: boolean;
   request?: CanonicalModelRequest;
+  /**
+   * Host-safe prompt-preparation intent. The sidecar sends this instead of
+   * attempting to splice candidate durable messages into an already projected
+   * request. Abort signals and callbacks are intentionally excluded.
+   */
+  preparation?: Omit<ContextPrepareInput, "abortSignal">;
+  calibration?: TokenCalibrationBaseline;
 };
 
 export type CompactionAutoCompactInput = {
@@ -64,6 +73,9 @@ export type CompactionAutoCompactInput = {
   budgetEvaluator?: (messages: CanonicalMessage[]) => Promise<TokenBudgetSnapshot>;
   /** Serializable request template used to reconstruct request-level budgeting across a sidecar boundary. */
   budgetRequest?: CanonicalModelRequest;
+  /** Candidate-message preparation intent for a remote context runtime. */
+  budgetPreparation?: Omit<ContextPrepareInput, "abortSignal">;
+  budgetCalibration?: TokenCalibrationBaseline;
 };
 
 /** Derive the public budget intent from an in-process auto-compaction call. */
@@ -80,6 +92,8 @@ export function projectCompactionBudget(input: CompactionAutoCompactInput): Comp
     ...(input.manualForce !== undefined ? { manualForce: input.manualForce } : {}),
     ...(input.allowFallbackOnFailure !== undefined ? { allowFallbackOnFailure: input.allowFallbackOnFailure } : {}),
     ...(input.budgetRequest ? { request: input.budgetRequest } : {}),
+    ...(input.budgetPreparation ? { preparation: input.budgetPreparation } : {}),
+    ...(input.budgetCalibration ? { calibration: input.budgetCalibration } : {}),
   };
 }
 

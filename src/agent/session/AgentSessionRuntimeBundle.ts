@@ -228,6 +228,7 @@ export class AgentSessionRuntimeBundle {
       const capabilities = createAgentTurnCapabilities(this.options.config, dependencies);
       const sidecarModules = createSidecarModuleComposition({
         model: durableModelPort,
+        metadata: capabilities.model.metadata,
         budget: capabilities.model.budget,
         toolExecution: durableToolPort,
         permission: sessionScope.permission,

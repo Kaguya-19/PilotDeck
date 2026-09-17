@@ -101,6 +101,218 @@ test("default sidecar factory maps host-neutral execution payloads", async () =>
   ]);
 });
 
+test("default sidecar factory preserves an explicit empty prompt and additional working directories", async () => {
+  const execution = await createSidecarExecution({
+    request: {
+      kind: "request",
+      messageId: "message-empty-prompt",
+      method: "execute",
+      runId: "run-empty-prompt",
+      operationId: "operation-empty-prompt",
+      requestId: "request-empty-prompt",
+      sessionId: "session-empty-prompt",
+      turnId: "turn-empty-prompt",
+      payload: {
+        agent: { provider: "provider-a", model: "model-a", cwd: "/workspace", systemPrompt: "" },
+        permissionContext: {
+          mode: "default",
+          canPrompt: false,
+          additionalWorkingDirectories: ["/workspace/shared", "/workspace/vendor"],
+          rules: { allow: [], deny: [], ask: [] },
+        },
+      },
+    },
+    abortSignal: new AbortController().signal,
+    callModule: async () => ({ kind: "response", messageId: "empty-prompt-response", inReplyTo: "call", ok: true }),
+  });
+
+  assert.equal((execution.loop as any).config.systemPrompt, "");
+  assert.deepEqual((execution.loop as any).config.permissionContext.additionalWorkingDirectories, [
+    "/workspace/shared",
+    "/workspace/vendor",
+  ]);
+});
+
+test("default sidecar factory applies host metadata before the turn and after routed preparation", async () => {
+  const calls: Array<{ operation?: string; provider?: string; model?: string }> = [];
+  const execution = await createSidecarExecution({
+    request: {
+      kind: "request",
+      messageId: "message-model-metadata",
+      method: "execute",
+      runId: "run-model-metadata",
+      operationId: "operation-model-metadata",
+      requestId: "request-model-metadata",
+      sessionId: "session-model-metadata",
+      turnId: "turn-model-metadata",
+      payload: {
+        agent: { provider: "provider-a", model: "model-a", cwd: "/workspace" },
+        hostModules: { model: { methods: ["prepare", "stream", "get_metadata"] } },
+        messages: [{ role: "user", content: "route this request" }],
+        maxTurns: 1,
+      },
+    },
+    abortSignal: new AbortController().signal,
+    callModule: async (moduleCall) => {
+      const payload = moduleCall.payload as Record<string, unknown>;
+      calls.push({
+        operation: payload.operation as string | undefined,
+        provider: payload.provider as string | undefined,
+        model: payload.model as string | undefined,
+      });
+      if (payload.operation === "get_metadata") {
+        return {
+          kind: "response" as const,
+          messageId: "metadata-response",
+          inReplyTo: moduleCall.requestId,
+          ok: true,
+          payload: {
+            metadata: {
+              provider: "provider-a",
+              model: "model-a",
+              maxContextTokens: 8192,
+              maxOutputTokens: 2048,
+              tokenLimits: { maxContextTokens: 8192, maxOutputTokens: 2048 },
+              protocol: "anthropic",
+              supportsPromptCache: true,
+            },
+          },
+        };
+      }
+      if (payload.operation === "prepare") {
+        return {
+          kind: "response" as const,
+          messageId: "prepared-metadata-response",
+          inReplyTo: moduleCall.requestId,
+          ok: true,
+          payload: {
+            prepared: {
+              request: { ...(payload.request as Record<string, unknown>), provider: "provider-b", model: "model-b" },
+              provider: "provider-b",
+              model: "model-b",
+            },
+            metadata: {
+              provider: "provider-b",
+              model: "model-b",
+              maxContextTokens: 4096,
+              maxOutputTokens: 1024,
+              tokenLimits: { maxContextTokens: 4096, maxOutputTokens: 1024 },
+              protocol: "openai",
+              supportsPromptCache: false,
+            },
+          },
+        };
+      }
+      return {
+        kind: "response" as const,
+        messageId: "stream-metadata-response",
+        inReplyTo: moduleCall.requestId,
+        ok: true,
+        payload: { events: [{ type: "text_delta", text: "done" }, { type: "message_end", finishReason: "stop" }] },
+      };
+    },
+  });
+
+  const metadata = (execution.loop as any).capabilities.model.metadata;
+  assert.equal(metadata.getModelMaxContextTokens("provider-a", "model-a"), 8192);
+  assert.equal(metadata.getModelProtocol("provider-a"), "anthropic");
+  assert.equal(metadata.getModelSupportsPromptCache("provider-a", "model-a"), true);
+
+  for await (const _event of execution.loop.run(execution.input)) {
+    // Run through prepare so the host-selected route can replace the snapshot.
+  }
+
+  assert.equal(metadata.getModelMaxContextTokens("provider-b", "model-b"), 4096);
+  assert.equal(metadata.getModelMaxOutputTokens("provider-b", "model-b"), 1024);
+  assert.equal(metadata.getModelProtocol("provider-b"), "openai");
+  assert.equal(metadata.getModelSupportsPromptCache("provider-b", "model-b"), false);
+  assert.deepEqual(calls.slice(0, 3).map((call) => call.operation), ["get_metadata", "prepare", "stream"]);
+});
+
+test("default sidecar factory fails closed for malformed advertised model metadata", async () => {
+  await assert.rejects(
+    async () => { await createSidecarExecution({
+      request: {
+        kind: "request",
+        messageId: "message-malformed-metadata",
+        method: "execute",
+        runId: "run-malformed-metadata",
+        operationId: "operation-malformed-metadata",
+        requestId: "request-malformed-metadata",
+        sessionId: "session-malformed-metadata",
+        turnId: "turn-malformed-metadata",
+        payload: {
+          agent: { provider: "provider-a", model: "model-a" },
+          hostModules: { model: { methods: ["get_metadata"] } },
+        },
+      },
+      abortSignal: new AbortController().signal,
+      callModule: async (moduleCall) => ({
+        kind: "response",
+        messageId: "malformed-metadata-response",
+        inReplyTo: moduleCall.requestId,
+        ok: true,
+        payload: { metadata: { provider: "provider-a", model: "model-a", maxContextTokens: -1 } },
+      }),
+    }); },
+    /invalid maxContextTokens/,
+  );
+});
+
+test("default sidecar factory rejects prepared metadata for a different routed model", async () => {
+  const execution = await createSidecarExecution({
+    request: {
+      kind: "request",
+      messageId: "message-mismatched-prepared-metadata",
+      method: "execute",
+      runId: "run-mismatched-prepared-metadata",
+      operationId: "operation-mismatched-prepared-metadata",
+      requestId: "request-mismatched-prepared-metadata",
+      sessionId: "session-mismatched-prepared-metadata",
+      turnId: "turn-mismatched-prepared-metadata",
+      payload: {
+        agent: { provider: "provider-a", model: "model-a" },
+        hostModules: { model: { methods: ["prepare", "get_metadata"] } },
+      },
+    },
+    abortSignal: new AbortController().signal,
+    callModule: async (moduleCall) => {
+      const payload = moduleCall.payload as Record<string, unknown>;
+      if (payload.operation === "get_metadata") {
+        return {
+          kind: "response" as const,
+          messageId: "initial-metadata-response",
+          inReplyTo: moduleCall.requestId,
+          ok: true,
+          payload: { metadata: { provider: "provider-a", model: "model-a" } },
+        };
+      }
+      return {
+        kind: "response" as const,
+        messageId: "prepared-metadata-response",
+        inReplyTo: moduleCall.requestId,
+        ok: true,
+        payload: {
+          prepared: {
+            request: { ...(payload.request as Record<string, unknown>), provider: "provider-b", model: "model-b" },
+            provider: "provider-b",
+            model: "model-b",
+          },
+          metadata: { provider: "provider-a", model: "model-a" },
+        },
+      };
+    },
+  });
+
+  await assert.rejects(
+    () => (execution.loop as any).capabilities.model.execution.prepare({
+      request: { provider: "provider-a", model: "model-a", messages: [] },
+      context: { sessionId: "session-mismatched-prepared-metadata", turnId: "turn-mismatched-prepared-metadata" },
+    }),
+    /does not match the prepared route/,
+  );
+});
+
 test("default sidecar factory preserves every canonical media and reference block", async () => {
   const timeline = {
     version: 1 as const,
