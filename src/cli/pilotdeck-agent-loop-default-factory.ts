@@ -28,7 +28,10 @@ import {
   readHostPermissionModuleMethods,
   readHostTurnModuleMethods,
 } from "../agent/modules/protocol.js";
-import { AgentLoop } from "../agent/loop/AgentLoop.js";
+import {
+  AgentLoop,
+  parseAgentLoopModelSessionStateProjection,
+} from "../agent/loop/AgentLoop.js";
 import { createSidecarAgentTurnCapabilities, type ModelMetadataPort } from "../agent/loop/AgentTurnCapabilities.js";
 import type { AgentRuntimeConfig } from "../agent/runtime/AgentRuntimeConfig.js";
 import { parseAgentRunMode } from "../agent/protocol/input.js";
@@ -70,6 +73,8 @@ export type SidecarAgentLoopPayload = {
   };
   permissionContext?: unknown;
   seedState?: unknown;
+  /** Volatile host-owned state restored only for the current sidecar session. */
+  modelState?: unknown;
   executionContext?: unknown;
 };
 
@@ -145,19 +150,9 @@ export const createSidecarExecution: SidecarExecutionFactory = async ({ request,
       asRecord(contextOverride.metadata),
     ),
   };
-  const tools = readToolDescriptors(
+  const tools = toolDefinitionsFromDescriptors(
     contextOverride.tools !== undefined ? contextOverride.tools : payload.tools,
-  ).map((descriptor) => ({
-    name: descriptor.name,
-    description: descriptor.description,
-    kind: descriptor.kind,
-    requiredRuntimeCapabilities: descriptor.requiredRuntimeCapabilities,
-    inputSchema: descriptor.inputSchema,
-    isReadOnly: () => descriptor.readOnly,
-    isConcurrencySafe: () => descriptor.concurrencySafe,
-    requiresUserInteraction: () => descriptor.requiresUserInteraction,
-    execute: async () => ({ content: [{ type: "text", text: "Capability is executed by the host module." }] }),
-  } satisfies PilotDeckToolDefinition));
+  );
   const moduleBinding = sidecarModuleBinding(request);
   const budget = createHostModelBudgetPort(callModule, moduleBinding, budgetMethods);
   const turnCallbacks = createHostTurnCallbacks(callModule, moduleBinding, turnMethods);
@@ -178,6 +173,7 @@ export const createSidecarExecution: SidecarExecutionFactory = async ({ request,
     modelMethods,
     ...(metadata ? { onPreparedMetadata: metadata.apply } : {}),
     capabilityMethods,
+    deserializeTools: readRequiredToolDefinitions,
     onAbort: abortExecution,
   });
   const dependencies = {
@@ -199,6 +195,7 @@ export const createSidecarExecution: SidecarExecutionFactory = async ({ request,
     config,
     createSidecarAgentTurnCapabilities(config, dependencies),
     parseAgentLoopSeedStateProjection(payload.seedState),
+    parseAgentLoopModelSessionStateProjection(payload.modelState),
   );
   return {
     loop,
@@ -710,6 +707,34 @@ function readToolDescriptors(value: unknown): ToolDescriptor[] {
       requiredRuntimeCapabilities: [...requiredRuntimeCapabilities],
     }];
   });
+}
+
+function toolDefinitionsFromDescriptors(value: unknown): PilotDeckToolDefinition[] {
+  return readToolDescriptors(value).map((descriptor) => ({
+    name: descriptor.name,
+    description: descriptor.description,
+    kind: descriptor.kind,
+    requiredRuntimeCapabilities: descriptor.requiredRuntimeCapabilities,
+    inputSchema: descriptor.inputSchema,
+    isReadOnly: () => descriptor.readOnly,
+    isConcurrencySafe: () => descriptor.concurrencySafe,
+    requiresUserInteraction: () => descriptor.requiresUserInteraction,
+    execute: async () => ({ content: [{ type: "text", text: "Capability is executed by the host module." }] }),
+  } satisfies PilotDeckToolDefinition));
+}
+
+/** A live catalog is protocol input, so malformed responses must fail closed. */
+function readRequiredToolDefinitions(value: unknown): PilotDeckToolDefinition[] {
+  const record = asRecord(value);
+  const entries = Array.isArray(value) ? value : record?.available;
+  if (!Array.isArray(entries)) {
+    throw new Error("Host tool catalog response must contain a tools array.");
+  }
+  const descriptors = readToolDescriptors(entries);
+  if (descriptors.length !== entries.length || new Set(descriptors.map((tool) => tool.name)).size !== descriptors.length) {
+    throw new Error("Host tool catalog response contains an invalid or duplicate tool descriptor.");
+  }
+  return toolDefinitionsFromDescriptors(entries);
 }
 
 function readToolRuntimeCapabilities(value: unknown): PilotDeckToolRuntimeCapability[] {

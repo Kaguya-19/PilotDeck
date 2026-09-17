@@ -1,6 +1,10 @@
 import { createInterface } from "node:readline";
 import type { Writable, Readable } from "node:stream";
-import type { AgentLoop, AgentLoopInput } from "../../loop/AgentLoop.js";
+import {
+  serializeAgentLoopModelSessionStateProjection,
+  type AgentLoop,
+  type AgentLoopInput,
+} from "../../loop/AgentLoop.js";
 import { serializeAgentLoopSeedStateProjection } from "../checkpoint/seedStateProjection.js";
 import type { SidecarModuleCall, SidecarModuleCallClient } from "./sidecarPorts.js";
 import { ModuleOperationHost } from "./moduleRuntime.js";
@@ -326,7 +330,7 @@ export class AgentLoopSidecarServer {
           // Test/integration runners may implement only the public run surface.
           // Seed state is an optional checkpoint projection, never a reason to
           // rewrite an otherwise valid execution terminal as failed.
-          ...snapshotSeedState(execution.loop),
+          ...snapshotVolatileState(execution.loop),
         },
       });
       finalSent = true;
@@ -645,11 +649,17 @@ function writeSidecarLine(output: Writable, line: string): Promise<void> {
   });
 }
 
-function snapshotSeedState(loop: AgentLoop): Record<string, unknown> {
+function snapshotVolatileState(loop: AgentLoop): Record<string, unknown> {
   const snapshot = (loop as Partial<Pick<AgentLoop, "snapshotFileState">>).snapshotFileState;
-  return typeof snapshot === "function"
+  const modelSnapshot = (loop as Partial<Pick<AgentLoop, "snapshotModelSessionState">>).snapshotModelSessionState;
+  return {
+    ...(typeof snapshot === "function"
     ? { seedState: serializeAgentLoopSeedStateProjection(snapshot.call(loop)) }
-    : {};
+    : {}),
+    ...(typeof modelSnapshot === "function"
+      ? { modelState: serializeAgentLoopModelSessionStateProjection(modelSnapshot.call(loop)) }
+      : {}),
+  };
 }
 
 function earliestDeadline(...values: Array<string | undefined>): number | undefined {

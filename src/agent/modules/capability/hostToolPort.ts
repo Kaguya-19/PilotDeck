@@ -25,6 +25,8 @@ export type HostCapabilityModuleClient = (request: CapabilityModuleCall) => Prom
 
 export type HostCapabilityToolPortOptions = {
   tools?: PilotDeckToolDefinition[];
+  /** Decode an advertised host catalog. Required when `list_tools` is used. */
+  deserializeTools?: (value: unknown) => PilotDeckToolDefinition[];
   /** Optional host-owned decision provider that gates capability side effects. */
   permission?: PermissionDecisionPort;
   /** Immutable execution identity supplied by a sidecar composition. */
@@ -55,16 +57,17 @@ export function createPermissionAwareToolPort(
   } = {},
 ): ToolPort {
   if (!options.permission && !options.authorization) return port;
-  const toolsByName = new Map((options.tools ?? port.list()).map((tool) => [tool.name, tool]));
+  const toolByName = (name: string) => port.list.call(port).find((tool) => tool.name === name);
   return {
     list: () => port.list.call(port),
+    ...(port.refresh ? { refresh: () => port.refresh!.call(port) } : {}),
     async executeAll(calls, context, execution) {
       const authorize = async (call: PilotDeckToolCall): Promise<PilotDeckToolCall | PilotDeckToolResult> => {
         if (options.authorization) {
           const outcome = await options.authorization.authorize(call, context);
           return "call" in outcome ? outcome.call : outcome.result;
         }
-        const tool = toolsByName.get(call.name);
+        const tool = toolByName(call.name);
         if (!tool) return call;
         const decision = await options.permission!.decide(tool, call.input, context, call.id);
         if (decision.type !== "allow") return permissionDecisionResult(call, decision, context);
@@ -94,7 +97,7 @@ export function createPermissionAwareToolPort(
         const parallel: Array<{ index: number; call: PilotDeckToolCall }> = [];
         const sequential: Array<{ index: number; call: PilotDeckToolCall }> = [];
         calls.forEach((call, index) => {
-          const tool = toolsByName.get(call.name);
+          const tool = toolByName(call.name);
           (tool?.isConcurrencySafe(call.input) ? parallel : sequential).push({ index, call });
         });
         await executeGroup(parallel, true);
@@ -107,12 +110,17 @@ export function createPermissionAwareToolPort(
 
 /** Build a permission policy port without coupling it to tool execution. */
 export function createPermissionToolAuthorizationPort(
-  options: { tools?: PilotDeckToolDefinition[]; permission: PermissionDecisionPort },
+  options: {
+    tools?: PilotDeckToolDefinition[];
+    /** Resolve against a live catalog when the tool provider supports refresh. */
+    findTool?: (name: string) => PilotDeckToolDefinition | undefined;
+    permission: PermissionDecisionPort;
+  },
 ): ToolAuthorizationPort {
   const toolsByName = new Map((options.tools ?? []).map((tool) => [tool.name, tool]));
   return {
     async authorize(call, context) {
-      const tool = toolsByName.get(call.name);
+      const tool = options.findTool?.(call.name) ?? toolsByName.get(call.name);
       if (!tool) return { call };
       const decision = await options.permission.decide(tool, call.input, context, call.id);
       return decision.type === "allow"
@@ -138,14 +146,37 @@ export function createHostCapabilityToolPort(
     );
   }
   const uuid = options.uuid ?? (() => Math.random().toString(36).slice(2));
+  let tools = [...(options.tools ?? [])];
   return {
-    list: () => options.tools ?? [],
+    list: () => tools,
+    ...(options.methods?.includes("list_tools")
+      ? {
+          async refresh(): Promise<PilotDeckToolDefinition[]> {
+            if (!options.deserializeTools) {
+              throw new Error("Host advertised list_tools without a sidecar tool descriptor decoder.");
+            }
+            const response = await callModule({
+              runId: options.binding?.runId ?? "sidecar-tool-catalog",
+              operationId: options.binding?.operationId ?? "sidecar-tool-catalog",
+              idempotencyKey: options.binding?.idempotencyKey,
+              requestId: `tool-catalog-${uuid()}`,
+              module: "capability",
+              payload: { operation: "list_tools" },
+            });
+            if (!response.ok) {
+              throw new Error(String(response.error?.message ?? response.code ?? "Host tool catalog refresh failed."));
+            }
+            tools = options.deserializeTools(response.payload?.tools);
+            return tools;
+          },
+        }
+      : {}),
     async executeAll(
       calls: PilotDeckToolCall[],
       context: PilotDeckToolRuntimeContext,
       execution: AgentExecutionContext,
     ): Promise<PilotDeckToolResult[]> {
-      const toolsByName = new Map((options.tools ?? []).map((tool) => [tool.name, tool]));
+      const toolsByName = new Map(tools.map((tool) => [tool.name, tool]));
 
       if (options.methods?.includes("execute_batch") && calls.length > 0) {
         const resultSlots = new Array<PilotDeckToolResult | undefined>(calls.length);

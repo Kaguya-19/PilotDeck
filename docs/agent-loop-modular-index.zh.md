@@ -23,7 +23,7 @@ PilotDeck；宿主产品的 session、turn、permission、tool、checkpoint、SO
 4. [Module Communication SOP](pilotdeck-module-communication-sop.zh.md)
 
    规范身份字段、operation/attempt 状态、终态、取消、deadline、重试、恢复、profile
-   和 transport-independent adapter 约定。当前文档版本为 v0.8，协议版本为 v2.0。
+   和 transport-independent adapter 约定。当前文档版本为 v0.9，协议版本为 v2.0。
 
 5. [Module Protocol v2 Schema](pilotdeck-module-protocol-v2.schema.json)
 
@@ -129,10 +129,19 @@ composition 投影 `ModelBudgetPort`，`turn` module 把 live steer drain 和 co
 channel、Session writer 和 callback 对象都不进入 wire。durable owner 分别仍是 host model/token policy、
 `AgentTurnInbox`/Session transcript 与 `TurnRunner.onCompactPersisted`。
 
+turn 提交的 permission rules 仅是 user-owned override：host 会替换既有 user rules，但保留 project、session、
+policy 与 cli 规则，且不会接受 wire 输入伪造这些来源。动态工具目录则通过可选 `capability.list_tools` 在每次
+新 model request 前刷新；它只返回冻结 descriptor view，不暴露 registry、scheduler 或 permission object。未广告
+时继续使用 execute admission 的快照，广告后返回 malformed catalog 必须失败关闭。
+
 model module 优先通过 `stream_next` 逐批拉取 canonical events，并在 generator 提前结束或 abort 时用
 `close_stream` 释放 host-owned provider iterator；未广告新方法时才回退到 deprecated batched `stream`。每个
 `preparationId` 只绑定一个 iterator，module-call cache 保证 reconnect 重放同一 pull 时不重复推进；turn dispose
 负责关闭仍存活的 iterator，不把 provider stream state 放进 sidecar 或 Session durable state。
+
+runner 还会在同一存活 session 内回传一个可选、易失的 model-state projection，其中仅有 route-aware token
+calibration 与跨 turn 的 hard context/output cap。它随 execute/final 在 host 与 child 间往返，绝不进入 Session
+event、projection 或 checkpoint；新的 session/recovery 仍从保守基线开始。
 
 `model.get_metadata` 是可选的 host module operation。host 从 `ModelMetadataPort` 投影 provider/model、context/output
 limits、protocol 和 prompt-cache capability；sidecar 只保留当前 turn 的只读 snapshot，启动时读取 effective route，`prepare`
@@ -159,6 +168,10 @@ input rewrite，后者只调用 capability。host 广告 `execute_batch` 时，a
 tool-context adapter 从窄 ports、checkpoint 和 turn identity 组装；transport 不直接拥有 Plan/Todo、
 goal、subagent、permission 或 auxiliary-model 聚合逻辑。
 
+启用 `includeToolProgress` 时，host tool 可以将 `tool_progress` 写进 host event buffer；runner 在 capability
+module call 未结束时仍轮询并转发该 volatile event，因此进度可早于最终 `tool_result` 到达。进度不写入 transcript，
+也不参与 replay 或 terminal settlement。
+
 sidecar transport 只拥有连接、replay、identity 与 terminal settlement。`SidecarConnectionFactoryInput` 只包含
 `SidecarTransportTurn`、seed projection 与 `SidecarTransportContext`，不能取得任何 model/tool/permission/context port。
 `SidecarModuleComposition` 按 model、budget、turn、capability、permission、planTodo、context、lifecycle、event 分开注入；每个 custom handler
@@ -178,6 +191,10 @@ observer 使用 `HostPermissionModeState` 保持现有 plan-mode 生命周期，
 registry 与 manifest 冻结后交给 protocol；protocol 仅处理 transport、identity、replay、checkpoint 与 terminal settlement，
 不接收 `SidecarModuleComposition`。默认 dispatcher 由 host composition 创建。旧 `AgentLoopSidecarConnectionFactoryInput` 仅为命名兼容 alias，生产 transport 应使用
 `SidecarConnectionFactoryInput`，不应读取 native capability facade。
+
+`HostToolCheckpoint` 是每个 turn 的 host-owned mutable file state。后续 transcript/status callback 失败必须让 turn
+按失败语义结算，但不得抹掉已完成 host tool 的 checkpoint snapshot；runner 的 finally 将它作为下一次 execute 的 seed，
+而不是把 callback failure 解释为工具未执行。
 
 `ModelExecutionPort` 是 AgentLoop 的核心 consumer contract。直接构造 capabilities 时 Router 不是必需 owner，但完整
 `AgentRuntimeDependencies`/session/Gateway composition 仍保留 Router 依赖。显式 execution provider 可以绕过 Router，空
@@ -220,8 +237,8 @@ normalization 规则隐藏 semantic diff。
 
 ## 当前验收状态
 
-- PilotDeck native vs sidecar 的正式 Gateway gate 当前为 52 个场景；`run.py` 维护独立必跑清单，缺少、重复或空场景
-  会直接失败。sidecar adapter 必须通过
+- PilotDeck native vs sidecar 的正式 Gateway gate 当前为 52 个场景；2026-09-17 在 Node `22.23.1` 上最新重跑
+  **52/52 PASS**，`FAIL=0`、`BLOCKED=0`、oracle failure `=0`。`run.py` 维护独立必跑清单，缺少、重复或空场景会直接失败。sidecar adapter 必须通过
   `PILOTDECK_AGENT_LOOP_TRANSPORT=stdio` 进入 deployment profile 和
   `createAgentLoopSidecarRuntimeFactory`，并在原始 trace 中留下 transport selection、handshake/binding 和预期
   host module call 证据；任一证据缺失均为 `BLOCKED`。旧 adapter 自建 runner 或注入测试 factory 的结果已废止，
@@ -238,6 +255,9 @@ normalization 规则隐藏 semantic diff。
 - `lifecycle.dispatch` 已作为可选 host-module method 闭合；host 继续拥有 plugin registry、turn environment 和 teardown，sidecar 仅消费 hook dispatch result。
 - capability host dispatch 会从 active host capability view 重建 audit、interaction、file/plan services、turn environment 和 model routing；read/write seed state 与 full-fork subagent state 继续按 checkpoint/R3 owner 隔离。
 - `event.emit` 已作为可选 host-module method 闭合；sidecar 串行回传 AgentLoop volatile event，并在 final 前 flush 已受理 delivery。它不是 Session truth、operation ledger 或 reconnect state；event failure 不得改写业务 terminal。
+- production loopback contract 已覆盖动态 tool catalog、host `prepare()` request materialization、steer attachment 的
+  durable-before-authorize 顺序、跨 child 的 hard token cap、慢工具 progress 与 durable callback failure 后的 host
+  checkpoint 保留；这些是 sidecar factory 路径测试，不替代 Gateway stdio parity gate。
 - session read-side 已按 selected storage provider 组合 catalog 与 transcript reader；Web fork 通过 `ProjectSessionForkPort` 把 target durable write、auxiliary artifact transfer 和 publication 留给 provider，Web replace 通过 `ProjectSessionReplacementPort` 把 backup/rewrite/finalize/recovery 留给 provider。未声明 catalog/fork/replacement 的 non-native backend 分别 fail-closed；Gateway 继续拥有 replacement 的 live reservation 和 timeout。
 - StaffDeck workflow 对拍已能真实进入 Harness，但 SOP step/slot/handoff、deadline、
   unknown result 等宿主状态仍有差异，不能作为 PilotDeck core 已完全验收的依据。

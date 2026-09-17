@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { setTimeout as sleep } from "node:timers/promises";
 
 import type { CanonicalMessage } from "../../../model/index.js";
 import { HostToolCheckpoint } from "../checkpoint/hostToolCheckpoint.js";
@@ -34,8 +35,16 @@ import type {
 } from "../protocol.js";
 import { MODULE_PROTOCOL_VERSION, validateModuleMessage } from "../protocol.js";
 import type { AgentLoopRuntimeFactory } from "../../loop/AgentLoopRuntimeFactory.js";
-import type { AgentLoopInput, AgentLoopRunResult, AgentLoopSeedState } from "../../loop/AgentLoop.js";
+import {
+  parseAgentLoopModelSessionStateProjection,
+  serializeAgentLoopModelSessionStateProjection,
+  type AgentLoopInput,
+  type AgentLoopModelSessionState,
+  type AgentLoopRunResult,
+  type AgentLoopSeedState,
+} from "../../loop/AgentLoop.js";
 import { seedAgentReadState } from "../../loop/seedReadState.js";
+import { applyAgentPermissionOverrides } from "../../turn/permissionOverrides.js";
 import type { AgentEvent } from "../../protocol/events.js";
 import { agentError } from "../../protocol/errors.js";
 import type { AgentTurnResult } from "../../protocol/result.js";
@@ -243,6 +252,7 @@ export function createAgentLoopSidecarRuntimeFactory(
 
 class AgentLoopSidecarRunner implements AgentLoopRunner {
   private seedState: AgentLoopSeedState | undefined;
+  private modelState: AgentLoopModelSessionState | undefined;
   private active = false;
   private readonly turnComposition: SidecarTurnComposition;
   private readonly modules: SidecarModuleComposition;
@@ -301,20 +311,27 @@ class AgentLoopSidecarRunner implements AgentLoopRunner {
     let connection: AgentLoopSidecarConnection | undefined;
     let protocol: SidecarTurnProtocol | undefined;
     let dispatcher: ReturnType<typeof createSidecarDefaultModuleDispatcher> | undefined;
+    let hostToolCheckpoint: HostToolCheckpoint | undefined;
     try {
       // Native AgentLoop applies submit overrides before it evaluates this
       // turn. The host keeps the resulting live policy for later turns too.
       this.applyRunModeOverride(input);
+      applyAgentPermissionOverrides(this.options.config, input);
       const turnComposition = this.turnComposition.forTurn(input);
       if (input.abortSignal?.aborted) return abortedResult(input);
+      const model = this.modules.model.bindTurn?.({
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+      }) ?? this.modules.model;
+      const modules = Object.freeze({ ...this.modules, model });
       // The connection provider and host module dispatcher must observe one
       // immutable checkpoint for this turn. A transport receives its own
       // clone so it cannot alter the host-owned seed used by capability calls.
       const turnSeedState = this.snapshotFileState();
-      const hostToolCheckpoint = new HostToolCheckpoint(turnSeedState, input.allowedReadFiles);
+      hostToolCheckpoint = new HostToolCheckpoint(turnSeedState, input.allowedReadFiles);
       dispatcher = createSidecarDefaultModuleDispatcher({
         config: this.options.config,
-        modules: this.modules,
+        modules,
         input,
         checkpoint: hostToolCheckpoint,
         capabilityResultObserver: turnComposition.capabilityResultObserver,
@@ -323,7 +340,7 @@ class AgentLoopSidecarRunner implements AgentLoopRunner {
       const moduleHandlers = turnComposition.moduleHandlers
         ?? resolveSidecarTurnCompositionHandlers({
           config: this.options.config,
-          modules: this.modules,
+          modules,
           turn: input,
         }, this.options.moduleHandlers);
       connection = await this.options.connect({
@@ -339,6 +356,7 @@ class AgentLoopSidecarRunner implements AgentLoopRunner {
         input,
         checkpoint: hostToolCheckpoint,
         manifest: dispatcher.manifest,
+        modelState: this.modelState,
         uuid: this.options.uuid,
         reconcileResultUnknown: this.options.reconcileResultUnknown,
         operationLedger: this.options.operationLedger,
@@ -346,10 +364,20 @@ class AgentLoopSidecarRunner implements AgentLoopRunner {
         moduleHandlers: Object.freeze({ ...dispatcher.handlers, ...moduleHandlers }),
       });
       const iterator = protocol.execute(connection);
+      const drainHostEvents = (): AgentEvent[] => this.options.modules.event?.drain?.() ?? [];
       let result: SidecarTerminal;
+      let pendingNext = iterator.next();
       while (true) {
-        const next = await iterator.next();
-        for (const hostEvent of this.options.modules.event?.drain?.() ?? []) {
+        const received = await Promise.race([
+          pendingNext.then((next) => ({ type: "event" as const, next })),
+          sleep(500).then(() => ({ type: "pump" as const })),
+        ]);
+        if (received.type === "pump") {
+          for (const hostEvent of drainHostEvents()) yield hostEvent;
+          continue;
+        }
+        const next = received.next;
+        for (const hostEvent of drainHostEvents()) {
           yield hostEvent;
         }
         if (next.done) {
@@ -359,6 +387,7 @@ class AgentLoopSidecarRunner implements AgentLoopRunner {
         const event = next.value;
         if (event.type === "steer_applied") {
           await input.onDurableMessage?.(event.message);
+          dispatcher.applySteerAuthorization(event.itemId);
           input.onSteerApplied?.(event.itemId);
         }
         if (event.type === "agent_status" && event.kind && event.text) {
@@ -373,10 +402,16 @@ class AgentLoopSidecarRunner implements AgentLoopRunner {
         if (event.type === "assistant_message" || event.type === "tool_results_projected") {
           await input.onDurableMessage?.(event.message);
         }
+        pendingNext = iterator.next();
       }
       this.seedState = result.seedState;
+      this.modelState = result.modelState;
       return { result: result.result, messages: result.messages };
     } finally {
+      // Tool code is host-owned. Retain its checkpoint even when a later
+      // transcript callback rejects; that failure must not erase safe read/
+      // write state or change the terminal outcome classification.
+      if (hostToolCheckpoint) this.seedState = hostToolCheckpoint.snapshot();
       this.active = false;
       try {
         await protocol?.close("agent_loop_turn_finished") ?? connection?.close?.("agent_loop_turn_finished");
@@ -393,7 +428,10 @@ class AgentLoopSidecarRunner implements AgentLoopRunner {
   }
 }
 
-type SidecarTerminal = AgentLoopRunResult & { seedState?: AgentLoopSeedState };
+type SidecarTerminal = AgentLoopRunResult & {
+  seedState?: AgentLoopSeedState;
+  modelState?: AgentLoopModelSessionState;
+};
 
 type SidecarBinding = {
   moduleId: string;
@@ -460,6 +498,7 @@ class SidecarTurnProtocol {
     input: AgentLoopInput;
     checkpoint: HostToolCheckpoint;
     manifest: ReturnType<typeof createSidecarDefaultModuleDispatcher>["manifest"];
+    modelState?: AgentLoopModelSessionState;
     uuid: () => string;
     reconcileResultUnknown?: AgentLoopSidecarResultUnknownReconciler;
     operationLedger?: AgentLoopOperationLedger;
@@ -673,6 +712,9 @@ class SidecarTurnProtocol {
         hostModules: this.manifest.hostModules,
         interactionCapabilities: this.manifest.interactionCapabilities,
         ...(seedState ? { seedState: serializeAgentLoopSeedStateProjection(seedState) } : {}),
+        ...(this.options.modelState
+          ? { modelState: serializeAgentLoopModelSessionStateProjection(this.options.modelState) }
+          : {}),
       },
     };
   }
@@ -1217,6 +1259,9 @@ function readTerminal(event: ModuleEvent, input: AgentLoopInput): SidecarTermina
     result,
     messages: messages as CanonicalMessage[],
     ...(payload?.seedState === undefined ? {} : { seedState: parseAgentLoopSeedStateProjection(payload.seedState) }),
+    ...(payload?.modelState === undefined
+      ? {}
+      : { modelState: parseAgentLoopModelSessionStateProjection(payload.modelState) }),
   };
 }
 

@@ -42,6 +42,7 @@ export function createSidecarPorts(
   callModule: SidecarModuleCallClient,
   options: {
     tools?: PilotDeckToolDefinition[];
+    deserializeTools?: (value: unknown) => PilotDeckToolDefinition[];
     permission?: PermissionDecisionPort;
     authorization?: ToolAuthorizationPort;
     binding?: SidecarModuleBinding;
@@ -58,10 +59,16 @@ export function createSidecarPorts(
     binding: options.binding,
     uuid,
     methods: options.capabilityMethods,
+    deserializeTools: options.deserializeTools,
     onAbort: options.onAbort,
   });
   const authorization = options.authorization
-    ?? (options.permission ? createPermissionToolAuthorizationPort({ tools: options.tools, permission: options.permission }) : undefined);
+    ?? (options.permission
+      ? createPermissionToolAuthorizationPort({
+          permission: options.permission,
+          findTool: (name) => capability.list().find((tool) => tool.name === name),
+        })
+      : undefined);
   return {
     model: createHostModelInvokerPort(callModule, {
       uuid,

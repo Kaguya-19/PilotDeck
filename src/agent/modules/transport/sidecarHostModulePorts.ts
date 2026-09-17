@@ -13,6 +13,7 @@ import type {
   ToolExecutionPort,
   ToolResultObserver,
   ModelExecutionPort,
+  AgentTurnRoutingPort,
 } from "../../loop/AgentTurnCapabilities.js";
 import { isNoopAgentTurnContextPort } from "../../loop/AgentTurnCapabilities.js";
 import type { GoalPort } from "../../../goal/protocol/types.js";
@@ -34,6 +35,8 @@ import {
 export type SidecarModelModulePort = Readonly<{
   execution: ModelExecutionPort;
   metadata?: ModelMetadataPort;
+  /** Resolves host-owned routing state once for an active sidecar turn. */
+  bindTurn?(input: Readonly<{ sessionId: string; turnId: string }>): SidecarModelModulePort;
 }>;
 
 export type SidecarBudgetModulePort = ModelBudgetPort;
@@ -141,6 +144,8 @@ export type SidecarModuleComposition = Readonly<{
  */
 export type SidecarHostModulePorts = Readonly<{
   model: ModelExecutionPort;
+  /** Host-only routing view used to bind model execution per turn. */
+  routing?: Pick<AgentTurnRoutingPort, "invalidateSticky">;
   metadata?: ModelMetadataPort;
   budget?: ModelBudgetPort;
   toolExecution: ToolExecutionPort;
@@ -193,10 +198,7 @@ export function createSidecarModuleComposition(
   const permissionContext = createSidecarPermissionRequestContextServices(toolContext);
   const contextIdentity = createSidecarContextRequestIdentityServices(toolContext);
   return Object.freeze({
-    model: Object.freeze({
-      execution: ports.model,
-      ...(hasModelMetadata(ports.metadata) ? { metadata: ports.metadata } : {}),
-    }),
+    model: createSidecarModelModulePort(ports),
     ...(ports.budget ? { budget: ports.budget } : {}),
     ...(ports.interaction?.elicitationAvailable === true || ports.interaction?.elicitation
       ? { interaction: Object.freeze({ elicitationAvailable: true }) }
@@ -237,6 +239,7 @@ export function createSidecarHostModulePorts(
 ): SidecarHostModulePorts {
   return Object.freeze({
     model: capabilities.model.execution,
+    ...(capabilities.model.routing ? { routing: capabilities.model.routing } : {}),
     ...(hasModelMetadata(capabilities.model.metadata) ? { metadata: capabilities.model.metadata } : {}),
     budget: capabilities.model.budget,
     toolExecution: capabilities.toolExecution,
@@ -253,6 +256,50 @@ export function createSidecarHostModulePorts(
     goal: capabilities.goal,
     toolRuntimeServices: capabilities.toolExecution,
     clock: capabilities.clock,
+  });
+}
+
+function createSidecarModelModulePort(ports: SidecarHostModulePorts): SidecarModelModulePort {
+  const metadata = hasModelMetadata(ports.metadata) ? { metadata: ports.metadata } : {};
+  if (!ports.routing?.invalidateSticky) {
+    return Object.freeze({ execution: ports.model, ...metadata });
+  }
+  return Object.freeze({
+    execution: ports.model,
+    ...metadata,
+    bindTurn: ({ sessionId }) => {
+      const sticky = ports.routing!.invalidateSticky!(sessionId);
+      let previousTier = sticky?.previousTier;
+      const routeMetadata = (): Record<string, unknown> | undefined => {
+        if (sticky) {
+          return {
+            ...(previousTier ? { previousTier } : {}),
+            ...(sticky.previousProvider ? { previousProvider: sticky.previousProvider } : {}),
+            ...(sticky.previousModel ? { previousModel: sticky.previousModel } : {}),
+          };
+        }
+        return previousTier ? { previousTier } : undefined;
+      };
+      const execution: ModelExecutionPort = Object.freeze({
+        prepare: ({ request, context }) => ports.model.prepare.call(ports.model, {
+          request,
+          context: {
+            ...context,
+            ...(routeMetadata()
+              ? { metadata: { ...context.metadata, ...routeMetadata() } }
+              : {}),
+          },
+        }),
+        async *stream(input) {
+          try {
+            yield* ports.model.stream.call(ports.model, input);
+          } finally {
+            if (!sticky?.orchestrating) previousTier = undefined;
+          }
+        },
+      });
+      return Object.freeze({ execution, ...metadata });
+    },
   });
 }
 

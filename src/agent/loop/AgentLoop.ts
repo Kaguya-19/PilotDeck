@@ -48,6 +48,7 @@ import type { AgentControlBoundaryTranscriptEntry } from "../../session/transcri
 import type { AgentSteerMessage } from "../session/SteerMailbox.js";
 import { collectToolCalls } from "./collectToolCalls.js";
 import { buildTurnEnvironment } from "../turn/TurnEnvironment.js";
+import { applyAgentPermissionOverrides } from "../turn/permissionOverrides.js";
 import { createMissingToolResult, ensureToolResultPairing } from "./ensureToolResultPairing.js";
 import { LargeFileRepair, type LargeFileRepairDecision } from "./LargeFileRepair.js";
 import { resolveOutputTokenRetryBump } from "./outputTokenRetry.js";
@@ -171,17 +172,35 @@ export type AgentLoopSeedState = {
   allowedReadFiles?: string[];
 };
 
+type AgentLoopTokenCap = {
+  maxContextTokens?: number;
+  requestedMaxOutputTokens?: number;
+  attemptMaxOutputTokens?: number;
+  hardMaxOutputTokens?: number;
+};
+
+/**
+ * Volatile, session-owned model state. It is deliberately separate from the
+ * durable file checkpoint: a sidecar runner may carry it between child
+ * executions, while session recovery starts from the normal conservative
+ * baseline.
+ */
+export type AgentLoopModelSessionState = {
+  tokenCalibration?: TokenCalibrationBaseline[];
+  tokenCaps?: Array<{
+    provider: string;
+    model: string;
+    maxContextTokens?: number;
+    hardMaxOutputTokens?: number;
+  }>;
+};
+
 export class AgentLoop {
   private readonly readFileState: PilotDeckReadFileStateMap;
   private readonly writeSnapshots: PilotDeckWriteSnapshotMap;
   private readonly allowedReadFiles: Set<string>;
   private readonly tokenCalibrationByRoute = new Map<string, TokenCalibrationBaseline>();
-  private readonly transientTokenCaps = new Map<string, {
-    maxContextTokens?: number;
-    requestedMaxOutputTokens?: number;
-    attemptMaxOutputTokens?: number;
-    hardMaxOutputTokens?: number;
-  }>();
+  private readonly transientTokenCaps = new Map<string, AgentLoopTokenCap>();
   private readonly capabilities: AgentTurnCapabilities;
   private readonly modelPort: ModelInvokerPort;
   private readonly toolPort: ToolPort;
@@ -208,6 +227,7 @@ export class AgentLoop {
     private readonly config: AgentRuntimeConfig,
     capabilities: AgentTurnCapabilities | AgentTurnCapabilityComposition,
     seedState?: AgentLoopSeedState,
+    modelSessionState?: AgentLoopModelSessionState,
   ) {
     this.readFileState = cloneReadFileStateMap(seedState?.readFileState);
     this.writeSnapshots = cloneWriteSnapshotMap(seedState?.writeSnapshots);
@@ -217,6 +237,7 @@ export class AgentLoop {
       : createAgentTurnCapabilities(config, capabilities);
     this.modelPort = this.capabilities.model.execution;
     this.toolPort = this.capabilities.toolExecution;
+    this.restoreModelSessionState(modelSessionState);
   }
 
   snapshotFileState(): AgentLoopSeedState {
@@ -225,6 +246,37 @@ export class AgentLoop {
       writeSnapshots: cloneWriteSnapshotMap(this.writeSnapshots),
       allowedReadFiles: [...this.allowedReadFiles],
     };
+  }
+
+  snapshotModelSessionState(): AgentLoopModelSessionState {
+    const tokenCalibration = [...this.tokenCalibrationByRoute.values()].map((calibration) => ({ ...calibration }));
+    const tokenCaps = [...this.transientTokenCaps.entries()].flatMap(([key, cap]) => {
+      if (cap.maxContextTokens === undefined && cap.hardMaxOutputTokens === undefined) return [];
+      const [provider, model] = key.split("\u0000");
+      if (!provider || !model) return [];
+      return [{
+        provider,
+        model,
+        ...(cap.maxContextTokens !== undefined ? { maxContextTokens: cap.maxContextTokens } : {}),
+        ...(cap.hardMaxOutputTokens !== undefined ? { hardMaxOutputTokens: cap.hardMaxOutputTokens } : {}),
+      }];
+    });
+    return {
+      ...(tokenCalibration.length > 0 ? { tokenCalibration } : {}),
+      ...(tokenCaps.length > 0 ? { tokenCaps } : {}),
+    };
+  }
+
+  private restoreModelSessionState(state: AgentLoopModelSessionState | undefined): void {
+    for (const calibration of state?.tokenCalibration ?? []) {
+      this.tokenCalibrationByRoute.set(tokenCalibrationKey(calibration.provider, calibration.model), { ...calibration });
+    }
+    for (const cap of state?.tokenCaps ?? []) {
+      this.transientTokenCaps.set(this.tokenCapKey(cap.provider, cap.model), {
+        ...(cap.maxContextTokens !== undefined ? { maxContextTokens: cap.maxContextTokens } : {}),
+        ...(cap.hardMaxOutputTokens !== undefined ? { hardMaxOutputTokens: cap.hardMaxOutputTokens } : {}),
+      });
+    }
   }
 
   /**
@@ -273,7 +325,7 @@ export class AgentLoop {
   private async *runOrdered(input: AgentLoopInput): AsyncGenerator<AgentEvent, AgentLoopRunResult, unknown> {
     this.clearTurnScopedTokenCaps();
     this.applyRunModeOverride(input.runMode);
-    this.applyPermissionOverrides(input.permissionMode, input.permissionRules, input.basePermissionMode);
+    applyAgentPermissionOverrides(this.config, input);
     for (const filePath of input.allowedReadFiles ?? []) {
       this.allowedReadFiles.add(filePath);
     }
@@ -725,8 +777,14 @@ export class AgentLoop {
           }
         }
       }
-      request = this.applyTokenCapsToRequest(request, routedProvider, routedModel);
-      prepared = { ...prepared, request };
+      // `prepare()` is allowed to materialize provider-specific request
+      // fields. Apply only AgentLoop-owned caps to that materialized request;
+      // never overwrite its prompt, tool schema, metadata, or output cap.
+      prepared = {
+        ...prepared,
+        request: this.applyTokenCapsToRequest(prepared.request, routedProvider, routedModel),
+      };
+      request = prepared.request;
       this.clearAttemptOutputTokenCap(routedProvider, routedModel);
       if (pendingContextBudget && !emittedContextBudget) {
         yield {
@@ -2170,6 +2228,9 @@ export class AgentLoop {
     input: AgentLoopInput,
     options: { emitInstructionEvents?: boolean; previewOnly?: boolean } = {},
   ): Promise<CanonicalModelRequest> {
+    // A host-owned sidecar catalog can reveal tools after prior calls. Refresh
+    // only at a model-request boundary so one tool batch sees a stable view.
+    await this.toolPort.refresh?.();
     const contextRuntime = this.capabilities.contextPreparation;
     const prepareInput = this.createContextPrepareInput(messages, input);
     const prepared = await contextRuntime.prepareForModel({
@@ -2423,7 +2484,7 @@ export class AgentLoop {
   }
 
   private tokenCapKey(provider: string, model: string): string {
-    return `${provider}/${model}`;
+    return tokenCalibrationKey(provider, model);
   }
 
   private getModelTokenLimits(provider: string, model: string): { maxContextTokens?: number; maxOutputTokens?: number } | undefined {
@@ -2495,12 +2556,7 @@ export class AgentLoop {
     return this.config.maxOutputTokens;
   }
 
-  private setTransientTokenCap(provider: string, model: string, cap: {
-    maxContextTokens?: number;
-    requestedMaxOutputTokens?: number;
-    attemptMaxOutputTokens?: number;
-    hardMaxOutputTokens?: number;
-  }): void {
+  private setTransientTokenCap(provider: string, model: string, cap: AgentLoopTokenCap): void {
     const key = this.tokenCapKey(provider, model);
     const previous = this.transientTokenCaps.get(key) ?? {};
     this.transientTokenCaps.set(key, { ...previous, ...cap });
@@ -2571,11 +2627,12 @@ export class AgentLoop {
   }
 
   private applyTokenCapsToRequest(request: CanonicalModelRequest, provider: string, model: string): CanonicalModelRequest {
+    const maxOutputTokens = this.currentMaxOutputTokens(provider, model);
     return {
       ...request,
       provider,
       model,
-      maxOutputTokens: this.currentMaxOutputTokens(provider, model),
+      ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
     };
   }
 
@@ -2895,24 +2952,6 @@ export class AgentLoop {
     };
   }
 
-  private applyPermissionOverrides(
-    permissionMode?: PermissionMode,
-    permissionRules?: Partial<PermissionRuleSet>,
-    basePermissionMode?: PermissionMode,
-  ): void {
-    if (permissionMode) {
-      if (permissionMode === "plan" && this.config.permissionMode !== "plan") {
-        this.config.permissionModeBeforePlan = basePermissionMode ?? this.config.permissionMode;
-      }
-      this.config.permissionMode = permissionMode;
-      this.config.permissionContext.mode = permissionMode;
-    }
-    if (!permissionRules) return;
-    mergeUserRules(this.config.permissionContext.rules.allow, permissionRules.allow);
-    mergeUserRules(this.config.permissionContext.rules.deny, permissionRules.deny);
-    mergeUserRules(this.config.permissionContext.rules.ask, permissionRules.ask);
-  }
-
   private applyRunModeOverride(runMode?: AgentRunMode): void {
     if (runMode) {
       this.config.runMode = runMode;
@@ -2925,11 +2964,6 @@ export class AgentLoop {
 }
 
 export { buildTurnEnvironment } from "../turn/TurnEnvironment.js";
-
-function mergeUserRules(target: PermissionRule[], userRules: PermissionRule[] | undefined): void {
-  const nonUserRules = target.filter((rule) => rule.source !== "user");
-  target.splice(0, target.length, ...nonUserRules, ...(userRules ?? []));
-}
 
 function filterAskModeTools(tools: PilotDeckToolDefinition[]): CanonicalToolSchema[] {
   const agentOverride = buildAskModeAgentToolSchema();
@@ -3814,6 +3848,74 @@ function clampOutputToModelCap(requested: number, modelMaxOutputTokens: number |
 function joinSystemPromptAddenda(...values: Array<string | undefined>): string | undefined {
   const parts = values.filter((value): value is string => typeof value === "string" && value.trim().length > 0);
   return parts.length > 0 ? parts.join("\n\n") : undefined;
+}
+
+/** Validate the JSON-safe model-state projection carried by a sidecar turn. */
+export function parseAgentLoopModelSessionStateProjection(value: unknown): AgentLoopModelSessionState | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!isPlainRecord(value)) throw new Error("Invalid sidecar modelState: expected an object.");
+  const tokenCalibration = readArray(value.tokenCalibration, "modelState.tokenCalibration").map((entry) => {
+    if (!isPlainRecord(entry)) throw new Error("Invalid sidecar modelState calibration entry.");
+    return {
+      provider: readNonEmptyString(entry.provider, "modelState calibration provider"),
+      model: readNonEmptyString(entry.model, "modelState calibration model"),
+      actualInputTokens: readPositiveFiniteNumber(entry.actualInputTokens, "modelState calibration actualInputTokens"),
+      estimatedInputTokens: readPositiveFiniteNumber(entry.estimatedInputTokens, "modelState calibration estimatedInputTokens"),
+    };
+  });
+  const tokenCaps = readArray(value.tokenCaps, "modelState.tokenCaps").map((entry) => {
+    if (!isPlainRecord(entry)) throw new Error("Invalid sidecar modelState cap entry.");
+    const maxContextTokens = readOptionalPositiveFiniteNumber(entry.maxContextTokens, "modelState cap maxContextTokens");
+    const hardMaxOutputTokens = readOptionalPositiveFiniteNumber(entry.hardMaxOutputTokens, "modelState cap hardMaxOutputTokens");
+    if (maxContextTokens === undefined && hardMaxOutputTokens === undefined) {
+      throw new Error("Invalid sidecar modelState cap entry without a persistent cap.");
+    }
+    return {
+      provider: readNonEmptyString(entry.provider, "modelState cap provider"),
+      model: readNonEmptyString(entry.model, "modelState cap model"),
+      ...(maxContextTokens !== undefined ? { maxContextTokens } : {}),
+      ...(hardMaxOutputTokens !== undefined ? { hardMaxOutputTokens } : {}),
+    };
+  });
+  return {
+    ...(tokenCalibration.length > 0 ? { tokenCalibration } : {}),
+    ...(tokenCaps.length > 0 ? { tokenCaps } : {}),
+  };
+}
+
+export function serializeAgentLoopModelSessionStateProjection(
+  state: AgentLoopModelSessionState,
+): Record<string, unknown> {
+  return {
+    ...(state.tokenCalibration?.length ? { tokenCalibration: state.tokenCalibration.map((entry) => ({ ...entry })) } : {}),
+    ...(state.tokenCaps?.length ? { tokenCaps: state.tokenCaps.map((entry) => ({ ...entry })) } : {}),
+  };
+}
+
+function readArray(value: unknown, field: string): unknown[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new Error(`Invalid sidecar ${field}: expected an array.`);
+  return value;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value)
+    && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
+}
+
+function readNonEmptyString(value: unknown, field: string): string {
+  if (typeof value !== "string" || value.length === 0) throw new Error(`Invalid sidecar ${field}.`);
+  return value;
+}
+
+function readPositiveFiniteNumber(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) throw new Error(`Invalid sidecar ${field}.`);
+  return value;
+}
+
+function readOptionalPositiveFiniteNumber(value: unknown, field: string): number | undefined {
+  if (value === undefined) return undefined;
+  return readPositiveFiniteNumber(value, field);
 }
 
 function tokenCalibrationKey(provider: string, model: string): string {

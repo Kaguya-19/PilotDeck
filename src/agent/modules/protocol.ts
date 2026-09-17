@@ -31,7 +31,7 @@ export const HOST_TURN_MODULE_METHODS = [
 ] as const;
 
 /** Host-advertised capability operations supported by Module Protocol v2. */
-export const HOST_CAPABILITY_MODULE_METHODS = ["execute", "execute_batch", "plan_todo"] as const;
+export const HOST_CAPABILITY_MODULE_METHODS = ["execute", "execute_batch", "list_tools", "plan_todo"] as const;
 
 /** Host-advertised permission operations supported by Module Protocol v2. */
 export const HOST_PERMISSION_MODULE_METHODS = ["decide"] as const;
@@ -437,6 +437,12 @@ export type ModelInvokerPort = {
 
 export type ToolPort = {
   list(): import("../../tool/index.js").PilotDeckToolDefinition[];
+  /**
+   * Optionally refresh a host-owned catalog before composing a new model
+   * request. Native registries remain synchronous; sidecar consumers use the
+   * optional remote capability only when it was advertised by the host.
+   */
+  refresh?(): Promise<import("../../tool/index.js").PilotDeckToolDefinition[]>;
   executeAll(
     calls: import("../../tool/index.js").PilotDeckToolCall[],
     context: import("../../tool/index.js").PilotDeckToolRuntimeContext,

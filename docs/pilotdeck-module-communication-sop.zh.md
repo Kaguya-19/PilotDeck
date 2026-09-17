@@ -1,4 +1,4 @@
-# PilotDeck AgentLoop Module Protocol SOP v0.8
+# PilotDeck AgentLoop Module Protocol SOP v0.9
 
 状态：执行稿
 适用范围：PilotDeck AgentLoop 与 StaffDeck、DSH 及其他语言模块之间的调用、事件传递和跨进程接入。
@@ -148,7 +148,7 @@ override 的字段优先于普通 `agent`、`messages`、`tools` 字段；显式
 {
   "hostModules": {
     "model": {
-      "methods": ["prepare", "stream", "stream_next", "close_stream"]
+      "methods": ["prepare", "stream", "stream_next", "close_stream", "get_metadata"]
     },
     "budget": {
       "methods": ["estimate_request_input", "evaluate_request_budget", "estimate_usage_cost"]
@@ -160,7 +160,7 @@ override 的字段优先于普通 `agent`、`messages`、`tools` 字段；显式
       "methods": ["prepare_for_model", "apply_tool_results", "recover_from_model_error", "capture_turn", "try_auto_compact"]
     },
     "capability": {
-      "methods": ["execute", "execute_batch", "plan_todo"]
+      "methods": ["execute", "execute_batch", "list_tools", "plan_todo"]
     },
     "permission": {
       "methods": ["decide"]
@@ -180,7 +180,8 @@ override 的字段优先于普通 `agent`、`messages`、`tools` 字段；显式
 
 sidecar 仅代理宿主显式声明的方法。未声明 context 时继续使用本地默认 context；未声明
 `model.prepare` 时 host model consumer 保持本地 canonical request 的兼容 prepare；未声明
-`execute_batch` 时继续使用兼容的单工具调用；未声明 permission 时不注入远端 permission port，
+`execute_batch` 时继续使用兼容的单工具调用；未声明 `list_tools` 时沿用 execute admission 时的工具快照；
+未声明 permission 时不注入远端 permission port，
 继续使用 capability owner 或本地 composition 已有的权限路径。未声明 `plan_todo` 时 sidecar 不创建
 远端 Plan/Todo port；它不得从工具名、prompt 或宿主私有字段猜测 workflow 状态。
 未声明 `lifecycle.dispatch` 时 sidecar 不创建远端 hook runtime；它不得加载、匹配或执行宿主 plugin/hook。
@@ -194,8 +195,12 @@ sidecar 仅代理宿主显式声明的方法。未声明 context 时继续使用
 需要保持 route-aware retry 或 compaction 语义的宿主必须声明 `model.prepare`，并声明增量
 `model.stream_next` 或 deprecated batched `model.stream`。`prepare` 返回可公开的 canonical request、provider/model 和 context/output
 limits，并只用本次 execute 的 `preparationId` 与随后的 stream operation 关联。Router decision、请求
-物化对象和校准 token state 继续由宿主保存；它们不能进入 Protocol payload、Session event 或
-跨 execute 的缓存。
+物化对象、provider iterator、prepared opaque state 以及下段受限 `modelState` 以外的校准 token state
+继续由宿主保存；它们不能进入 Protocol payload、Session event 或跨 execute 的缓存。
+
+sidecar session 可在 execute payload/final payload 间携带可选 `modelState` projection，但它只允许 route-aware
+token calibration 与 persistent hard context/output cap。它是 runner 的易失跨 child 状态，不是 Session durable
+event、checkpoint 或 restart recovery 输入；provider iterator、Router state 和 prepared opaque state 仍禁止序列化。
 
 `stream_next` 每次返回 `{ events, done }`，事件必须保持 provider 生成顺序。第一次 pull 使用 sidecar 回传的
 最新 canonical request 替换 host cached prepared request 的公开 request，同时保留 provider opaque state；每个
@@ -211,7 +216,7 @@ AgentLoop 内部的五类 model port 不等于五个 Module Protocol endpoint：
 | --- | --- | --- |
 | `ModelExecutionPort` | `model.prepare` / `model.stream_next` / `model.close_stream`；deprecated `model.stream` fallback | 传递 canonical request、增量 stream event、usage、错误和 deadline；provider iterator 由 host 持有和释放 |
 | `AgentTurnRoutingPort` | 由 host/local composition 决定 | provider selection、materialization、sticky invalidation；不新增 wire method |
-| `ModelMetadataPort` | 由 host/local composition 决定 | limits、protocol、prompt-cache capability；缺失时按 conservative fallback |
+| `ModelMetadataPort` | 可选 `model.get_metadata` | limits、protocol、prompt-cache capability；缺失时按 conservative fallback |
 | `ModelBudgetPort` | `budget.estimate_request_input` / `evaluate_request_budget` / `estimate_usage_cost` | input estimation、budget evaluation 与 canonical usage cost；不把 evaluator 或校准状态序列化 |
 | `AuxiliaryModelPort` | 由 host capability/context composition 决定 | 工具、subagent、提取器的二次调用；不改变主 turn 的 execution |
 
@@ -275,6 +280,18 @@ seed state 和 full-fork subagent parent state 由其各自 checkpoint/R3 contra
 工具 descriptor 的 `requiresUserInteraction` 是宿主计算后的能力元数据。AgentLoop 使用它和
 `canPrompt` 过滤当前模型可见工具；sidecar 不按具体工具名称做特殊判断。
 
+`capability.list_tools` 是可选的下一请求目录刷新。它只返回当前 tool descriptor 数组，不能暴露 registry、scheduler
+或 permission object。sidecar 只在新的 model request 边界读取它；若响应 malformed、名称重复或 host 未广告该方法，
+必须失败关闭或保留 execute admission 时的兼容快照，不能猜测隐藏工具。
+
+`permissionRules` 是 turn 的 user-owned override，不是完整 host policy。host 必须只替换 source 为 `user` 的既有
+规则，保留 project/session/policy/cli 规则，并拒绝从 wire 接受伪造的非 user source；sidecar tool context 只读取
+这个 host-confirmed effective policy。
+
+若启用 `includeToolProgress`，host tool context 可将 `tool_progress` 投递给 host event buffer。runner 必须在
+`capability.execute`/`execute_batch` 仍等待时继续抽取该 buffer，使 progress 能早于最终 tool result 可见；它是 live-only
+projection，不写 transcript、不参与 replay，也不能改变工具的 terminal result。
+
 #### 4.4.1 可选 Plan/Todo capability
 
 `capability.methods` 只有在宿主已经拥有 session-bound `PlanTodoPort` 时才可广告 `plan_todo`。
@@ -334,6 +351,11 @@ context limit 和 reserved output tokens 重建 request-level 预算评估。mal
 `steer_applied` 的持久化、claim 和 ack 仍由 host 完成。`turn.persist_compaction` 把 replacement boundary 与 compacted
 messages 交给 host `TurnRunner.onCompactPersisted`，且必须等待 durable callback 完成后才能发起后续 model request。
 持久化失败直接中止后续请求；reconnect 不得重复提交 replacement。
+
+包含 attachment 的 steer 也遵循同一线性化点：先 durable 写入 canonical steer message，写入成功后 host 才把
+`allowedReadFiles` 加到本 turn 的 `HostToolCheckpoint`，随后才 ack。callback 失败时不得提前授权附件路径。相反，
+已经完成 host tool 的 checkpoint 在之后的 durable callback 失败时仍必须保留为 runner 的下一 turn seed；失败只影响
+本次 terminal/durable outcome，不能回滚工具已完成的 host file state。
 
 三个 operation 的 Provider 是 active turn callbacks，Consumer 是 sidecar `AgentLoopInput`，Composition 在每次 execute
 绑定 run/operation identity 和 abort lifecycle。未广告 capability 就不创建对应 callback；unknown method、非法 steer
@@ -546,3 +568,4 @@ Host session/turn
 | v0.6 | 执行稿 | 明确 capability tool call 的 host execution-context reconstruction，防止 ambient service、env 或 storage owner 由 sidecar 决定 |
 | v0.7 | 执行稿 | 增加可选、host-owned `event.emit`：有序 volatile AgentLoop event 在 final 前回传 host；不写 durable state、不参与恢复且失败不改写业务 terminal |
 | v0.8 | 执行稿 | 增加可选 `budget`、`turn` module 和 elicitation availability；budget/steer/compaction 均由 host owner 提供，sidecar 只消费窄 port |
+| v0.9 | 执行稿 | 增加可选 `model.get_metadata` 与 `capability.list_tools`，明确易失 `modelState`、durable-before-attachment authorization、callback failure 后 checkpoint 保留及 live tool progress 顺序 |

@@ -51,6 +51,29 @@ turn-bound auxiliary-model port。sidecar tool context 改为显式最小 `Sidec
 handler、result observer 与 handler registry；transport 只消费该 contract。Plan/Todo refresh 改为独立
 `ToolResultObserver`，不再包装 execution port。协议字段、批量工具边界、durable owner 和 terminal 语义保持不变。
 
+### 2026-09-17 Sidecar parity safety closure
+
+本轮继续收紧 sidecar 与 native 的既有语义，而不增加产品能力。turn 的 `permissionRules` 现在只替换
+user-owned rule，project/session/policy/cli policy 保持 host-owned，wire 不能伪造非 user rule。host 的动态工具目录
+通过可选 `capability.list_tools` 在新 model request 边界刷新；runner、AgentLoop 和 permission lookup 均消费同一个
+live descriptor view，未广告时保持 admission snapshot。
+
+sidecar runner 在连续 child execute 之间只保留易失 `modelState` 投影：route token calibration 与 persistent hard
+context/output cap 会交给下一 child，但绝不写进 Session durable event、projection 或 checkpoint。`prepare()` 的公开
+request materialization 同时保持原样，AgentLoop 只在其后合并自己拥有的 token cap。默认非 streaming `complete()`
+恢复线性、无默认 jitter 的 request retry；stream retry policy 不变。
+
+live steer 的 attachment path 只有在 canonical steer message durable 后才写入 `HostToolCheckpoint` 并 ack。host tool
+完成后，即使后续 durable callback 失败，runner 也保留其 file checkpoint 作为下一 turn seed；callback failure 仍按
+本 turn 的失败语义结算。启用 `includeToolProgress` 时，runner 在未完成的 host capability call 中轮询 host event
+buffer，让 volatile `tool_progress` 早于最终 tool result 可见，且不创建第二份 durable truth。
+
+本轮新增 production loopback factory 契约，覆盖动态 catalog、prepared request、durable steer authorization、跨 child
+hard cap、live progress 和 callback-failure checkpoint；另有独立 permission override 与 non-stream retry regression。
+这些证据证明正式 factory 路径而非测试注入 runner。2026-09-17 在 Node `22.23.1` 上，相关 protocol/sidecar/
+permission/retry focused suites **74/74** 与正式 Gateway stdio matrix **52/52** 都通过，后者
+`FAIL=0`、`BLOCKED=0`、oracle failure `=0`；Gateway gate 仍独立于 loopback 契约执行。
+
 ### 2026-09-14 模型栈可插拔解耦
 
 参考 DSH 的 `llm`、`llm-retry`、`token-meter` 与 bundle 分层，AgentLoop-facing model view
@@ -1390,7 +1413,7 @@ reconciliation，也不证明远程 subagent，因此不改变 R2/R3 的开始�
 | R1.4 | host ToolRuntime 获得 native 等价的 execution services，wire 不决定 env/storage/service owner | Node 22 build + sidecar capability context reconstruction focused test |
 | R1.5 | host 收到有序 AgentLoop live event，且 event failure/restart 不改写业务 terminal 或 durable truth | Node 22 build + host event bridge、default factory、loopback sidecar final-before-flush focused tests |
 | R4.2 sidecar production closure | budget、elicitation、live steer、compaction/status persistence、完整/projected request budget、seed read state、incremental model stream 与 metadata snapshot 经正式 factory；callback failure/reconnect/capability absence fail closed；production proof 不可缺失 | Node 22 build + protocol/default-factory/sidecar/TCP focused suites + Gateway matrix **52/52**；`FAIL=0`、`BLOCKED=0`、oracle failure `=0`；negative-control 缺 handshake/fake runner 必须 `BLOCKED` |
-| R5-Z（实现已完成；P1 已验收） | host-confirmed enter/exit-plan transition 是唯一 live permission owner；submit-time run mode、context prompt、ToolRuntime 与 lifecycle 也只能读取 host config；forged/stale wire mode 无法绕过 ask gate；reconnect replay 不重复 transition | 已通过 Node 22 build + host permission-mode state、sidecar client 与 TCP replay focused suites；完整 PilotDeck matrix 纳入 R4.2 的 49 场景生产 gate，且 `plan_mode_host_policy` 覆盖省略 legacy mode 的四 turn 生命周期 |
+| R5-Z（实现已完成；P1 已验收） | host-confirmed enter/exit-plan transition 是唯一 live permission owner；submit-time run mode、context prompt、ToolRuntime 与 lifecycle 也只能读取 host config；forged/stale wire mode 无法绕过 ask gate；reconnect replay 不重复 transition | 已通过 Node 22 build + host permission-mode state、sidecar client 与 TCP replay focused suites；完整 PilotDeck matrix 纳入 R4.2 的 52 场景生产 gate，且 `plan_mode_host_policy` 覆盖省略 legacy mode 的四 turn 生命周期 |
 | R2 | 单终态、cancel/deadline、reconnect/replay、unknown reconciliation | protocol fault-injection + host operation integration test；无 durable status-query consumer 时不得宣称可恢复 |
 | R3 | child owner 未迁移；one-shot host callback、TCP/stdio parent-abort、TCP/stdio deadline/late terminal 和 host sidechain reference 已通过；剩余 remote/queued provider parity | native vs sidecar/remote canonical trace parity + TCP/stdio parent-abort/deadline E2E |
 | R3.1（已完成） | Gateway timeout 投影同一 absolute operation deadline；effective one-shot child budget 不超过它；timeout 与 parent abort 可区分；host callback 不重复 terminal | Node 22 build + Gateway deadline contract + deterministic adapter/unit regression + one-shot timeout regression + host capability focused contract |

@@ -40,6 +40,8 @@ export function createSidecarDefaultModuleDispatcher(options: {
 }): Readonly<{
   handlers: SidecarModuleHandlerRegistry;
   manifest: SidecarModuleManifest;
+  /** Apply steer attachment authority only after the canonical steer message is durable. */
+  applySteerAuthorization(itemId: string): void;
   dispose(): Promise<void>;
 }> {
   const capabilityContext = options.modules.capability.runtimeContext.bindTurn({
@@ -59,6 +61,7 @@ export function createSidecarDefaultModuleDispatcher(options: {
   });
   const preparations = new Map<string, PreparedModelInvocation>();
   const modelStreams = new Map<string, AsyncIterator<CanonicalModelEvent>>();
+  const pendingSteerAuthorizations = new Map<string, string[]>();
   const handlers: SidecarModuleHandlerRegistry = Object.freeze({
     model: async (call) => {
       const operation = stringField(call.payload, "operation");
@@ -126,10 +129,13 @@ export function createSidecarDefaultModuleDispatcher(options: {
       throw new Error(`Unsupported sidecar model operation: ${operation}`);
     },
     ...(options.modules.budget ? { budget: async (call: ModuleCallRequest) => dispatchBudget(options, call) } : {}),
-    turn: async (call: ModuleCallRequest) => dispatchTurn(options.input, call),
+    turn: async (call: ModuleCallRequest) => dispatchTurn(options.input, call, pendingSteerAuthorizations),
     capability: async (call) => {
       const operation = stringField(call.payload, "operation");
       if (operation === "plan_todo") return options.planTodoHandler(call);
+      if (operation === "list_tools") {
+        return { tools: options.modules.capability.execution.list().map(serializeToolDescriptor) };
+      }
       const planTodo = options.modules.planTodo?.forSession(options.input.sessionId);
       const context = capabilityContext.toolRuntimeContext(call.payload.context, planTodo, true);
       const execution = capabilityContext.executionContext(call);
@@ -170,6 +176,11 @@ export function createSidecarDefaultModuleDispatcher(options: {
   });
   return Object.freeze({
     handlers,
+    applySteerAuthorization(itemId) {
+      const allowedReadFiles = pendingSteerAuthorizations.get(itemId);
+      pendingSteerAuthorizations.delete(itemId);
+      options.checkpoint.allowReadFiles(allowedReadFiles);
+    },
     async dispose() {
       const iterators = [...modelStreams.values()];
       modelStreams.clear();
@@ -229,13 +240,21 @@ async function dispatchBudget(
   throw new Error(`Host budget capability does not support ${operation}.`);
 }
 
-async function dispatchTurn(input: AgentLoopInput, call: ModuleCallRequest): Promise<Record<string, unknown>> {
+async function dispatchTurn(
+  input: AgentLoopInput,
+  call: ModuleCallRequest,
+  pendingSteerAuthorizations?: Map<string, string[]>,
+): Promise<Record<string, unknown>> {
   const operation = stringField(call.payload, "operation");
   if (operation === "drain_steer" && input.drainSteerMessages) {
-    return { messages: await input.drainSteerMessages() };
+    const messages = await input.drainSteerMessages();
+    rememberSteerAuthorizations(messages, pendingSteerAuthorizations);
+    return { messages };
   }
   if (operation === "drain_or_close_steer" && input.drainOrCloseSteerMailbox) {
-    return await input.drainOrCloseSteerMailbox();
+    const result = await input.drainOrCloseSteerMailbox();
+    rememberSteerAuthorizations(result.messages, pendingSteerAuthorizations);
+    return result;
   }
   if (operation === "persist_compaction" && input.onCompactPersisted) {
     const boundary = asRecord(call.payload.boundary);
@@ -247,6 +266,17 @@ async function dispatchTurn(input: AgentLoopInput, call: ModuleCallRequest): Pro
     return { persisted: true };
   }
   throw new Error(`Host turn capability does not support ${operation}.`);
+}
+
+function rememberSteerAuthorizations(
+  messages: readonly import("../../session/SteerMailbox.js").AgentSteerMessage[],
+  pending: Map<string, string[]> | undefined,
+): void {
+  if (!pending) return;
+  for (const message of messages) {
+    const allowedReadFiles = message.allowedReadFiles?.filter((path) => typeof path === "string") ?? [];
+    if (allowedReadFiles.length > 0) pending.set(message.itemId, allowedReadFiles);
+  }
 }
 
 async function dispatchContext(options: Parameters<typeof createSidecarDefaultModuleDispatcher>[0], input: Record<string, unknown>, call: ModuleCallRequest): Promise<Record<string, unknown>> {
@@ -335,7 +365,9 @@ function hostModuleCapabilities(modules: SidecarModuleComposition, input: AgentL
           }
         : {}
     ),
-    capability: { methods: ["execute", "execute_batch", ...(modules.planTodo ? ["plan_todo"] : [])] },
+    capability: {
+      methods: ["execute", "execute_batch", "list_tools", ...(modules.planTodo ? ["plan_todo"] : [])],
+    },
     ...(contextMethods.length > 0 ? { context: { methods: contextMethods } } : {}),
     ...(modules.permission ? { permission: { methods: ["decide"] } } : {}),
     ...(modules.lifecycle ? { lifecycle: { methods: ["dispatch"] } } : {}),

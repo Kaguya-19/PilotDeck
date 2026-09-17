@@ -51,6 +51,7 @@ test("Module Protocol v2 schema and SOP are shipped together", () => {
   assert.match(sop, /Module Protocol v2\.0/);
   assert.match(sop, /流事件按 `\(streamId, sequence\)` 去重/);
   assert.match(sop, /execute_batch/);
+  assert.match(sop, /list_tools/);
   assert.match(sop, /lifecycle\.dispatch/);
 });
 

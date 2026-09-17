@@ -4,7 +4,7 @@ import test from "node:test";
 import { parseModelConfig } from "../../../src/model/config/parseModelConfig.js";
 import type { CanonicalModelEvent, CanonicalModelRequest, ProviderConfig } from "../../../src/model/protocol/canonical.js";
 import type { GoogleClientFactory } from "../../../src/model/providers/google/client.js";
-import { resolveStreamIdleTimeout, streamModel } from "../../../src/model/streaming/streamModel.js";
+import { complete, resolveStreamIdleTimeout, streamModel } from "../../../src/model/streaming/streamModel.js";
 
 function createConfig(input: { timeoutMs?: number; streamMaxRetries?: number; streamIdleTimeoutMs?: number } = {}) {
   return parseModelConfig({
@@ -73,6 +73,45 @@ test("stream idle timeout defaults independently from provider request timeout",
   assert.equal(resolveStreamIdleTimeout(provider), 600_000);
   assert.equal(resolveStreamIdleTimeout(provider, { streamTimeoutMs: 1234 }), 1234);
   assert.equal(resolveStreamIdleTimeout({ ...provider, retry: { streamIdleTimeoutMs: 5678 } }), 5678);
+});
+
+test("non-streaming complete keeps the default retry delay linear and unjittered", async () => {
+  const config = parseModelConfig({
+    providers: {
+      test: {
+        protocol: "openai",
+        url: "https://example.test/v1",
+        apiKey: "test-key",
+        retry: { requestMaxRetries: 1, baseDelayMs: 1 },
+        models: { "test-model": {} },
+      },
+    },
+  });
+  const warnings: string[] = [];
+  const originalWarn = console.warn;
+  const originalRandom = Math.random;
+  let requests = 0;
+  try {
+    Math.random = () => 1;
+    console.warn = (message: unknown) => { warnings.push(String(message)); };
+    const response = await complete(createRequest(), config, {
+      fetch: async () => {
+        requests += 1;
+        if (requests === 1) throw new Error("ECONNRESET while connecting");
+        return new Response(JSON.stringify({
+          choices: [{ message: { role: "assistant", content: "recovered" }, finish_reason: "stop" }],
+        }), { headers: { "content-type": "application/json" } });
+      },
+    });
+    assert.ok(response);
+  } finally {
+    Math.random = originalRandom;
+    console.warn = originalWarn;
+  }
+
+  assert.equal(requests, 2);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0]!, /delay=1ms/);
 });
 
 test("stream request setup uses the stream timeout instead of provider timeout", async () => {

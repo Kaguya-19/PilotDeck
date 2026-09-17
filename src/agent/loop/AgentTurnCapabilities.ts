@@ -353,6 +353,7 @@ function createToolExecutionPort(
   // prototype or rely on `this`. The narrow frozen view preserves both cases.
   return Object.freeze({
     list: () => port.list.call(port),
+    ...(port.refresh ? { refresh: () => port.refresh!.call(port) } : {}),
     executeAll: (calls, context, execution) => port.executeAll.call(port, calls, context, execution),
     ...extensions,
   });

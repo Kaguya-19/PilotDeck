@@ -46,6 +46,10 @@ export class HostToolCheckpoint {
       allowedReadFiles: [...this.allowedReadFiles],
     }) ?? {};
   }
+
+  allowReadFiles(filePaths: Iterable<string> | undefined): void {
+    for (const filePath of filePaths ?? []) this.allowedReadFiles.add(filePath);
+  }
 }
 
 function cloneSeedState(seedState: AgentLoopSeedState | undefined): AgentLoopSeedState | undefined {

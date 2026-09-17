@@ -34,7 +34,7 @@
             "methods": {
               "type": "array",
               "uniqueItems": true,
-              "items": { "enum": ["prepare", "stream", "stream_next", "close_stream"] }
+              "items": { "enum": ["prepare", "stream", "stream_next", "close_stream", "get_metadata"] }
             }
           }
         },
@@ -84,7 +84,7 @@
             "methods": {
               "type": "array",
               "uniqueItems": true,
-              "items": { "enum": ["execute", "execute_batch", "plan_todo"] }
+              "items": { "enum": ["execute", "execute_batch", "list_tools", "plan_todo"] }
             }
           }
         },

@@ -73,7 +73,13 @@ export async function complete(
 ) {
   const nonStreamingRequest = { ...request, stream: false };
   const { provider } = validateModelRequest(nonStreamingRequest, config);
-  const retryPolicy = options.retryPolicy ?? createNativeRetryPolicy({ defaultMaxRetries: DEFAULT_REQUEST_MAX_RETRIES });
+  // `complete()` historically used a linear request retry delay. Streaming
+  // keeps the shared jittered policy because continuation/reconnect retries
+  // intentionally retain that behavior.
+  const retryPolicy = options.retryPolicy ?? createNativeRetryPolicy({
+    defaultMaxRetries: DEFAULT_REQUEST_MAX_RETRIES,
+    defaultJitter: 0,
+  });
   const maxRetries = retryPolicy.decide({ provider, kind: "request", attempt: 0 }).maxRetries;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {

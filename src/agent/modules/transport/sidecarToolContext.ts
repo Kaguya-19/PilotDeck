@@ -1,4 +1,4 @@
-import type { PermissionContext, PermissionRuleSet } from "../../../permission/index.js";
+import type { PermissionContext } from "../../../permission/index.js";
 import type { PilotDeckPlanTodoStateHandle, } from "../../../tool/protocol/types.js";
 import type { PilotDeckToolRuntimeContext } from "../../../tool/index.js";
 import type { AgentLoopInput } from "../../loop/AgentLoop.js";
@@ -31,7 +31,7 @@ export function createSidecarPermissionRequestContextServices(
 ): PermissionRequestContextServicesPort {
   return Object.freeze({
     bindTurn: (binding) => {
-      const context = createSidecarToolContextBuilder({ ...binding, ports });
+      const context = createSidecarToolContextBuilder({ ...binding, ports, includeAuxiliaryModel: false });
       return Object.freeze({
         toolRuntimeContext: (value: unknown) => context.toolRuntimeContext(value),
       });
@@ -45,7 +45,7 @@ export function createSidecarContextRequestIdentityServices(
 ): ContextRequestIdentityServicesPort {
   return Object.freeze({
     bindTurn: (binding) => {
-      const context = createSidecarToolContextBuilder({ ...binding, ports });
+      const context = createSidecarToolContextBuilder({ ...binding, ports, includeAuxiliaryModel: false });
       return Object.freeze({ contextIdentity: context.contextIdentity });
     },
   });
@@ -57,8 +57,16 @@ export function createSidecarToolContextBuilder(options: {
   input: AgentLoopInput;
   ports: SidecarToolContextPorts;
   checkpoint: HostToolCheckpoint;
+  includeAuxiliaryModel?: boolean;
 }) {
   const permissionContext = (): PermissionContext => effectivePermissionContext(options.config, options.input);
+  const auxiliaryModel = options.includeAuxiliaryModel === false
+    ? undefined
+    : options.ports.model?.forTurn?.({
+        sessionId: options.input.sessionId,
+        turnId: options.input.turnId,
+        projectPath: options.config.cwd,
+      }) ?? options.ports.model;
 
   return {
     permissionContext,
@@ -115,7 +123,7 @@ export function createSidecarToolContextBuilder(options: {
           : {}),
         env: buildTurnEnvironment(config.env, config.cwd, input.sessionId, input.turnId),
         ...(config.maxResultBytes ? { maxResultBytes: config.maxResultBytes } : {}),
-        ...(ports.model ? { model: ports.model } : {}),
+        ...(auxiliaryModel ? { model: auxiliaryModel } : {}),
         ...(ports.interaction?.elicitation ? { elicitation: ports.interaction.elicitation } : {}),
         ...(ports.interaction?.userDialog ? { userDialog: ports.interaction.userDialog } : {}),
         ...(ports.toolExecution?.fileHistory ? { fileHistory: ports.toolExecution.fileHistory } : {}),
@@ -177,17 +185,12 @@ export function createSidecarToolContextBuilder(options: {
 }
 
 function effectivePermissionContext(config: AgentRuntimeConfig, input: AgentLoopInput): PermissionContext {
-  const rules: PermissionRuleSet = {
-    allow: input.permissionRules?.allow ?? config.permissionContext.rules.allow,
-    deny: input.permissionRules?.deny ?? config.permissionContext.rules.deny,
-    ask: input.permissionRules?.ask ?? config.permissionContext.rules.ask,
-  };
   return {
     ...config.permissionContext,
     cwd: config.cwd,
     mode: config.permissionMode,
     canPrompt: input.canPrompt ?? config.permissionContext.canPrompt,
-    rules,
+    rules: config.permissionContext.rules,
   };
 }
 
