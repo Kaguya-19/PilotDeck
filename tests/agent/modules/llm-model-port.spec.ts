@@ -200,6 +200,70 @@ test("host model consumer uses an advertised prepare call and keeps host routing
   assert.equal(events.length, 1);
 });
 
+test("host model consumer materializes an existing preparation without exposing host opaque state", async () => {
+  const calls: Array<Record<string, unknown>> = [];
+  const port = createHostModelInvokerPort(async (moduleCall) => {
+    const payload = moduleCall.payload as Record<string, unknown>;
+    calls.push({ operation: payload.operation, preparationId: payload.preparationId, request: payload.request });
+    if (payload.operation === "prepare") {
+      return {
+        kind: "response" as const,
+        messageId: "prepared",
+        inReplyTo: "prepare",
+        ok: true,
+        payload: {
+          prepared: {
+            request: {
+              ...request,
+              provider: "provider-b",
+              model: "model-b",
+              systemPrompt: "provider prompt",
+              tools: [{ name: "provider_tool" }],
+              maxOutputTokens: 64,
+            },
+            provider: "provider-b",
+            model: "model-b",
+            opaque: { hostOnly: true },
+          },
+        },
+      };
+    }
+    if (payload.operation === "materialize_prepared_request") {
+      assert.equal((payload.request as CanonicalModelRequest).systemPrompt, "candidate prompt");
+      return {
+        kind: "response" as const,
+        messageId: "materialized",
+        inReplyTo: "materialize",
+        ok: true,
+        payload: {
+          request: {
+            ...(payload.request as CanonicalModelRequest),
+            systemPrompt: "provider prompt",
+            tools: [{ name: "provider_tool" }],
+            maxOutputTokens: 64,
+          },
+        },
+      };
+    }
+    throw new Error(`Unexpected operation: ${payload.operation}`);
+  }, { methods: ["prepare", "materialize_prepared_request"], uuid: () => "fixed" });
+
+  const prepared = await port.prepare({ request, context });
+  const materialized = await port.materializePreparedRequest?.(prepared, {
+    ...request,
+    provider: "provider-b",
+    model: "model-b",
+    messages: [{ role: "user", content: [{ type: "text", text: "compacted" }] }],
+    systemPrompt: "candidate prompt",
+  } as CanonicalModelRequest);
+
+  assert.equal(materialized?.systemPrompt, "provider prompt");
+  assert.equal(materialized?.tools?.[0]?.name, "provider_tool");
+  assert.equal(materialized?.maxOutputTokens, 64);
+  assert.equal(calls[0]?.preparationId, calls[1]?.preparationId);
+  assert.equal((calls[1]?.request as { opaque?: unknown }).opaque, undefined);
+});
+
 test("host model consumer preserves one prepared request snapshot and identity when a caller retries the module call", async () => {
   const calls: Array<{
     requestId?: string;

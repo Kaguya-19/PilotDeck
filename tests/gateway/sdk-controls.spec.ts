@@ -592,7 +592,7 @@ test("submit_turn applies SDK session config before creating the native session"
   const router = {
     hasActiveTurn: () => false,
     beginTurn: () => true,
-    close: async () => { calls.push("close"); },
+    markSessionDirty: () => { calls.push("dirty"); return true; },
     getOrCreate: async () => { calls.push("create"); return session; },
     endTurn: () => { calls.push("end"); },
   } as unknown as SessionRouter;
@@ -627,7 +627,7 @@ test("submit_turn applies SDK session config before creating the native session"
     },
   })) events.push(event.type);
 
-  assert.deepEqual(calls.slice(0, 3), ["config", "close", "create"]);
+  assert.deepEqual(calls.slice(0, 3), ["config", "dirty", "create"]);
   assert.deepEqual(config, {
     systemPrompt: "review changes",
     appendSystemPrompt: "Keep answers concise.",
@@ -645,6 +645,277 @@ test("submit_turn applies SDK session config before creating the native session"
   });
   assert.ok(events.includes("turn_completed"));
 });
+
+test("submit_turn reserves the session while an async SDK config update is pending", async () => {
+  let activeRunId: string | undefined;
+  let releaseConfig!: () => void;
+  let configStarted!: () => void;
+  const configStartedPromise = new Promise<void>((resolve) => { configStarted = resolve; });
+  const configGate = new Promise<void>((resolve) => { releaseConfig = resolve; });
+  const session = {
+    async *submit() {
+      yield { type: "input_accepted", sessionId: "sdk:config-race", turnId: "config-run", messages: [] };
+      yield {
+        type: "turn_completed",
+        sessionId: "sdk:config-race",
+        turnId: "config-run",
+        result: { type: "success", stopReason: "completed", usage: {} },
+      };
+    },
+  } as unknown as AgentSession;
+  const router = {
+    hasActiveTurn: () => activeRunId !== undefined,
+    beginTurn: (_sessionKey: string, runId: string) => {
+      if (activeRunId !== undefined) return false;
+      activeRunId = runId;
+      return true;
+    },
+    endTurn: (_sessionKey: string, runId: string) => {
+      if (activeRunId === runId) activeRunId = undefined;
+    },
+    markSessionDirty: () => true,
+    getOrCreate: async () => session,
+  } as unknown as SessionRouter;
+  const gateway = new InProcessGateway(router, {
+    setSdkSessionConfig: async () => {
+      configStarted();
+      await configGate;
+      return { changed: true };
+    },
+  });
+
+  const configTurn = (async () => {
+    const events = [];
+    for await (const event of gateway.submitTurn({
+      sessionKey: "sdk:config-race",
+      channelKey: "api_server",
+      message: "configure and run",
+      runId: "config-run",
+      sdkSessionConfig: { systemPrompt: "configured" },
+    })) events.push(event);
+    return events;
+  })();
+
+  await configStartedPromise;
+  assert.equal(router.beginTurn("sdk:config-race", "concurrent-run"), false);
+  releaseConfig();
+  const events = await configTurn;
+  assert.ok(events.some((event) => event.type === "turn_completed"));
+  assert.equal(activeRunId, undefined);
+});
+
+test("abort_turn waits for SDK config admission to unwind and prevents submit", async () => {
+  let activeRunId: string | undefined;
+  let releaseConfig!: () => void;
+  let configStarted!: () => void;
+  let receivedSignal: AbortSignal | undefined;
+  let submitCalls = 0;
+  const started = new Promise<void>((resolve) => { configStarted = resolve; });
+  const gate = new Promise<void>((resolve) => { releaseConfig = resolve; });
+  const session = {
+    abort() {},
+    async *submit() {
+      submitCalls += 1;
+      yield { type: "turn_completed", sessionId: "sdk:abort-admission", turnId: "config-run", result: { type: "success", stopReason: "completed", usage: {} } };
+    },
+  } as unknown as AgentSession;
+  const router = {
+    hasActiveTurn: () => activeRunId !== undefined,
+    beginTurn: (_sessionKey: string, runId: string) => {
+      if (activeRunId !== undefined) return false;
+      activeRunId = runId;
+      return true;
+    },
+    activeTurnRunId: () => activeRunId,
+    endTurn: (_sessionKey: string, runId: string) => {
+      if (activeRunId === runId) activeRunId = undefined;
+    },
+    abort: async () => session.abort(),
+    markSessionDirty: () => true,
+    getOrCreate: async () => session,
+  } as unknown as SessionRouter;
+  const gateway = new InProcessGateway(router, {
+    setSdkSessionConfig: async (_sessionKey, _config, _projectKey, signal) => {
+      receivedSignal = signal;
+      configStarted();
+      await gate; // Deliberately ignore cancellation until the provider returns.
+      return { changed: true };
+    },
+  });
+
+  const turn = (async () => {
+    const events = [];
+    for await (const event of gateway.submitTurn({
+      sessionKey: "sdk:abort-admission",
+      channelKey: "api_server",
+      message: "configure and run",
+      runId: "config-run",
+      sdkSessionConfig: { systemPrompt: "configured" },
+    })) events.push(event);
+    return events;
+  })();
+  await started;
+  let abortReturned = false;
+  const abort = gateway.abortTurn({ sessionKey: "sdk:abort-admission", runId: "config-run" })
+    .then(() => { abortReturned = true; });
+  await Promise.resolve();
+  assert.equal(receivedSignal?.aborted, true);
+  assert.equal(abortReturned, false);
+  releaseConfig();
+  const events = await turn;
+  await abort;
+
+  assert.equal(abortReturned, true);
+  assert.equal(submitCalls, 0);
+  assert.equal(activeRunId, undefined);
+  assert.deepEqual(events.map((event) => event.type), ["turn_completed"]);
+  assert.equal(events[0]?.type === "turn_completed" ? events[0].finishReason : undefined, "aborted_streaming");
+});
+
+test("abort_turn propagates cancellation to a responsive SDK config provider", async () => {
+  let activeRunId: string | undefined;
+  let configStarted!: () => void;
+  let providerObservedAbort = false;
+  let submitCalls = 0;
+  const started = new Promise<void>((resolve) => { configStarted = resolve; });
+  const session = {
+    abort() {},
+    async *submit() {
+      submitCalls += 1;
+      yield { type: "turn_completed", sessionId: "sdk:abort-responsive", turnId: "config-run", result: { type: "success", stopReason: "completed", usage: {} } };
+    },
+  } as unknown as AgentSession;
+  const router = {
+    hasActiveTurn: () => activeRunId !== undefined,
+    beginTurn: (_sessionKey: string, runId: string) => {
+      if (activeRunId !== undefined) return false;
+      activeRunId = runId;
+      return true;
+    },
+    activeTurnRunId: () => activeRunId,
+    endTurn: (_sessionKey: string, runId: string) => {
+      if (activeRunId === runId) activeRunId = undefined;
+    },
+    abort: async () => session.abort(),
+    markSessionDirty: () => true,
+    getOrCreate: async () => session,
+  } as unknown as SessionRouter;
+  const gateway = new InProcessGateway(router, {
+    setSdkSessionConfig: async (_sessionKey, _config, _projectKey, signal) => {
+      configStarted();
+      await new Promise<void>((resolve) => {
+        if (signal?.aborted) {
+          providerObservedAbort = true;
+          resolve();
+          return;
+        }
+        signal?.addEventListener("abort", () => {
+          providerObservedAbort = true;
+          resolve();
+        }, { once: true });
+      });
+      return { changed: true };
+    },
+  });
+
+  const turn = (async () => {
+    const events = [];
+    for await (const event of gateway.submitTurn({
+      sessionKey: "sdk:abort-responsive",
+      channelKey: "api_server",
+      message: "configure and run",
+      runId: "config-run",
+      sdkSessionConfig: { systemPrompt: "configured" },
+    })) events.push(event);
+    return events;
+  })();
+  await started;
+  await gateway.abortTurn({ sessionKey: "sdk:abort-responsive", runId: "config-run" });
+  const events = await turn;
+
+  assert.equal(providerObservedAbort, true);
+  assert.equal(submitCalls, 0);
+  assert.equal(activeRunId, undefined);
+  assert.deepEqual(events.map((event) => event.type), ["turn_completed"]);
+  assert.equal(events[0]?.type === "turn_completed" ? events[0].finishReason : undefined, "aborted_streaming");
+});
+
+for (const blockedStage of ["session_creation", "attachment_preparation", "model_selection"] as const) {
+  test(`abort_turn prevents submit while ${blockedStage} is pending`, async () => {
+    let activeRunId: string | undefined;
+    let release!: () => void;
+    let started!: () => void;
+    let submitCalls = 0;
+    const stageStarted = new Promise<void>((resolve) => { started = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const session = {
+      abort() {},
+      async *submit() {
+        submitCalls += 1;
+        yield { type: "turn_completed", sessionId: "sdk:late-abort", turnId: "late-run", result: { type: "success", stopReason: "completed", usage: {} } };
+      },
+    } as unknown as AgentSession;
+    const router = {
+      beginTurn: (_sessionKey: string, runId: string) => {
+        if (activeRunId !== undefined) return false;
+        activeRunId = runId;
+        return true;
+      },
+      activeTurnRunId: () => activeRunId,
+      endTurn: (_sessionKey: string, runId: string) => {
+        if (activeRunId === runId) activeRunId = undefined;
+      },
+      abort: async () => session.abort(),
+      getOrCreate: async () => {
+        if (blockedStage === "session_creation") {
+          started();
+          await gate;
+        }
+        return session;
+      },
+    } as unknown as SessionRouter;
+    const gateway = new InProcessGateway(router, {
+      attachmentTurnComposer: {
+        prepare: async ({ message }) => {
+          if (blockedStage === "attachment_preparation") {
+            started();
+            await gate;
+          }
+          return { agentInput: { type: "text", text: message }, allowedReadFiles: [] };
+        },
+      },
+      resolveTurnModelSelection: async () => {
+        if (blockedStage === "model_selection") {
+          started();
+          await gate;
+        }
+        return { source: "default" };
+      },
+    });
+
+    const turn = (async () => {
+      const events = [];
+      for await (const event of gateway.submitTurn({
+        sessionKey: "sdk:late-abort",
+        channelKey: "api_server",
+        message: "run",
+        runId: "late-run",
+      })) events.push(event);
+      return events;
+    })();
+    await stageStarted;
+    const abort = gateway.abortTurn({ sessionKey: "sdk:late-abort", runId: "late-run" });
+    await Promise.resolve();
+    release();
+    const events = await turn;
+    await abort;
+
+    assert.equal(submitCalls, 0);
+    assert.equal(activeRunId, undefined);
+    assert.deepEqual(events.map((event) => event.type), ["turn_completed"]);
+    assert.equal(events[0]?.type === "turn_completed" ? events[0].finishReason : undefined, "aborted_streaming");
+  });
+}
 
 test("submit_turn validates and forwards maxBudgetUsd without making it SDK-client state", async () => {
   let received: unknown;

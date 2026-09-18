@@ -14,7 +14,14 @@ export const HOST_CONTEXT_MODULE_METHODS = [
 ] as const;
 
 /** Host-advertised model operations supported by Module Protocol v2. */
-export const HOST_MODEL_MODULE_METHODS = ["prepare", "stream", "stream_next", "close_stream", "get_metadata"] as const;
+export const HOST_MODEL_MODULE_METHODS = [
+  "prepare",
+  "materialize_prepared_request",
+  "stream",
+  "stream_next",
+  "close_stream",
+  "get_metadata",
+] as const;
 
 /** Host-advertised model-budget operations supported by Module Protocol v2. */
 export const HOST_BUDGET_MODULE_METHODS = [

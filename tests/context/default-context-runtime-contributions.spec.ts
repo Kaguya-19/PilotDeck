@@ -124,6 +124,27 @@ test("user-message runtime context is durable-shaped and precedes the latest use
   assert.deepEqual(result.materialization?.runtimeContextMessages, [result.messages[0]]);
 });
 
+test("user-message runtime context replaces a prior request-only projection", async () => {
+  const runtime = new DefaultContextRuntime({ now });
+  const first = await runtime.prepareForModel(input({ runtimeContextSurface: "user_message" }));
+  const second = await runtime.prepareForModel(input({
+    runtimeContextSurface: "user_message",
+    messages: [
+      ...first.messages,
+      { role: "assistant", content: [{ type: "text", text: "first response" }] },
+      { role: "user", content: [{ type: "text", text: "follow up" }] },
+    ],
+  }));
+
+  assert.equal(
+    second.messages.filter((message) => message.metadata?.purpose === "runtime_context").length,
+    1,
+  );
+  const latestBlock = second.messages.at(-1)?.content[0];
+  assert.equal(latestBlock?.type, "text");
+  if (latestBlock?.type === "text") assert.equal(latestBlock.text, "follow up");
+});
+
 function input(overrides: Partial<ContextPrepareInput> = {}): ContextPrepareInput {
   return {
     sessionId: "session-1",

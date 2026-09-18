@@ -173,6 +173,68 @@ test("local Gateway pre-session permission grants seed the same rule provider as
   await local.gateway.closeSession({ sessionKey: "permission-pre-grant" });
 });
 
+test("local Gateway preserves live permission mode across dirty session recreation", async (t) => {
+  const fixture = await createFixture(t);
+  const observedModes: Array<string | undefined> = [];
+  const observedBaseModes: Array<string | undefined> = [];
+  let runs = 0;
+  const local = createLocalGateway({
+    projectRoot: fixture.root,
+    pilotHome: fixture.root,
+    __testAgentLoopFactory: () => ({
+      snapshotFileState: () => ({}),
+      async *run(input: AgentLoopInput): AsyncGenerator<AgentEvent, AgentLoopRunResult, unknown> {
+        runs += 1;
+        observedModes.push(input.permissionMode);
+        observedBaseModes.push(input.basePermissionMode);
+        if (runs === 1) {
+          yield { type: "mode_change_requested", sessionId: input.sessionId, turnId: input.turnId, mode: "plan" };
+        } else {
+          yield { type: "mode_change_requested", sessionId: input.sessionId, turnId: input.turnId, mode: "default" };
+        }
+        const result: AgentLoopRunResult = {
+          result: {
+            type: "success",
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            finalMessage: { role: "assistant", content: [{ type: "text", text: "done" }] },
+            stopReason: "completed",
+            usage: {},
+            permissionDenials: [],
+            turns: 1,
+            startedAt: new Date().toISOString(),
+            completedAt: new Date().toISOString(),
+          },
+          messages: input.messages,
+        };
+        yield { type: "turn_completed", sessionId: input.sessionId, turnId: input.turnId, result: result.result };
+        return result;
+      },
+    }),
+  });
+  t.after(() => local.dispose());
+
+  for await (const _event of local.gateway.submitTurn({
+    sessionKey: "permission-dirty-recreate",
+    channelKey: "test",
+    projectKey: fixture.root,
+    message: "enter plan",
+    runId: "permission-dirty-1",
+  })) {}
+  for await (const _event of local.gateway.submitTurn({
+    sessionKey: "permission-dirty-recreate",
+    channelKey: "test",
+    projectKey: fixture.root,
+    message: "continue after config",
+    runId: "permission-dirty-2",
+    sdkSessionConfig: { systemPrompt: "configured" },
+  })) {}
+
+  assert.deepEqual(observedModes, ["default", "plan"]);
+  assert.deepEqual(observedBaseModes, ["default", "default"]);
+  await local.gateway.closeSession({ sessionKey: "permission-dirty-recreate" });
+});
+
 async function createFixture(t: { after(callback: () => void | Promise<void>): void }): Promise<{ root: string }> {
   const root = await mkdtemp(join(tmpdir(), "pilotdeck-permission-roundtrip-"));
   t.after(() => rm(root, { recursive: true, force: true }));

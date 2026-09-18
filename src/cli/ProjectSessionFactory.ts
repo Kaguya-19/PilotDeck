@@ -118,12 +118,12 @@ export class ProjectSessionFactory<Runtime extends ProjectSessionFactoryRuntime>
 
   async createSession(context: GatewaySessionContext) {
     const prepared = await this.prepare(context);
-    const storage = await this.options.createStorage({
-      runtime: prepared.runtime,
-      sessionKey: context.sessionKey,
-      now: this.options.now,
-    });
     try {
+      const storage = await this.options.createStorage({
+        runtime: prepared.runtime,
+        sessionKey: context.sessionKey,
+        now: this.options.now,
+      });
       const resumed = await resumeAgentSession({
         sessionId: context.sessionKey,
         config: prepared.agentConfig,
@@ -151,13 +151,14 @@ export class ProjectSessionFactory<Runtime extends ProjectSessionFactoryRuntime>
 
   async recreateSession(context: GatewaySessionContext, previousSession: AgentSession) {
     const prepared = await this.prepare(context);
-    const previous = previousSession.snapshotForRuntimeReload();
-    const storage = await this.options.createStorage({
-      runtime: prepared.runtime,
-      sessionKey: context.sessionKey,
-      now: this.options.now,
-    });
+    let storage: Awaited<ReturnType<ProjectSessionFactoryOptions<Runtime>["createStorage"]>> | undefined;
     try {
+      const previous = previousSession.snapshotForRuntimeReload();
+      storage = await this.options.createStorage({
+        runtime: prepared.runtime,
+        sessionKey: context.sessionKey,
+        now: this.options.now,
+      });
       const readResult = await storage.restore();
       if (previous.transcriptWriterState) {
         storage.events.restoreState(previous.transcriptWriterState);
@@ -189,7 +190,7 @@ export class ProjectSessionFactory<Runtime extends ProjectSessionFactoryRuntime>
     } catch (error) {
       await this.releasePreparedResources(prepared).catch(() => undefined);
       try {
-        await storage.dispose();
+        await storage?.dispose();
       } catch (rollbackError) {
         throw new AggregateError(
           [error, rollbackError],

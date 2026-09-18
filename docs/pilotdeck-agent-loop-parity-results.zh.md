@@ -22,10 +22,10 @@ Gateway/WebSocket、module protocol 和 durable callback 的确定性语义一�
 | 构建 | `pnpm build` | PASS |
 | Protocol/ports/sidecar/Gateway focused tests | 下方明确文件列表 | 109/109 PASS |
 | SDK package tests | `pnpm --filter @pilotdeck/sdk test` | 123/123 PASS |
-| Harness contract/negative-control | `cd tools/agent-loop-parity && python3 -m unittest test_trace.py` | 18/18 PASS |
+| Harness contract/negative-control | `cd tools/agent-loop-parity && python3 -m unittest test_trace.py` | 42/42 PASS |
 | Gateway 旧生产路径基线 | `run.py --comparison same-version --surface gateway --scenario all` | 48/48 PASS；仅证明当时的 scenario 集合 |
 | Gateway 当前生产路径 gate（2026-09-17） | `run.py --comparison same-version --surface gateway --scenario all` | 49/49 PASS；`FAIL=0`、`BLOCKED=0`、oracle failure `=0` |
-| Gateway metadata/configuration gate（2026-09-17） | `run.py --comparison same-version --surface gateway --scenario all` | 52/52 PASS；`FAIL=0`、`BLOCKED=0`、oracle failure `=0` |
+| Gateway merge-closure gate（2026-09-18） | `run.py --comparison both --surface gateway --scenario all --pilotdeck-baseline origin/main` | 53 个场景全部执行；52 个 native/sidecar strict shared；`deadline` 保留 2 条精确声明的 transport settlement difference；exact contract 后 `FAIL=0`、`BLOCKED=0`、oracle failure `=0` |
 | 本轮 metadata focused suites | `default-factory`、`llm-model-port`、`sidecar-client` | 72/72 PASS |
 
 全量命令：
@@ -47,22 +47,34 @@ node --test --test-force-exit --test-timeout 300000 \
   dist/tests/sdk/seed-read-state-e2e.spec.js
 python3 tools/agent-loop-parity/run.py \
   --pilotdeck-root /Users/a1/Desktop/claw/openbmb/PilotDeck-sdk-core-integration \
-  --comparison same-version \
+  --pilotdeck-baseline origin/main \
+  --comparison both \
   --surface gateway \
-  --scenario all
+  --scenario all \
+  --output /tmp/pilotdeck-parity-merge-closure-final
 ```
 
-当前全量摘要：
+当前全量验收口径：
 
 ```json
 {
-  "scenarios": 52,
+  "scenarios": 53,
+  "sameVersionStrictShared": 52,
+  "sameVersionExpectedExtensions": {
+    "deadline/PilotDeck": 2
+  },
+  "baselineApplicable": 34,
+  "baselineNotApplicable": 19,
   "blocked": [],
   "failed": [],
-  "oracleFailures": [],
-  "knownGaps": []
+  "oracleFailures": []
 }
 ```
+
+`deadline` 的两条 extension 不是 comparator normalization：native 可确认本进程执行已 abort，sidecar 在 host
+没有提供可靠终态时必须保留 operation `result_unknown`。`completed`、`failed`、`cancelled` 与
+`result_unknown` 仍严格区分。baseline comparison 中 `origin/main` 只适用于 34 个当前场景，另外 19 个因 main
+没有对应 fixture/capability 标记为 `notApplicable`，不能计为 PASS。
 
 ## 生产路径证据
 
@@ -75,7 +87,7 @@ sidecar oracle 要求每个适用场景同时出现：
 缺失任一证据均分类为 `BLOCKED`，不能由 comparator 结果变成 PASS。harness negative-control 已验证 fake runner
 或缺少 handshake 时会失败关闭。
 
-新增七个闭环场景的原始 trace 结果：
+新增闭环场景的原始 trace 结果：
 
 | 场景 | 生产 module 证据 | durable / 行为结果 |
 | --- | --- | --- |
@@ -95,11 +107,23 @@ sidecar oracle 要求每个适用场景同时出现：
 
 ## 结论
 
-`48/48` 与 `49/49` 是历史基线；当前 `52/52` 已在正式 stdio factory 下重跑，并补充 metadata/configuration 生产路径覆盖。`plan_mode_host_policy` 验证四轮 host-owned
+`48/48` 与 `49/49` 是历史基线；当前 53 个场景已在正式 stdio factory 下全部重跑。除 `deadline` 的精确
+transport settlement contract 外，52 个场景保持 native/sidecar strict shared；exact contract 生效后
+`FAIL=0`、`BLOCKED=0`、oracle failure `=0`。`plan_mode_host_policy` 验证四轮 host-owned
 permission mode 生命周期、plan-mode 写拒绝和退出后的一次副作用；projected-history 场景同时验证实际 `maxContextMessages`
 投影与原始/replacement request-level budget。trace invocation identity、必跑场景清单和 baseline oracle 缺失均为
 `BLOCKED` 或失败，不能以 comparator 的空差异替代。model pull stream 使用 `stream_next`，旧 `stream` 仅保留 batched
 compatibility fallback。
+
+与 `origin/main` 的 34 个适用场景使用 exact baseline extension contract：current 的 durable timeout status、durable
+`steer_applied` 与 `auto_compact` 增量必须逐路径、逐值匹配声明；额外差异仍为 FAIL。main system prompt 中的
+`<user-context>`/`<available-skills>` 与 current runtime composition 会投影到同一 canonical 结构后实际比较，skill
+路径仅规范化为 `<skill-path>`，内容不会被删除。
+
+baseline 的 `context.budget` 先按所属 model request 配对：main 的 request 后发 budget 与 current 的 request 前发 budget
+映射为同一请求属性。只有已声明的 prompt/tool/runtime-context 组合差异导致原始 token 输入不同，才比较共同的
+limit/state 决策；原始请求相同时仍逐值比较 usage/ratio。缺失、重复、未配对或篡改 budget 均为 semantic difference。
+`runtime_context` 是 request-only 投影，下一次 prepare 必须替换旧快照；重复标签、未知残余文本和非文本 block 继续失败。
 
 报告中的 format warning 只涉及已声明的 transport/envelope、随机 identity 或 actor-local sequence 差异；terminal、
 错误码、模型请求、工具调用与副作用、permission、checkpoint、mailbox、boundary 和 transcript 可见状态仍严格比较。

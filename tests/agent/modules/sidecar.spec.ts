@@ -769,6 +769,72 @@ test("sidecar abort releases a pending module call", async () => {
   assert.equal(terminal?.outcome, "cancelled");
 });
 
+test("sidecar classifies a matching host timeout cancel as result_unknown", async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const lines: Record<string, unknown>[] = [];
+  let buffered = "";
+  output.on("data", (chunk: Buffer) => {
+    buffered += chunk.toString("utf8");
+    for (const line of buffered.split("\n").slice(0, -1)) {
+      const message = JSON.parse(line) as Record<string, unknown>;
+      lines.push(message);
+      if (message.inReplyTo === "execute-timeout" && message.ok === true) {
+        input.write(`${JSON.stringify({
+          kind: "request",
+          messageId: "cancel-timeout",
+          method: "cancel",
+          runId: "run-timeout",
+          operationId: "op-timeout",
+          requestId: "request-timeout",
+          reason: "timeout:run-timeout",
+        })}\n`);
+        input.end();
+      }
+    }
+    buffered = buffered.slice(buffered.lastIndexOf("\n") + 1);
+  });
+  const factory: SidecarExecutionFactory = ({ abortSignal }) => ({
+    loop: {
+      async *run() {
+        if (!abortSignal.aborted) {
+          await new Promise<void>((resolve) => abortSignal.addEventListener("abort", () => resolve(), { once: true }));
+        }
+        return {
+          result: {
+            type: "aborted",
+            sessionId: "session-timeout",
+            turnId: "turn-timeout",
+            stopReason: "aborted_streaming",
+            usage: {},
+            permissionDenials: [],
+            turns: 1,
+            startedAt: "2026-09-18T00:00:00.000Z",
+            completedAt: "2026-09-18T00:00:00.001Z",
+          },
+          messages: [],
+        };
+      },
+    } as unknown as AgentLoop,
+    input: {} as never,
+  });
+  const serving = new AgentLoopSidecarServer(factory).serve(input, output);
+  input.write(`${JSON.stringify({
+    kind: "request",
+    messageId: "execute-timeout",
+    method: "execute",
+    runId: "run-timeout",
+    operationId: "op-timeout",
+    requestId: "request-timeout",
+    payload: {},
+  })}\n`);
+  await serving;
+
+  const terminal = lines.find((message) => message.kind === "event" && message.final === true);
+  assert.equal(terminal?.outcome, "result_unknown");
+  assert.equal(terminal?.code, "DEADLINE_EXCEEDED");
+});
+
 test("sidecar fences stale cancel and duplicate execute against the active operation identity", async () => {
   const input = new PassThrough();
   const output = new PassThrough();

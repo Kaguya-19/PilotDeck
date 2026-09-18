@@ -178,7 +178,10 @@ import type { GatewayTurnReplacementCoordinatorPort } from "./GatewayTurnReplace
 import { GatewayInteractionCoordinator } from "./GatewayInteractionCoordinator.js";
 import type { GatewayInteractionCoordinatorPort } from "./GatewayInteractionCoordinatorPort.js";
 import { GatewayTurnCompletionFence } from "./GatewayTurnCompletionFence.js";
-import type { GatewayTurnCompletionFencePort } from "./GatewayTurnCompletionFencePort.js";
+import type {
+  GatewayTurnCompletionFencePort,
+  GatewayTurnCompletionHandle,
+} from "./GatewayTurnCompletionFencePort.js";
 import { GatewayManualCompactionCoordinator } from "./GatewayManualCompactionCoordinator.js";
 import type { GatewayManualCompactionCoordinatorPort } from "./GatewayManualCompactionCoordinatorPort.js";
 import type { GatewayElicitationBus } from "../elicitation/GatewayElicitationBus.js";
@@ -282,6 +285,7 @@ export type InProcessGatewayOptions = {
     sessionKey: string,
     config: GatewaySessionSdkConfig,
     projectKey?: string,
+    signal?: AbortSignal,
   ) => Promise<{ changed: boolean }> | { changed: boolean };
   assertSdkModelAllowed?: (
     sessionKey: string,
@@ -725,7 +729,24 @@ export class InProcessGateway implements Gateway {
     }
 
     const runId = input.runId ?? this.uuid();
+    const setSdkSessionConfig = this.options.setSdkSessionConfig;
     const replacementClaim = this.turnReplacementCoordinator.claimForSubmit(input.sessionKey, runId);
+    let turnReserved = false;
+    let turnCompletion: GatewayTurnCompletionHandle | undefined;
+    const reserveCompletionFence = () => {
+      turnCompletion ??= this.turnCompletionFence.begin(input.sessionKey, runId);
+    };
+    const releasePreflight = () => {
+      if (turnReserved) {
+        this.router.endTurn(input.sessionKey, runId);
+        turnReserved = false;
+      }
+      if (turnCompletion) {
+        this.turnCompletionFence.complete(input.sessionKey, turnCompletion);
+        turnCompletion = undefined;
+      }
+      this.turnReplacementCoordinator.releaseSubmitClaim(input.sessionKey, runId);
+    };
     if (replacementClaim === "conflict") {
       const message = "This session is waiting for its edited replacement turn to be accepted.";
       yield {
@@ -740,7 +761,7 @@ export class InProcessGateway implements Gateway {
     }
 
     if (this.turnReplacementCoordinator.hasTranscriptWriteReservation(input.sessionKey)) {
-      this.turnReplacementCoordinator.releaseSubmitClaim(input.sessionKey, runId);
+      releasePreflight();
       yield {
         type: "error",
         runId,
@@ -752,8 +773,8 @@ export class InProcessGateway implements Gateway {
       return;
     }
     if (input.sdkSessionConfig) {
-      if (!this.options.setSdkSessionConfig) {
-        this.turnReplacementCoordinator.releaseSubmitClaim(input.sessionKey, runId);
+      if (!setSdkSessionConfig) {
+        releasePreflight();
         yield {
           type: "error",
           runId,
@@ -763,23 +784,73 @@ export class InProcessGateway implements Gateway {
         };
         return;
       }
-      if (this.router.hasActiveTurn(input.sessionKey)) {
-        this.turnReplacementCoordinator.releaseSubmitClaim(input.sessionKey, runId);
+      try {
+        validateSdkSessionConfig(input.sdkSessionConfig);
+      } catch (error) {
+        releasePreflight();
         yield {
           type: "error",
           runId,
-          code: "SESSION_BUSY",
-          message: "Cannot change SDK session configuration while a turn is active.",
+          code: error instanceof DialogGatewayError ? error.code : "INVALID_SDK_SESSION_CONFIG",
+          message: error instanceof Error ? error.message : String(error),
           recoverable: true,
         };
         return;
       }
+    }
+    if (!this.router.beginTurn(input.sessionKey, runId)) {
+      releasePreflight();
+      const sdkConfigAdmission = input.sdkSessionConfig !== undefined;
+      const message = sdkConfigAdmission
+        ? "Cannot change SDK session configuration while a turn is active."
+        : `Session ${input.sessionKey} already has an active turn.`;
+      const userHint = "Wait for the current turn to finish or stop it before sending another message.";
+      if (!sdkConfigAdmission) {
+        yield {
+          type: "agent_status",
+          event: "session_busy",
+          detail: createVisibleErrorStatusDetail({
+            message,
+            code: "session_busy",
+            userHint,
+            scope: "session",
+            source: "gateway",
+          }),
+        };
+      }
+      yield {
+        type: "error",
+        runId,
+        code: sdkConfigAdmission ? "SESSION_BUSY" : "session_busy",
+        message,
+        recoverable: true,
+        ...(sdkConfigAdmission ? {} : { userHint }),
+      };
+      return;
+    }
+    turnReserved = true;
+    reserveCompletionFence();
+    if (input.sdkSessionConfig) {
       try {
-        validateSdkSessionConfig(input.sdkSessionConfig);
-        const configUpdate = await this.options.setSdkSessionConfig(input.sessionKey, input.sdkSessionConfig, input.projectKey);
-        if (configUpdate.changed) await this.router.close(input.sessionKey);
+        const configUpdate = await setSdkSessionConfig!(
+          input.sessionKey,
+          input.sdkSessionConfig,
+          input.projectKey,
+          turnCompletion!.signal,
+        );
+        if (turnCompletion!.signal.aborted) {
+          releasePreflight();
+          yield { type: "turn_completed", runId, usage: {}, finishReason: "aborted_streaming" };
+          return;
+        }
+        if (configUpdate.changed) this.router.markSessionDirty(input.sessionKey, "sdk_session_config_changed");
       } catch (error) {
-        this.turnReplacementCoordinator.releaseSubmitClaim(input.sessionKey, runId);
+        if (turnCompletion?.signal.aborted) {
+          releasePreflight();
+          yield { type: "turn_completed", runId, usage: {}, finishReason: "aborted_streaming" };
+          return;
+        }
+        releasePreflight();
         yield {
           type: "error",
           runId,
@@ -797,7 +868,7 @@ export class InProcessGateway implements Gateway {
       try {
         this.options.assertSdkModelAllowed(input.sessionKey, explicitModel, input.projectKey);
       } catch (error) {
-        this.turnReplacementCoordinator.releaseSubmitClaim(input.sessionKey, runId);
+        releasePreflight();
         yield {
           type: "error",
           runId,
@@ -810,12 +881,22 @@ export class InProcessGateway implements Gateway {
     }
     let taskBudget: { totalUsd: number; spentUsd: number } | undefined;
     if (this.options.taskBudgetSnapshot) {
-      taskBudget = await this.options.taskBudgetSnapshot({
-        sessionKey: input.sessionKey,
-        projectKey: input.projectKey,
-      });
+      try {
+        taskBudget = await this.options.taskBudgetSnapshot({
+          sessionKey: input.sessionKey,
+          projectKey: input.projectKey,
+        });
+        if (turnCompletion?.signal.aborted) {
+          releasePreflight();
+          yield { type: "turn_completed", runId, usage: {}, finishReason: "aborted_streaming" };
+          return;
+        }
+      } catch (error) {
+        releasePreflight();
+        throw error;
+      }
       if (taskBudget && taskBudget.spentUsd >= taskBudget.totalUsd) {
-        this.turnReplacementCoordinator.releaseSubmitClaim(input.sessionKey, runId);
+        releasePreflight();
         const message = `Reached Gateway-owned taskBudget.total ($${taskBudget.totalUsd.toFixed(6)}) after spending $${taskBudget.spentUsd.toFixed(6)}.`;
         yield {
           type: "error",
@@ -829,7 +910,7 @@ export class InProcessGateway implements Gateway {
         return;
       }
     } else if (input.sdkSessionConfig?.taskBudget) {
-      this.turnReplacementCoordinator.releaseSubmitClaim(input.sessionKey, runId);
+      releasePreflight();
       yield {
         type: "error",
         runId,
@@ -839,39 +920,18 @@ export class InProcessGateway implements Gateway {
       };
       return;
     }
-    if (!this.router.beginTurn(input.sessionKey, runId)) {
-      this.turnReplacementCoordinator.releaseSubmitClaim(input.sessionKey, runId);
-      const message = `Session ${input.sessionKey} already has an active turn.`;
-      const userHint = "Wait for the current turn to finish or stop it before sending another message.";
-      yield {
-        type: "agent_status",
-        event: "session_busy",
-        detail: createVisibleErrorStatusDetail({
-          message,
-          code: "session_busy",
-          userHint,
-          scope: "session",
-          source: "gateway",
-        }),
-      };
-      yield {
-        type: "error",
-        code: "session_busy",
-        message,
-        recoverable: true,
-        userHint,
-      };
-      return;
-    }
-
     try {
       await this.options.clearRecoveredUserDialogs?.({
         sessionKey: input.sessionKey,
         projectKey: input.projectKey,
       });
+      if (turnCompletion!.signal.aborted) {
+        releasePreflight();
+        yield { type: "turn_completed", runId, usage: {}, finishReason: "aborted_streaming" };
+        return;
+      }
     } catch (error) {
-      this.router.endTurn(input.sessionKey, runId);
-      this.turnReplacementCoordinator.releaseSubmitClaim(input.sessionKey, runId);
+      releasePreflight();
       yield {
         type: "error",
         runId,
@@ -883,10 +943,15 @@ export class InProcessGateway implements Gateway {
       return;
     }
 
-    const turnCompletion = this.turnCompletionFence.begin(input.sessionKey);
+    const activeTurnCompletion = turnCompletion!;
 
     const queue = new AsyncQueue<GatewayEvent>();
     this.turnEventCoordinator.start(input.sessionKey, runId, (event) => queue.enqueue(event));
+    const stopCancelledAdmission = (): boolean => {
+      if (!activeTurnCompletion.signal.aborted) return false;
+      queue.enqueue({ type: "turn_completed", runId, usage: {}, finishReason: "aborted_streaming" });
+      return true;
+    };
     const emitGatewayFailureStatus = async (status: GatewayRecordAgentStatusMessageInput["status"]): Promise<void> => {
       await this.recordGatewayStatusMessage({
         sessionKey: input.sessionKey,
@@ -939,6 +1004,7 @@ export class InProcessGateway implements Gateway {
             // turn over a transient yaml read error.
           }
         }
+        if (stopCancelledAdmission()) return;
         markTiming("configMs");
         const session = await this.router.getOrCreate({
           sessionKey: input.sessionKey,
@@ -947,6 +1013,7 @@ export class InProcessGateway implements Gateway {
           allowedTools: input.allowedTools,
           disallowedTools: input.disallowedTools,
         });
+        if (stopCancelledAdmission()) return;
         const operationDeadline = operationDeadlineForTimeout(input.timeoutMs, this.now);
         if (input.timeoutMs !== undefined && Number.isFinite(input.timeoutMs) && input.timeoutMs > 0) {
           const settleTimeout = async (): Promise<void> => {
@@ -1004,8 +1071,8 @@ export class InProcessGateway implements Gateway {
           }, input.timeoutMs);
         }
         const permissionSettings = readPermissionSettings();
-        const inputMode = normalizeGatewayModeForLegacyInput((input as { mode?: unknown }).mode)
-          ?? this.permissionModes.get(input.sessionKey);
+        const requestedInputMode = normalizeGatewayModeForLegacyInput((input as { mode?: unknown }).mode);
+        const inputMode = requestedInputMode ?? this.permissionModes.get(input.sessionKey);
         const runMode = normalizeGatewayRunMode((input as { runMode?: unknown }).runMode)
           ?? (inputMode === "plan" ? "plan" : "agent");
         const livePermissionMode = this.permissionModes.get(input.sessionKey);
@@ -1015,7 +1082,9 @@ export class InProcessGateway implements Gateway {
           ?? (permissionSettings.skipPermissions ? "bypassPermissions" : undefined);
         const basePermissionMode = normalizeGatewayModeForLegacyInput(
           (input as { basePermissionMode?: unknown }).basePermissionMode,
-        ) ?? this.options.defaultPermissionMode;
+        ) ?? this.permissionModes.getBase?.(input.sessionKey)
+          ?? (requestedInputMode !== "plan" ? requestedInputMode : undefined)
+          ?? this.options.defaultPermissionMode;
         const allowPlanModeTools = input.allowPlanModeTools ?? inputMode === "plan";
         const persistedRules = permissionSettingsToRuleSet(permissionSettings);
         const sessionAllowRules = this.interactionCoordinator.sessionAllowRules(input.sessionKey);
@@ -1039,12 +1108,14 @@ export class InProcessGateway implements Gateway {
         uploadedAttachmentLease = input.uploadedAttachments?.length
           ? await this.resolveUploadedAttachments(input)
           : undefined;
+        if (stopCancelledAdmission()) return;
         const attachments = [...(input.attachments ?? []), ...(uploadedAttachmentLease?.attachments ?? [])];
         const { agentInput, allowedReadFiles } = await this.prepareAttachmentTurn(
           input.message,
           attachments,
           input.projectKey,
         );
+        if (stopCancelledAdmission()) return;
         const syntheticMessages: CanonicalMessage[] = (input.syntheticMessages ?? []).map((s) => ({
           role: "user" as const,
           content: [{ type: "text" as const, text: s.text }],
@@ -1057,6 +1128,7 @@ export class InProcessGateway implements Gateway {
             : input.modelSelection?.mode === "model" || input.modelOverride
               ? { selection: input.modelSelection?.mode === "model" ? input.modelSelection : input.modelOverride, source: "turn" as const }
               : { source: "default" as const };
+        if (stopCancelledAdmission()) return;
         markTiming("selectionMs");
         let lastEmittedModel: string | undefined;
         let actualRequestModel: string | undefined;
@@ -1079,7 +1151,7 @@ export class InProcessGateway implements Gateway {
         // attachments, config, or model selection. Do not admit a new
         // AgentSession turn after that timeout: submit() creates a fresh
         // abort controller and would otherwise revive a closed operation.
-        if (timedOut) return;
+        if (timedOut || stopCancelledAdmission()) return;
         for await (const event of session.submit(
           agentInput,
           {
@@ -1125,7 +1197,7 @@ export class InProcessGateway implements Gateway {
           },
         )) {
           if (timedOut) break;
-          if (!this.turnCompletionFence.isCurrent(input.sessionKey, turnCompletion)) {
+          if (!this.turnCompletionFence.isCurrent(input.sessionKey, activeTurnCompletion)) {
             break;
           }
           this.agentEventTelemetryObserver.observe(event, {
@@ -1138,7 +1210,15 @@ export class InProcessGateway implements Gateway {
             phase: telemetryContext.phase,
           });
           if (event.type === "mode_change_requested" && isPermissionMode(event.mode)) {
-            this.permissionModes.set(input.sessionKey, event.mode);
+            if (this.permissionModes.transition) {
+              this.permissionModes.transition(
+                input.sessionKey,
+                event.mode,
+                basePermissionMode ?? permissionMode,
+              );
+            } else {
+              this.permissionModes.set(input.sessionKey, event.mode);
+            }
           }
           if (event.type === "input_accepted") {
             await this.turnReplacementCoordinator.commitAcceptedInput(input.sessionKey, runId);
@@ -1215,7 +1295,7 @@ export class InProcessGateway implements Gateway {
             channelKey: input.channelKey,
           },
         });
-        if (this.turnCompletionFence.isCurrent(input.sessionKey, turnCompletion)) {
+        if (this.turnCompletionFence.isCurrent(input.sessionKey, activeTurnCompletion)) {
           const message = error instanceof Error ? error.message : String(error);
           const managedModelDenied = (error instanceof DialogGatewayError || error instanceof RouterRuntimeError)
             && error.code === "SDK_MANAGED_MODEL_DENIED";
@@ -1296,7 +1376,7 @@ export class InProcessGateway implements Gateway {
       // Signal any in-flight `abortTurn` awaiters after Router cleanup.
       // The fence only owns this short-lived drain promise; it does not
       // decide whether another turn may be admitted.
-      this.turnCompletionFence.complete(input.sessionKey, turnCompletion);
+      this.turnCompletionFence.complete(input.sessionKey, activeTurnCompletion);
       this.turnReplacementCoordinator.releaseSubmitClaim(input.sessionKey, runId);
       this.options.afterTurnCompleted?.({
         sessionKey: input.sessionKey,
@@ -1448,6 +1528,8 @@ export class InProcessGateway implements Gateway {
 
   async abortTurn(input: { sessionKey: string; runId?: string; reason?: string }): Promise<void> {
     const reason = input.reason ?? (input.runId ? `aborted:${input.runId}` : "aborted");
+    const cancelled = this.turnCompletionFence.cancel(input.sessionKey, reason, input.runId);
+    if (input.runId !== undefined && !cancelled) return;
     await this.router.abort(input.sessionKey, reason);
     // Wait for the in-flight `submitTurn` (if any) to fully unwind so
     // `inFlightTurns` has been cleared by the time the RPC response is

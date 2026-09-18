@@ -113,7 +113,7 @@ export class AgentSession {
     if (!controller) {
       throw new Error("Manual compaction is unavailable for this agent session.");
     }
-    if (this.state.status !== "idle") {
+    if (this.state.status === "running" || this.state.currentTurnId !== undefined) {
       throw new Error("Agent session is not idle for manual compaction.");
     }
     this.state.status = "running";

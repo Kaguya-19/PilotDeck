@@ -19,6 +19,7 @@ import { createVisibleErrorStatusDetail } from "../../status/agentStatus.js";
 import { FileArtifactCollector, type FileArtifact } from "../../session/artifacts/index.js";
 import type { AgentSteerMessage } from "../session/SteerMailbox.js";
 import { AgentSessionEventRecorder } from "../session/AgentSessionEventRecorder.js";
+import { isAgentLoopResultUnknownError } from "../modules/transport/operationLedger.js";
 
 export type TurnRunnerOptions = {
   sessionId: string;
@@ -407,6 +408,9 @@ export class TurnRunner {
         return runResult;
       } catch (error) {
         const unappliedSteers = await closeSteerMailbox();
+        if (isTimedOutUnknownOperation(error, options)) {
+          throw error;
+        }
         const normalized = normalizeAgentError(error);
         const result = this.createErrorResult(options, normalized);
         const artifacts = await finishArtifacts(result);
@@ -525,8 +529,10 @@ export class TurnRunner {
       return undefined;
     }
     const metadataStore = this.turnDependencies.metadataStore;
-    const generateTitle = this.turnDependencies.sessionTitleProvider?.generate
-      ?? this.turnDependencies.sessionTitleGenerator;
+    const titleProvider = this.turnDependencies.sessionTitleProvider;
+    const generateTitle = titleProvider
+      ? titleProvider.generate.bind(titleProvider)
+      : this.turnDependencies.sessionTitleGenerator;
     if (!metadataStore || !generateTitle) {
       return undefined;
     }
@@ -537,9 +543,10 @@ export class TurnRunner {
     if (this.pendingSessionTitle && !this.pendingSessionTitle.completed) {
       return this.pendingSessionTitle;
     }
-    // Source sequences refer to the accepted-input event just committed for
-    // this turn, so the provider must not also receive unsequenced history.
-    const text = allHumanText(acceptedMessages);
+    // Provenance identifies the newly committed accepted input, but title
+    // generation needs the full human task context when a prior attempt
+    // returned no title. Keep those concerns separate.
+    const text = allHumanText([...options.messages, ...acceptedMessages]);
     if (!text) {
       return undefined;
     }
@@ -636,13 +643,19 @@ export class TurnRunner {
       .join("\n")
       .trim();
     if (!assistantResponse) return null;
-    return await generate({
-      userPrompt,
-      assistantResponse,
-      sessionId: options.sessionId,
-      turnId: options.turnId,
-      signal: options.abortSignal ?? new AbortController().signal,
-    });
+    try {
+      return await generate({
+        userPrompt,
+        assistantResponse,
+        sessionId: options.sessionId,
+        turnId: options.turnId,
+        signal: options.abortSignal ?? new AbortController().signal,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.debug(`[prompt-suggestion] generation skipped (provider_error): ${message.slice(0, 200)}`);
+      return null;
+    }
   }
 
   private async persistListingPromptMetadata(
@@ -666,6 +679,12 @@ export class TurnRunner {
       updatedAt: this.now().toISOString(),
     }).catch(() => {});
   }
+}
+
+function isTimedOutUnknownOperation(error: unknown, options: TurnRunnerOptions): boolean {
+  if (!isAgentLoopResultUnknownError(error) || options.abortSignal?.aborted !== true) return false;
+  const runId = options.execution?.runId;
+  return typeof runId === "string" && options.abortSignal.reason === `timeout:${runId}`;
 }
 
 function isVisibleFailureStatus(status: AgentStatusMessageInput): boolean {

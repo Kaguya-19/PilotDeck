@@ -86,6 +86,35 @@ test("manual compaction records failure when the replacement cannot be appended"
   assert.match(outcome.error, /replacement unavailable/);
 });
 
+test("AgentSession permits manual compaction from failed and aborted terminal states", async () => {
+  for (const status of ["failed", "aborted"] as const) {
+    let calls = 0;
+    const session = new AgentSession({
+      sessionId: `session-${status}`,
+      turnRunner: { sessionEventRecorder: {} } as never,
+      initialState: {
+        sessionId: `session-${status}`,
+        messages: [],
+        usage: {},
+        status,
+        permissionDenials: [],
+        abortController: new AbortController(),
+      },
+      manualCompactionController: {
+        async compact({ turnId }) {
+          calls += 1;
+          return { type: "skipped", turnId: turnId ?? "manual", reason: "no_compactable_history", usage: {} };
+        },
+      } as ManualCompactionController,
+    });
+
+    const result = await session.compact({ abortSignal: new AbortController().signal, turnId: "manual" });
+    assert.equal(result.type, "skipped");
+    assert.equal(calls, 1);
+    assert.equal(session.snapshot().status, "idle");
+  }
+});
+
 test("AgentHandle maintenance blocks direct submit and leaves later followup FIFO behind compaction", async () => {
   let releaseCompact!: () => void;
   const compactGate = new Promise<void>((resolve) => { releaseCompact = resolve; });

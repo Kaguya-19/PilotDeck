@@ -15,6 +15,7 @@ from typing import Any
 
 from trace import (
     Difference,
+    compare_baseline_trace_details,
     compare_trace_details,
     load_trace,
     validate_production_sidecar_proof,
@@ -35,7 +36,7 @@ REQUIRED_GATEWAY_SCENARIOS = frozenset({
     "tool_retryable_error", "tool_non_retryable_error", "model_retryable_error", "model_non_retryable_error",
     "malformed_model_response", "stream_interruption", "cancel_during_tool", "deadline_during_tool",
     "multimodal_image_and_text", "allowed_read_files", "denied_read_files", "write_snapshot_resume", "auto_compact",
-    "plan_mode_host_policy",
+    "plan_mode_host_policy", "plan_mode_bypass_host_policy",
     "sidecar_budget_limit", "sidecar_elicitation", "sidecar_elicitation_execution", "sidecar_sdk_tool_progress",
     "sidecar_live_steer", "sidecar_durable_compaction", "sidecar_full_request_compaction_budget",
     "sidecar_projected_request_compaction_budget", "sidecar_seed_read_state", "sidecar_live_model_stream",
@@ -45,18 +46,212 @@ REQUIRED_GATEWAY_SCENARIOS = frozenset({
     "sidecar_one_shot_parent_abort_after_admission", "sidecar_one_shot_parent_close_after_admission",
 })
 
-# These scenarios exercise SDK and sidecar capabilities that did not exist in
-# the pinned main baseline. They remain required for current native/sidecar
-# parity, but a baseline run must report them explicitly rather than running
-# an ignored option and calling the result a product difference.
-BASELINE_UNSUPPORTED_SUITES = frozenset({"sidecar-production", "subagent-parity"})
+# Baseline policy is scenario-specific. Keeping it keyed by scenario id avoids
+# silently dropping an entire suite when main already supports part of it.
+BASELINE_COMPARISONS: dict[str, dict[str, Any]] = {
+    "auto_compact": {"mode": "extension", "expected": {"terminalOutcome": "failed", "stopReason": "prompt_too_long"}, "allowedDifferences": [{
+        "pathSuffix": "compactionCompletedCount", "baseline": 0, "current": 1,
+    }]},
+    # Current Gateway aborts the active session before it durably publishes a
+    # timeout. This closes the historical main race where the visible timeout
+    # could be emitted without a durable AgentLoop terminal. The extension is
+    # intentionally narrow: the visible timeout remains shared, while the
+    # terminal fields below prove durable-before-visible for both transports.
+    "deadline": {"mode": "extension", "allowedDifferencesByAdapter": {
+        "pilotdeck-current-native": [
+            {"path": "trace.partialOrder.left.durable_status_missing.turn_timeout[0]", "baseline": "durable_before_visible", "current": "missing"},
+            {"pathSuffix": "durableStopReason", "baseline": None, "current": "aborted_streaming"},
+            {"pathSuffix": "resultType", "baseline": None, "current": "aborted"},
+        ],
+        "pilotdeck-current-sidecar": [
+            {"path": "trace.partialOrder.left.durable_status_missing.turn_timeout[0]", "baseline": "durable_before_visible", "current": "missing"},
+        ],
+    }},
+    "deadline_during_tool": {"mode": "extension", "allowedDifferences": [
+        {"path": "trace.partialOrder.left.durable_status_missing.turn_timeout[0]", "baseline": "durable_before_visible", "current": "missing"},
+    ]},
+    "sidecar_live_steer": {"mode": "extension", "allowedDifferences": [
+        {"path": "trace.partialOrder.left.durable_steer_missing.parity-steer-1[0]", "baseline": "durable_before_applied", "current": "missing"},
+    ]},
+    "plan_mode_host_policy": {"mode": "unavailable", "reason": "main lacks the host-owned plan-mode lifecycle exercised by this scenario"},
+    "plan_mode_bypass_host_policy": {"mode": "unavailable", "reason": "main lacks the host-owned plan-mode lifecycle exercised by this scenario"},
+    "sidecar_budget_limit": {"mode": "unavailable", "reason": "main Gateway has no ModelBudgetPort capability"},
+    "sidecar_elicitation": {"mode": "unavailable", "reason": "main Gateway cannot advertise elicitation availability as a sidecar capability"},
+    "sidecar_elicitation_execution": {"mode": "unavailable", "reason": "main Gateway cannot route host-backed elicitation through a sidecar capability"},
+    "sidecar_sdk_tool_progress": {"mode": "unavailable", "reason": "main Gateway has no SDK session progress control"},
+    "sidecar_durable_compaction": {"mode": "unavailable", "reason": "main cannot inject the durable compaction provider required by this scenario"},
+    "sidecar_full_request_compaction_budget": {"mode": "unavailable", "reason": "main has no request-level compaction budget capability"},
+    "sidecar_projected_request_compaction_budget": {"mode": "unavailable", "reason": "main has no projected-request compaction budget capability"},
+    "sidecar_seed_read_state": {"mode": "unavailable", "reason": "main Gateway client does not expose seed_read_state"},
+    "sidecar_empty_system_prompt": {"mode": "unavailable", "reason": "main Gateway has no SDK session system-prompt control"},
+    "sidecar_additional_working_directories": {"mode": "unavailable", "reason": "main Gateway has no SDK additional-working-directories control"},
+    "sidecar_continuable_followup_live": {"mode": "unavailable", "reason": "main has no continuable subagent lifecycle"},
+    "sidecar_continuable_followup_cold": {"mode": "unavailable", "reason": "main has no continuable subagent lifecycle"},
+    "sidecar_parent_close_after_admission": {"mode": "unavailable", "reason": "main has no one-shot subagent admission lifecycle"},
+    "sidecar_one_shot_subagent_success": {"mode": "unavailable", "reason": "main has no one-shot subagent capability"},
+    "sidecar_one_shot_subagent_failure": {"mode": "unavailable", "reason": "main has no one-shot subagent capability"},
+    "sidecar_one_shot_parent_abort_after_admission": {"mode": "unavailable", "reason": "main has no one-shot subagent admission lifecycle"},
+    "sidecar_one_shot_parent_close_after_admission": {"mode": "unavailable", "reason": "main has no one-shot subagent admission lifecycle"},
+}
 
+SAME_VERSION_COMPARISONS: dict[str, dict[str, Any]] = {
+    "deadline": {"mode": "extension", "allowedDifferences": [
+        {"pathSuffix": "durableStopReason", "baseline": "aborted_streaming", "current": None},
+        {"pathSuffix": "resultType", "baseline": "aborted", "current": None},
+    ]},
+}
+
+# These are SDK-only Gateway controls, not scenario-authored tools. Their
+# existence is asserted by SDK coverage; main-baseline parity removes only this
+# explicit catalog delta and still compares every shared tool schema exactly.
+_SDK_EXTENSION_TOOLS = ["create_goal", "get_goal", "lsp", "send_message", "subagent", "update_goal"]
+
+# SDK adds an explicit Gateway sandbox execution profile and a configurable
+# subagent depth cap. These two existing tools retain their complete schemas;
+# only their model-visible descriptions differ from main. Keep both complete
+# strings here so an unreviewed description change remains a baseline failure.
+_SDK_TOOL_DESCRIPTION_CONTRACTS: dict[str, dict[str, str]] = {
+    "agent": {
+        "baseline": (
+            "Launch a new subagent to handle a focused multi-step task.\n\n"
+            "Use this tool when a bounded piece of work would benefit from an autonomous helper instead of keeping every intermediate step in the parent agent's context.\n\n"
+            "Provide:\n"
+            "- `description`: a short 3-5 word label for the task.\n"
+            "- `prompt`: the full directive for the subagent. Write it like a complete briefing: include the goal, relevant context, constraints, and what good output looks like.\n"
+            "- `subagent_type` (optional): choose a built-in preset. If omitted, `general-purpose` is used.\n\n"
+            "Available built-in subagent types:\n"
+            "- general-purpose: General-purpose subagent for complex research/synthesis tasks. Has broad parent-tool access except nested subagent launch. Tools: all parent tools except nested agent launch.\n"
+            "- explore: Read-only exploration subagent. Inspects files, runs grep/glob, and may run safe shell commands. Cannot edit files. Tools: read_file, grep, glob, bash.\n"
+            "- plan: Read-only planning subagent. Inspects code via read/grep/glob and produces a step-by-step plan. Tools: read_file, grep, glob.\n\n"
+            "The subagent returns one structured report with these sections: `Scope`, `Result`, `Key files`, `Files changed`, and `Issues`.\n\n"
+            "Runtime behavior:\n"
+            "- Multiple independent agent calls in one assistant message may run concurrently; batch sibling investigations when their scopes do not depend on each other.\n"
+            "- Inside the AgentLoop, this runs a real forked subagent with its own scoped tool loop.\n"
+            "- In stand-alone runtimes and some tests, it falls back to a single model call that preserves the same high-level subagent intent."
+        ),
+        "current": (
+            "Launch a new subagent to handle a focused multi-step task.\n\n"
+            "Use this tool when a bounded piece of work would benefit from an autonomous helper instead of keeping every intermediate step in the parent agent's context.\n\n"
+            "Provide:\n"
+            "- `description`: a short 3-5 word label for the task.\n"
+            "- `prompt`: the full directive for the subagent. Write it like a complete briefing: include the goal, relevant context, constraints, and what good output looks like.\n"
+            "- `subagent_type` (optional): choose a built-in preset. If omitted, `general-purpose` is used.\n\n"
+            "Available built-in subagent types:\n"
+            "- general-purpose: General-purpose subagent for complex research/synthesis tasks. Has broad parent-tool access; nested delegation follows the configured depth cap. Tools: all parent tools except nested agent launch.\n"
+            "- explore: Read-only exploration subagent. Inspects files, runs grep/glob, and may run safe shell commands. Cannot edit files. Tools: read_file, grep, glob, bash.\n"
+            "- plan: Read-only planning subagent. Inspects code via read/grep/glob and produces a step-by-step plan. Tools: read_file, grep, glob.\n\n"
+            "The subagent returns one structured report with these sections: `Scope`, `Result`, `Key files`, `Files changed`, and `Issues`.\n\n"
+            "Runtime behavior:\n"
+            "- Multiple independent agent calls in one assistant message may run concurrently; batch sibling investigations when their scopes do not depend on each other.\n"
+            "- Inside the AgentLoop, this runs a real forked subagent with its own scoped tool loop.\n"
+            "- In stand-alone runtimes and some tests, it falls back to a single model call that preserves the same high-level subagent intent."
+        ),
+    },
+    "execute_code": {
+        "baseline": (
+            "Run a local Python 3 script that can call a small allow-list of PilotDeck tools via `import pilotdeck_tools`. "
+            "The script runs from the workspace cwd and inherits the same runtime environment as normal tools such as bash, including configured API, proxy, PATH, virtualenv, and conda variables; do not print secrets or dump the full environment. "
+            "Only the script's final stdout/stderr summary is returned to the model; intermediate tool results stay inside the script. "
+            "Available helper functions: web_fetch, read_file, write_file, edit_file, grep, glob, bash. "
+            "Use normal Python control flow to orchestrate tools: loops for batch work, conditionals for branching, data structures for aggregation, and try/except around individual helper calls when one failure should not abort the whole script. Helper failures raise RuntimeError. You can chain helper results, e.g. grep -> read_file -> edit_file. Print only the concise final result needed by the agent. "
+            "Before modifying an existing file, call read_file first so PilotDeck can verify freshness. Prefer edit_file for targeted changes and write_file for new files or complete rewrites. "
+            "Notebook edits, agent, task tools, MCP tools, and execute_code itself are not available."
+        ),
+        "current": (
+            "Run a local Python 3 script that can call a small allow-list of PilotDeck tools via `import pilotdeck_tools`. "
+            "The script runs through a Gateway-selected host sandbox runner. It receives only the private RPC/module environment needed for this execution, not the Gateway process environment, provider credentials, or arbitrary host variables. "
+            "Only the script's final stdout/stderr summary is returned to the model; intermediate tool results stay inside the script. "
+            "Available helper functions: web_fetch, read_file, write_file, edit_file, grep, glob, bash. "
+            "Use normal Python control flow to orchestrate tools: loops for batch work, conditionals for branching, data structures for aggregation, and try/except around individual helper calls when one failure should not abort the whole script. Helper failures raise RuntimeError. You can chain helper results, e.g. grep -> read_file -> edit_file. Print only the concise final result needed by the agent. "
+            "Before modifying an existing file, call read_file first so PilotDeck can verify freshness. Prefer edit_file for targeted changes and write_file for new files or complete rewrites. "
+            "Notebook edits, agent, task tools, MCP tools, and execute_code itself are not available."
+        ),
+    },
+}
+
+
+def baseline_comparison(scenario: dict[str, Any]) -> dict[str, Any]:
+    inline = scenario.get("baselineComparison")
+    if isinstance(inline, dict):
+        return inline
+    configured = BASELINE_COMPARISONS.get(str(scenario.get("scenarioId")), {"mode": "shared"})
+    return {
+        "extensionTools": _SDK_EXTENSION_TOOLS,
+        "toolDescriptionContracts": _SDK_TOOL_DESCRIPTION_CONTRACTS,
+        **configured,
+    }
 
 def baseline_not_applicable_reason(scenario: dict[str, Any]) -> str | None:
-    suite = scenario.get("suite")
-    if suite in BASELINE_UNSUPPORTED_SUITES:
-        return f"baseline lacks {suite} capability surface"
+    comparison = baseline_comparison(scenario)
+    if comparison.get("mode") == "unavailable":
+        reason = comparison.get("reason")
+        if not isinstance(reason, str) or not reason:
+            raise ValueError(f"{scenario.get('scenarioId')}: unavailable baseline comparison requires a reason")
+        return reason
     return None
+
+
+def baseline_comparison_mode(scenario: dict[str, Any]) -> str:
+    comparison = baseline_comparison(scenario)
+    mode = comparison.get("mode", "shared")
+    if mode not in {"shared", "extension", "unavailable"}:
+        raise ValueError(f"{scenario.get('scenarioId')}: invalid baseline comparison mode {mode!r}")
+    return str(mode)
+
+
+def declared_extension_matches(
+    scenario: dict[str, Any],
+    differences: list[Difference],
+    *,
+    comparison: dict[str, Any] | None = None,
+    adapter: str | None = None,
+) -> bool:
+    """Accept only exhaustively declared baseline/current differences.
+
+    An extension is not a whole-scenario waiver. Each observed semantic
+    difference needs a matching contract with an exact baseline/current value;
+    declarations that are not observed are also failures, preventing stale
+    allowlists from silently masking a newly shared behavior.
+    """
+    comparison = comparison or baseline_comparison(scenario)
+    per_adapter = comparison.get("allowedDifferencesByAdapter")
+    allowed = per_adapter.get(adapter) if isinstance(per_adapter, dict) and adapter else comparison.get("allowedDifferences")
+    if not isinstance(allowed, list):
+        return False
+    unmatched = list(differences)
+    for expected in allowed:
+        if not isinstance(expected, dict):
+            return False
+        exact_path = expected.get("path")
+        path_suffix = expected.get("pathSuffix")
+        if not isinstance(exact_path, str) and not isinstance(path_suffix, str):
+            return False
+        if isinstance(path_suffix, str) and path_suffix.startswith("durable_"):
+            return False
+        found = next((
+            index for index, difference in enumerate(unmatched)
+            if (difference.path == exact_path if isinstance(exact_path, str) else difference.path.endswith(path_suffix))
+            and difference.left == expected.get("baseline")
+            and difference.right == expected.get("current")
+        ), None)
+        if found is None:
+            return False
+        unmatched.pop(found)
+    return not unmatched
+
+
+def scenario_for_adapter(scenario: dict[str, Any], adapter: str) -> dict[str, Any]:
+    if adapter != "pilotdeck-baseline-native":
+        return scenario
+    comparison = baseline_comparison(scenario)
+    expected = comparison.get("expected")
+    if not isinstance(expected, dict):
+        return scenario
+    baseline = dict(scenario)
+    baseline["expected"] = expected
+    baseline.pop("expectedByPair", None)
+    baseline.pop("expectedByAdapter", None)
+    return baseline
 
 
 def resolve_ref(root: Path, ref: str) -> str:
@@ -206,6 +401,11 @@ def run_adapter(
         command = f"node {shlex.quote(str(ROOT / 'adapters' / 'pilotdeck_native_impl.mjs'))}"
     else:
         command = f"{shlex.quote(sys.executable)} {shlex.quote(str(ROOT / 'adapters' / 'pilotdeck_sidecar_impl.py'))}"
+    scenario_timeout = scenario.get("adapterTimeoutSeconds")
+    if scenario_timeout is not None:
+        if not isinstance(scenario_timeout, (int, float)) or isinstance(scenario_timeout, bool) or scenario_timeout <= 0:
+            return "BLOCKED: scenario adapterTimeoutSeconds must be a positive number"
+        timeout_seconds = float(scenario_timeout)
     try:
         result = subprocess.run(
             shlex.split(command),
@@ -265,6 +465,7 @@ def main() -> int:
     failed: list[str] = []
     oracle_failures: list[str] = []
     known_gaps: list[str] = []
+    expected_extensions: list[str] = []
     not_applicable: list[str] = []
     warnings: list[str] = []
     try:
@@ -275,44 +476,74 @@ def main() -> int:
                     prepare_baseline(baseline)
                 for scenario in scenarios:
                     sid = str(scenario["scenarioId"])
-                    jobs: list[tuple[str, str, Path, str, str | None]] = []
+                    jobs: dict[str, tuple[str, Path, str, str | None]] = {}
                     if args.comparison in {"same-version", "both"}:
-                        jobs.extend([
-                            ("pilotdeck-native", "native", args.pilotdeck_root, "working-tree", args.pilotdeck_native_cmd),
-                            ("pilotdeck-sidecar", "sidecar", args.pilotdeck_root, "working-tree", args.pilotdeck_sidecar_cmd),
-                        ])
+                        jobs.update({
+                            "pilotdeck-current-native": ("native", args.pilotdeck_root, "working-tree", args.pilotdeck_native_cmd),
+                            "pilotdeck-current-sidecar": ("sidecar", args.pilotdeck_root, "working-tree", args.pilotdeck_sidecar_cmd),
+                        })
                     if args.comparison in {"baseline", "both"}:
                         reason = baseline_not_applicable_reason(scenario)
                         if reason:
                             not_applicable.append(f"{sid}: {reason}")
                         else:
-                            jobs.extend([
-                                ("pilotdeck-baseline-native", "native", baseline, args.pilotdeck_baseline, args.pilotdeck_native_cmd),
-                                ("pilotdeck-current-native", "native", args.pilotdeck_root, "working-tree", args.pilotdeck_native_cmd),
-                            ])
+                            jobs.update({
+                                "pilotdeck-baseline-native": ("native", baseline, args.pilotdeck_baseline, args.pilotdeck_native_cmd),
+                                "pilotdeck-current-native": ("native", args.pilotdeck_root, "working-tree", args.pilotdeck_native_cmd),
+                                "pilotdeck-current-sidecar": ("sidecar", args.pilotdeck_root, "working-tree", args.pilotdeck_sidecar_cmd),
+                            })
                     traces: dict[str, Path] = {}
-                    for name, mode, source, ref, override in jobs:
+                    for name, (mode, source, ref, override) in jobs.items():
                         trace_path = args.output / f"{sid}.{name}.jsonl"
                         status = run_adapter(mode, source, ref, scenario, mock_url, trace_path, args.surface, args.adapter_timeout_seconds, override)
                         if status != "PASS":
                             blocked.append(f"{sid}/{name}: {status}")
                             continue
                         traces[name] = trace_path
-                        for failure in validate_trace_expectations(load_trace(trace_path), scenario, "pilotdeck", name):
+                        oracle_scenario = scenario_for_adapter(scenario, name)
+                        for failure in validate_trace_expectations(load_trace(trace_path), oracle_scenario, "pilotdeck", name):
                             oracle_failures.append(f"{sid}/{name}: {failure.path} expected={failure.left!r} actual={failure.right!r}")
                     comparisons = [
-                        ("PilotDeck", "pilotdeck-native", "pilotdeck-sidecar", False),
+                        ("PilotDeck", "pilotdeck-current-native", "pilotdeck-current-sidecar", False),
                         ("PilotDeck baseline drift", "pilotdeck-baseline-native", "pilotdeck-current-native", True),
+                        ("PilotDeck baseline sidecar drift", "pilotdeck-baseline-native", "pilotdeck-current-sidecar", True),
                     ]
                     for label, left_name, right_name, is_baseline in comparisons:
                         if left_name not in traces or right_name not in traces:
                             continue
-                        comparison = compare_trace_details(load_trace(traces[left_name]), load_trace(traces[right_name]))
+                        comparison = (
+                            compare_baseline_trace_details(
+                                load_trace(traces[left_name]),
+                                load_trace(traces[right_name]),
+                                {**scenario, "baselineComparison": baseline_comparison(scenario)},
+                            )
+                            if is_baseline
+                            else compare_trace_details(load_trace(traces[left_name]), load_trace(traces[right_name]))
+                        )
                         report = args.output / f"{sid}-{label.lower().replace(' ', '-')}.md"
                         write_report(report, f"{sid} {label}", traces[left_name], traces[right_name], comparison)
                         if comparison.format_warnings:
                             warnings.append(f"{sid}/{label}: {len(comparison.format_warnings)} warning(s)")
-                        if scenario.get("suite") == "known-gap":
+                        same_version_contract = SAME_VERSION_COMPARISONS.get(sid, {"mode": "shared"})
+                        if not is_baseline and same_version_contract.get("mode") == "extension":
+                            if declared_extension_matches(scenario, comparison.semantic, comparison=same_version_contract):
+                                expected_extensions.append(
+                                    f"{sid}/{label}: verified {len(comparison.semantic)} declared transport difference(s)"
+                                )
+                            else:
+                                failed.append(
+                                    f"{sid}/{label}: transport contract mismatch ({len(comparison.semantic)} semantic difference(s))"
+                                )
+                        elif is_baseline and baseline_comparison_mode(scenario) == "extension":
+                            if declared_extension_matches(scenario, comparison.semantic, adapter=right_name):
+                                expected_extensions.append(
+                                    f"{sid}/{label}: verified {len(comparison.semantic)} declared extension difference(s)"
+                                )
+                            else:
+                                failed.append(
+                                    f"{sid}/{label}: extension contract mismatch ({len(comparison.semantic)} semantic difference(s))"
+                                )
+                        elif scenario.get("suite") == "known-gap":
                             if known_gap_matches(scenario, comparison.semantic):
                                 known_gaps.append(f"{sid}/{label}: reproduced {len(comparison.semantic)} expected difference(s)")
                             else:
@@ -340,6 +571,7 @@ def main() -> int:
         "failed": failed,
         "oracleFailures": oracle_failures,
         "knownGaps": known_gaps,
+        "expectedExtensions": expected_extensions,
         "notApplicable": not_applicable,
         "formatWarnings": warnings,
         "output": str(args.output),

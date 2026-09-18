@@ -1312,6 +1312,7 @@ export interface Gateway {
     sessionKey: string,
     config: GatewaySessionSdkConfig,
     projectKey?: string,
+    signal?: AbortSignal,
   ): Promise<{ changed: boolean }> | { changed: boolean };
   supportedAgents?(): Promise<GatewaySupportedAgentsResult>;
   reconnectInteraction?(input: GatewayReconnectInteractionInput): Promise<GatewayReconnectInteractionResult> | GatewayReconnectInteractionResult;

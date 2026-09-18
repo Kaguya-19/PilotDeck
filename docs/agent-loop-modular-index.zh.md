@@ -139,6 +139,12 @@ model module 优先通过 `stream_next` 逐批拉取 canonical events，并在 g
 `preparationId` 只绑定一个 iterator，module-call cache 保证 reconnect 重放同一 pull 时不重复推进；turn dispose
 负责关闭仍存活的 iterator，不把 provider stream state 放进 sidecar 或 Session durable state。
 
+当 post-routing compaction 要替换消息窗口时，sidecar 可选调用 model 的
+`materialize_prepared_request`。它只携带 `preparationId` 和 canonical candidate request；host 使用同一条已准备
+的 invocation 调用窄 `AgentTurnRoutingPort.materializeRequest`，再返回 materialized request。Router/opaque
+routing state 不进入 wire，且没有此 capability 的 direct provider path 只替换 messages，保留 `prepare()` 已决定的
+system prompt、tool schema、cache plan 与 output cap。
+
 runner 还会在同一存活 session 内回传一个可选、易失的 model-state projection，其中仅有 route-aware token
 calibration、跨 turn 的 hard context/output cap，以及 large-file recovery 的 session output target。它随 execute/final 在 host 与 child 间往返，绝不进入 Session
 event、projection 或 checkpoint；新的 session/recovery 仍从保守基线开始。
@@ -243,12 +249,19 @@ normalization 规则隐藏 semantic diff。
 
 ## 当前验收状态
 
-- PilotDeck native vs sidecar 的正式 Gateway gate 当前为 52 个 PilotDeck 场景；2026-09-17 在 Node `22.23.1` 上最新重跑
-  **52/52 PASS**，`FAIL=0`、`BLOCKED=0`、oracle failure `=0`。`run.py` 维护独立必跑清单，缺少、重复或空场景会直接失败。sidecar adapter 必须通过
+- PilotDeck native vs sidecar 的正式 Gateway gate 当前为 53 个 PilotDeck 场景；2026-09-18 在 Node `22.23.1` 上最新重跑时，
+  52 个场景为 strict shared，`deadline` 保留 native confirmed abort 与 sidecar `result_unknown` 的 2 条精确 transport
+  settlement difference。exact contract 生效后 `FAIL=0`、`BLOCKED=0`、oracle failure `=0`，不能写成 53 个场景无条件
+  strict equality。与 `origin/main` 对拍时 34 个场景适用、19 个 `notApplicable`；durable timeout/steer 与
+  `auto_compact` 是逐路径声明的 current extension，额外差异仍为 FAIL。runtime context 与 skill 内容继续 canonicalize
+  后实际比较，只规范化 skill 文件路径。`run.py` 维护独立必跑清单，缺少、重复或空场景会直接失败。sidecar adapter 必须通过
   `PILOTDECK_AGENT_LOOP_TRANSPORT=stdio` 进入 deployment profile 和
   `createAgentLoopSidecarRuntimeFactory`，并在原始 trace 中留下 transport selection、handshake/binding 和预期
   host module call 证据；任一证据缺失均为 `BLOCKED`。旧 adapter 自建 runner 或注入测试 factory 的结果已废止，
   不能作为生产 sidecar 验收。
+- main/current 的 context-budget 发射顺序不同，baseline comparator 将 budget 绑定到对应 model request 后比较；缺失、重复、
+  未配对和相同请求上的数值变化仍为 FAIL。`runtime_context` 是 request-only projection，prepare 会替换旧快照，comparator
+  继续拒绝重复标签、未知残余内容和非文本 block。
 - budget、elicitation、live steer、durable compaction、full-request budget、seed read state、live model stream、model metadata、显式空 system prompt 与 additional working directories 已加入正式 Gateway matrix。mock model/tool 只是正式 host dispatcher 的确定性依赖，不是外部 provider 或完整 deployment E2E。
 - `plan_mode_host_policy` 与 `plan_mode_bypass_host_policy` 通过同一 Gateway session 的四轮提交验证 host-owned mode 生命周期：客户端省略 legacy `mode` 后，下一轮分别为
   `default -> plan -> plan -> default` 与 `bypassPermissions -> plan -> plan -> bypassPermissions`；plan 中的写操作以 `plan_mode_violation` 拒绝，退出后仅允许一次真实副作用。

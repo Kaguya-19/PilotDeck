@@ -104,6 +104,32 @@ test("agent tool keeps host-owned one-shot sidechain references in its result", 
   assert.equal(result.metadata?.transcriptRelativePath, "sessions/parent/subagents/child-1.jsonl");
 });
 
+test("agent tool uses the host-provided subagent identity source", async () => {
+  let receivedSubagentId: string | undefined;
+  const tool = createAgentTool({ uuid: () => "deterministic-child" });
+  const result = await tool.execute(
+    { description: "inspect identity", prompt: "inspect", subagent_type: "explore" },
+    baseContext({
+      depth: 0,
+      maxSubagentDepth: 1,
+      listDefinitions: () => [{ id: "explore", description: "explore" }],
+      isAllowedDefinition: (id) => id === "explore",
+      fork: async ({ subagentId }) => {
+        receivedSubagentId = subagentId;
+        return {
+          markdown: "Scope: test\nResult: ok",
+          usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+          turns: 1,
+          durationMs: 1,
+        };
+      },
+    }),
+  );
+
+  assert.equal(receivedSubagentId, "deterministic-child");
+  assert.equal(result.metadata?.subagentId, "deterministic-child");
+});
+
 test("agent tool preserves unknown custom fallback subagent names", async () => {
   const requests: string[] = [];
   const model: PilotDeckToolModelClient = {

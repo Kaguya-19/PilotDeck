@@ -22,6 +22,7 @@ import {
   finalizePreparedModelRequest,
   normalizeMessagesForModelRequest,
 } from "../../loop/modelRequestAssembly.js";
+import { COMPACTION_BUDGET_CONTRACT_ERROR_CODE } from "../../../context/index.js";
 
 export type SidecarModuleManifest = Readonly<{
   tools: readonly Record<string, unknown>[];
@@ -87,6 +88,20 @@ export function createSidecarDefaultModuleDispatcher(options: {
             ? { metadata: serializeModelMetadata(options.modules.model.metadata, prepared.provider, prepared.model) }
             : {}),
         };
+      }
+      if (operation === "materialize_prepared_request") {
+        const prepared = preparations.get(preparationId);
+        if (!prepared) throw new Error(`Unknown sidecar model preparation: ${preparationId}`);
+        const candidate = canonicalModelRequest(call.payload.request);
+        const request = options.modules.model.materializeRequest
+          ? await options.modules.model.materializeRequest(prepared, candidate)
+          : {
+              ...prepared.request,
+              messages: candidate.messages,
+              provider: prepared.provider,
+              model: prepared.model,
+            };
+        return { request: canonicalModelRequest(request) };
       }
       if (operation === "stream") {
         const prepared = preparations.get(preparationId);
@@ -172,7 +187,12 @@ export function createSidecarDefaultModuleDispatcher(options: {
       const decision = await permission.decision.decide(tool, call.payload.input, permissionContext!.toolRuntimeContext(call.payload.context), stringField(call.payload, "toolCallId"));
       return { decision };
     } } : {}),
-    ...(options.modules.context ? { context: async (call: ModuleCallRequest) => dispatchContext(options, contextIdentity!.contextIdentity(asRecord(call.payload.input)), call) } : {}),
+    ...(options.modules.context ? { context: async (call: ModuleCallRequest) => dispatchContext(
+      options,
+      contextIdentity!.contextIdentity(asRecord(call.payload.input)),
+      call,
+      preparations,
+    ) } : {}),
     ...(options.modules.lifecycle ? { lifecycle: async (call: ModuleCallRequest) => dispatchLifecycle(options, call) } : {}),
     ...(options.modules.event ? { event: async (call: ModuleCallRequest) => {
       if (stringField(call.payload, "operation") !== "emit") throw new Error("Unsupported sidecar event operation.");
@@ -285,7 +305,12 @@ function rememberSteerAuthorizations(
   }
 }
 
-async function dispatchContext(options: Parameters<typeof createSidecarDefaultModuleDispatcher>[0], input: Record<string, unknown>, call: ModuleCallRequest): Promise<Record<string, unknown>> {
+async function dispatchContext(
+  options: Parameters<typeof createSidecarDefaultModuleDispatcher>[0],
+  input: Record<string, unknown>,
+  call: ModuleCallRequest,
+  preparations: ReadonlyMap<string, PreparedModelInvocation>,
+): Promise<Record<string, unknown>> {
   const operation = stringField(call.payload, "operation");
   if (operation === "try_auto_compact" && input.budgetStage === undefined) {
     const stage = asRecord(input.budgetProjection)?.stage;
@@ -295,21 +320,39 @@ async function dispatchContext(options: Parameters<typeof createSidecarDefaultMo
   }
   if (operation === "try_auto_compact" && input.maxContextTokens === undefined && options.config.maxContextTokens !== undefined) input.maxContextTokens = options.config.maxContextTokens;
   if (operation === "try_auto_compact" && input.budgetRequest !== undefined) {
-    const request = canonicalModelRequest(input.budgetRequest);
+    const request = asCompactionContract(() => canonicalModelRequest(input.budgetRequest));
     const budget = options.modules.budget;
     if (budget?.evaluateRequestBudget) {
-      const maxContextTokens = positiveFinite(input.maxContextTokens, "maxContextTokens");
-      const reservedOutputTokens = optionalNonNegativeFinite(input.reservedOutputTokens, "reservedOutputTokens");
+      const maxContextTokens = asCompactionContract(() => positiveFinite(input.maxContextTokens, "maxContextTokens"));
+      const reservedOutputTokens = asCompactionContract(() => optionalNonNegativeFinite(input.reservedOutputTokens, "reservedOutputTokens"));
       const preparation = budgetPreparation(input.budgetPreparation);
-      const calibration = budgetCalibration(input.budgetCalibration, request.provider, request.model);
+      const preparationId = asCompactionContract(() => optionalStringField(input, "budgetPreparationId"));
+      const prepared = preparationId ? preparations.get(preparationId) : undefined;
+      if (preparationId && !prepared) {
+        throw compactionContractError(`Unknown sidecar compaction budget preparation: ${preparationId}`);
+      }
+      if (prepared && (prepared.provider !== request.provider || prepared.model !== request.model)) {
+        throw compactionContractError("Sidecar compaction budget preparation does not match the request route.");
+      }
+      if (options.modules.model.materializeRequest && input.budgetStage !== "pre_route" && !prepared) {
+        throw compactionContractError("Sidecar compaction budget is missing its prepared request reference.");
+      }
+      const calibration = asCompactionContract(() => budgetCalibration(
+        input.budgetCalibration,
+        request.provider,
+        request.model,
+      ));
       input.budgetEvaluator = async (messages: unknown) => {
-        const candidateMessages = canonicalMessages(messages, "Compaction budget messages");
+        const candidateMessages = asCompactionContract(() => canonicalMessages(messages, "Compaction budget messages"));
         const snapshot = await budget.evaluateRequestBudget!(await createCompactionBudgetRequest({
           request,
           preparation,
           candidateMessages,
           config: options.config,
           context: options.modules.context?.execution,
+          stage: input.budgetStage as "pre_route" | "routed" | "recovery" | undefined,
+          prepared,
+          materializeRequest: options.modules.model.materializeRequest,
           signal: options.input.abortSignal,
         }), {
           maxContextTokens,
@@ -317,7 +360,7 @@ async function dispatchContext(options: Parameters<typeof createSidecarDefaultMo
           ...(options.input.abortSignal ? { signal: options.input.abortSignal } : {}),
           ...(calibration ? { calibration } : {}),
         });
-        validateBudgetSnapshot(snapshot);
+        asCompactionContract(() => validateBudgetSnapshot(snapshot));
         return snapshot;
       };
     }
@@ -353,7 +396,14 @@ function hostModuleCapabilities(modules: SidecarModuleComposition, input: AgentL
   const contextMethods = context ? ["prepare_for_model", ...(context.applyToolResults ? ["apply_tool_results"] : []), ...(context.recoverFromModelError ? ["recover_from_model_error"] : []), ...(context.captureTurn ? ["capture_turn"] : []), ...(context.tryAutoCompact ? ["try_auto_compact"] : [])] : [];
   return {
     model: {
-      methods: ["prepare", "stream", "stream_next", "close_stream", ...(modules.model.metadata ? ["get_metadata"] : [])],
+      methods: [
+        "prepare",
+        ...(modules.model.materializeRequest ? ["materialize_prepared_request"] : []),
+        "stream",
+        "stream_next",
+        "close_stream",
+        ...(modules.model.metadata ? ["get_metadata"] : []),
+      ],
     },
     ...(modules.budget ? {
       budget: {
@@ -422,6 +472,14 @@ function readHostEmittedEvent(value: unknown, input: AgentLoopInput): AgentEvent
 function serializeLifecycleDispatchResult(result: LifecycleDispatchResult): Record<string, unknown> { return { effects: result.effects, messages: result.messages, events: result.events, blockingErrors: result.blockingErrors, nonBlockingErrors: result.nonBlockingErrors, ...(result.pendingAsyncHooks ? { pendingAsyncHooks: result.pendingAsyncHooks } : {}) }; }
 function modelOverride(value: unknown): { provider: string; model: string } | undefined { const record = asRecord(value); return record && typeof record.provider === "string" && typeof record.model === "string" ? { provider: record.provider, model: record.model } : undefined; }
 function stringField(value: Record<string, unknown> | undefined, field: string): string { const candidate = value?.[field]; if (typeof candidate !== "string" || candidate.length === 0) throw new Error(`Sidecar payload field ${field} must be a non-empty string.`); return candidate; }
+function optionalStringField(value: Record<string, unknown> | undefined, field: string): string | undefined {
+  const candidate = value?.[field];
+  if (candidate === undefined) return undefined;
+  if (typeof candidate !== "string" || candidate.length === 0) {
+    throw new Error(`Sidecar payload field ${field} must be a non-empty string.`);
+  }
+  return candidate;
+}
 function booleanField(value: Record<string, unknown> | undefined, field: string): boolean { const candidate = value?.[field]; if (typeof candidate !== "boolean") throw new Error(`Sidecar payload field ${field} must be a boolean.`); return candidate; }
 function positiveFinite(value: unknown, field: string): number { if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) throw new Error(`Sidecar payload field ${field} must be positive.`); return value; }
 function optionalNonNegativeFinite(value: unknown, field: string): number | undefined { if (value === undefined) return undefined; if (typeof value !== "number" || !Number.isFinite(value) || value < 0) throw new Error(`Sidecar payload field ${field} must be non-negative.`); return value; }
@@ -436,6 +494,24 @@ function validateBudgetSnapshot(value: unknown): void {
     throw new Error("Host compaction budget snapshot has an invalid state.");
   }
 }
+
+function compactionContractError(message: string, cause?: unknown): Error & { code: string } {
+  const error = new Error(message, cause === undefined ? undefined : { cause }) as Error & { code: string };
+  error.code = COMPACTION_BUDGET_CONTRACT_ERROR_CODE;
+  return error;
+}
+
+function asCompactionContract<T>(read: () => T): T {
+  try {
+    return read();
+  } catch (error) {
+    if (typeof error === "object" && error !== null
+      && (error as { code?: unknown }).code === COMPACTION_BUDGET_CONTRACT_ERROR_CODE) {
+      throw error;
+    }
+    throw compactionContractError(error instanceof Error ? error.message : String(error), error);
+  }
+}
 function canonicalMessages(value: unknown, label: string): CanonicalModelRequest["messages"] {
   if (!Array.isArray(value) || value.some((message) => {
     const record = asRecord(message);
@@ -448,7 +524,7 @@ function canonicalMessages(value: unknown, label: string): CanonicalModelRequest
 function budgetPreparation(value: unknown): Record<string, unknown> {
   const preparation = asRecord(value);
   if (!preparation || !Array.isArray(preparation.tools) || typeof preparation.provider !== "string" || typeof preparation.model !== "string") {
-    throw new Error("Sidecar compaction budget preparation is missing or invalid.");
+    throw compactionContractError("Sidecar compaction budget preparation is missing or invalid.");
   }
   return preparation;
 }
@@ -458,7 +534,7 @@ function budgetCalibration(value: unknown, provider: string, model: string): {
   if (value === undefined) return undefined;
   const calibration = asRecord(value);
   if (!calibration || calibration.provider !== provider || calibration.model !== model) {
-    throw new Error("Sidecar compaction budget calibration does not match the request route.");
+    throw compactionContractError("Sidecar compaction budget calibration does not match the request route.");
   }
   const actualInputTokens = positiveFinite(calibration.actualInputTokens, "calibration.actualInputTokens");
   const estimatedInputTokens = positiveFinite(calibration.estimatedInputTokens, "calibration.estimatedInputTokens");
@@ -471,6 +547,9 @@ async function createCompactionBudgetRequest(input: {
   candidateMessages: CanonicalModelRequest["messages"];
   config: AgentRuntimeConfig;
   context: NonNullable<SidecarModuleComposition["context"]>["execution"] | undefined;
+  stage?: "pre_route" | "routed" | "recovery";
+  prepared?: PreparedModelInvocation;
+  materializeRequest?: SidecarModuleComposition["model"]["materializeRequest"];
   signal?: AbortSignal;
 }): Promise<CanonicalModelRequest> {
   if (!input.context) throw new Error("Host context capability is unavailable for request-level compaction budgeting.");
@@ -482,12 +561,24 @@ async function createCompactionBudgetRequest(input: {
   } as never);
   // Context preparation is required for the candidate. Do not call model
   // prepare here: that would rerun routing after the stream route is fixed.
-  return (await finalizePreparedModelRequest({
+  const candidate = (await finalizePreparedModelRequest({
     request: input.request,
     prepared,
     permissionMode: input.config.permissionMode,
     fallbackSystemPrompt: input.request.systemPrompt,
   })).request;
+  if (input.prepared && input.materializeRequest) {
+    return canonicalModelRequest(await input.materializeRequest(input.prepared, candidate));
+  }
+  if (input.stage === "routed" || input.stage === "recovery") {
+    return canonicalModelRequest({
+      ...input.request,
+      messages: candidate.messages,
+      cacheBreakpoints: candidate.cacheBreakpoints,
+      cachePlan: candidate.cachePlan,
+    });
+  }
+  return candidate;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined; }

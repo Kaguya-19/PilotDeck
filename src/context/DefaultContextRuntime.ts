@@ -169,7 +169,7 @@ export class DefaultContextRuntime implements ContextRuntime {
     const runtimeContextSurface = input.runtimeContextSurface ?? this.runtimeContextSurface;
 
     const projection = this.messageProjector.project({
-      messages: input.messages,
+      messages: input.messages.filter((message) => message.metadata?.purpose !== "runtime_context"),
       maxMessages: input.maxMessages,
     });
 

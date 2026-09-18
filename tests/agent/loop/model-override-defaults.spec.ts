@@ -192,3 +192,77 @@ test("plan-mode memory retrieval uses the real user request", async () => {
 
   assert.equal(query, "REAL USER REQUEST");
 });
+
+test("direct model execution replaces cache indices with the compacted request projection", async () => {
+  const config: AgentRuntimeConfig = {
+    provider: "anthropic",
+    model: "cache-model",
+    cwd: "/workspace/project",
+    permissionMode: "default",
+    permissionContext: createDefaultPermissionContext({
+      cwd: "/workspace/project",
+      mode: "default",
+      canPrompt: false,
+      bypassAvailable: true,
+    }),
+  };
+  const loop = AgentLoop.fromDependencies(config, {
+    ports: {
+      model: {
+        prepare: async ({ request }) => ({
+          provider: request.provider,
+          model: request.model,
+          request,
+        }),
+        stream: async function* () {},
+      },
+      tools: { list: () => [], executeAll: async () => [] },
+    },
+  });
+  const original: CanonicalModelRequest = {
+    provider: "anthropic",
+    model: "cache-model",
+    systemPrompt: "stable",
+    messages: Array.from({ length: 9 }, (_, index) => ({
+      role: index % 2 === 0 ? "user" : "assistant",
+      content: [{ type: "text", text: `message-${index}` }],
+    })),
+    tools: [],
+    cacheBreakpoints: [8],
+    cachePlan: {
+      provider: "anthropic",
+      model: "cache-model",
+      system: true,
+      tools: false,
+      messages: [8],
+      fingerprint: "before",
+      generation: 1,
+    },
+  };
+  const compacted: CanonicalModelRequest = {
+    ...original,
+    messages: [{ role: "assistant", content: [{ type: "text", text: "summary" }] }],
+    cacheBreakpoints: [0],
+    cachePlan: {
+      provider: "anthropic",
+      model: "cache-model",
+      system: true,
+      tools: false,
+      messages: [0],
+      fingerprint: "after",
+      generation: 2,
+    },
+  };
+
+  const materialized = await (loop as unknown as {
+    materializePreparedRequest(
+      prepared: { provider: string; model: string; request: CanonicalModelRequest },
+      candidate: CanonicalModelRequest,
+    ): Promise<CanonicalModelRequest>;
+  }).materializePreparedRequest({ provider: "anthropic", model: "cache-model", request: original }, compacted);
+
+  assert.deepEqual(materialized.messages, compacted.messages);
+  assert.deepEqual(materialized.cacheBreakpoints, [0]);
+  assert.deepEqual(materialized.cachePlan, compacted.cachePlan);
+  assert.equal(materialized.systemPrompt, "stable");
+});

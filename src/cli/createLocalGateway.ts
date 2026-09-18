@@ -189,6 +189,8 @@ export type CreateLocalGatewayOptions = {
   __testModelFactory?: (snapshot: PilotConfigSnapshot) => ModelRuntime;
   /** @internal Narrow session-config override for production-path Gateway tests. */
   __testAgentConfigOverrides?: Pick<AgentRuntimeConfig, "maxContextMessages">;
+  /** @internal Deterministic subagent identities for production-path tests. */
+  __testSubagentIdFactory?: () => string;
   /** Application-selected model invocation providers for each project generation. */
   modelInvocationProviderFactory?: (snapshot: PilotConfigSnapshot) => readonly ModelInvocationProvider[];
   /** Application-selected project execution-world provider. */
@@ -598,6 +600,7 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
   try {
   const attachmentPort = options.attachmentPort ?? createNodeAttachmentPort();
   const subagentRuntime = new GatewaySubagentRuntimeBundle({
+    uuid: options.__testSubagentIdFactory,
     onCleanupError: (error) => {
       console.warn("[pilotdeck] failed to clean up continuable subagent resources:", error);
     },
@@ -630,6 +633,7 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
     permissionTimeoutMs,
     elicitationTimeoutMs,
     now,
+    subagentIdFactory: options.__testSubagentIdFactory,
     extraTools: options.extraTools,
     organizationToolPolicy: organizationPolicy?.tools,
     organizationPolicy,
@@ -717,7 +721,9 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
           });
         }
       : undefined,
-    onSessionEvict: (sessionKey) => registry.permissionModePort().clear(sessionKey),
+    onSessionEvict: (sessionKey, reason) => {
+      if (reason !== "dirty_recreate") registry.permissionModePort().clear(sessionKey);
+    },
   });
   bootResources.ownRouter(router);
   const skillManager = new SkillManager({ pilotHome, builtinSkillsRoot });
@@ -993,8 +999,8 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
     reloadOutputStyles: (input) => registry.reloadOutputStylesForSdk(input),
     usageSnapshot: async (input) => registry.usageSnapshotForSdk(input),
     modelUsageSnapshot: async (input) => registry.modelUsageSnapshotForSdk(input),
-    setSdkSessionConfig: (sessionKey, config, projectKey) =>
-      registry.setSdkSessionConfig(sessionKey, config, projectKey),
+    setSdkSessionConfig: (sessionKey, config, projectKey, signal) =>
+      registry.setSdkSessionConfig(sessionKey, config, projectKey, signal),
     assertSdkModelAllowed: (sessionKey, model, projectKey) =>
       registry.assertSdkModelAllowed(sessionKey, model, projectKey),
     deleteEphemeralSession: (input) => registry.deleteEphemeralSession(input.sessionKey),

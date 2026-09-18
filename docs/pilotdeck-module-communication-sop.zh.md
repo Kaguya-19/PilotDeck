@@ -148,7 +148,7 @@ override 的字段优先于普通 `agent`、`messages`、`tools` 字段；显式
 {
   "hostModules": {
     "model": {
-      "methods": ["prepare", "stream", "stream_next", "close_stream", "get_metadata"]
+      "methods": ["prepare", "materialize_prepared_request", "stream", "stream_next", "close_stream", "get_metadata"]
     },
     "budget": {
       "methods": ["estimate_request_input", "evaluate_request_budget", "estimate_usage_cost"]

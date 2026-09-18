@@ -49,6 +49,7 @@ type ActiveSidecarExecution = {
   runId: string;
   requestId: string;
   controller: AbortController;
+  deadlineExceeded: boolean;
 };
 
 type SidecarConnection = {
@@ -174,6 +175,9 @@ export class AgentLoopSidecarServer {
           );
           if (identityMatches) {
             this.operations.requestCancel(message.operationId);
+            if (message.reason === `timeout:${message.runId}`) {
+              active!.deadlineExceeded = true;
+            }
             active!.controller.abort(message.reason);
           }
           await this.send(connection, {
@@ -232,16 +236,17 @@ export class AgentLoopSidecarServer {
       return;
     }
     const controller = new AbortController();
-    this.abortControllers.set(request.operationId, {
+    const activeExecution: ActiveSidecarExecution = {
       runId: request.runId,
       requestId: request.requestId,
       controller,
-    });
-    let deadlineExceeded = false;
+      deadlineExceeded: false,
+    };
+    this.abortControllers.set(request.operationId, activeExecution);
     let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
     if (deadlineAt !== undefined) {
       const abortForDeadline = () => {
-        deadlineExceeded = true;
+        activeExecution.deadlineExceeded = true;
         controller.abort({ code: "DEADLINE_EXCEEDED", message: "Module execution deadline exceeded." });
       };
       if (deadlineAt <= Date.now()) abortForDeadline();
@@ -289,14 +294,14 @@ export class AgentLoopSidecarServer {
       }
       const result = next.value;
       await execution.flush?.();
-      if (deadlineExceeded) {
+      if (activeExecution.deadlineExceeded) {
         await this.sendDeadlineUnknown(request, streamId, sequence++);
         finalSent = true;
         return;
       }
       const outcome = moduleOutcomeFromAgentResult(result.result);
       const moduleFailure = this.moduleFailures.get(request.operationId);
-      const terminalError = deadlineExceeded
+      const terminalError = activeExecution.deadlineExceeded
         ? { code: "DEADLINE_EXCEEDED", message: "Module execution deadline exceeded." }
         : result.result.type === "max_turns"
           ? result.result.errors?.[0] ?? {
@@ -335,7 +340,7 @@ export class AgentLoopSidecarServer {
       });
       finalSent = true;
     } catch (error) {
-      if (deadlineExceeded) {
+      if (activeExecution.deadlineExceeded) {
         await this.sendDeadlineUnknown(request, streamId, sequence++);
         finalSent = true;
         return;

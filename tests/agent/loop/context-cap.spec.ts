@@ -6,6 +6,7 @@ import { AgentLoop } from "../../../src/agent/loop/AgentLoop.js";
 import type { AgentRuntimeConfig } from "../../../src/agent/runtime/AgentRuntimeConfig.js";
 import type { AgentRouterRuntime, AgentRuntimeDependencies } from "../../../src/agent/runtime/AgentRuntimeDependencies.js";
 import { TokenBudgetManager } from "../../../src/context/budget/TokenBudgetManager.js";
+import { COMPACTION_BUDGET_CONTRACT_ERROR_CODE } from "../../../src/context/index.js";
 import { requestFingerprint } from "../../../src/model/streaming/requestFingerprint.js";
 import { createDefaultPermissionContext } from "../../../src/permission/protocol/types.js";
 import { ToolRegistry } from "../../../src/tool/registry/ToolRegistry.js";
@@ -144,6 +145,103 @@ test("agent loop respects agent maxContextTokens before and after routing", asyn
   assert.equal(budgetEvaluations[0]!.maxContextTokens, 8_000);
   assert.equal(budgetEvaluations[0]!.reservedOutputTokens, 32_768);
   assert.ok(events.some((event) => event.type === "context_budget"));
+});
+
+test("post-routing compaction preserves the prepared route and reuses it for streaming", async () => {
+  const tokenBudget = new TokenBudgetManager();
+  const decisions: string[] = [];
+  const streamedModels: string[] = [];
+  const compactLimits: number[] = [];
+  let compactCalls = 0;
+  const context: AgentRuntimeDependencies["context"] = {
+    prepareForModel: async (input) => ({
+      messages: input.messages,
+      systemPromptParts: [],
+      tools: input.tools,
+      diagnostics: [],
+      boundaries: [],
+    }),
+    tryAutoCompact: async (input) => {
+      compactCalls += 1;
+      compactLimits.push(input.maxContextTokens ?? -1);
+      if (compactCalls === 1) {
+        return { type: "skipped", snapshot: tokenBudget.snapshotFromTokens(8_000, input.maxContextTokens ?? 100_000) };
+      }
+      return {
+        type: "compacted",
+        tier: "full",
+        messages: [{ role: "assistant", content: [{ type: "text", text: "summary" }] }],
+        snapshot: tokenBudget.snapshotFromTokens(8_000, input.maxContextTokens ?? 10_000),
+        result: {
+          compactionId: "route-stability",
+          trigger: "auto",
+          preTokens: 11_000,
+          postTokens: 8_000,
+          messagesSummarized: 1,
+          boundaryMarker: { role: "assistant", content: [] },
+          messagesToKeep: [],
+          attachments: [],
+          hookResults: [],
+          diagnostics: [],
+        },
+      };
+    },
+  };
+  const router: AgentRouterRuntime = {
+    async decide() {
+      const model = decisions.length === 0 ? "route-a" : "route-b";
+      decisions.push(model);
+      return {
+        provider: "openai",
+        model,
+        scenarioType: "default",
+        isSubagent: false,
+        orchestrating: false,
+        resolvedFrom: "explicit",
+        mutations: {},
+      };
+    },
+    materializeRequest: (decision, request) => ({ ...request, provider: decision.provider, model: decision.model }),
+    execute: async function* (decision): AsyncIterable<CanonicalModelEvent> {
+      streamedModels.push(decision.model);
+      yield { type: "message_start", role: "assistant" };
+      yield { type: "text_delta", text: "done" };
+      yield { type: "message_end", finishReason: "stop" };
+    },
+    stream: async function* (): AsyncIterable<CanonicalModelEvent> {},
+  };
+  const loop = AgentLoop.fromDependencies({
+    provider: "openai",
+    model: "default",
+    cwd: "/workspace/project",
+    permissionMode: "bypassPermissions",
+    permissionContext: createDefaultPermissionContext({
+      cwd: "/workspace/project",
+      mode: "bypassPermissions",
+      canPrompt: false,
+      bypassAvailable: true,
+    }),
+  }, {
+    router,
+    context,
+    tools: { registry: new ToolRegistry(), scheduler: { async executeAll() { return []; } } },
+    getModelTokenLimits(_provider, model) {
+      if (model === "route-a") return { maxContextTokens: 10_000, maxOutputTokens: 1_000 };
+      if (model === "route-b") return { maxContextTokens: 100, maxOutputTokens: 10 };
+      return { maxContextTokens: 100_000, maxOutputTokens: 1_000 };
+    },
+  });
+
+  for await (const _event of loop.run({
+    sessionId: "route-stability-session",
+    turnId: "route-stability-turn",
+    messages: [{ role: "user", content: [{ type: "text", text: "continue" }] }],
+  })) {}
+
+  assert.deepEqual(decisions, ["route-a"]);
+  assert.deepEqual(streamedModels, ["route-a"]);
+  assert.ok(compactLimits.includes(10_000));
+  assert.equal(compactLimits.includes(100), false);
 });
 
 test("pre-route compaction carries calibration for an explicit model override", async () => {
@@ -1222,4 +1320,65 @@ test("agent loop skips calibration when a same-route request was transformed", a
 
   const calibrations = (loop as unknown as { tokenCalibrationByRoute: Map<string, unknown> }).tokenCalibrationByRoute;
   assert.equal(calibrations.size, 0);
+});
+
+test("agent loop fails closed before model execution on a compaction contract error", async () => {
+  let modelCalls = 0;
+  const contractError = Object.assign(new Error("invalid compaction preparation"), {
+    code: COMPACTION_BUDGET_CONTRACT_ERROR_CODE,
+  });
+  const context: AgentRuntimeDependencies["context"] = {
+    prepareForModel: async (input) => ({
+      messages: input.messages,
+      systemPromptParts: [],
+      tools: input.tools,
+      diagnostics: [],
+      boundaries: [],
+    }),
+    tryAutoCompact: async () => { throw contractError; },
+  };
+  const router: AgentRouterRuntime = {
+    decide: async ({ request }) => ({
+      provider: request.provider,
+      model: request.model,
+      scenarioType: "default",
+      isSubagent: false,
+      orchestrating: false,
+      resolvedFrom: "explicit",
+      mutations: {},
+    }),
+    execute: async function* (): AsyncIterable<CanonicalModelEvent> {
+      modelCalls += 1;
+      yield { type: "message_end", finishReason: "stop" };
+    },
+    stream: async function* (): AsyncIterable<CanonicalModelEvent> {},
+  };
+  const loop = AgentLoop.fromDependencies({
+    provider: "openai",
+    model: "model-a",
+    cwd: "/workspace/project",
+    permissionMode: "bypassPermissions",
+    permissionContext: createDefaultPermissionContext({
+      cwd: "/workspace/project",
+      mode: "bypassPermissions",
+      canPrompt: false,
+      bypassAvailable: true,
+    }),
+  }, {
+    router,
+    context,
+    tools: { registry: new ToolRegistry(), scheduler: { async executeAll() { return []; } } },
+  });
+
+  await assert.rejects(async () => {
+    for await (const _event of loop.run({
+      sessionId: "contract-failure",
+      turnId: "contract-turn",
+      messages: [{ role: "user", content: [{ type: "text", text: "continue" }] }],
+    })) {}
+  }, (error: unknown) => (
+    typeof error === "object" && error !== null
+    && (error as { code?: unknown }).code === COMPACTION_BUDGET_CONTRACT_ERROR_CODE
+  ));
+  assert.equal(modelCalls, 0);
 });

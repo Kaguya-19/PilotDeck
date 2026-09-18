@@ -15,6 +15,7 @@ import {
   type CanonicalMessage,
   type CanonicalModelError,
   ModelProviderError,
+  snapshotCanonicalModelRequest,
   type CanonicalModelRequest,
   type CanonicalToolSchema,
   type CanonicalUsage,
@@ -42,7 +43,11 @@ import type {
   TokenCalibrationBaseline,
   TokenBudgetSnapshot,
 } from "../../context/index.js";
-import { actualInputTokensFromUsage, countTokens } from "../../context/index.js";
+import {
+  actualInputTokensFromUsage,
+  COMPACTION_BUDGET_CONTRACT_ERROR_CODE,
+  countTokens,
+} from "../../context/index.js";
 import type { PermissionMode, PermissionRule, PermissionRuleSet } from "../../permission/index.js";
 import type { AgentControlBoundaryTranscriptEntry } from "../../session/transcript/TranscriptEntry.js";
 import type { AgentSteerMessage } from "../session/SteerMailbox.js";
@@ -113,6 +118,12 @@ class CompactionPersistenceError extends Error {
 
 function isCompactionPersistenceError(error: unknown): error is CompactionPersistenceError {
   return error instanceof CompactionPersistenceError;
+}
+
+function isFatalCompactionError(error: unknown): boolean {
+  return isCompactionPersistenceError(error)
+    || (typeof error === "object" && error !== null
+      && (error as { code?: unknown }).code === COMPACTION_BUDGET_CONTRACT_ERROR_CODE);
 }
 
 type ActiveSubagentStatus = {
@@ -656,7 +667,7 @@ export class AgentLoop {
           }
           pendingContextBudget = compact.snapshot;
         } catch (error: unknown) {
-          if (isCompactionPersistenceError(error)) throw error;
+          if (isFatalCompactionError(error)) throw error;
           logAutoCompactFailure("pre-routing", input, error);
           // Auto-compaction must never block the model call — proceed with
           // the original messages if evaluation or summarization fails.
@@ -758,11 +769,9 @@ export class AgentLoop {
               this.tokenCalibrationByRoute.clear();
               request = await this.createModelRequest(messages, input);
               request = this.applyTokenCapsToRequest(request, routedProvider, routedModel);
-              prepared = await this.modelPort.prepare({ request, context: modelContext });
-              routedProvider = prepared.provider;
-              routedModel = prepared.model;
-              routedMaxOutputTokens = prepared.maxOutputTokens ?? this.getModelTokenLimits(routedProvider, routedModel)?.maxOutputTokens;
-              decision = { provider: routedProvider, model: routedModel };
+              prepared.request = snapshotCanonicalModelRequest(
+                await this.materializePreparedRequest(prepared, request),
+              );
               await this.persistCompactSnapshot(input, recompact);
               yield {
                 type: "turn_continued",
@@ -794,7 +803,7 @@ export class AgentLoop {
             };
             emittedContextBudget = true;
           } catch (error: unknown) {
-            if (isCompactionPersistenceError(error)) throw error;
+            if (isFatalCompactionError(error)) throw error;
             logAutoCompactFailure("post-routing", input, error);
             // Post-routing compaction must never block the model call.
           }
@@ -1546,7 +1555,7 @@ export class AgentLoop {
                 this.tokenCalibrationByRoute.clear();
               }
             } catch (error: unknown) {
-              if (isCompactionPersistenceError(error)) throw error;
+              if (isFatalCompactionError(error)) throw error;
               logAutoCompactFailure("model-error-recovery", input, error);
               messages = truncateHeadKeepRatio(messages, 0.5);
               this.tokenCalibrationByRoute.clear();
@@ -2469,18 +2478,7 @@ export class AgentLoop {
         cacheBreakpoints: candidateRequest.cacheBreakpoints,
         cachePlan: candidateRequest.cachePlan,
       };
-      candidateRequest = this.capabilities.model.routing?.materializeRequest
-        ? this.capabilities.model.routing.materializeRequest(options.prepared, materializedRequest)
-        : {
-            // Direct execution ports have already materialized provider-owned
-            // request fields. Compaction replaces only its candidate context.
-            ...options.prepared.request,
-            messages: candidateRequest.messages,
-            cacheBreakpoints: candidateRequest.cacheBreakpoints,
-            cachePlan: candidateRequest.cachePlan,
-            provider: options.prepared.provider,
-            model: options.prepared.model,
-          };
+      candidateRequest = await this.materializePreparedRequest(options.prepared, materializedRequest);
     } else if (options.decision) {
       candidateRequest = {
         ...candidateRequest,
@@ -2489,6 +2487,31 @@ export class AgentLoop {
       };
     }
     return candidateRequest;
+  }
+
+  private async materializePreparedRequest(
+    prepared: PreparedModelInvocation,
+    candidate: CanonicalModelRequest,
+  ): Promise<CanonicalModelRequest> {
+    const routedCandidate = {
+      ...candidate,
+      provider: prepared.provider,
+      model: prepared.model,
+    };
+    if (this.capabilities.model.routing?.materializeRequest) {
+      return await this.capabilities.model.routing.materializeRequest(prepared, routedCandidate);
+    }
+    // A prepared execution port owns all provider-specific request controls.
+    // Compaction only replaces the canonical message window; replacing the
+    // prompt, tools, cache plan, or output cap here would undo preparation.
+    return {
+      ...prepared.request,
+      messages: routedCandidate.messages,
+      cacheBreakpoints: routedCandidate.cacheBreakpoints,
+      cachePlan: routedCandidate.cachePlan,
+      provider: prepared.provider,
+      model: prepared.model,
+    };
   }
 
   private recordTokenCalibration(

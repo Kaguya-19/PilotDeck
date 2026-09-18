@@ -40,7 +40,10 @@ export type ModelRouteIdentity = Readonly<{
 
 export type AgentTurnRoutingPort = Readonly<{
   invalidateSticky?(sessionId: string): { previousTier?: string; previousProvider?: string; previousModel?: string; orchestrating?: boolean } | undefined;
-  materializeRequest?(prepared: PreparedModelInvocation, request: CanonicalModelRequest): CanonicalModelRequest;
+  materializeRequest?(
+    prepared: PreparedModelInvocation,
+    request: CanonicalModelRequest,
+  ): CanonicalModelRequest | Promise<CanonicalModelRequest>;
 }>;
 
 /**

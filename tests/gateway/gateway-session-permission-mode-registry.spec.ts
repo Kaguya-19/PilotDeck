@@ -3,19 +3,23 @@ import test from "node:test";
 
 import type { AgentInput, AgentSession, AgentSubmitOptions } from "../../src/agent/index.js";
 import { InProcessGateway } from "../../src/gateway/client/InProcessGateway.js";
-import { GatewaySessionPermissionModeRegistry } from "../../src/gateway/permission/GatewaySessionPermissionModeRegistry.js";
+import {
+  GatewaySessionPermissionModeRegistry,
+  type GatewaySessionPermissionModePort,
+} from "../../src/gateway/permission/GatewaySessionPermissionModeRegistry.js";
 import { SessionRouter } from "../../src/gateway/SessionRouter.js";
 
 test("Gateway carries successful plan transitions into later turns and restores on exit", async () => {
   const modes = new GatewaySessionPermissionModeRegistry();
   const submittedModes: Array<string | undefined> = [];
+  const submittedBaseModes: Array<string | undefined> = [];
   let submitCount = 0;
   const session = fakeSession(() => {
     submitCount += 1;
     if (submitCount === 1) return "plan";
     if (submitCount === 3) return "default";
     return undefined;
-  }, (mode) => submittedModes.push(mode));
+  }, (mode) => submittedModes.push(mode), (_mode, baseMode) => submittedBaseModes.push(baseMode));
   const router = new SessionRouter({ idleSweepIntervalMs: 0, createSession: () => session });
   const gateway = new InProcessGateway(router, {
     uuid: (() => {
@@ -23,6 +27,7 @@ test("Gateway carries successful plan transitions into later turns and restores 
       return () => `run-${++next}`;
     })(),
     permissionModes: modes,
+    defaultPermissionMode: "default",
   });
 
   for (let index = 0; index < 4; index += 1) {
@@ -36,6 +41,7 @@ test("Gateway carries successful plan transitions into later turns and restores 
   }
 
   assert.deepEqual(submittedModes.slice(1), ["plan", "plan", "default"]);
+  assert.deepEqual(submittedBaseModes.slice(1), ["default", "default", "default"]);
   assert.equal(modes.get("session-mode"), "default");
 
   await gateway.closeSession({ sessionKey: "session-mode" });
@@ -44,8 +50,11 @@ test("Gateway carries successful plan transitions into later turns and restores 
 
 test("permission mode registry clears volatile session state", () => {
   const registry = new GatewaySessionPermissionModeRegistry();
-  registry.set("session-a", "plan");
+  registry.transition("session-a", "plan", "default");
   assert.equal(registry.get("session-a"), "plan");
+  assert.equal(registry.getBase("session-a"), "default");
+  registry.transition("session-a", "default");
+  assert.equal(registry.getBase("session-a"), undefined);
   registry.clear("session-a");
   assert.equal(registry.get("session-a"), undefined);
   registry.set("session-b", "default");
@@ -72,6 +81,32 @@ test("Gateway uses the application base permission mode when client mode is omit
   }
 
   assert.deepEqual(submitted, [{ mode: "default", baseMode: "default" }]);
+});
+
+test("Gateway remains compatible with permission mode ports that only implement get and set", async () => {
+  const stored = new Map<string, "default" | "plan">();
+  const legacyPort: GatewaySessionPermissionModePort = {
+    get: (sessionKey) => stored.get(sessionKey),
+    set: (sessionKey, mode) => stored.set(sessionKey, mode as "default" | "plan"),
+    clear: (sessionKey) => { stored.delete(sessionKey); },
+    dispose: () => { stored.clear(); },
+  };
+  const session = fakeSession(() => "plan", () => undefined);
+  const router = new SessionRouter({ idleSweepIntervalMs: 0, createSession: () => session });
+  const gateway = new InProcessGateway(router, {
+    permissionModes: legacyPort,
+    defaultPermissionMode: "default",
+  });
+
+  for await (const _event of gateway.submitTurn({
+    sessionKey: "legacy-port",
+    channelKey: "test",
+    message: "enter plan",
+  })) {
+    // Drain the turn so the mode transition is applied.
+  }
+
+  assert.equal(stored.get("legacy-port"), "plan");
 });
 
 function fakeSession(

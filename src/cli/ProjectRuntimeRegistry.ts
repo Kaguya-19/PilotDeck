@@ -147,6 +147,7 @@ export type ProjectRuntimeRegistryOptions = {
   elicitationTimeoutMs: number;
   now: () => Date;
   extraTools?: PilotDeckToolDefinition[];
+  subagentIdFactory?: () => string;
   organizationToolPolicy?: { allow: readonly string[]; deny: readonly string[] };
   organizationPolicy?: ResolvedGatewayOrganizationPolicy;
   sessionOverrides?: SessionConfigOverrides;
@@ -943,7 +944,9 @@ export class ProjectRuntimeRegistry {
     sessionKey: string,
     config: GatewaySessionSdkConfig,
     projectKey?: string,
+    signal?: AbortSignal,
   ): Promise<{ changed: boolean }> {
+    signal?.throwIfAborted();
     const next = structuredClone(config);
     applyOrganizationTaskBudgetCap(next, this.options.organizationPolicy?.limits?.maxTaskBudgetUsd);
     validateSdkManagedPermissions(next.managedPermissions);
@@ -973,6 +976,7 @@ export class ProjectRuntimeRegistry {
       return { changed: false };
     }
     await runtime.pluginRuntime.refresh();
+    signal?.throwIfAborted();
     const sessionPlugins = await resolveSdkSessionPlugins(next.plugins, runtime);
     const extensionView = runtime.pluginRuntime.createView(sessionPlugins);
     if (Array.isArray(next.skills)) {
@@ -996,7 +1000,8 @@ export class ProjectRuntimeRegistry {
       this.assertOrganizationModelAllowed(runtime.projectRoot, resolvedFallback);
       assertSdkManagedModelAllowed(next.managedModels, resolvedFallback);
     }
-    await this.configureProjectTaskBudget(runtime.projectRoot, sessionKey, next.taskBudget);
+    await this.configureProjectTaskBudget(runtime.projectRoot, sessionKey, next.taskBudget, signal);
+    signal?.throwIfAborted();
     this.sdkSessionConfigs.set(sessionKey, next);
     if (sessionPlugins.length > 0) this.sdkSessionPlugins.set(sessionKey, sessionPlugins);
     else this.sdkSessionPlugins.delete(sessionKey);
@@ -1391,9 +1396,11 @@ export class ProjectRuntimeRegistry {
     projectRoot: string,
     sessionKey: string,
     taskBudget: GatewaySessionSdkConfig["taskBudget"],
+    signal?: AbortSignal,
   ): Promise<void> {
     if (!taskBudget || sdkTaskBudgetScope(taskBudget) !== "project") return;
     await this.ensureTaskBudgetLedgerLoaded();
+    signal?.throwIfAborted();
     const key = taskBudgetLedgerKey(projectRoot, "project", sessionKey);
     let ledger = this.sdkTaskBudgetLedgers.get(key);
     if (ledger && this.expireProjectTaskBudgetLedgerIfInactive(key, ledger)) ledger = undefined;
@@ -1585,6 +1592,7 @@ export class ProjectRuntimeRegistry {
       now: this.options.now,
       telemetry: this.options.telemetry,
       extraTools: this._extraTools,
+      subagentIdFactory: this.options.subagentIdFactory,
       builtinPlugins: this.options.builtinPlugins ?? loadBuiltinPlugins(),
       modelFactory: this.options.modelFactory,
       modelInvocationProviderFactory: this.options.modelInvocationProviderFactory,

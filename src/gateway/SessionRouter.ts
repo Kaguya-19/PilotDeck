@@ -358,6 +358,13 @@ export class SessionRouter {
     return count;
   }
 
+  markSessionDirty(sessionKey: string, reason = "runtime_changed"): boolean {
+    const record = this.sessions.get(sessionKey);
+    if (!record) return false;
+    record.dirtyReason = reason;
+    return true;
+  }
+
   async list(input: ListSessionsInput = {}): Promise<ListSessionsResult> {
     if (this.options.listSessions) {
       return this.options.listSessions(input);

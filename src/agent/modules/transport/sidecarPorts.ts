@@ -16,11 +16,13 @@ import type {
   ToolPort,
   ToolAuthorizationPort,
 } from "../protocol.js";
+import type { AgentTurnRoutingPort } from "../../loop/AgentTurnCapabilities.js";
 
 export type SidecarExecutionPorts = Readonly<{
   model: ModelInvokerPort;
   toolExecution: ToolPort;
   toolAuthorization?: ToolAuthorizationPort;
+  routing?: AgentTurnRoutingPort;
 }>;
 
 export type SidecarModuleCall = Omit<ModuleCallRequest, "kind" | "messageId" | "method"> & {
@@ -69,17 +71,21 @@ export function createSidecarPorts(
           findTool: (name) => capability.list().find((tool) => tool.name === name),
         })
       : undefined);
-  return {
-    model: createHostModelInvokerPort(callModule, {
+  const model = createHostModelInvokerPort(callModule, {
       uuid,
       methods: options.modelMethods,
       onPreparedMetadata: options.onPreparedMetadata,
-    }),
+    });
+  return {
+    model,
     toolExecution: createPermissionAwareToolPort(capability, {
     tools: options.tools,
     authorization,
     preserveBatch: options.capabilityMethods?.includes("execute_batch") ?? false,
   }),
     ...(authorization ? { toolAuthorization: authorization } : {}),
+    ...(model.materializePreparedRequest
+      ? { routing: Object.freeze({ materializeRequest: model.materializePreparedRequest }) }
+      : {}),
   };
 }

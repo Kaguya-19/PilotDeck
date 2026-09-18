@@ -84,6 +84,48 @@ test("TurnRunner appends session metadata after successful and failed accepted t
   }
 });
 
+test("prompt suggestion failure cannot rewrite a completed turn", async () => {
+  const sessionId = "suggestion-failure-session";
+  const transcript = new InMemoryTranscriptWriter();
+  const successfulResult: AgentTurnResult = {
+    ...result(sessionId),
+    finalMessage: { role: "assistant", content: [{ type: "text", text: "Completed" }] },
+  };
+  const loop = {
+    async *run(input: AgentLoopInput): AsyncGenerator<AgentEvent, AgentLoopRunResult, unknown> {
+      yield { type: "turn_completed", sessionId, turnId: input.turnId, result: successfulResult };
+      return { result: successfulResult, messages: input.messages };
+    },
+    snapshotFileState: () => ({}),
+  } as unknown as AgentLoop;
+  const runner = new TurnRunner(
+    loop,
+    transcript,
+    undefined,
+    () => new Date(NOW),
+    undefined,
+    { cwd: process.cwd(), transcriptPath: "", collectFileArtifacts: false },
+    { promptSuggestionGenerator: async () => { throw new Error("suggestion unavailable"); } },
+  );
+
+  const events: AgentEvent[] = [];
+  for await (const event of runner.run({
+    sessionId,
+    turnId: "turn-1",
+    messages: [],
+    input: { type: "text", text: "Complete the task" },
+  })) events.push(event);
+
+  assert.equal(events.some((event) => event.type === "turn_failed"), false);
+  assert.equal(events.some((event) => event.type === "prompt_suggestion"), false);
+  const terminal = events.find((event) => event.type === "turn_completed");
+  assert.equal(terminal?.type, "turn_completed");
+  if (terminal?.type === "turn_completed") assert.equal(terminal.result.type, "success");
+  const durable = transcript.entries.find((entry) => entry.type === "turn_result");
+  assert.equal(durable?.type, "turn_result");
+  if (durable?.type === "turn_result") assert.equal(durable.result.type, "success");
+});
+
 test("SessionMetadataStore does not advance its snapshot when persistence fails", async () => {
   const transcript = new InMemoryTranscriptWriter();
   transcript.recordSessionMetadata = async () => {
@@ -227,6 +269,60 @@ test("TurnRunner records title provider provenance and accepted-input sequence",
   // sequence is the durable input snapshot used for title provenance.
   assert.deepEqual(snapshot.titleMessageSequences, [2]);
   assert.equal(snapshot.titleSourceTurnId, "turn-title");
+});
+
+test("TurnRunner retries a title with prior human context and preserves provider this binding", async () => {
+  const sessionId = "title-retry-history";
+  const transcript = new InMemoryTranscriptWriter();
+  const metadataStore = new SessionMetadataStore({ transcript, sessionId, now: () => new Date(NOW) });
+  const titleInputs: string[] = [];
+  const provider: SessionTitlePort & { prefix: string } = {
+    providerId: "bound-provider",
+    modelProvenance: { provider: "test", model: "title" },
+    prefix: "Payment architecture",
+    async generate(input) {
+      titleInputs.push(input.text);
+      return titleInputs.length === 1 ? null : `${this.prefix} review`;
+    },
+  };
+  const loop = {
+    async *run(input: AgentLoopInput): AsyncGenerator<AgentEvent, AgentLoopRunResult, unknown> {
+      const successfulResult = result(input.sessionId);
+      yield { type: "turn_completed", sessionId: input.sessionId, turnId: input.turnId, result: successfulResult };
+      return { result: successfulResult, messages: input.messages };
+    },
+    snapshotFileState: () => ({}),
+  } as unknown as AgentLoop;
+  const runner = new TurnRunner(
+    loop,
+    transcript,
+    undefined,
+    () => new Date(NOW),
+    undefined,
+    { cwd: process.cwd(), transcriptPath: "", collectFileArtifacts: false },
+    { metadataStore, autoGenerateSessionTitle: true, sessionTitleProvider: provider },
+  );
+  const first = { role: "user" as const, content: [{ type: "text" as const, text: "Investigate the payment processing architecture" }] };
+  for await (const _event of runner.run({
+    sessionId,
+    turnId: "turn-1",
+    messages: [],
+    input: { type: "text", text: "Investigate the payment processing architecture" },
+  })) {}
+  await new Promise<void>(resolve => setImmediate(resolve));
+  for await (const _event of runner.run({
+    sessionId,
+    turnId: "turn-2",
+    messages: [first],
+    input: { type: "text", text: "Continue" },
+  })) {}
+  await new Promise<void>(resolve => setImmediate(resolve));
+
+  assert.deepEqual(titleInputs, [
+    "Investigate the payment processing architecture",
+    "Investigate the payment processing architecture\nContinue",
+  ]);
+  assert.equal(metadataStore.getSnapshot().aiTitle, "Payment architecture review");
 });
 
 test("TurnRunner updates lastPrompt on subsequent accepted turns", async () => {

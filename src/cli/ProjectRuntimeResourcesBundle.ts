@@ -96,6 +96,7 @@ export type ProjectRuntimeResourcesBundleOptions = {
   now: () => Date;
   telemetry: TelemetryClient;
   extraTools: readonly PilotDeckToolDefinition[];
+  subagentIdFactory?: () => string;
   builtinPlugins: readonly PilotDeckLoadedPlugin[];
   modelFactory?: (snapshot: PilotConfigSnapshot) => ModelRuntime;
   modelInvocationProviderFactory?: (snapshot: PilotConfigSnapshot) => readonly ModelInvocationProvider[];
@@ -234,6 +235,7 @@ export class ProjectRuntimeResourcesBundle {
       profile,
       now: this.options.now,
       extraTools: this.options.extraTools,
+      subagentIdFactory: this.options.subagentIdFactory,
       skills: {
         loader: (name) => pluginRuntime.loadSkillPrompt(name),
         lister: () => pluginRuntime.getAllSkills(),

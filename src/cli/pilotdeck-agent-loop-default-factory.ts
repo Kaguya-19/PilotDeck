@@ -183,6 +183,7 @@ export const createSidecarExecution: SidecarExecutionFactory = async ({ request,
     ports: {
       model: sidecarPorts.model,
       toolExecution: sidecarPorts.toolExecution,
+      ...(sidecarPorts.routing ? { routing: sidecarPorts.routing } : {}),
       ...(budget ? { budget } : {}),
       ...(metadata ? { metadata } : {}),
     },

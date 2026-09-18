@@ -59,3 +59,17 @@ export type AgentLoopOperationLedger = {
     input: AgentLoopOperationUnknownTerminal,
   ): AgentLoopOperationResolution | undefined | Promise<AgentLoopOperationResolution | undefined>;
 };
+
+export class AgentLoopResultUnknownError extends Error {
+  readonly code = "AGENT_LOOP_RESULT_UNKNOWN";
+
+  constructor(message = "AgentLoop terminal outcome is result_unknown and host reconciliation found no final result.") {
+    super(message);
+    this.name = "AgentLoopResultUnknownError";
+  }
+}
+
+export function isAgentLoopResultUnknownError(error: unknown): error is AgentLoopResultUnknownError {
+  return error instanceof AgentLoopResultUnknownError
+    || (error instanceof Error && (error as Error & { code?: string }).code === "AGENT_LOOP_RESULT_UNKNOWN");
+}

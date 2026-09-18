@@ -108,6 +108,8 @@ export type CreateAgentToolOptions = {
   provider?: string;
   model_?: string;
   maxOutputTokens?: number;
+  /** Optional host identity source; production defaults to random UUIDs. */
+  uuid?: () => string;
 };
 
 const DEFAULT_MAX_OUTPUT_TOKENS = 65_536;
@@ -182,6 +184,7 @@ export function createAgentTool(
           requestedType,
           directive,
           fork: context.subagent,
+          uuid: options.uuid ?? randomUUID,
         });
       }
       let requestedType = explicit ?? "general-purpose";
@@ -324,8 +327,9 @@ async function runFullFork(args: {
   requestedType: string;
   directive: string;
   fork: PilotDeckSubagentForkApi;
+  uuid: () => string;
 }): Promise<PilotDeckToolExecutionOutput<AgentToolOutput>> {
-  const { input, context, requestedType, directive, fork } = args;
+  const { input, context, requestedType, directive, fork, uuid } = args;
 
   if (!fork.isAllowedDefinition(requestedType)) {
     const allowed = fork.listDefinitions().map((d) => d.id).join(", ");
@@ -343,9 +347,9 @@ async function runFullFork(args: {
     );
   }
   if (fork.isBackgroundDefinition?.(requestedType)) {
-    return runBackgroundFork({ input, context, requestedType, directive, fork });
+    return runBackgroundFork({ input, context, requestedType, directive, fork, uuid });
   }
-  const subagentId = randomUUID();
+  const subagentId = uuid();
   const timeoutMs = context.subagentTimeoutMs ?? DEFAULT_SUBAGENT_TIMEOUT_MS;
   let report;
   try {
@@ -415,8 +419,9 @@ async function runBackgroundFork(args: {
   requestedType: string;
   directive: string;
   fork: PilotDeckSubagentForkApi;
+  uuid: () => string;
 }): Promise<PilotDeckToolExecutionOutput<AgentToolOutput>> {
-  const { input, context, requestedType, directive, fork } = args;
+  const { input, context, requestedType, directive, fork, uuid } = args;
   if (!fork.launchBackground) {
     throw new PilotDeckToolRuntimeError(
       "unsupported_tool",
@@ -426,7 +431,7 @@ async function runBackgroundFork(args: {
   if (context.abortSignal?.aborted) {
     throw new PilotDeckToolRuntimeError("tool_aborted", "agent subagent aborted before launch.");
   }
-  const subagentId = randomUUID();
+  const subagentId = uuid();
   const timeoutMs = context.subagentTimeoutMs ?? DEFAULT_SUBAGENT_TIMEOUT_MS;
   let launched: { taskId: string };
   try {

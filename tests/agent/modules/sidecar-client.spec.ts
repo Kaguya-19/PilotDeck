@@ -1810,6 +1810,91 @@ test("sidecar factory sends cancel only after the streaming execute accepted res
   assert.equal(terminal?.result?.type, "aborted");
 });
 
+test("sidecar maps a compaction persistence cancellation without a terminal result to aborted", async () => {
+  const responses = queue<unknown>();
+  let session: ReturnType<typeof createAgentSession> | undefined;
+  const factory = createAgentLoopSidecarRuntimeFactory({
+    connect: () => ({
+      send(message) {
+        const request = message as Record<string, unknown>;
+        if (request.method === "hello") {
+          responses.push(handshakeResponse(request, {}));
+        } else if (request.method === "capabilities") {
+          responses.push(handshakeResponse(request, {
+            capabilitiesVersion: "1",
+            methods: [{ name: "execute", enabled: true, profiles: ["streaming"], cancel: true }],
+          }));
+        } else if (request.method === "execute") {
+          session?.abort("compaction_persistence_failed");
+          responses.push({
+            kind: "response",
+            messageId: "persistence-execute-accepted",
+            inReplyTo: request.messageId,
+            requestId: request.requestId,
+            ok: true,
+            streamId: "persistence-cancel-stream",
+            cursor: 0,
+          });
+        } else if (request.method === "cancel") {
+          responses.push({
+            kind: "response",
+            messageId: "persistence-cancel-accepted",
+            inReplyTo: request.messageId,
+            requestId: request.requestId,
+            ok: true,
+            payload: {},
+          });
+          responses.push({
+            kind: "event",
+            eventType: "agent.execute.cancelled",
+            streamId: "persistence-cancel-stream",
+            sequence: 0,
+            runId: request.runId,
+            operationId: request.operationId,
+            requestId: request.requestId,
+            final: true,
+            outcome: "cancelled",
+            error: { message: "Sidecar module call aborted." },
+            payload: { error: { message: "Sidecar module call aborted." } },
+          });
+          responses.end();
+        }
+      },
+      receive: () => responses,
+    }),
+    uuid: deterministicIds(),
+  });
+  const transcript = new InMemoryTranscriptWriter();
+  session = createAgentSession({
+    sessionId: "persistence-cancel-session",
+    config: config(),
+    dependencies: {
+      router: {} as never,
+      ports: { model: noopModel(), tools: noopTools() },
+      tools: { registry: { list: () => [] } as never, scheduler: { executeAll: async () => [] } as never },
+    },
+    transcript,
+    agentLoopFactory: factory,
+  });
+
+  const events: AgentEvent[] = [];
+  for await (const event of session.submit(
+    { type: "text", text: "compact" },
+    { turnId: "persistence-cancel-turn" },
+  )) events.push(event);
+
+  const terminal = events.find((event) => event.type === "turn_completed");
+  assert.equal(terminal?.type, "turn_completed");
+  if (terminal?.type === "turn_completed") {
+    assert.equal(terminal.result.type, "aborted");
+    assert.equal(terminal.result.stopReason, "aborted_streaming");
+    assert.notEqual(terminal.result.errors?.[0]?.code, "agent_invalid_state");
+  }
+  const durable = transcript.entries.find((entry) => entry.type === "turn_result");
+  assert.equal(durable?.type, "turn_result");
+  if (durable?.type === "turn_result") assert.equal(durable.result.type, "aborted");
+});
+
 test("sidecar factory resumes an accepted stream on an explicit reconnectable transport", async () => {
   const transcript = new InMemoryTranscriptWriter();
   const reconnects: Array<Record<string, unknown>> = [];
@@ -2142,6 +2227,112 @@ test("stdio sidecar keeps one unknown terminal when a host tool returns after it
   assert.equal(operationTerminal?.type === "agent_loop_operation_terminal" && operationTerminal.code, "DEADLINE_EXCEEDED");
 });
 
+test("sidecar keeps a timed-out result_unknown fail-closed without terminal evidence", async () => {
+  const responses = queue<unknown>();
+  let session: ReturnType<typeof createAgentSession> | undefined;
+  let reconciliations = 0;
+  let cancelReason: unknown;
+  const factory = createAgentLoopSidecarRuntimeFactory({
+    connect: () => ({
+      send(message) {
+        const request = message as Record<string, unknown>;
+        if (request.method === "hello") {
+          responses.push(handshakeResponse(request, {}));
+        } else if (request.method === "capabilities") {
+          responses.push(handshakeResponse(request, {
+            capabilitiesVersion: "1",
+            methods: [{ name: "execute", enabled: true, profiles: ["streaming"], cancel: true }],
+          }));
+        } else if (request.method === "execute") {
+          session?.abort("timeout:gateway-timeout-run");
+          responses.push({
+            kind: "response",
+            messageId: "timeout-execute-accepted",
+            inReplyTo: request.messageId,
+            requestId: request.requestId,
+            ok: true,
+            streamId: "timeout-stream",
+            cursor: 0,
+          });
+        } else if (request.method === "cancel") {
+          cancelReason = request.reason;
+          responses.push({
+            kind: "response",
+            messageId: "timeout-cancel-accepted",
+            inReplyTo: request.messageId,
+            requestId: request.requestId,
+            ok: true,
+            payload: {},
+          });
+          responses.push({
+            kind: "event",
+            eventType: "agent.execute.unknown",
+            streamId: "timeout-stream",
+            sequence: 0,
+            runId: request.runId,
+            operationId: request.operationId,
+            requestId: request.requestId,
+            final: true,
+            outcome: "result_unknown",
+            payload: {},
+          });
+          responses.end();
+        }
+      },
+      receive: () => responses,
+    }),
+    reconcileResultUnknown: async () => {
+      reconciliations += 1;
+      return undefined;
+    },
+    uuid: deterministicIds(),
+  });
+  const transcript = new InMemoryTranscriptWriter();
+  session = createAgentSession({
+    sessionId: "gateway-timeout-session",
+    config: config(),
+    dependencies: {
+      router: {} as never,
+      ports: { model: noopModel(), tools: noopTools() },
+      tools: { registry: { list: () => [] } as never, scheduler: { executeAll: async () => [] } as never },
+    },
+    transcript,
+    agentLoopFactory: factory,
+  });
+
+  const events: AgentEvent[] = [];
+  await assert.rejects(
+    async () => {
+      for await (const event of session!.submit(
+        { type: "text", text: "timeout" },
+        {
+          turnId: "gateway-timeout-turn",
+          execution: {
+            runId: "gateway-timeout-run",
+            operationId: "gateway-timeout-operation",
+          },
+        },
+      )) events.push(event);
+    },
+    /result_unknown/,
+  );
+  assert.equal(events.some((event) => event.type === "turn_completed"), false);
+  assert.equal(events.some((event) => event.type === "turn_failed"), false);
+  assert.equal(reconciliations, 1);
+  const operationEntries = transcript.entries.filter((entry) => entry.type.startsWith("agent_loop_operation_"));
+  assert.deepEqual(operationEntries.map((entry) => entry.type), [
+    "agent_loop_operation_started",
+    "agent_loop_operation_accepted",
+    "agent_loop_operation_terminal",
+  ]);
+  const operationTerminals = operationEntries.filter(
+    (entry): entry is Extract<typeof entry, { type: "agent_loop_operation_terminal" }> =>
+      entry.type === "agent_loop_operation_terminal",
+  );
+  assert.equal(operationTerminals[0]?.outcome, "result_unknown");
+  assert.equal(cancelReason, "timeout:gateway-timeout-run");
+});
+
 test("stdio sidecar connection reports malformed stdout and exit diagnostics", async () => {
   const malformed = createStdioAgentLoopSidecarConnectionFactory({
     command: process.execPath,
@@ -2319,10 +2510,11 @@ test("sidecar host capability calls reconstruct plan/todo and host execution ser
   assert.equal(terminal?.result?.type, "success");
 });
 
-test("sidecar compaction rebuilds candidate requests through host context without rerunning model preparation", async () => {
+test("sidecar compaction rebuilds candidate requests through host context and the bound preparation", async () => {
   const inputs: Array<Record<string, unknown>> = [];
   const preparationInputs: Array<Record<string, unknown>> = [];
   const modelPreparationRequests: Array<Record<string, unknown>> = [];
+  const materializedCandidates: Array<Record<string, unknown>> = [];
   const evaluatedRequests: Array<Record<string, unknown>> = [];
   const manifests: Array<Record<string, unknown>> = [];
   const moduleResponses: Array<Record<string, unknown>> = [];
@@ -2347,6 +2539,7 @@ test("sidecar compaction rebuilds candidate requests through host context withou
               },
               provider: request.provider,
               model: request.model,
+              opaque: { route: `${request.provider}/${request.model}` },
             };
           },
           async *stream() {},
@@ -2362,6 +2555,16 @@ test("sidecar compaction rebuilds candidate requests through host context withou
               blockingRatio: 0.9,
               state: "ok",
               ratio: 240 / options.maxContextTokens,
+            };
+          },
+        },
+        routing: {
+          materializeRequest(decision, request) {
+            materializedCandidates.push({ prepared: decision as unknown as Record<string, unknown>, request });
+            return {
+              ...request,
+              systemPrompt: `router materialized: ${"R".repeat(1024)}`,
+              tools: [{ name: "routed_tool", description: "T".repeat(1024), inputSchema: { type: "object" } }],
             };
           },
         },
@@ -2432,7 +2635,8 @@ test("sidecar compaction rebuilds candidate requests through host context withou
   assert.ok(moduleResponses.every((response) => response.ok === true), JSON.stringify(moduleResponses));
   assert.equal(evaluatedRequests.length, 3);
   assert.equal(preparationInputs.length, 3);
-  assert.equal(modelPreparationRequests.length, 0);
+  assert.equal(modelPreparationRequests.length, 2);
+  assert.equal(materializedCandidates.length, 2);
   assert.deepEqual((preparationInputs[0]?.messages as unknown[]), [{
     role: "user",
     content: [{ type: "text", text: "candidate" }],
@@ -2459,6 +2663,9 @@ test("sidecar compaction rebuilds candidate requests through host context withou
   assert.equal((evaluatedRequests[0]?.options as Record<string, unknown>).maxContextTokens, 128_000);
   assert.equal((evaluatedRequests[1]?.options as Record<string, unknown>).maxContextTokens, 32_000);
   assert.equal((evaluatedRequests[2]?.options as Record<string, unknown>).maxContextTokens, 16_000);
+  assert.match(String((evaluatedRequests[1]?.request as Record<string, unknown>).systemPrompt), /^router materialized:/);
+  assert.equal(((evaluatedRequests[1]?.request as Record<string, unknown>).tools as Array<{ name: string }>)[0]?.name, "routed_tool");
+  assert.match(String((evaluatedRequests[2]?.request as Record<string, unknown>).systemPrompt), /^router materialized:/);
 });
 
 test("sidecar compaction rejects malformed or cross-route calibration before host context", async () => {
@@ -2536,11 +2743,13 @@ test("sidecar compaction rejects malformed or cross-route calibration before hos
 
   await assert.rejects(
     () => request({ provider: "provider-b", model: "model-a", actualInputTokens: 10, estimatedInputTokens: 8 }),
-    /does not match the request route/,
+    (error: Error & { code?: string }) => error.message.includes("does not match the request route")
+      && error.code === "COMPACTION_BUDGET_CONTRACT_INVALID",
   );
   await assert.rejects(
     () => request({ provider: "provider-a", model: "model-a", actualInputTokens: -1, estimatedInputTokens: 8 }),
-    /actualInputTokens must be positive/,
+    (error: Error & { code?: string }) => error.message.includes("actualInputTokens must be positive")
+      && error.code === "COMPACTION_BUDGET_CONTRACT_INVALID",
   );
   assert.equal(contextCalls, 0);
   await dispatcher.dispose();
@@ -2674,6 +2883,72 @@ test("sidecar dispatcher legacy stream uses its cached prepared request when omi
       { type: "message_end", finishReason: "stop" },
     ],
   });
+  await dispatcher.dispose();
+});
+
+test("sidecar dispatcher materializes a prepared request through the narrow host routing capability", async () => {
+  const materialized: Array<Record<string, unknown>> = [];
+  const dispatcher = createSidecarDefaultModuleDispatcher({
+    config: config(),
+    input: { sessionId: "materialize-session", turnId: "materialize-turn", messages: [] },
+    checkpoint: new HostToolCheckpoint({}),
+    capabilityResultObserver: { onCapabilityResults: async () => undefined },
+    planTodoHandler: async () => ({}),
+    modules: {
+      model: {
+        execution: {
+          async prepare({ request }) {
+            return {
+              request: { ...request, systemPrompt: "prepared prompt", tools: [{ name: "prepared_tool", inputSchema: { type: "object" } }], maxOutputTokens: 64 },
+              provider: request.provider,
+              model: request.model,
+              opaque: { hostOnly: true },
+            };
+          },
+          async *stream() { yield { type: "message_end", finishReason: "stop" } as const; },
+        },
+        materializeRequest(prepared, request) {
+          materialized.push({ opaque: prepared.opaque, request });
+          return { ...request, systemPrompt: "router prompt", tools: [{ name: "router_tool", inputSchema: { type: "object" } }], maxOutputTokens: 32 };
+        },
+      },
+      capability: {
+        execution: noopTools(),
+        runtimeContext: {
+          bindTurn: () => ({
+            permissionContext: () => config().permissionContext,
+            toolRuntimeContext: () => ({} as never),
+            executionContext: () => ({} as never),
+            contextIdentity: (source) => ({ ...(source ?? {}) }),
+          }),
+        },
+      },
+    },
+  });
+  assert.ok((dispatcher.manifest.hostModules.model as { methods: string[] }).methods.includes("materialize_prepared_request"));
+  const handler = dispatcher.handlers.model!;
+  const identity = {
+    kind: "request", method: "module_call", runId: "materialize-run", operationId: "materialize-operation", requestId: "materialize-request", module: "model",
+  } as const;
+  await handler({
+    ...identity,
+    messageId: "materialize-prepare",
+    payload: { operation: "prepare", preparationId: "prepared-1", request: { provider: "p", model: "m", messages: [] } },
+  } as never);
+  const response = await handler({
+    ...identity,
+    messageId: "materialize-call",
+    payload: {
+      operation: "materialize_prepared_request",
+      preparationId: "prepared-1",
+      request: { provider: "p", model: "m", messages: [{ role: "user", content: [{ type: "text", text: "compacted" }] }], systemPrompt: "candidate" },
+    },
+  } as never);
+
+  assert.deepEqual(materialized[0]?.opaque, { hostOnly: true });
+  assert.equal((response.request as { systemPrompt?: string }).systemPrompt, "router prompt");
+  assert.equal((response.request as { tools?: Array<{ name: string }> }).tools?.[0]?.name, "router_tool");
+  assert.equal((response.request as { maxOutputTokens?: number }).maxOutputTokens, 32);
   await dispatcher.dispose();
 });
 
@@ -3826,6 +4101,16 @@ function compactionContextConnection(
     module: "context",
     payload: { operation: "try_auto_compact", input },
   });
+  const modelPrepareCall = (messageId: string, preparationId: string, request: Record<string, unknown>) => ({
+    kind: "request",
+    messageId,
+    method: "module_call",
+    runId,
+    operationId,
+    requestId,
+    module: "model",
+    payload: { operation: "prepare", preparationId, request },
+  });
   return {
     send(message: unknown) {
       const request = message as Record<string, unknown>;
@@ -3884,6 +4169,12 @@ function compactionContextConnection(
       if (request.kind !== "response") return;
       moduleResponses.push(structuredClone(request));
       if (request.inReplyTo === "pre-route-compact") {
+        responses.push(modelPrepareCall("routed-model-prepare", "routed-preparation", {
+          provider: "routed-provider", model: "routed-model", messages: [],
+        }));
+        return;
+      }
+      if (request.inReplyTo === "routed-model-prepare") {
         responses.push(moduleCall("routed-compact", {
           messages: [],
           maxContextTokens: 32_000,
@@ -3907,11 +4198,18 @@ function compactionContextConnection(
             messages: [],
             tools: [{ name: "large_tool", description: "T".repeat(256), inputSchema: { type: "object" } }],
           },
+          budgetPreparationId: "routed-preparation",
           budgetProjection: { stage: "routed", trigger: "auto", maxContextTokens: 32_000 },
         }));
         return;
       }
       if (request.inReplyTo === "routed-compact") {
+        responses.push(modelPrepareCall("recovery-model-prepare", "recovery-preparation", {
+          provider: "recovery-provider", model: "recovery-model", messages: [],
+        }));
+        return;
+      }
+      if (request.inReplyTo === "recovery-model-prepare") {
         responses.push(moduleCall("recovery-compact", {
           messages: [],
           maxContextTokens: 16_000,
@@ -3935,6 +4233,7 @@ function compactionContextConnection(
             messages: [],
             tools: [{ name: "large_tool", description: "T".repeat(256), inputSchema: { type: "object" } }],
           },
+          budgetPreparationId: "recovery-preparation",
           budgetProjection: { stage: "recovery", trigger: "model_error", maxContextTokens: 16_000 },
         }));
         return;

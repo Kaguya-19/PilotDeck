@@ -29,17 +29,48 @@ export type HostModelInvokerPortOptions = {
   onPreparedMetadata?: (metadata: unknown, prepared: PreparedModelInvocation) => void;
 };
 
+export type HostModelInvokerPort = ModelInvokerPort & Readonly<{
+  /**
+   * Materialize an already prepared invocation through the host routing
+   * capability. The preparation id is transport-local and never reveals the
+   * host's opaque routing state to the sidecar.
+   */
+  materializePreparedRequest?: (
+    prepared: PreparedModelInvocation,
+    request: CanonicalModelRequest,
+  ) => Promise<CanonicalModelRequest>;
+}>;
+
 const preparationIdSymbol = Symbol("pilotdeck.hostModelPreparationId");
+const requestPreparationIdSymbol = Symbol("pilotdeck.hostModelRequestPreparationId");
 
 type PreparedInvocationWithIdentity = PreparedModelInvocation & {
   [preparationIdSymbol]?: string;
 };
 
+type ModelRequestWithPreparationIdentity = CanonicalModelRequest & {
+  [requestPreparationIdSymbol]?: string;
+};
+
+export function readHostModelRequestPreparationId(request: CanonicalModelRequest): string | undefined {
+  return (request as ModelRequestWithPreparationIdentity)[requestPreparationIdSymbol];
+}
+
+function rememberRequestPreparationId(request: CanonicalModelRequest, preparationId: string): CanonicalModelRequest {
+  Object.defineProperty(request, requestPreparationIdSymbol, {
+    configurable: false,
+    enumerable: false,
+    value: preparationId,
+    writable: false,
+  });
+  return request;
+}
+
 /** ModelInvokerPort consumer backed by a host-owned model module. */
 export function createHostModelInvokerPort(
   callModule: HostModelModuleClient,
   options: HostModelInvokerPortOptions = {},
-): ModelInvokerPort {
+): HostModelInvokerPort {
   const uuid = options.uuid ?? (() => Math.random().toString(36).slice(2));
   const preparationIds = new WeakMap<PreparedModelInvocation, string>();
   let preparationSequence = 0;
@@ -47,6 +78,12 @@ export function createHostModelInvokerPort(
   const supportsRemotePrepare = options.methods?.includes("prepare") === true;
   const supportsPullStream = options.methods?.includes("stream_next") === true;
   const supportsCloseStream = options.methods?.includes("close_stream") === true;
+  const supportsMaterialize = options.methods?.includes("materialize_prepared_request") === true;
+  const preparationContexts = new WeakMap<PreparedModelInvocation, ModelExecutionContext>();
+  const remember = (prepared: PreparedModelInvocation, preparationId: string, context?: ModelExecutionContext): void => {
+    rememberPreparationId(prepared, preparationId, preparationIds);
+    if (context) preparationContexts.set(prepared, context);
+  };
   return {
     async prepare({ request, context }): Promise<PreparedModelInvocation> {
       const fallback: PreparedModelInvocation = {
@@ -56,7 +93,7 @@ export function createHostModelInvokerPort(
       };
       const preparationId = nextPreparationId();
       if (!supportsRemotePrepare) {
-        rememberPreparationId(fallback, preparationId, preparationIds);
+        remember(fallback, preparationId, context);
         return fallback;
       }
       const response = await callModule({
@@ -74,14 +111,47 @@ export function createHostModelInvokerPort(
       });
       const prepared = readPreparedInvocation(response, fallback);
       options.onPreparedMetadata?.(response.payload?.metadata, prepared);
-      rememberPreparationId(prepared, preparationId, preparationIds);
+      remember(prepared, preparationId, context);
       return prepared;
     },
+    ...(supportsMaterialize ? {
+      async materializePreparedRequest(
+        prepared: PreparedModelInvocation,
+        request: CanonicalModelRequest,
+      ): Promise<CanonicalModelRequest> {
+        const preparationId = readPreparationId(prepared, preparationIds);
+        const context = preparationContexts.get(prepared);
+        if (!preparationId || !context) {
+          throw invalidModelResponse("Prepared invocation is not bound to a host model request.");
+        }
+        const response = await callModule({
+          runId: context.runId,
+          operationId: context.operationId ?? context.turnId,
+          idempotencyKey: context.idempotencyKey,
+          requestId: `model-materialize-${uuid()}`,
+          module: "model",
+          payload: {
+            operation: "materialize_prepared_request",
+            preparationId,
+            request: snapshotCanonicalModelRequest(request),
+          },
+        });
+        assertModelResponse(response, "Model request materialization failed");
+        const materialized = response.payload?.request;
+        if (!materialized || typeof materialized !== "object") {
+          throw invalidModelResponse("Model materialization response must contain a canonical request.");
+        }
+        return rememberRequestPreparationId(
+          snapshotCanonicalModelRequest(materialized as CanonicalModelRequest),
+          preparationId,
+        );
+      },
+    } : {}),
     async *stream({ prepared, context }): AsyncIterable<CanonicalModelEvent> {
       let preparationId = readPreparationId(prepared, preparationIds);
       if (!preparationId) {
         preparationId = nextPreparationId();
-        rememberPreparationId(prepared, preparationId, preparationIds);
+        remember(prepared, preparationId, context);
       }
       if (supportsPullStream) {
         let done = false;

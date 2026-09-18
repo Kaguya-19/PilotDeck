@@ -44,7 +44,14 @@ test("Module Protocol defines and normalizes advertised host module operations",
     "capture_turn",
     "try_auto_compact",
   ]);
-  assert.deepEqual(HOST_MODEL_MODULE_METHODS, ["prepare", "stream", "stream_next", "close_stream", "get_metadata"]);
+  assert.deepEqual(HOST_MODEL_MODULE_METHODS, [
+    "prepare",
+    "materialize_prepared_request",
+    "stream",
+    "stream_next",
+    "close_stream",
+    "get_metadata",
+  ]);
   assert.deepEqual(HOST_BUDGET_MODULE_METHODS, [
     "estimate_request_input",
     "evaluate_request_budget",
@@ -63,8 +70,9 @@ test("Module Protocol defines and normalizes advertised host module operations",
     "prepare_for_model",
     "capture_turn",
   ]);
-  assert.deepEqual(readHostModelModuleMethods(["prepare", "unknown", "stream_next", "close_stream"]), [
+  assert.deepEqual(readHostModelModuleMethods(["prepare", "unknown", "materialize_prepared_request", "stream_next", "close_stream"]), [
     "prepare",
+    "materialize_prepared_request",
     "stream_next",
     "close_stream",
   ]);

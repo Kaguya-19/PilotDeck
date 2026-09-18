@@ -109,7 +109,7 @@ class MockHandler(BaseHTTPRequestHandler):
         if delay_ms > 0:
             time.sleep(delay_ms / 1000)
         has_tool_result = any(_is_tool_result(item) for item in messages)
-        if scenario == "plan_mode_host_policy":
+        if scenario in {"plan_mode_host_policy", "plan_mode_bypass_host_policy"}:
             turn_index = int(request.get("turnIndex") or 0)
             turn_model_attempt = int(request.get("turnModelAttempt") or 1)
             if turn_index == 3:
@@ -206,6 +206,12 @@ class MockHandler(BaseHTTPRequestHandler):
         if scenario == "sidecar_elicitation_execution" and not has_tool_result:
             self._json(200, _tool_completion([("ask_user_question", {
                 "questions": [{"question": "Continue?", "header": "Parity", "options": [{"label": "yes", "description": "Continue"}, {"label": "no", "description": "Stop"}]}],
+            })]))
+            return
+        if scenario == "write_snapshot_resume" and not has_tool_result:
+            self._json(200, _tool_completion([("write_file", {
+                "file_path": "parity-output.txt",
+                "content": "parity snapshot before\n",
             })]))
             return
         if scenario == "pure_text" or scenario in {"image", "checkpoint_resume", "multimodal_image_and_text", "stale_event", "write_snapshot_resume", "duplicate_execute", "sop_scheduled_task", "sop_handoff_resume", "sidecar_elicitation", "sidecar_durable_compaction", "sidecar_full_request_compaction_budget", "sidecar_projected_request_compaction_budget", "sidecar_live_model_stream", "sidecar_model_metadata", "sidecar_empty_system_prompt", "sidecar_additional_working_directories"}:

@@ -151,7 +151,10 @@ export {
   type CompactionSnipPort,
   type CompactionSummaryPort,
 } from "./compaction/CompactionPort.js";
-export { projectCompactionBudget } from "./compaction/CompactionPort.js";
+export {
+  COMPACTION_BUDGET_CONTRACT_ERROR_CODE,
+  projectCompactionBudget,
+} from "./compaction/CompactionPort.js";
 export {
   createNativeCompactionPort,
   type NativeCompactionPortOptions,

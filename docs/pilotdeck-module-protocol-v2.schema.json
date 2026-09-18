@@ -34,7 +34,7 @@
             "methods": {
               "type": "array",
               "uniqueItems": true,
-              "items": { "enum": ["prepare", "stream", "stream_next", "close_stream", "get_metadata"] }
+              "items": { "enum": ["prepare", "materialize_prepared_request", "stream", "stream_next", "close_stream", "get_metadata"] }
             }
           }
         },

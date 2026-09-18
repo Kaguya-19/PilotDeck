@@ -14,6 +14,8 @@ import type {
 } from "./MicroCompactionEngine.js";
 import type { SnipResult } from "./SnipEngine.js";
 
+export const COMPACTION_BUDGET_CONTRACT_ERROR_CODE = "COMPACTION_BUDGET_CONTRACT_INVALID";
+
 /** Result returned by a context consumer after one proactive compaction pass. */
 export type AutoCompactResult =
   | { type: "skipped"; snapshot: TokenBudgetSnapshot }
@@ -41,6 +43,8 @@ export type CompactionBudgetProjection = {
   manualForce?: boolean;
   allowFallbackOnFailure?: boolean;
   request?: CanonicalModelRequest;
+  /** Transport-local reference to host-owned prepared routing state. */
+  preparationId?: string;
   /**
    * Host-safe prompt-preparation intent. The sidecar sends this instead of
    * attempting to splice candidate durable messages into an already projected

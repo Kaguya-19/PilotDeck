@@ -14,6 +14,7 @@ export type GatewaySubagentContinuations = SessionSubagentContinuationRuntime & 
 export type GatewaySubagentRuntimeBundleOptions = {
   agentRegistryName?: string;
   onCleanupError?: (error: unknown) => void;
+  uuid?: () => string;
 };
 
 /**
@@ -44,6 +45,7 @@ export class GatewaySubagentRuntimeBundle {
       agents: this.agents,
       providers: this.providers,
       host: this.host,
+      uuid: options.uuid,
     });
     this.continuations = {
       provider: nativeProvider.name,

@@ -57,7 +57,8 @@ _TOOL_LIFECYCLE_PHASE = {
     "tool.finish": 2,
     "tool.result": 3,
 }
-_HARNESS_PROOF_KINDS = {"harness.proof"}
+_HARNESS_PROOF_KINDS = {"harness.proof", "operation.terminal"}
+_REQUIRED_DURABLE_STATUS_EVENTS = {"turn_timeout", "max_budget_reached", "context_budget"}
 
 
 def _generated_id_placeholder(
@@ -284,6 +285,10 @@ _SEMANTIC_EVENT_FIELDS = {
     "durable.status": {"event", "statusKind", "text"},
     "durable.steer": {"itemId", "message"},
     "durable.compaction_completed": {"operationId", "status"},
+    "context.budget": {
+        "used", "displayUsed", "budgetUsed", "total", "effectiveTotal",
+        "reservedOutputTokens", "ratio", "state", "source", "exact", "breakdown",
+    },
     "durable.state": {
         "durableStatusCount", "durableSteerCount", "compactionBoundaryCount",
         "compactionCompletedCount", "replayedStatusCount",
@@ -292,6 +297,7 @@ _SEMANTIC_EVENT_FIELDS = {
         "state", "stage", "code", "attempt", "parentClosed", "parentAborted",
         "subagentModelRequests", "terminalCount",
     },
+    "session.lifecycle": {"state", "reason"},
     "fault.injected": {"target", "action", "stage", "attempt"},
     "side_effect.state": {"counts", "sideEffectCount"},
     "compact.boundary": {"compactionId", "reason", "messages", "metadata"},
@@ -300,7 +306,10 @@ _SEMANTIC_EVENT_FIELDS = {
     "checkpoint": {"status", "seedState", "messages", "activeStepId", "taskFrameId", "slots", "knowledgeBudget", "recoveryPoint", "sideEffectCount"},
     "taskframe": {"taskFrame", "status", "stepId", "nextStepId", "slots", "requiredCapabilities", "knowledgeBudget", "priorTaskResults"},
     "session.state": {"activeSkillId", "activeStepId", "pendingTasks", "awaitingInput", "handoff", "slots", "priorTaskResults"},
-    "terminal": {"outcome", "code", "stopReason", "resultType", "structuredResult", "output", "frameStatus", "runStatus", "taskFrame", "session"},
+    "terminal": {
+        "outcome", "code", "stopReason", "resultType", "durableStopReason", "durableErrorCode",
+        "structuredResult", "output", "usage", "frameStatus", "runStatus", "taskFrame", "session",
+    },
     "user.output": {"text"},
 }
 
@@ -410,9 +419,28 @@ def project_semantic_trace(records: list[dict[str, Any]]) -> list[dict[str, Any]
     # Parent and host-owned child loops are independently ordered actors. Their
     # internal event order remains strict, but process scheduling does not
     # define a semantic total order between the two streams.
-    parent = [record for record in projected if record.get("agentScope") != "child"]
-    child = [record for record in projected if record.get("agentScope") == "child"]
-    return parent + child
+    durable_kinds = {"durable.status", "durable.steer", "durable.compaction_completed", "compact.boundary", "durable.state"}
+    lifecycle_kind = "sidecar.lifecycle"
+    parent = [
+        record for record in projected
+        if record.get("agentScope") != "child"
+        and record.get("kind") not in durable_kinds
+        and record.get("kind") != lifecycle_kind
+    ]
+    parent_durable = [
+        record for record in projected
+        if record.get("agentScope") != "child" and record.get("kind") in durable_kinds
+    ]
+    child = [
+        record for record in projected
+        if record.get("agentScope") == "child" and record.get("kind") not in durable_kinds
+    ]
+    child_durable = [
+        record for record in projected
+        if record.get("agentScope") == "child" and record.get("kind") in durable_kinds
+    ]
+    lifecycle = [record for record in projected if record.get("kind") == lifecycle_kind]
+    return parent + parent_durable + lifecycle + child + child_durable
 
 
 def project_format_trace(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -528,9 +556,480 @@ def _diff_semantic_records(left: list[dict[str, Any]], right: list[dict[str, Any
 
 
 def compare_trace_details(left: list[dict[str, Any]], right: list[dict[str, Any]]) -> Comparison:
-    semantic = _diff_semantic_records(project_semantic_trace(left), project_semantic_trace(right))
+    semantic = (
+        _partial_order_differences(left, "left")
+        + _partial_order_differences(right, "right")
+        + _diff_semantic_records(project_semantic_trace(left), project_semantic_trace(right))
+    )
     format_differences = _diff_values(project_format_trace(left), project_format_trace(right))
     return Comparison(semantic=semantic, format_warnings=format_differences)
+
+
+def compare_baseline_trace_details(
+    left: list[dict[str, Any]],
+    right: list[dict[str, Any]],
+    scenario: dict[str, Any],
+) -> Comparison:
+    """Compare behavior shared with main while retaining the raw format diff.
+
+    Main and the modular runtime intentionally compose different prompt and
+    tool catalogs. The shared contract keeps the requested tools, user-authored
+    messages, model identity, effects, policy, output, and terminal state.
+    Extension-only prompt/catalog data remains visible in format warnings.
+    """
+    comparison = scenario.get("baselineComparison")
+    extension_tools = (
+        {str(name) for name in comparison.get("extensionTools") or []}
+        if isinstance(comparison, dict)
+        else set()
+    )
+    tool_description_contracts = (
+        comparison.get("toolDescriptionContracts")
+        if isinstance(comparison, dict)
+        and isinstance(comparison.get("toolDescriptionContracts"), dict)
+        else {}
+    )
+
+    def description_contract_differences(
+        records: list[dict[str, Any]],
+        side: str,
+    ) -> list[Difference]:
+        differences: list[Difference] = []
+        for request_index, record in enumerate(records):
+            if record.get("kind") != "model.request":
+                continue
+            view = record.get("modelView")
+            if not isinstance(view, dict):
+                continue
+            for tool in view.get("tools") or []:
+                if not isinstance(tool, dict) or not isinstance(tool.get("name"), str):
+                    continue
+                contract = tool_description_contracts.get(tool["name"])
+                if not isinstance(contract, dict) or not isinstance(contract.get(side), str):
+                    continue
+                if tool.get("description") != contract[side]:
+                    differences.append(Difference(
+                        f"trace[{request_index}].modelView.tools.{tool['name']}.description.{side}",
+                        contract[side],
+                        tool.get("description"),
+                    ))
+        return differences
+
+    def shared(
+        records: list[dict[str, Any]],
+        side: str,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any] | None]]:
+        projected = project_semantic_trace(records)
+        result: list[dict[str, Any]] = []
+        raw_request_views: list[dict[str, Any] | None] = []
+        pending_current_budgets: list[dict[str, Any]] = []
+        last_baseline_request: dict[str, Any] | None = None
+        for record in projected:
+            if record.get("kind") in {"durable.status", "durable.steer", "durable.compaction_completed"}:
+                continue
+            if record.get("kind") == "context.budget":
+                budget = _baseline_shared_context_budget(record)
+                if side == "baseline" and last_baseline_request is not None and "contextBudget" not in last_baseline_request:
+                    last_baseline_request["contextBudget"] = budget
+                elif side == "current":
+                    pending_current_budgets.append(budget)
+                else:
+                    result.append(record)
+                continue
+            candidate = dict(record)
+            if candidate.get("kind") == "model.request":
+                view = candidate.get("modelView")
+                raw_request_views.append(dict(view) if isinstance(view, dict) else None)
+                if isinstance(view, dict):
+                    messages = [_baseline_shared_runtime_message(message) for message in view.get("messages") or []]
+                    messages = [message for message in messages if message is not None]
+                    # Preserve every provider-visible request control. Only
+                    # explicitly declared composition additions are removed.
+                    # Filtering to scenario.tools hid prompt/cache/tool-policy
+                    # regressions and made a changed tool catalog look equal.
+                    normalized_view = dict(view)
+                    normalized_view["messages"] = messages
+                    normalized_view["systemPrompt"] = _baseline_shared_system_prompt(
+                        normalized_view.get("systemPrompt"),
+                    )
+                    composition = _runtime_composition(view)
+                    if composition:
+                        normalized_view["runtimeComposition"] = composition
+                    if extension_tools:
+                        normalized_view["tools"] = [
+                            tool for tool in view.get("tools") or []
+                            if not (isinstance(tool, dict) and tool.get("name") in extension_tools)
+                        ]
+                    normalized_tools: list[Any] = []
+                    for tool in normalized_view.get("tools") or []:
+                        if not isinstance(tool, dict):
+                            normalized_tools.append(tool)
+                            continue
+                        contract = tool_description_contracts.get(tool.get("name"))
+                        if isinstance(contract, dict) and tool.get("description") == contract.get(side):
+                            normalized_tool = dict(tool)
+                            normalized_tool["description"] = "<declared-sdk-tool-description>"
+                            normalized_tools.append(normalized_tool)
+                        else:
+                            normalized_tools.append(tool)
+                    normalized_view["tools"] = normalized_tools
+                    candidate["modelView"] = normalized_view
+                if side == "current" and pending_current_budgets:
+                    candidate["contextBudget"] = pending_current_budgets.pop(0)
+                if side == "baseline":
+                    last_baseline_request = candidate
+            elif candidate.get("kind") == "agent.status" and candidate.get("event") == "context_budget":
+                detail = candidate.get("detail")
+                candidate["detail"] = {
+                    "type": detail.get("type") if isinstance(detail, dict) else None,
+                    "state": detail.get("state") if isinstance(detail, dict) else None,
+                }
+            result.append(candidate)
+        result.extend(pending_current_budgets)
+        return result, raw_request_views
+
+    left_shared, left_raw_requests = shared(left, "baseline")
+    right_shared, right_raw_requests = shared(right, "current")
+    budget_validation = (
+        _baseline_budget_validation_differences(left_shared, "baseline")
+        + _baseline_budget_validation_differences(right_shared, "current")
+    )
+    _normalize_baseline_budget_for_declared_request_drift(
+        left_shared,
+        right_shared,
+        left_raw_requests,
+        right_raw_requests,
+    )
+
+    semantic = (
+        _partial_order_differences(left, "left")
+        + _partial_order_differences(right, "right")
+        + budget_validation
+        + description_contract_differences(left, "baseline")
+        + description_contract_differences(right, "current")
+        + _diff_semantic_records(left_shared, right_shared)
+    )
+    format_differences = _diff_values(project_format_trace(left), project_format_trace(right))
+    return Comparison(semantic=semantic, format_warnings=format_differences)
+
+
+_BASELINE_CONTEXT_BUDGET_FIELDS = (
+    "used",
+    "displayUsed",
+    "budgetUsed",
+    "total",
+    "effectiveTotal",
+    "reservedOutputTokens",
+    "ratio",
+    "state",
+)
+
+_BASELINE_CONTEXT_BUDGET_DECISION_FIELDS = (
+    "total",
+    "effectiveTotal",
+    "reservedOutputTokens",
+    "state",
+)
+
+
+def _baseline_budget_validation_differences(
+    records: list[dict[str, Any]],
+    side: str,
+) -> list[Difference]:
+    differences: list[Difference] = []
+    for index, request in enumerate(record for record in records if record.get("kind") == "model.request"):
+        budget = request.get("contextBudget")
+        if not isinstance(budget, dict):
+            continue
+        path = f"trace.contextBudget.{side}[{index}]"
+        for field in ("used", "displayUsed", "total", "effectiveTotal", "reservedOutputTokens", "ratio"):
+            value = budget.get(field)
+            if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
+                differences.append(Difference(f"{path}.{field}", "non_negative_number", value))
+        used = budget.get("used")
+        effective_total = budget.get("effectiveTotal")
+        ratio = budget.get("ratio")
+        if isinstance(used, (int, float)) and isinstance(effective_total, (int, float)) \
+                and isinstance(ratio, (int, float)) and effective_total > 0:
+            expected_ratio = used / effective_total
+            if abs(ratio - expected_ratio) > 1e-12:
+                differences.append(Difference(f"{path}.ratio_consistency", expected_ratio, ratio))
+        if budget.get("state") not in {"ok", "warning", "blocking"}:
+            differences.append(Difference(f"{path}.state", "ok|warning|blocking", budget.get("state")))
+    return differences
+
+
+def _baseline_shared_context_budget(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "kind": "context.budget",
+        **{
+            key: record[key]
+            for key in _BASELINE_CONTEXT_BUDGET_FIELDS
+            if key in record
+        },
+    }
+
+
+def _normalize_baseline_budget_for_declared_request_drift(
+    left: list[dict[str, Any]],
+    right: list[dict[str, Any]],
+    left_raw_requests: list[dict[str, Any] | None],
+    right_raw_requests: list[dict[str, Any] | None],
+) -> None:
+    left_requests = [record for record in left if record.get("kind") == "model.request"]
+    right_requests = [record for record in right if record.get("kind") == "model.request"]
+    for index, (left_request, right_request) in enumerate(zip(left_requests, right_requests)):
+        if left_request.get("modelView") != right_request.get("modelView"):
+            continue
+        left_raw = left_raw_requests[index] if index < len(left_raw_requests) else None
+        right_raw = right_raw_requests[index] if index < len(right_raw_requests) else None
+        if left_raw == right_raw:
+            continue
+        for request in (left_request, right_request):
+            budget = request.get("contextBudget")
+            if isinstance(budget, dict):
+                request["contextBudget"] = {
+                    key: budget[key]
+                    for key in _BASELINE_CONTEXT_BUDGET_DECISION_FIELDS
+                    if key in budget
+                }
+
+
+def _baseline_shared_message(message: Any) -> Any:
+    if not isinstance(message, dict):
+        return message
+    result = dict(message)
+    content = result.get("content")
+    if isinstance(content, list):
+        result["content"] = [
+            block for block in content
+            if not (
+                isinstance(block, dict)
+                and block.get("type") == "text"
+                and str(block.get("text") or "").startswith("[Attachment diagnostics]\n")
+            )
+        ]
+    return result
+
+
+def _tagged_prompt_sections(value: Any, tag: str) -> list[str]:
+    if not isinstance(value, str):
+        return []
+    sections: list[str] = []
+    for match in re.finditer(rf"<{re.escape(tag)}>(.*?)</{re.escape(tag)}>", value, re.DOTALL):
+        section = match.group(1).strip()
+        if tag == "available-skills":
+            section = re.sub(r"\(file: [^)]+\)", "(file: <skill-path>)", section)
+        sections.append(section)
+    return sections
+
+
+def _runtime_composition(view: dict[str, Any]) -> dict[str, Any]:
+    composition: dict[str, Any] = {}
+    order_violations: list[str] = []
+
+    def collect(value: Any, location: str) -> None:
+        observed: list[tuple[int, str, str]] = []
+        if isinstance(value, str):
+            for tag, key in (("user-context", "userContext"), ("available-skills", "availableSkills")):
+                for match in re.finditer(rf"<{re.escape(tag)}>(.*?)</{re.escape(tag)}>", value, re.DOTALL):
+                    section = match.group(1).strip()
+                    if tag == "available-skills":
+                        section = re.sub(r"\(file: [^)]+\)", "(file: <skill-path>)", section)
+                    observed.append((match.start(), key, section))
+        observed.sort(key=lambda item: item[0])
+        for _offset, key, section in observed:
+            composition.setdefault(key, []).append(section)
+        ranks = [0 if key == "userContext" else 1 for _offset, key, _section in observed]
+        if ranks != sorted(ranks):
+            order_violations.append(location)
+
+    system_prompt = view.get("systemPrompt")
+    collect(system_prompt, "systemPrompt")
+    for message_index, message in enumerate(view.get("messages") or []):
+        if not isinstance(message, dict) or not isinstance(message.get("metadata"), dict):
+            continue
+        if message["metadata"].get("purpose") != "runtime_context":
+            continue
+        for block_index, block in enumerate(message.get("content") or []):
+            if not isinstance(block, dict) or block.get("type") != "text":
+                continue
+            collect(block.get("text"), f"messages[{message_index}].content[{block_index}]")
+    if order_violations:
+        composition["orderViolations"] = order_violations
+    return composition
+
+
+def _baseline_shared_runtime_message(message: Any) -> Any:
+    normalized = _baseline_shared_message(message)
+    if not isinstance(normalized, dict) or not isinstance(normalized.get("metadata"), dict):
+        return normalized
+    if normalized["metadata"].get("purpose") != "runtime_context":
+        return normalized
+    content = normalized.get("content")
+    if not isinstance(content, list):
+        return normalized
+    residual: list[Any] = []
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "text":
+            residual.append(block)
+            continue
+        text = block.get("text")
+        if not isinstance(text, str):
+            residual.append(block)
+            continue
+        for tag in ("user-context", "available-skills"):
+            text = re.sub(rf"<{re.escape(tag)}>.*?</{re.escape(tag)}>", "", text, flags=re.DOTALL)
+        text = re.sub(
+            r'<runtime-context(?: name="pilotdeck:(?:user-context|available-skills):\d+")?>\s*</runtime-context>',
+            "",
+            text,
+            flags=re.DOTALL,
+        )
+        text = re.sub(r"\n{3,}", "\n\n", text).strip()
+        if text:
+            residual.append({**block, "text": text})
+    if not residual:
+        return None
+    return {**normalized, "content": residual}
+
+
+def _baseline_shared_system_prompt(value: Any) -> Any:
+    """Remove only runtime-projected context that has its own canonical surface.
+
+    Main keeps user context in the system prompt while the modular profile
+    persists it as a synthetic runtime-context message. Skills are similarly
+    discovered from the deployment environment rather than authored by the
+    scenario. Static system instructions remain byte-for-byte comparable.
+    """
+    if not isinstance(value, str):
+        return value
+    result = value
+    for tag in ("user-context", "available-skills"):
+        start = f"<{tag}>"
+        end = f"</{tag}>"
+        while start in result:
+            before, remainder = result.split(start, 1)
+            if end not in remainder:
+                break
+            _discarded, after = remainder.split(end, 1)
+            result = before + after
+    return re.sub(r"\n{3,}", "\n\n", result).strip()
+
+
+def _partial_order_differences(records: list[dict[str, Any]], side: str) -> list[Difference]:
+    """Validate durable-before-visible relationships without requiring a total order.
+
+    Host scheduling may insert unrelated durable records between model events.
+    These three relationships are not scheduler noise: violating one means a
+    reconnect can observe state the model/client was never durably committed.
+    """
+    differences: list[Difference] = []
+    compact_indices = [index for index, record in enumerate(records) if record.get("kind") == "compact.boundary"]
+    boundary_ids = [records[index].get("compactionId") for index in compact_indices]
+    duplicate_ids = {
+        compaction_id for compaction_id in boundary_ids
+        if compaction_id is not None and boundary_ids.count(compaction_id) > 1
+    }
+    for compact_index in compact_indices:
+        compaction_id = records[compact_index].get("compactionId")
+        if compaction_id is None:
+            differences.append(Difference(
+                f"trace.partialOrder.{side}.compaction_identity_missing.{compact_index}",
+                "non_empty_compaction_id",
+                None,
+            ))
+        elif compaction_id in duplicate_ids:
+            differences.append(Difference(
+                f"trace.partialOrder.{side}.compaction_identity_duplicate.{compaction_id}",
+                "unique_compaction_id",
+                "duplicate",
+            ))
+        completed_index = next((
+            index for index, record in enumerate(records)
+            if record.get("kind") == "durable.compaction_completed"
+            and compaction_id is not None
+            and record.get("compactionId") == compaction_id
+        ), None)
+        following_request = next((
+            index for index, record in enumerate(records)
+            if record.get("kind") == "model.request"
+            and compaction_id is not None
+            and record.get("afterCompactionId") == compaction_id
+        ), None)
+        identity = str(compaction_id or compact_index)
+        if completed_index is None:
+            differences.append(Difference(
+                f"trace.partialOrder.{side}.compaction_completion_missing.{identity}",
+                "boundary_before_completion",
+                "missing",
+            ))
+        elif completed_index < compact_index:
+            differences.append(Difference(
+                f"trace.partialOrder.{side}.compaction_boundary_before_completion.{identity}",
+                "boundary_before_completion",
+                "completion_before_boundary",
+            ))
+        if following_request is None:
+            differences.append(Difference(
+                f"trace.partialOrder.{side}.compaction_followup_request_missing.{identity}",
+                "completion_before_request",
+                "missing",
+            ))
+        elif completed_index is not None and completed_index > following_request:
+            differences.append(Difference(
+                f"trace.partialOrder.{side}.compaction_completion_before_request.{identity}",
+                "completion_before_request",
+                "request_before_completion",
+            ))
+
+    durable_status_indices: dict[str, list[int]] = {}
+    durable_steer_indices: dict[str, list[int]] = {}
+    for index, record in enumerate(records):
+        if record.get("kind") == "durable.status" and isinstance(record.get("event"), str):
+            durable_status_indices.setdefault(record["event"], []).append(index)
+        if record.get("kind") == "durable.steer" and isinstance(record.get("itemId"), str):
+            durable_steer_indices.setdefault(record["itemId"], []).append(index)
+    consumed_status: dict[str, int] = {}
+    consumed_steer: dict[str, int] = {}
+    for index, record in enumerate(records):
+        if record.get("kind") == "agent.status" and isinstance(record.get("event"), str):
+            if record["event"] not in _REQUIRED_DURABLE_STATUS_EVENTS:
+                continue
+            durable = durable_status_indices.get(record["event"], [])
+            occurrence = consumed_status.get(record["event"], 0)
+            durable_index = durable[occurrence] if occurrence < len(durable) else None
+            consumed_status[record["event"]] = occurrence + 1
+            if durable_index is None:
+                differences.append(Difference(
+                    f"trace.partialOrder.{side}.durable_status_missing.{record['event']}[{occurrence}]",
+                    "durable_before_visible",
+                    "missing",
+                ))
+            elif durable_index > index:
+                differences.append(Difference(
+                    f"trace.partialOrder.{side}.durable_status_before_visible.{record['event']}[{occurrence}]",
+                    "durable_before_visible",
+                    "visible_before_durable",
+                ))
+        if record.get("kind") == "steer.applied" and isinstance(record.get("itemId"), str):
+            durable = durable_steer_indices.get(record["itemId"], [])
+            occurrence = consumed_steer.get(record["itemId"], 0)
+            durable_index = durable[occurrence] if occurrence < len(durable) else None
+            consumed_steer[record["itemId"]] = occurrence + 1
+            if durable_index is None:
+                differences.append(Difference(
+                    f"trace.partialOrder.{side}.durable_steer_missing.{record['itemId']}[{occurrence}]",
+                    "durable_before_applied",
+                    "missing",
+                ))
+            elif durable_index > index:
+                differences.append(Difference(
+                    f"trace.partialOrder.{side}.durable_steer_before_applied.{record['itemId']}[{occurrence}]",
+                    "durable_before_applied",
+                    "applied_before_durable",
+                ))
+    return differences
 
 
 def _merged_expectation(scenario: dict[str, Any], pair: str) -> dict[str, Any]:
@@ -609,7 +1108,20 @@ def _record_value(records: list[dict[str, Any]], key: str) -> Any:
             ),
             None,
         ),
+        "operationOutcome": (_last(records, "operation.terminal") or {}).get("outcome"),
         "pendingTasks": session.get("pendingTasks"),
+        "toolStartedBeforeTerminal": any(
+            record.get("kind") == "tool.start"
+            for record in records[:next((
+                index for index, record in enumerate(records)
+                if record.get("kind") == "terminal"
+            ), len(records))]
+        ),
+        "sessionRebuiltForResume": any(
+            record.get("kind") == "session.lifecycle"
+            and record.get("state") == "closed_for_resume"
+            for record in records
+        ),
     }
     durable = _last(records, "durable.state") or {}
     if key in {

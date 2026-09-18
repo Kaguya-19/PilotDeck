@@ -6,11 +6,18 @@ import unittest
 
 from trace import (
     canonicalize,
+    compare_baseline_trace_details,
+    compare_trace_details,
     compare_traces,
     validate_production_sidecar_proof,
     validate_trace_expectations,
 )
-from run import baseline_not_applicable_reason
+from run import (
+    baseline_comparison_mode,
+    baseline_not_applicable_reason,
+    declared_extension_matches,
+    scenario_for_adapter,
+)
 
 
 FIRST_SUBAGENT = "11111111-1111-4111-8111-111111111111"
@@ -47,12 +54,25 @@ def subagent_trace(subagent_id: str, message_id: str, turn_id: str, followup_id:
 
 
 class SubagentTraceNormalizationTests(unittest.TestCase):
-    def test_baseline_extension_suites_are_explicitly_not_applicable(self) -> None:
+    def test_baseline_availability_is_scenario_specific(self) -> None:
         self.assertEqual(
-            baseline_not_applicable_reason({"suite": "sidecar-production"}),
-            "baseline lacks sidecar-production capability surface",
+            baseline_not_applicable_reason({"scenarioId": "sidecar_seed_read_state", "suite": "sidecar-production"}),
+            "main Gateway client does not expose seed_read_state",
         )
-        self.assertIsNone(baseline_not_applicable_reason({"suite": "core-regression"}))
+        self.assertIsNone(baseline_not_applicable_reason({"scenarioId": "sidecar_live_model_stream", "suite": "sidecar-production"}))
+        self.assertEqual(baseline_comparison_mode({"scenarioId": "sidecar_budget_limit"}), "unavailable")
+        self.assertEqual(baseline_comparison_mode({"scenarioId": "pure_text"}), "shared")
+
+    def test_unavailable_main_extension_does_not_forge_a_baseline_oracle(self) -> None:
+        scenario = {
+            "scenarioId": "sidecar_durable_compaction",
+            "expected": {"terminalOutcome": "completed"},
+            "expectedByPair": {"pilotdeck-native->pilotdeck-sidecar": {"terminalOutcome": "completed"}},
+            "expectedByAdapter": {"pilotdeck-sidecar": {"terminalOutcome": "completed"}},
+        }
+        baseline = scenario_for_adapter(scenario, "pilotdeck-baseline-native")
+        self.assertEqual(baseline, scenario)
+        self.assertEqual(scenario_for_adapter(scenario, "pilotdeck-native"), scenario)
 
     def test_request_output_target_and_terminal_result_type_are_semantic(self) -> None:
         left = [{
@@ -74,6 +94,367 @@ class SubagentTraceNormalizationTests(unittest.TestCase):
         self.assertEqual(request_difference.left["maxOutputTokens"], 64)
         self.assertEqual(request_difference.right["maxOutputTokens"], 128)
         self.assertTrue(any("resultType" in item.path for item in differences))
+
+    def test_canonical_request_controls_are_semantic(self) -> None:
+        left = [{
+            "kind": "model.request", "scenarioId": "controls", "q": "controls", "sequence": 0,
+            "modelView": {
+                "provider": "openai", "model": "test", "cachePlan": {"mode": "off"},
+                "thinking": {"enabled": False}, "toolChoice": "auto", "speed": "normal",
+            },
+        }]
+        right = [{
+            "kind": "model.request", "scenarioId": "controls", "q": "controls", "sequence": 0,
+            "modelView": {
+                "provider": "openai", "model": "test", "cachePlan": {"mode": "auto"},
+                "thinking": {"enabled": True}, "toolChoice": "required", "speed": "fast",
+            },
+        }]
+        self.assertTrue(compare_traces(left, right))
+
+    def test_baseline_contract_ignores_only_declared_composition_surfaces(self) -> None:
+        baseline = [{
+            "kind": "model.request", "scenarioId": "shared", "q": "shared", "sequence": 0,
+            "modelView": {
+                "provider": "p", "model": "m", "maxOutputTokens": 10,
+                "messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}],
+                "tools": [{"name": "lookup", "inputSchema": {"type": "object"}}],
+            },
+        }]
+        current = [{
+            "kind": "durable.status", "scenarioId": "shared", "q": "shared", "sequence": 0,
+            "event": "context_budget", "statusKind": "status", "text": "context_budget",
+        }, {
+            "kind": "model.request", "scenarioId": "shared", "q": "shared", "sequence": 1,
+            "modelView": {
+                "provider": "p", "model": "m", "maxOutputTokens": 10,
+                "messages": [
+                    {"role": "user", "content": [{"type": "text", "text": "hello"}]},
+                ],
+                "tools": [
+                    {"name": "lookup", "inputSchema": {"type": "object"}},
+                    {"name": "new_extension", "inputSchema": {"type": "object"}},
+                ],
+            },
+        }]
+        scenario = {"baselineComparison": {"extensionTools": ["new_extension"]}}
+        self.assertEqual(compare_baseline_trace_details(baseline, current, scenario).semantic, [])
+        current[1]["modelView"]["messages"][0]["content"][0]["text"] = "changed"
+        self.assertTrue(compare_baseline_trace_details(baseline, current, scenario).semantic)
+
+    def test_baseline_contract_associates_budget_before_or_after_the_same_request(self) -> None:
+        request = {
+            "kind": "model.request",
+            "attempt": 1,
+            "modelView": {"provider": "p", "model": "m", "messages": []},
+        }
+        budget = {
+            "kind": "context.budget",
+            "used": 10,
+            "displayUsed": 10,
+            "total": 100,
+            "effectiveTotal": 90,
+            "reservedOutputTokens": 10,
+            "ratio": 1 / 9,
+            "state": "ok",
+        }
+        baseline = [request, budget, {"kind": "model.response", "attempt": 1}]
+        current = [budget, {"kind": "durable.status", "event": "context_budget"}, request, {"kind": "model.response", "attempt": 1}]
+        self.assertEqual(compare_baseline_trace_details(baseline, current, {}).semantic, [])
+
+    def test_baseline_contract_rejects_changed_missing_or_duplicate_request_budget(self) -> None:
+        request = {
+            "kind": "model.request",
+            "attempt": 1,
+            "modelView": {"provider": "p", "model": "m", "messages": []},
+        }
+        budget = {
+            "kind": "context.budget",
+            "used": 10,
+            "total": 100,
+            "effectiveTotal": 90,
+            "reservedOutputTokens": 10,
+            "ratio": 1 / 9,
+            "state": "ok",
+        }
+        baseline = [request, budget]
+        changed = [{**budget, "used": 11}, request]
+        missing = [request]
+        duplicate = [budget, budget, request]
+        self.assertTrue(compare_baseline_trace_details(baseline, changed, {}).semantic)
+        self.assertTrue(compare_baseline_trace_details(baseline, missing, {}).semantic)
+        self.assertTrue(compare_baseline_trace_details(baseline, duplicate, {}).semantic)
+
+    def test_baseline_contract_rejects_corrupt_budget_during_declared_request_drift(self) -> None:
+        baseline = [{
+            "kind": "model.request",
+            "modelView": {"messages": [], "tools": []},
+        }, {
+            "kind": "context.budget", "used": 10, "displayUsed": 10,
+            "total": 100, "effectiveTotal": 90, "reservedOutputTokens": 10,
+            "ratio": 1 / 9, "state": "ok",
+        }]
+        current = [{
+            "kind": "context.budget", "used": -1, "displayUsed": -1,
+            "total": 100, "effectiveTotal": 90, "reservedOutputTokens": 10,
+            "ratio": 1 / 9, "state": "ok",
+        }, {
+            "kind": "model.request",
+            "modelView": {"messages": [], "tools": [{"name": "sdk_extension"}]},
+        }]
+        scenario = {"baselineComparison": {"extensionTools": ["sdk_extension"]}}
+        self.assertTrue(compare_baseline_trace_details(baseline, current, scenario).semantic)
+        del current[0]["used"]
+        self.assertTrue(compare_baseline_trace_details(baseline, current, scenario).semantic)
+
+    def test_baseline_contract_rejects_unrecognized_runtime_context_residual(self) -> None:
+        baseline = [{"kind": "model.request", "modelView": {"messages": []}}]
+        current = [{"kind": "model.request", "modelView": {"messages": [{
+            "role": "user",
+            "metadata": {"purpose": "runtime_context"},
+            "content": [{"type": "text", "text": "Injected instruction"}],
+        }]}}]
+        self.assertTrue(compare_baseline_trace_details(baseline, current, {}).semantic)
+
+    def test_baseline_contract_preserves_runtime_context_multiplicity(self) -> None:
+        baseline = [{"kind": "model.request", "modelView": {
+            "systemPrompt": "<user-context>cwd</user-context>", "messages": [],
+        }}]
+        current = [{"kind": "model.request", "modelView": {
+            "systemPrompt": "<user-context>cwd</user-context><user-context>cwd</user-context>", "messages": [],
+        }}]
+        self.assertTrue(compare_baseline_trace_details(baseline, current, {}).semantic)
+
+    def test_baseline_contract_rejects_reordered_runtime_context_tags(self) -> None:
+        baseline = [{"kind": "model.request", "modelView": {
+            "systemPrompt": "<user-context>cwd</user-context><available-skills>skills</available-skills>",
+            "messages": [],
+        }}]
+        current = [{"kind": "model.request", "modelView": {
+            "systemPrompt": "<available-skills>skills</available-skills><user-context>cwd</user-context>",
+            "messages": [],
+        }}]
+        self.assertTrue(compare_baseline_trace_details(baseline, current, {}).semantic)
+
+    def test_baseline_contract_preserves_all_request_controls_and_extra_tools(self) -> None:
+        baseline = [{
+            "kind": "model.request",
+            "modelView": {
+                "provider": "p", "model": "m", "systemPrompt": "keep",
+                "cachePlan": {"mode": "auto"}, "cacheBreakpoints": [1],
+                "thinking": {"enabled": True}, "toolChoice": "required", "speed": "fast",
+                "tools": [{"name": "lookup"}],
+            },
+        }]
+        for field, changed in [
+            ("systemPrompt", "changed"),
+            ("cachePlan", {"mode": "off"}),
+            ("cacheBreakpoints", [2]),
+            ("thinking", {"enabled": False}),
+            ("toolChoice", "auto"),
+            ("speed", "normal"),
+            ("tools", [{"name": "other"}]),
+        ]:
+            current = json.loads(json.dumps(baseline))
+            current[0]["modelView"][field] = changed
+            self.assertTrue(
+                compare_baseline_trace_details(baseline, current, {}).semantic,
+                field,
+            )
+
+    def test_baseline_contract_compares_runtime_prompt_sections_across_projection_forms(self) -> None:
+        baseline = [{
+            "kind": "model.request",
+            "modelView": {
+                "systemPrompt": "static policy\n<user-context>\nmain cwd\n</user-context>\n<available-skills>\nmain skills\n</available-skills>",
+                "messages": [],
+            },
+        }]
+        current = [{
+            "kind": "model.request",
+            "modelView": {
+                "systemPrompt": "static policy\n<available-skills>\nmain skills\n</available-skills>",
+                "messages": [{
+                    "role": "user",
+                    "metadata": {"purpose": "runtime_context"},
+                    "content": [{"type": "text", "text": "<runtime-context><user-context>main cwd</user-context></runtime-context>"}],
+                }],
+            },
+        }]
+        self.assertEqual(compare_baseline_trace_details(baseline, current, {}).semantic, [])
+        current[0]["modelView"]["messages"] = []
+        self.assertTrue(compare_baseline_trace_details(baseline, current, {}).semantic)
+
+    def test_baseline_tool_description_contract_is_exact_without_hiding_schema(self) -> None:
+        baseline = [{
+            "kind": "model.request",
+            "modelView": {"tools": [{
+                "name": "execute_code", "description": "main description",
+                "inputSchema": {"type": "object", "required": ["code"]},
+            }]},
+        }]
+        current = [{
+            "kind": "model.request",
+            "modelView": {"tools": [{
+                "name": "execute_code", "description": "sdk sandbox description",
+                "inputSchema": {"type": "object", "required": ["code"]},
+            }]},
+        }]
+        scenario = {"baselineComparison": {"toolDescriptionContracts": {
+            "execute_code": {"baseline": "main description", "current": "sdk sandbox description"},
+        }}}
+        self.assertEqual(compare_baseline_trace_details(baseline, current, scenario).semantic, [])
+        current[0]["modelView"]["tools"][0]["description"] = "unreviewed description"
+        self.assertTrue(compare_baseline_trace_details(baseline, current, scenario).semantic)
+        current[0]["modelView"]["tools"][0]["description"] = "sdk sandbox description"
+        current[0]["modelView"]["tools"][0]["inputSchema"] = {"type": "object", "required": ["script"]}
+        self.assertTrue(compare_baseline_trace_details(baseline, current, scenario).semantic)
+
+    def test_extension_contract_does_not_waive_unrelated_regression(self) -> None:
+        scenario = {
+            "baselineComparison": {
+                "mode": "extension",
+                "allowedDifferences": [{
+                    "pathSuffix": "terminal.outcome",
+                    "baseline": "failed",
+                    "current": "completed",
+                }],
+            },
+        }
+        allowed = [
+            type("Difference", (), {"path": "trace[1].terminal.outcome", "left": "failed", "right": "completed"})(),
+        ]
+        self.assertTrue(declared_extension_matches(scenario, allowed))
+        regression = allowed + [
+            type("Difference", (), {"path": "trace[0].modelView", "left": {"provider": "p"}, "right": {"provider": "bad"}})(),
+        ]
+        self.assertFalse(declared_extension_matches(scenario, regression))
+
+    def test_extension_contract_can_pin_adapter_specific_durable_differences(self) -> None:
+        scenario = {"baselineComparison": {
+            "mode": "extension",
+            "allowedDifferencesByAdapter": {
+                "pilotdeck-current-native": [{
+                    "pathSuffix": "resultType", "baseline": None, "current": "aborted",
+                }],
+                "pilotdeck-current-sidecar": [],
+            },
+        }}
+        difference = type("Difference", (), {
+            "path": "trace[1].resultType", "left": None, "right": "aborted",
+        })()
+        self.assertTrue(declared_extension_matches(
+            scenario,
+            [difference],
+            adapter="pilotdeck-current-native",
+        ))
+        self.assertFalse(declared_extension_matches(
+            scenario,
+            [difference],
+            adapter="pilotdeck-current-sidecar",
+        ))
+
+    def test_partial_order_extension_contract_cannot_match_the_wrong_side(self) -> None:
+        scenario = {"baselineComparison": {"mode": "extension", "allowedDifferences": [{
+            "path": "trace.partialOrder.left.durable_steer_missing.s1[0]",
+            "baseline": "durable_before_applied",
+            "current": "missing",
+        }]}}
+        left_missing = type("Difference", (), {
+            "path": "trace.partialOrder.left.durable_steer_missing.s1[0]",
+            "left": "durable_before_applied", "right": "missing",
+        })()
+        right_missing = type("Difference", (), {
+            "path": "trace.partialOrder.right.durable_steer_missing.s1[0]",
+            "left": "durable_before_applied", "right": "missing",
+        })()
+        self.assertTrue(declared_extension_matches(scenario, [left_missing]))
+        self.assertFalse(declared_extension_matches(scenario, [right_missing]))
+
+    def test_terminal_usage_and_durable_partial_orders_are_semantic(self) -> None:
+        left = [
+            {"kind": "durable.status", "event": "working"},
+            {"kind": "agent.status", "event": "working"},
+            {"kind": "durable.steer", "itemId": "s1"},
+            {"kind": "steer.applied", "itemId": "s1"},
+            {"kind": "compact.boundary"},
+            {"kind": "model.request", "modelView": {"messages": []}},
+            {"kind": "terminal", "usage": {"inputTokens": 10, "outputTokens": 20, "nativeCost": 0.01}},
+        ]
+        usage_changed = json.loads(json.dumps(left))
+        usage_changed[-1]["usage"]["nativeCost"] = 1
+        self.assertTrue(compare_traces(left, usage_changed))
+        wrong_order = [left[1], left[0], left[3], left[2], left[5], left[4], left[6]]
+        self.assertTrue(compare_traces(left, wrong_order))
+
+    def test_compaction_cycle_requires_boundary_completion_then_its_request(self) -> None:
+        good = [
+            {"kind": "compact.boundary", "compactionId": "compact-1"},
+            {"kind": "durable.compaction_completed", "compactionId": "compact-1", "status": "compacted"},
+            {"kind": "model.request", "afterCompactionId": "compact-1", "modelView": {"messages": []}},
+        ]
+        request_before_completion = [good[0], good[2], good[1]]
+        request_before_boundary = [good[2], good[0], good[1]]
+        self.assertEqual(compare_traces(good, good), [])
+        self.assertTrue(compare_traces(good, request_before_completion))
+        self.assertTrue(compare_traces(good, request_before_boundary))
+
+    def test_compaction_cycles_cannot_borrow_another_cycles_request(self) -> None:
+        crossed = [
+            {"kind": "compact.boundary", "compactionId": "compact-a"},
+            {"kind": "durable.compaction_completed", "compactionId": "compact-a", "status": "compacted"},
+            {"kind": "compact.boundary", "compactionId": "compact-b"},
+            {"kind": "durable.compaction_completed", "compactionId": "compact-b", "status": "compacted"},
+            {"kind": "model.request", "afterCompactionId": "compact-b", "modelView": {"messages": []}},
+        ]
+        self.assertTrue(any(
+            "compaction_followup_request_missing.compact-a" in difference.path
+            for difference in compare_trace_details(crossed, crossed).semantic
+        ))
+
+    def test_deadline_oracle_requires_explicit_operation_terminal(self) -> None:
+        scenario = {"expectedByAdapter": {
+            "pilotdeck-current-sidecar": {"operationOutcome": "result_unknown"},
+        }}
+        self.assertTrue(validate_trace_expectations(
+            [{"kind": "terminal", "outcome": "failed"}],
+            scenario,
+            "pilotdeck",
+            "pilotdeck-current-sidecar",
+        ))
+        self.assertEqual(validate_trace_expectations(
+            [{"kind": "operation.terminal", "outcome": "result_unknown"}],
+            scenario,
+            "pilotdeck",
+            "pilotdeck-current-sidecar",
+        ), [])
+
+    def test_context_budget_gateway_event_is_semantic(self) -> None:
+        left = [{"kind": "context.budget", "used": 10, "total": 100, "ratio": 0.1, "state": "ok"}]
+        right = [{"kind": "context.budget", "used": 20, "total": 100, "ratio": 0.2, "state": "ok"}]
+        self.assertTrue(compare_traces(left, right))
+
+    def test_each_visible_durable_event_requires_its_own_prior_write(self) -> None:
+        good = [
+            {"kind": "durable.status", "event": "turn_timeout"},
+            {"kind": "agent.status", "event": "turn_timeout"},
+            {"kind": "durable.status", "event": "turn_timeout"},
+            {"kind": "agent.status", "event": "turn_timeout"},
+        ]
+        missing_second_write = [
+            {"kind": "durable.status", "event": "turn_timeout"},
+            {"kind": "agent.status", "event": "turn_timeout"},
+            {"kind": "agent.status", "event": "turn_timeout"},
+        ]
+        late_second_write = [
+            {"kind": "durable.status", "event": "turn_timeout"},
+            {"kind": "agent.status", "event": "turn_timeout"},
+            {"kind": "agent.status", "event": "turn_timeout"},
+            {"kind": "durable.status", "event": "turn_timeout"},
+        ]
+        self.assertEqual(compare_traces(good, good), [])
+        self.assertTrue(compare_traces(good, missing_second_write))
+        self.assertTrue(compare_traces(good, late_second_write))
 
     def test_skipped_compaction_is_not_a_durable_replacement(self) -> None:
         left = [{
@@ -438,6 +819,16 @@ class SubagentTraceNormalizationTests(unittest.TestCase):
             validate_trace_expectations(records, {"expected": {"parentClosed": True}}, "pilotdeck"),
             [],
         )
+
+    def test_parent_and_sidecar_lifecycle_are_independently_ordered_actors(self) -> None:
+        parent_request = {"kind": "model.request", "attempt": 2, "modelView": {"messages": []}}
+        requested = {"kind": "sidecar.lifecycle", "state": "parent_close_requested", "stage": "child_model_started"}
+        closed = {"kind": "sidecar.lifecycle", "state": "parent_closed", "stage": "child_first_drain", "parentClosed": True}
+        self.assertEqual(
+            compare_traces([requested, parent_request, closed], [parent_request, requested, closed]),
+            [],
+        )
+        self.assertTrue(compare_traces([requested, parent_request, closed], [parent_request, closed, requested]))
 
     def test_parent_abort_requires_acknowledgement_and_one_gateway_terminal(self) -> None:
         records = [

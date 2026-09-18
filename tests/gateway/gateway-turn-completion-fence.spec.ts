@@ -12,9 +12,9 @@ import type { SessionRouter } from "../../src/gateway/SessionRouter.js";
 
 test("GatewayTurnCompletionFence waits for the exact in-flight turn and preserves a newer handle", async () => {
   const fence = new GatewayTurnCompletionFence();
-  const first = fence.begin("web:fence");
+  const first = fence.begin("web:fence", "run-1");
   const firstWait = fence.waitForCompletion("web:fence");
-  const second = fence.begin("web:fence");
+  const second = fence.begin("web:fence", "run-2");
 
   fence.complete("web:fence", first);
   await firstWait;
@@ -29,9 +29,39 @@ test("GatewayTurnCompletionFence waits for the exact in-flight turn and preserve
   assert.equal(fence.isCurrent("web:fence", second), false);
 });
 
+test("GatewayTurnCompletionFence cancels only the matching run", () => {
+  const fence = new GatewayTurnCompletionFence();
+  const handle = fence.begin("web:cancel", "run-current");
+  assert.equal(fence.cancel("web:cancel", "wrong", "run-other"), false);
+  assert.equal(handle.signal.aborted, false);
+  assert.equal(fence.cancel("web:cancel", "stop", "run-current"), true);
+  assert.equal(handle.signal.aborted, true);
+  assert.equal(handle.signal.reason, "stop");
+  fence.complete("web:cancel", handle);
+});
+
+test("InProcessGateway ignores an abort for a stale run id", async () => {
+  const fence = new GatewayTurnCompletionFence();
+  const handle = fence.begin("web:stale", "run-current");
+  let abortCalls = 0;
+  const gateway = new InProcessGateway({
+    abort: async () => { abortCalls += 1; },
+  } as unknown as SessionRouter, { turnCompletionFence: fence });
+
+  await gateway.abortTurn({ sessionKey: "web:stale", runId: "run-old" });
+
+  assert.equal(abortCalls, 0);
+  assert.equal(handle.signal.aborted, false);
+  fence.complete("web:stale", handle);
+});
+
 test("InProcessGateway delegates submit drain and abort waiting to an injected completion fence", async () => {
   const calls: string[] = [];
-  const handle: GatewayTurnCompletionHandle = { done: Promise.resolve() };
+  const handle: GatewayTurnCompletionHandle = {
+    runId: "turn-fence",
+    signal: new AbortController().signal,
+    done: Promise.resolve(),
+  };
   const fence: GatewayTurnCompletionFencePort = {
     begin: () => {
       calls.push("begin");
@@ -41,6 +71,7 @@ test("InProcessGateway delegates submit drain and abort waiting to an injected c
       calls.push("current");
       return true;
     },
+    cancel: () => { calls.push("cancel"); return true; },
     complete: () => { calls.push("complete"); },
     waitForCompletion: async () => { calls.push("wait"); },
   };
@@ -92,5 +123,5 @@ test("InProcessGateway delegates submit drain and abort waiting to an injected c
   assert.ok(calls.includes("begin"));
   assert.ok(calls.includes("current"));
   assert.ok(calls.includes("complete"));
-  assert.deepEqual(calls.slice(-2), ["router-abort", "wait"]);
+  assert.deepEqual(calls.slice(-3), ["cancel", "router-abort", "wait"]);
 });

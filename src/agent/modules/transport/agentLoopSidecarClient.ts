@@ -22,6 +22,10 @@ import type {
   AgentLoopOperationResolution,
   AgentLoopOperationUnknownTerminal,
 } from "./operationLedger.js";
+import {
+  AgentLoopResultUnknownError,
+  isAgentLoopResultUnknownError,
+} from "./operationLedger.js";
 import type {
   ModuleCapabilities,
   ModuleBinding,
@@ -615,7 +619,7 @@ class SidecarTurnProtocol {
         if (message.final) {
           let terminal = message.outcome === "result_unknown"
             ? await this.reconcileResultUnknown(message)
-            : this.withHostToolCheckpoint(readTerminal(message, this.options.input));
+            : this.withHostToolCheckpoint(readFinalTerminal(message, this.options.input));
           if (isResolvedModuleOutcome(message.outcome)) {
             terminal = await this.recordKnownTerminal(terminal, message.outcome);
           }
@@ -638,6 +642,13 @@ class SidecarTurnProtocol {
       }
     } catch (error) {
       this.observeReconnectFailure();
+      if (isAgentLoopResultUnknownError(error)) {
+        this.observe({
+          type: "result_unknown_fail_closed",
+          source: this.resultUnknownSource ?? "transport_interruption",
+        });
+        throw error;
+      }
       if (executeStarted && !terminalObserved && this.streamId) {
         try {
           const terminal = await this.reconcileTransportInterruption(
@@ -886,6 +897,10 @@ class SidecarTurnProtocol {
   private sendCancelIfReady(): void {
     if (!this.cancelRequested || this.cancelSent || !this.streamId || !this.supportsCancel) return;
     this.cancelSent = true;
+    const signalReason = this.options.input.abortSignal?.reason;
+    const reason = typeof signalReason === "string" && signalReason.length > 0
+      ? signalReason
+      : "host_abort";
     void Promise.resolve(this.send({
       kind: "request",
       messageId: `cancel-${this.options.uuid()}`,
@@ -893,7 +908,7 @@ class SidecarTurnProtocol {
       runId: this.runId,
       operationId: this.operationId,
       requestId: this.requestId,
-      reason: "host_abort",
+      reason,
     })).catch(() => undefined);
   }
 
@@ -961,7 +976,7 @@ class SidecarTurnProtocol {
     const ledgerResolution = await this.options.operationLedger?.reconcile(unknown);
     const resolution = ledgerResolution ?? await this.options.reconcileResultUnknown?.(unknown);
     if (!resolution) {
-      throw new Error("Sidecar terminal outcome is result_unknown and host reconciliation found no final result.");
+      throw new AgentLoopResultUnknownError();
     }
     const terminal = readResolvedTerminal(resolution, this.options.input);
     // A successful external status query becomes the new durable source of
@@ -1274,6 +1289,21 @@ function readTerminal(event: ModuleEvent, input: AgentLoopInput): SidecarTermina
   };
 }
 
+function readFinalTerminal(event: ModuleEvent, input: AgentLoopInput): SidecarTerminal {
+  const payload = asRecord(event.payload);
+  if (isAgentTurnResult(payload?.result) && Array.isArray(payload?.messages)) {
+    return readTerminal(event, input);
+  }
+  if (
+    event.outcome === "cancelled"
+    && input.abortSignal?.aborted
+    && input.abortSignal.reason === "compaction_persistence_failed"
+  ) {
+    return abortedResult(input);
+  }
+  return readTerminal(event, input);
+}
+
 /**
  * A deadline can expire before a streaming execute is accepted, so the
  * protocol has no stream identity or final event to project. Preserve its
@@ -1368,7 +1398,6 @@ function abortedResult(input: AgentLoopInput): AgentLoopRunResult {
       turns: 0,
       startedAt: now,
       completedAt: now,
-      errors: [agentError("agent_aborted", "AgentLoop sidecar turn was cancelled before execution started.")],
     },
     messages: input.messages,
   };

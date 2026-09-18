@@ -20,7 +20,8 @@ import type { GoalPort } from "../../../goal/protocol/types.js";
 import type { PermissionContext } from "../../../permission/index.js";
 import type { PilotDeckPlanTodoStateHandle } from "../../../tool/protocol/types.js";
 import type { PilotDeckToolDefinition, PilotDeckToolRuntimeContext } from "../../../tool/index.js";
-import type { AgentExecutionContext, ModuleCallRequest } from "../protocol.js";
+import type { AgentExecutionContext, ModuleCallRequest, PreparedModelInvocation } from "../protocol.js";
+import type { CanonicalModelRequest } from "../../../model/index.js";
 import type { AgentLoopInput } from "../../loop/AgentLoop.js";
 import type { AgentRuntimeConfig } from "../../runtime/AgentRuntimeConfig.js";
 import type { HostToolCheckpoint } from "../checkpoint/hostToolCheckpoint.js";
@@ -35,6 +36,8 @@ import {
 export type SidecarModelModulePort = Readonly<{
   execution: ModelExecutionPort;
   metadata?: ModelMetadataPort;
+  /** Applies host-owned routing policy to an existing prepared invocation. */
+  materializeRequest?: AgentTurnRoutingPort["materializeRequest"];
   /** Resolves host-owned routing state once for an active sidecar turn. */
   bindTurn?(input: Readonly<{ sessionId: string; turnId: string }>): SidecarModelModulePort;
 }>;
@@ -145,7 +148,7 @@ export type SidecarModuleComposition = Readonly<{
 export type SidecarHostModulePorts = Readonly<{
   model: ModelExecutionPort;
   /** Host-only routing view used to bind model execution per turn. */
-  routing?: Pick<AgentTurnRoutingPort, "invalidateSticky">;
+  routing?: Pick<AgentTurnRoutingPort, "invalidateSticky" | "materializeRequest">;
   metadata?: ModelMetadataPort;
   budget?: ModelBudgetPort;
   toolExecution: ToolExecutionPort;
@@ -261,8 +264,14 @@ export function createSidecarHostModulePorts(
 
 function createSidecarModelModulePort(ports: SidecarHostModulePorts): SidecarModelModulePort {
   const metadata = hasModelMetadata(ports.metadata) ? { metadata: ports.metadata } : {};
+  const materialize = ports.routing?.materializeRequest
+    ? {
+        materializeRequest: (prepared: PreparedModelInvocation, request: CanonicalModelRequest) =>
+          ports.routing!.materializeRequest!.call(ports.routing, prepared, request),
+      }
+    : {};
   if (!ports.routing?.invalidateSticky) {
-    return Object.freeze({ execution: ports.model, ...metadata });
+    return Object.freeze({ execution: ports.model, ...metadata, ...materialize });
   }
   return Object.freeze({
     execution: ports.model,
@@ -298,7 +307,7 @@ function createSidecarModelModulePort(ports: SidecarHostModulePorts): SidecarMod
           }
         },
       });
-      return Object.freeze({ execution, ...metadata });
+      return Object.freeze({ execution, ...metadata, ...materialize });
     },
   });
 }

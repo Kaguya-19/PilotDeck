@@ -24,6 +24,7 @@ export type ProjectExecutionWorldBundleOptions = {
   profile: Pick<PilotDeckRuntimeProfile, "sandboxMode">;
   now: () => Date;
   extraTools: readonly PilotDeckToolDefinition[];
+  subagentIdFactory?: () => string;
   skills: ReadSkillDeps;
   /** Project-generation LSP capability consumed by the optional builtin tool. */
   lsp?: LspServicePort;
@@ -71,6 +72,7 @@ export class ProjectExecutionWorldBundle {
       executionTransport: executionWorld.executionTransport,
       executeCodeSandbox: executionWorld.executeCodeSandbox,
       backgroundTasks: { runtime: executionWorld.backgroundTasks },
+      ...(this.options.subagentIdFactory ? { agent: { uuid: this.options.subagentIdFactory } } : {}),
       readSkill: this.options.skills,
       ...(this.options.lsp ? { lsp: this.options.lsp } : {}),
       ...resolveWebSearchOptions(this.options.snapshot),

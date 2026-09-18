@@ -1,5 +1,6 @@
 import { projectCompactionBudget } from "../../../context/index.js";
 import { snapshotCanonicalModelRequest } from "../../../model/index.js";
+import { readHostModelRequestPreparationId } from "../llm/hostModelInvokerPort.js";
 import type {
   AgentContextCaptureTurnInput,
   AgentContextPrepareInput,
@@ -93,9 +94,11 @@ function serializeContextInput(operation: HostContextModuleMethod, input: object
   if (operation === "try_auto_compact") {
     const projection = projectCompactionBudget(input as CompactionAutoCompactInput);
     const { request, preparation, calibration, ...budgetProjection } = projection;
+    const preparationId = request ? readHostModelRequestPreparationId(request) : undefined;
     return {
       ...serializable,
       ...(request ? { budgetRequest: snapshotCanonicalModelRequest(request) } : {}),
+      ...(preparationId ? { budgetPreparationId: preparationId } : {}),
       ...(preparation ? { budgetPreparation: preparation } : {}),
       ...(calibration ? { budgetCalibration: calibration } : {}),
       budgetProjection,

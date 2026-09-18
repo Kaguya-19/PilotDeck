@@ -43,15 +43,18 @@ const storageProviderEntrypoint = path.join(
   sourceRoot,
   "dist/src/session/storage/ProjectSessionStorageProvider.js",
 );
-const nodeProjectSessionStorageProvider = await access(storageProviderEntrypoint)
-  .then(() => import(pathToFileURL(storageProviderEntrypoint).href))
-  .then((module) => module.nodeProjectSessionStorageProvider)
-  .catch((error) => {
-    // Only the optional entrypoint itself may be absent on the main baseline.
-    // A broken dependency inside that module must remain a blocked run.
-    if (error?.code === "ENOENT") return undefined;
-    throw error;
-  });
+let nodeProjectSessionStorageProvider;
+let hasStorageProviderEntrypoint = false;
+try {
+  await access(storageProviderEntrypoint);
+  hasStorageProviderEntrypoint = true;
+} catch (error) {
+  if (error?.code !== "ENOENT") throw error;
+}
+if (hasStorageProviderEntrypoint) {
+  const module = await import(pathToFileURL(storageProviderEntrypoint).href);
+  nodeProjectSessionStorageProvider = module.nodeProjectSessionStorageProvider;
+}
 
 let sequence = 0;
 const trace = [];
@@ -59,6 +62,7 @@ let modelAttempt = 0;
 let scenarioTurnIndex = 0;
 let scenarioTurnModelAttempt = 0;
 const scopedModelAttempts = new Map();
+const pendingCompactionIds = new Map();
 let markModelStarted;
 const modelStarted = new Promise((resolve) => {
   markModelStarted = resolve;
@@ -77,7 +81,11 @@ const modelView = (request) => ({
   systemPrompt: request.systemPrompt,
   messages: request.messages,
   tools: request.tools,
-  cache: request.cache,
+  cachePlan: request.cachePlan,
+  cacheBreakpoints: request.cacheBreakpoints,
+  thinking: request.thinking,
+  toolChoice: request.toolChoice,
+  speed: request.speed,
   metadata: request.metadata,
 });
 const faultAt = (target, attempt, stage) => (scenario.faults?.[target] ?? []).find(
@@ -129,7 +137,15 @@ class MockModelRuntime {
     const agentScope = isSubagentModelRequest(request) ? "child" : "parent";
     const attempt = (scopedModelAttempts.get(agentScope) ?? 0) + 1;
     scopedModelAttempts.set(agentScope, attempt);
-    push("model.request", { agentScope, attempt, modelView: modelView(request), request });
+    const afterCompactionId = pendingCompactionIds.get(agentScope);
+    if (afterCompactionId) pendingCompactionIds.delete(agentScope);
+    push("model.request", {
+      agentScope,
+      attempt,
+      ...(afterCompactionId ? { afterCompactionId } : {}),
+      modelView: modelView(request),
+      request,
+    });
     markModelStarted();
     const fault = faultAt("model", invocationAttempt);
     if (fault?.action === "retryable_error" || fault?.action === "non_retryable_error") {
@@ -436,9 +452,11 @@ function createObservedPersistenceProvider() {
               push("durable.steer", { agentScope, itemId: entry.message.metadata.queueItemId, message: entry.message });
             }
             if (entry.type === "control_boundary" && entry.boundary?.subtype === "compact_boundary") {
+              const compactionId = entry.boundary.compactMetadata?.compactionId;
+              if (compactionId) pendingCompactionIds.set(agentScope, compactionId);
               push("compact.boundary", {
                 agentScope,
-                compactionId: entry.boundary.compactMetadata?.compactionId,
+                compactionId,
                 messages: entry.boundary.replacementMessages,
                 metadata: entry.boundary.compactMetadata,
               });
@@ -447,6 +465,7 @@ function createObservedPersistenceProvider() {
               push("durable.compaction_completed", {
                 agentScope,
                 operationId: entry.operationId,
+                compactionId: entry.compactionId,
                 status: entry.status,
               });
             }
@@ -468,6 +487,23 @@ async function readTranscriptEntries(sessionKey) {
   return contents.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
 }
 
+async function readSettledTranscript(sessionKey, turnId, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  let entries = [];
+  while (true) {
+    try {
+      entries = await readTranscriptEntries(sessionKey);
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    const result = [...entries].reverse().find((entry) =>
+      entry.type === "turn_result" && entry.turnId === turnId
+    )?.result;
+    if (result || Date.now() >= deadline) return { entries, result };
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 const configuredRuntimeRoot = process.env.PARITY_RUNTIME_ROOT;
 const runtimeRoot = configuredRuntimeRoot
   ? path.resolve(configuredRuntimeRoot)
@@ -480,9 +516,14 @@ const projectRoot = pilotHome;
 const configuredContextTokens = scenario.limits?.maxContextTokens ?? 65536;
 const configuredOutputTokens = scenario.limits?.maxOutputTokens ?? 8192;
 const configuredMaxContextMessages = scenario.limits?.maxContextMessages;
+let subagentIdSequence = 0;
+const nextSubagentId = () => {
+  subagentIdSequence += 1;
+  return `00000000-0000-4000-8000-${String(subagentIdSequence).padStart(12, "0")}`;
+};
 await writeFile(path.join(pilotHome, "pilotdeck.yaml"), `schemaVersion: 1\nagent:\n  model: parity/deterministic\n  maxContextTokens: ${configuredContextTokens}\n  maxOutputTokens: ${configuredOutputTokens}${configuredMaxContextMessages ? `\n  maxContextMessages: ${configuredMaxContextMessages}` : ""}\nmodel:\n  providers:\n    parity:\n      protocol: openai\n      url: ${mockBaseUrl}\n      apiKey: parity-test\n      models:\n        deterministic:\n          capabilities:\n            supportsToolUse: true\n            maxContextTokens: ${configuredContextTokens}\n            maxOutputTokens: ${configuredOutputTokens}\ntelemetry:\n  enabled: false\n`, "utf8");
 await writeFile(path.join(projectRoot, "parity-input.txt"), "deterministic file content\n", "utf8");
-if (scenario.scenarioId === "plan_mode_host_policy") {
+if (["plan_mode_host_policy", "plan_mode_bypass_host_policy"].includes(scenario.scenarioId)) {
   await mkdir(path.join(projectRoot, ".pilotdeck", "plans"), { recursive: true });
   await writeFile(
     path.join(projectRoot, ".pilotdeck", "plans", "parity-plan.md"),
@@ -512,6 +553,7 @@ const local = createLocalGateway({
     ...createTools(),
   ],
   __testModelFactory: () => new MockModelRuntime(),
+  __testSubagentIdFactory: nextSubagentId,
   ...(Number.isInteger(configuredMaxContextMessages) && configuredMaxContextMessages > 0
     ? { __testAgentConfigOverrides: { maxContextMessages: configuredMaxContextMessages } }
     : {}),
@@ -553,10 +595,9 @@ const controlClient = new GatewayWsClient({ url: server.wsUrl, token: server.tok
 try {
   await client.connect();
   await controlClient.connect();
-  // Keep the same project cwd/model-visible runtime context for both adapters
-  // while isolating their durable session histories. A prior adapter can still
-  // be flushing its transcript when the next one begins.
-  const sessionKey = `full-${scenario.scenarioId}-${mode}`;
+  // Each adapter owns and fully disposes its isolated runtime, so use the same
+  // model-visible session identity on both sides.
+  const sessionKey = `full-${scenario.scenarioId}`;
   const runId = `run-${scenario.scenarioId}`;
   let seedReadResult;
   for (const message of scenario.historyTurns ?? []) {
@@ -570,16 +611,26 @@ try {
       // Build durable history through the production Gateway path.
     }
   }
-  if (scenario.scenarioId === "checkpoint_resume") {
+  const resumePrelude = scenario.scenarioId === "checkpoint_resume"
+    ? { message: "Previous deterministic result", mode: "default" }
+    : scenario.scenarioId === "write_snapshot_resume"
+      ? { message: "Persist the parity write snapshot", mode: "bypassPermissions" }
+      : undefined;
+  if (resumePrelude) {
     for await (const _event of client.stream("submit_turn", {
       sessionKey,
       channelKey: "test",
-      message: "Previous deterministic result",
-      mode: "default",
+      message: resumePrelude.message,
+      mode: resumePrelude.mode,
       canPrompt: false,
     })) {
-      // Populate the real transcript before the resumed turn.
+      // Populate real durable history before forcing session reconstruction.
     }
+    await controlClient.request("close_session", {
+      sessionKey,
+      reason: "parity_resume_rebuild",
+    });
+    push("session.lifecycle", { state: "closed_for_resume", reason: "parity_resume_rebuild" });
   }
   if (scenario.scenarioId === "sidecar_seed_read_state") {
     const observedMtime = Math.floor((await stat(path.join(projectRoot, "parity-input.txt"))).mtimeMs);
@@ -822,6 +873,21 @@ try {
     if (event.type === "agent_status") {
       push("agent.status", { event: event.event, detail: event.detail });
     }
+    if (event.type === "context_budget") {
+      push("context.budget", {
+        used: event.used,
+        displayUsed: event.displayUsed,
+        budgetUsed: event.budgetUsed,
+        total: event.total,
+        effectiveTotal: event.effectiveTotal,
+        reservedOutputTokens: event.reservedOutputTokens,
+        ratio: event.ratio,
+        state: event.state,
+        source: event.source,
+        exact: event.exact,
+        breakdown: event.breakdown,
+      });
+    }
     if (event.type === "tool_progress") {
       push("tool.progress", { toolCallId: event.toolCallId, toolName: event.toolName, message: event.message, metadata: event.metadata });
     }
@@ -858,13 +924,20 @@ try {
   }
   if (["sidecar_continuable_followup_live", "sidecar_continuable_followup_cold"].includes(scenario.scenarioId)) {
     const timeoutMs = Number(scenario.limits?.subagentWaitMs) || 5000;
-    await waitForSubagentModelRequests({
+    const observedChildRequests = await waitForSubagentModelRequests({
       timeoutMs,
       count: 2,
+    }).catch(async () => Number((await post("/control/state", { runKey })).subagentModelRequests ?? 0));
+    push("sidecar.lifecycle", {
+      state: "continuable_followup_observed",
+      stage: "turn_terminal",
+      subagentModelRequests: observedChildRequests,
     });
-    await waitForScopedModelResponses({ timeoutMs, agentScope: "child", count: 2 });
-    if (scenario.scenarioId === "sidecar_continuable_followup_live") {
-      await waitForScopedModelResponses({ timeoutMs, agentScope: "parent", count: 4 });
+    if (observedChildRequests >= 2) {
+      await waitForScopedModelResponses({ timeoutMs, agentScope: "child", count: 2 });
+      if (scenario.scenarioId === "sidecar_continuable_followup_live") {
+        await waitForScopedModelResponses({ timeoutMs, agentScope: "parent", count: 4 });
+      }
     }
   }
   const mockState = await post("/control/state", { runKey });
@@ -873,7 +946,17 @@ try {
     counts: sideEffectCounts,
     sideEffectCount: Object.values(sideEffectCounts).reduce((total, value) => total + Number(value || 0), 0),
   });
-  const transcriptEntries = await readTranscriptEntries(sessionKey);
+  const { entries: transcriptEntries, result: durableTurnResult } = await readSettledTranscript(sessionKey, runId);
+  const operationTerminal = [...transcriptEntries].reverse().find((entry) =>
+    entry.type === "agent_loop_operation_terminal" && entry.turnId === runId
+  );
+  if (operationTerminal) {
+    push("operation.terminal", {
+      outcome: operationTerminal.outcome,
+      code: operationTerminal.code,
+      lastAppliedSequence: operationTerminal.lastAppliedSequence,
+    });
+  }
   const durableStatusCount = transcriptEntries.filter((entry) =>
     entry.type === "agent_status_message" && entry.event === "max_budget_reached"
   ).length;
@@ -918,7 +1001,9 @@ try {
     stopReason: finishReason,
     output: visibleOutput,
     usage: terminal?.usage,
-    resultType: terminal?.result?.type,
+    resultType: durableTurnResult?.type,
+    durableStopReason: durableTurnResult?.stopReason,
+    durableErrorCode: durableTurnResult?.errors?.[0]?.code,
   });
   await writeFile(traceOut, `${trace.map((item) => JSON.stringify(item)).join("\n")}\n`, "utf8");
   }
