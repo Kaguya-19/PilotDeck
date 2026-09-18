@@ -263,10 +263,11 @@ export class TurnRunner {
             await this.transcript.recordAgentStatusMessage?.(options.sessionId, options.turnId, status);
           },
           onCompactPersisted: async ({ boundary, messages: compactMessages }) => {
-            await this.transcript.recordControlBoundary?.(options.sessionId, options.turnId, boundary);
-            for (const message of compactMessages) {
-              await this.transcript.recordDurableMessage(options.sessionId, options.turnId, message);
-            }
+            if (boundary.kind !== "compact" || boundary.subtype !== "compact_boundary") return;
+            await this.transcript.recordControlBoundary?.(options.sessionId, options.turnId, {
+              ...boundary,
+              snapshot: { version: 1, messages: compactMessages },
+            });
           },
         });
         let runResult: TurnRunnerResult | undefined;
