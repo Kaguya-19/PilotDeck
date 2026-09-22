@@ -112,7 +112,7 @@ function writeWeComConfig(config, input) {
 async function mutateConfigAndReload(adapterId, mutate) {
   const saved = await updatePilotDeckConfig(mutate, {
     paths: [['adapters', adapterId]],
-    beforeWrite: suppressNextWatchEvent,
+    onWriteCommitted: suppressNextWatchEvent,
   });
   if (!saved.changed) return false;
 

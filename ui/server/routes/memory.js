@@ -78,8 +78,14 @@ function getGlobalMemorySettings() {
 async function saveGlobalMemorySettings(partial = {}) {
   const saved = await updatePilotDeckConfig((config) => {
     const current = getGlobalMemorySettingsFromConfig(config);
+    const configuredMemory = config?.memory && typeof config.memory === 'object'
+      && !Array.isArray(config.memory);
+    const enabled = configuredMemory
+      ? (Object.hasOwn(config.memory, 'enabled') ? config.memory.enabled : true)
+      : false;
     const reasoningMode = validateReasoningMode(partial.reasoningMode);
     const next = {
+      enabled,
       reasoningMode: reasoningMode ?? current.reasoningMode,
       autoIndexIntervalMinutes: normalizeMemoryInterval(partial.autoIndexIntervalMinutes, current.autoIndexIntervalMinutes),
       autoDreamIntervalMinutes: normalizeMemoryInterval(partial.autoDreamIntervalMinutes, current.autoDreamIntervalMinutes),
@@ -87,7 +93,7 @@ async function saveGlobalMemorySettings(partial = {}) {
     config.memory = { ...(config.memory ?? {}), ...next };
   }, {
     paths: [['memory']],
-    beforeWrite: suppressNextWatchEvent,
+    onWriteCommitted: suppressNextWatchEvent,
   });
   await reloadPilotDeckConfig(saved.config);
   return getGlobalMemorySettingsFromConfig(saved.config);

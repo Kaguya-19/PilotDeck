@@ -10,8 +10,9 @@ import { reloadPilotDeckConfig } from './pilotdeckConfigReloader.js';
 
 // Watches ~/.pilotdeck/pilotdeck.yaml for external edits (vim, Cursor, other IDEs)
 // and triggers the same reload path the UI uses on save, so *any* edit takes
-// effect live. When the UI itself writes the file it calls
-// suppressNextWatchEvent() first to avoid a redundant second reload.
+// effect live. After the UI atomically commits its own write it calls
+// suppressNextWatchEvent() before fs.watch can dispatch the resulting event,
+// avoiding a redundant second reload without hiding failed/conflicting saves.
 
 let watcher = null;
 let debounceTimer = null;

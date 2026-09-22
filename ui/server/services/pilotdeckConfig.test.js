@@ -137,6 +137,18 @@ describe('readPilotDeckConfigFile fallback behavior', () => {
         expect(readPilotDeckConfigFile().parseError).toBeNull();
     });
 
+    it('replaces a null YAML parent before setting a targeted child path', async () => {
+        const configPath = useTempConfig('schemaVersion: 1\nadapters:\n');
+
+        await updatePilotDeckConfig((config) => {
+            config.adapters = { wecom: { enabled: true } };
+        }, { paths: [['adapters', 'wecom']], settleMs: 0 });
+
+        expect(parseYaml(readFileSync(configPath, 'utf8'))).toMatchObject({
+            adapters: { wecom: { enabled: true } },
+        });
+    });
+
     it('does not overwrite invalid YAML during a background update', async () => {
         const raw = 'schemaVersion: 1\nmodel:\n    providers: [\n';
         const configPath = useTempConfig(raw);
@@ -199,6 +211,7 @@ describe('readPilotDeckConfigFile fallback behavior', () => {
         const configPath = useTempConfig('schemaVersion: 1\ncustomEnv:\n  VALUE: first\n');
         const loaded = readPilotDeckConfigFile();
         const externalRaw = 'schemaVersion: 1\ncustomEnv:\n  VALUE: external\n';
+        const onWriteCommitted = vi.fn();
 
         await expect(writePilotDeckConfig({
             schemaVersion: 1,
@@ -206,9 +219,11 @@ describe('readPilotDeckConfigFile fallback behavior', () => {
         }, {
             expectedRevision: configRevision(loaded.raw),
             beforeWrite: () => writeFileSync(configPath, externalRaw, 'utf8'),
+            onWriteCommitted,
         })).rejects.toMatchObject({ code: 'CONFIG_CONFLICT' });
 
         expect(readFileSync(configPath, 'utf8')).toBe(externalRaw);
+        expect(onWriteCommitted).not.toHaveBeenCalled();
     });
 
     it('atomically updates a symlink target without replacing the symlink', async () => {

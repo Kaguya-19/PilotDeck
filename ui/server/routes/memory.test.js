@@ -67,6 +67,24 @@ describe('memory clear route', () => {
 });
 
 describe('memory settings route', () => {
+  it.each([
+    ['without an existing memory section', { schemaVersion: 1 }],
+    ['when memory is explicitly disabled', { schemaVersion: 1, memory: { enabled: false } }],
+  ])('keeps memory disabled %s', async (_label, initialConfig) => {
+    const { request, getConfig } = await createMemorySettingsApp(initialConfig);
+
+    const result = await request('/api/memory/settings?projectPath=/tmp/pilotdeck-project', {
+      method: 'POST',
+      body: JSON.stringify({ autoIndexIntervalMinutes: 45 }),
+    });
+
+    expect(result.status).toBe(200);
+    expect(getConfig().memory).toMatchObject({
+      enabled: false,
+      autoIndexIntervalMinutes: 45,
+    });
+  });
+
   it('saves answer_first reasoning mode', async () => {
     const { request, updatePilotDeckConfig } = await createMemorySettingsApp({
       memory: {
@@ -247,6 +265,7 @@ async function createMemorySettingsApp(initialConfig) {
   app.use('/api/memory', memoryRoutes);
 
   return {
+    getConfig: () => structuredClone(config),
     updatePilotDeckConfig,
     request: (path, init) => requestJson(app, path, init),
   };

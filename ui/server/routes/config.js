@@ -533,7 +533,7 @@ const connectionTasks = createConnectionTestTasks({
       if (binding.error) throw Object.assign(new Error(binding.error.message), binding.error);
     }, {
       paths: changedPaths,
-      beforeWrite: suppressNextWatchEvent,
+      onWriteCommitted: suppressNextWatchEvent,
     });
     const reload = await reloadPilotDeckConfig(saved.config);
     void notifyGatewayConfigReload();
@@ -821,7 +821,7 @@ router.put('/', async (req, res) => {
       saved = await writeRawPilotDeckYaml(renamed.config, {
         previousConfig: diskRecord.config,
         expectedRevision: configRevision(diskRecord.raw),
-        beforeWrite: suppressNextWatchEvent,
+        onWriteCommitted: suppressNextWatchEvent,
       });
     } else if (req.body?.config && typeof req.body.config === 'object') {
       if (diskRecord.parseError) {
@@ -884,7 +884,7 @@ router.put('/', async (req, res) => {
       saved = await writePilotDeckConfig(renamed.config, {
         previousConfig: diskRecord.config,
         expectedRevision: configRevision(diskRecord.raw),
-        beforeWrite: suppressNextWatchEvent,
+        onWriteCommitted: suppressNextWatchEvent,
       });
     } else {
       return res.status(400).json({ error: 'raw YAML or config object is required' });
@@ -1405,7 +1405,7 @@ router.post('/open', async (_req, res) => {
     } catch {
       await writePilotDeckConfig(buildDefaultPilotDeckConfig(), {
         expectedRevision: configRevision(''),
-        beforeWrite: suppressNextWatchEvent,
+        onWriteCommitted: suppressNextWatchEvent,
       });
     }
 

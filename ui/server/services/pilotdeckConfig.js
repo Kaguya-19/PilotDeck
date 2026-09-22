@@ -890,6 +890,16 @@ function valueAtPath(value, keys) {
   return current;
 }
 
+function prepareYamlPathParents(doc, next, keys) {
+  for (let length = 1; length < keys.length; length += 1) {
+    const prefix = keys.slice(0, length);
+    if (doc.getIn(prefix) !== null) continue;
+    const nextParent = valueAtPath(next, prefix);
+    if (Array.isArray(nextParent)) doc.setIn(prefix, doc.createNode([]));
+    else if (isRecord(nextParent)) doc.setIn(prefix, doc.createNode({}));
+  }
+}
+
 async function resolveConfigWritePath(configPath) {
   let current = path.resolve(configPath);
   const visited = new Set();
@@ -919,7 +929,11 @@ async function resolveConfigWritePath(configPath) {
   }
 }
 
-async function atomicWritePilotDeckYaml(raw, { expectedRevision, beforeWrite } = {}) {
+async function atomicWritePilotDeckYaml(raw, {
+  expectedRevision,
+  beforeWrite,
+  onWriteCommitted,
+} = {}) {
   const configPath = getPilotDeckConfigPath();
   const writePath = await resolveConfigWritePath(configPath);
   const configDir = path.dirname(writePath);
@@ -969,6 +983,7 @@ async function atomicWritePilotDeckYaml(raw, { expectedRevision, beforeWrite } =
     // yielding back to the event loop, so a detected external save cannot be
     // overwritten by a queued local callback.
     fs.renameSync(tempPath, writePath);
+    onWriteCommitted?.();
     try {
       const dirHandle = await fsPromises.open(configDir, 'r');
       try { await dirHandle.sync(); } finally { await dirHandle.close(); }
@@ -988,6 +1003,7 @@ export async function updatePilotDeckConfig(
   {
     paths,
     beforeWrite,
+    onWriteCommitted,
     settleMs = DEFAULT_CONFIG_SETTLE_MS,
     maxAttempts = DEFAULT_CONFIG_WRITE_ATTEMPTS,
   } = {},
@@ -1009,6 +1025,7 @@ export async function updatePilotDeckConfig(
         throw configFileError('INVALID_CONFIG_YAML', doc.errors[0].message);
       }
       for (const keys of paths) {
+        prepareYamlPathParents(doc, next, keys);
         const value = valueAtPath(next, keys);
         if (value === undefined) doc.deleteIn(keys);
         else doc.setIn(keys, value);
@@ -1027,6 +1044,7 @@ export async function updatePilotDeckConfig(
         await atomicWritePilotDeckYaml(raw, {
           expectedRevision: configRevision(disk.raw),
           beforeWrite,
+          onWriteCommitted,
         });
         const saved = readPilotDeckConfigFile();
         return {
@@ -1218,7 +1236,12 @@ function finalizeBootstrapPlaceholder(config) {
 // after running through validation. UI-internal === disk schema, so
 // there's no read-modify-write needed anymore (the previous translation
 // layer existed only to bridge an older internal schema).
-export async function writePilotDeckConfig(config, { previousConfig, expectedRevision, beforeWrite } = {}) {
+export async function writePilotDeckConfig(config, {
+  previousConfig,
+  expectedRevision,
+  beforeWrite,
+  onWriteCommitted,
+} = {}) {
   let previous = previousConfig;
   if (!isRecord(previous)) {
     try {
@@ -1260,7 +1283,7 @@ export async function writePilotDeckConfig(config, { previousConfig, expectedRev
     }
   }
   const raw = stringifyYaml(yamlObj, { lineWidth: 0 });
-  await atomicWritePilotDeckYaml(raw, { expectedRevision, beforeWrite });
+  await atomicWritePilotDeckYaml(raw, { expectedRevision, beforeWrite, onWriteCommitted });
   return { configPath, raw, validation, config: yamlObj };
 }
 

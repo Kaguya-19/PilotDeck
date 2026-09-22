@@ -474,7 +474,7 @@ router.put('/model-configuration', async (req, res) => {
       const saved = await writePilotDeckConfig(nextConfig, {
         previousConfig: recordConfig.config,
         expectedRevision: configRevision(recordConfig.raw),
-        beforeWrite: suppressNextWatchEvent,
+        onWriteCommitted: suppressNextWatchEvent,
       });
       return { saved, configurationId, savedAt };
     });
