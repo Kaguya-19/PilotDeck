@@ -8,6 +8,8 @@
  */
 import type { ModelConfig, CanonicalModelRequest } from "../model/protocol/canonical.js";
 import type { ModelRuntime } from "../model/ModelRuntime.js";
+import { validateModelRequest } from "../model/request/validateModelRequest.js";
+import { ModelProviderError, ModelRequestError } from "../model/protocol/errors.js";
 import type { ToolRegistry } from "../tool/registry/ToolRegistry.js";
 import type { ToolRuntime } from "../tool/execution/ToolRuntime.js";
 import type { PilotDeckToolRuntimeContext } from "../tool/protocol/types.js";
@@ -32,6 +34,7 @@ export type PublicCapabilityResponse = {
 
 export type NativePublicHostRuntime = {
   modelConfig: ModelConfig;
+  defaultSelection?: { provider: string; model: string };
   modelRuntime: ModelRuntime;
   tools: ToolRegistry;
   toolRuntime: ToolRuntime;
@@ -96,6 +99,21 @@ function modelSelection(config: ModelConfig, requestedModelId: string): PublicMo
     throw new Error(matches.length === 0 ? "model_not_found" : "model_id_ambiguous");
   }
   return matches[0];
+}
+
+function validateBudget(input: Record<string, unknown>, selection: PublicModelSelection, runtime: NativePublicHostRuntime): void {
+  const budget = asRecord(input.budget);
+  if (!budget) return;
+  for (const field of ["maxOutputTokens", "maxInputTokens", "timeoutMs"]) {
+    if (budget[field] !== undefined && (!Number.isInteger(budget[field]) || Number(budget[field]) <= 0)) {
+      throw new ModelRequestError("invalid_budget", `${field} must be a positive integer.`);
+    }
+  }
+  const maxOutput = budget.maxOutputTokens;
+  const cap = runtime.modelRuntime.getCapabilities(selection.providerId, selection.selectedModelId).maxOutputTokens;
+  if (typeof maxOutput === "number" && cap !== undefined && maxOutput > cap) {
+    throw new ModelRequestError("invalid_budget", `maxOutputTokens exceeds the selected model cap (${cap}).`);
+  }
 }
 
 function descriptor(tool: ReturnType<ToolRegistry["list"]>[number]) {
@@ -170,7 +188,7 @@ export function createNativeHostCapabilityProvider(runtime: NativePublicHostRunt
               model: model.id,
               provider: provider.id,
               enabled: true,
-              is_default: false,
+              is_default: runtime.defaultSelection?.provider === provider.id && runtime.defaultSelection.model === model.id,
             })),
           );
           return { status: 200, body: { data } };
@@ -179,12 +197,15 @@ export function createNativeHostCapabilityProvider(runtime: NativePublicHostRunt
           const request = asRecord(input.request) as Partial<CanonicalModelRequest> | undefined;
           const requestedModelId = requireString(input.modelId ?? request?.model, "modelId");
           const selection = modelSelection(runtime.modelConfig, requestedModelId);
+          validateBudget(input, selection, runtime);
+          const preparedRequest = { ...request, model: selection.selectedModelId, provider: selection.providerId } as CanonicalModelRequest;
+          validateModelRequest(preparedRequest, runtime.modelConfig);
           return {
             status: 200,
             body: {
               requestId: requireString(input.requestId, "requestId"),
               selection,
-              request: { ...request, model: selection.selectedModelId, provider: selection.providerId },
+              request: preparedRequest,
             },
           };
         }
@@ -197,6 +218,7 @@ export function createNativeHostCapabilityProvider(runtime: NativePublicHostRunt
             model: selection.selectedModelId,
             provider: selection.providerId,
           } as CanonicalModelRequest;
+          validateModelRequest(canonicalRequest, runtime.modelConfig);
           const events = runtime.modelRuntime.stream(canonicalRequest, { signal: options.signal });
           return {
             status: 200,
@@ -212,6 +234,13 @@ export function createNativeHostCapabilityProvider(runtime: NativePublicHostRunt
           return unsupported(operation);
       }
     } catch (error) {
+      if (options.signal?.aborted) return { status: 499, body: { code: "PUBLIC_HOST_CANCELLED" } };
+      if (error instanceof ModelProviderError) {
+        return { status: error.error.status ?? 502, body: error.error };
+      }
+      if (error instanceof ModelRequestError) {
+        return { status: 400, body: { code: error.code, message: error.message, details: error.details } };
+      }
       const message = error instanceof Error ? error.message : String(error);
       return { status: 502, body: { code: "PUBLIC_HOST_PROVIDER_ERROR", operation, message } };
     }

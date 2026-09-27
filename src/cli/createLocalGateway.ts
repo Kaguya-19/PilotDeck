@@ -106,6 +106,9 @@ import { listModelCatalog, validateExplicitModelSelection, validateModelSelectio
 import { createDialogProjectRegistry } from "../gateway/dialog/projectRegistry.js";
 import type { SessionModelSelection } from "../gateway/protocol/types.js";
 import { listCommands } from "../gateway/dialog/commands.js";
+import { ToolRuntime } from "../tool/execution/ToolRuntime.js";
+import { PermissionRuntime } from "../permission/index.js";
+import { createNativeHostCapabilityProvider, type PublicHostCapabilityProvider, type PublicHostPrincipal } from "../composition/nativeHostCapabilityProvider.js";
 import {
   ContentAddressedWorkspaceSnapshotRecorder,
   JsonlInvocationLogSink,
@@ -187,6 +190,8 @@ export type CreateLocalGatewayResult = {
    * AlwaysOnManager / CronManager in response to a config change.
    */
   updateSubsystems: (update: SubsystemUpdate) => void;
+  /** Shared runtime capability provider; never constructs a second runtime. */
+  getPublicHostCapabilities: (projectKey?: string) => PublicHostCapabilityProvider;
 };
 
 export function resolveBrowserUseOutputDir(input: {
@@ -608,6 +613,33 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
       gateway.setCronController(update.cron);
       gateway.setAlwaysOnApply(update.alwaysOnApply);
       gateway.setAlwaysOnRerunPlan(update.alwaysOnRerunPlan);
+    },
+    getPublicHostCapabilities: (projectKey) => {
+      const runtime = registry.resolve(projectKey);
+      const toolRuntime = new ToolRuntime(runtime.tools, new PermissionRuntime());
+      return createNativeHostCapabilityProvider({
+        modelConfig: runtime.snapshot.config.model,
+        modelRuntime: runtime.model,
+        tools: runtime.tools,
+        toolRuntime,
+        toolContext: (principal: PublicHostPrincipal, signal) => ({
+          sessionId: `public-host:${principal.pilotDeckUserId}`,
+          turnId: randomUUID(),
+          cwd: runtime.projectRoot,
+          abortSignal: signal,
+          permissionMode: "default",
+          permissionContext: createDefaultPermissionContext({
+            cwd: runtime.projectRoot,
+            mode: "default",
+            canPrompt: false,
+            bypassAvailable: false,
+          }),
+          env,
+          now,
+        }),
+        skills: skillManager,
+        projectKey: runtime.projectRoot,
+      });
     },
   };
 }
