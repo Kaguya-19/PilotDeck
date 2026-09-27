@@ -619,6 +619,10 @@ export function createLocalGateway(options: CreateLocalGatewayOptions = {}): Cre
       const toolRuntime = new ToolRuntime(runtime.tools, new PermissionRuntime());
       return createNativeHostCapabilityProvider({
         modelConfig: runtime.snapshot.config.model,
+        defaultSelection: {
+          provider: runtime.snapshot.config.agent.model.provider,
+          model: runtime.snapshot.config.agent.model.model,
+        },
         modelRuntime: runtime.model,
         tools: runtime.tools,
         toolRuntime,

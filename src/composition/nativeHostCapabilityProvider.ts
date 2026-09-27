@@ -63,6 +63,22 @@ const SUPPORTED_OPERATIONS = Object.freeze([
   "model_stream",
 ]);
 
+export const PUBLIC_HOST_CAPABILITY_GAPS = Object.freeze({
+  create_tool: "ToolRegistry has no persisted descriptor management owner; ToolPort.execute is not a create/update operation.",
+  update_tool: "ToolRegistry.replace is in-memory only and has no public descriptor persistence contract.",
+  probe_unsaved_tool: "No mounted unsaved-descriptor probe primitive exists in the native ToolPort.",
+  remove_tool: "ToolRegistry.unregister has no persisted management/source contract.",
+  publish_general_skill: "SkillManager has no publish lifecycle operation; create/write is not publish.",
+  archive_general_skill: "SkillManager.delete is removal and cannot be exposed as archive.",
+  test_general_skill: "SkillManager has validation, not the required general-skill test execution contract.",
+  extract_sop_text: "No mounted file parsing Port is available in the native runtime root.",
+  task_start: "BackgroundTaskRuntime is Bash-only and is not a SOP preview/APIJob/Knowledge ingest task namespace.",
+  task_status: "No public domain task status reader is mounted at the host root.",
+  task_result: "No public domain task result reader is mounted at the host root.",
+  task_cancel: "No domain cancel primitive is available; disconnect must not call Bash task cancellation.",
+  task_events: "No resumable domain event cursor is mounted at the host root.",
+});
+
 const unsupported = (operation: string): PublicCapabilityResponse => ({
   status: 501,
   body: {
@@ -161,9 +177,10 @@ export function createNativeHostCapabilityProvider(runtime: NativePublicHostRunt
           return { status: 200, body: { data: runtime.tools.list().map(descriptor) } };
         case "test_tool": {
           const name = requireString(input.toolId ?? input.name, "toolId");
-          if (!Object.hasOwn(input, "input")) return invalid("test_tool requires input.");
+          const testInput = Object.hasOwn(input, "input") ? input.input : input.body;
+          if (testInput === undefined) return invalid("test_tool requires body/input.");
           const result = await runtime.toolRuntime.execute(
-            { id: `public-test-${name}`, name, input: input.input },
+            { id: `public-test-${name}`, name, input: testInput },
             runtime.toolContext(options.principal, options.signal),
           );
           return { status: 200, body: result };
@@ -176,10 +193,22 @@ export function createNativeHostCapabilityProvider(runtime: NativePublicHostRunt
             cursor: input.cursor as string | undefined,
             limit: input.limit as number | undefined,
           });
-          return { status: 200, body: result };
+          return {
+            status: 200,
+            body: {
+              data: result.items,
+              next_cursor: result.nextCursor ?? null,
+              builtin: result.builtin,
+              user: result.user,
+              project: result.project,
+              projectPath: result.projectPath,
+            },
+          };
         }
-        case "import_general_skill":
-          return { status: 200, body: await runtime.skills.create(skillInput(input, runtime.projectKey)) };
+        case "import_general_skill": {
+          const payload = asRecord(input.body) ?? input;
+          return { status: 200, body: await runtime.skills.create(skillInput(payload, runtime.projectKey)) };
+        }
         case "list_model_catalog": {
           const data = Object.values(runtime.modelConfig.providers).flatMap((provider) =>
             Object.values(provider.models).map((model) => ({
