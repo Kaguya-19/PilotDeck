@@ -7,12 +7,12 @@
  * use these ports only for host execution.
  */
 import type {
-  CanonicalModelError,
   CanonicalModelEvent,
   CanonicalModelRequest,
   CanonicalToolSchema,
   CanonicalUsage,
 } from "../model/protocol/canonical.js";
+import type { CanonicalModelError } from "../model/protocol/errors.js";
 
 export type PublicModelSelection = {
   /** Stable model id selected by the caller/profile. */
