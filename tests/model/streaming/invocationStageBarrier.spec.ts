@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -105,6 +105,26 @@ function invocationContext() {
   };
 }
 
+async function waitForPersistedInvocation(
+  root: string,
+  sessionId: string,
+): Promise<{ line: string; record: InvocationLogRecord }> {
+  const path = join(root, "workspaces", "workspace", "sessions", sessionId, "llm", "invocations.jsonl");
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      const content = await readFile(path, "utf8");
+      const line = content.split("\n").find(Boolean);
+      if (line) {
+        return { line, record: JSON.parse(line) as InvocationLogRecord };
+      }
+    } catch {
+      // Invocation persistence is asynchronous; retry until the file is visible.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error(`Timed out waiting for invocation log: ${path}`);
+}
+
 test("complete synchronously stages the invocation before sending HTTP", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pilotdeck-stage-barrier-"));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -207,6 +227,45 @@ test("streamModel preserves completed UTF-8 characters in an interrupted respons
   assert.equal(records[0]?.responseBytes, Buffer.byteLength(payload));
   assert.equal(records[0]?.outcome, "incomplete");
   assert.equal(records[0]?.responseComplete, false);
+});
+
+test("JsonlInvocationLogSink round-trips split UTF-8 and provider unicode escapes", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pilotdeck-utf8-jsonl-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const sink = new JsonlInvocationLogSink({ root });
+  const cases = [
+    {
+      sessionId: "literal-utf8",
+      payload: 'data: {"choices":[{"delta":{"content":"中"}}]}\n\ndata: [DONE]\n\n',
+      splitMarker: "中",
+      serializedMarker: "中",
+    },
+    {
+      sessionId: "provider-unicode-escape",
+      payload: 'data: {"choices":[{"delta":{"content":"\\u4e2d"}}]}\n\ndata: [DONE]\n\n',
+      splitMarker: "\\u4e2d",
+      serializedMarker: "\\\\u4e2d",
+    },
+  ];
+
+  for (const item of cases) {
+    for await (const _event of streamModel(request, config, {
+      invocation: {
+        context: { ...invocationContext(), sessionId: item.sessionId },
+        sink,
+      },
+      fetch: async () => splitUtf8Response(item.payload, item.splitMarker),
+    })) {
+      // Drain the stream so the invocation is persisted.
+    }
+
+    const { line, record } = await waitForPersistedInvocation(root, item.sessionId);
+    assert.equal(line.includes(item.serializedMarker), true);
+    assert.equal(record.responseBody, item.payload);
+    assert.equal(Buffer.from(record.responseBody ?? "").equals(Buffer.from(item.payload)), true);
+    assert.equal(record.responseBody?.includes("\uFFFD"), false);
+    assert.equal(record.responseBytes, Buffer.byteLength(item.payload));
+  }
 });
 
 test("does not send HTTP when synchronous invocation staging fails", async () => {
