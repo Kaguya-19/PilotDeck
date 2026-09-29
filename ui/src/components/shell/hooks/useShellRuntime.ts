@@ -54,14 +54,16 @@ export function useShellRuntime({
       return;
     }
 
+    // Detach first so a synchronous or late close event cannot clear a newer
+    // shell connection that has already claimed the ref.
+    wsRef.current = null;
+
     if (
       activeSocket.readyState === WebSocket.OPEN ||
       activeSocket.readyState === WebSocket.CONNECTING
     ) {
       activeSocket.close();
     }
-
-    wsRef.current = null;
   }, []);
 
   const openAuthUrlInBrowser = useCallback((url = authUrlRef.current) => {

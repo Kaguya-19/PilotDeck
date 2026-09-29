@@ -4,7 +4,6 @@ import {
   SessionConfigOverrides,
   UNATTENDED_SESSION_EXCLUDED_TOOLS,
 } from "../../always-on/runtime/SessionConfigOverrides.js";
-import type { Gateway } from "../../gateway/index.js";
 import type { PilotDeckToolDefinition } from "../../tool/index.js";
 import type { CronConfig } from "../config/parseCronConfig.js";
 import type {
@@ -19,18 +18,24 @@ import type {
   CronStopInput,
   CronStopResult,
   CronTask,
+  CronResultDeliveryHandler,
+  CronUpdateInput,
+  CronUpdateResult,
 } from "../protocol/types.js";
 import { resolveCronPaths, type CronPaths } from "../storage/CronPaths.js";
-import { CronTaskStore } from "../storage/CronTaskStore.js";
 import { isValidCronTimezone, resolveCronTimezone } from "../CronTimezone.js";
-import { createCronCreateTool } from "../tool/CronCreateTool.js";
-import { createCronDeleteTool } from "../tool/CronDeleteTool.js";
-import { createCronListTool } from "../tool/CronListTool.js";
-import { createCronStopTool } from "../tool/CronStopTool.js";
-import { CronFire, type CronActiveRun } from "./CronFire.js";
+import { createCronToolDefinitions } from "../tool/createCronToolDefinitions.js";
+import { CronFire, type CronActiveRun, type CronTurnEventHandler } from "./CronFire.js";
 import { computeNextRunAt } from "./CronSchedule.js";
 import { CronScheduler } from "./CronScheduler.js";
 import type { TelemetryClient } from "../../telemetry/index.js";
+import type { CronControlPort } from "./CronControlPort.js";
+import type { CronAgentGatewayPort } from "./CronAgentGatewayPort.js";
+import {
+  createNativeCronProjectStorageProvider,
+  type CronProjectStorageProvider,
+  type CronTaskStorePort,
+} from "./CronProjectStorageProvider.js";
 
 export type CronRuntimeLogger = {
   info: (message: string, data?: Record<string, unknown>) => void;
@@ -44,11 +49,16 @@ export type CreateCronRuntimeOptions = {
   now?: () => Date;
   uuid?: () => string;
   logger?: CronRuntimeLogger;
-  store?: CronTaskStore;
+  /** Compatibility injection for direct tests. Application composition uses cronStorageProvider. */
+  store?: CronTaskStorePort;
+  /** Application-selected provider for project Cron records and restart discovery. */
+  cronStorageProvider?: CronProjectStorageProvider;
   telemetry?: TelemetryClient;
   sessionOverrides?: SessionConfigOverrides;
   activeRunCount?: () => number;
   skipToolCreation?: boolean;
+  onResultDelivery?: CronResultDeliveryHandler;
+  onTurnEvent?: CronTurnEventHandler;
 };
 
 const NOOP_LOGGER: CronRuntimeLogger = {
@@ -56,43 +66,50 @@ const NOOP_LOGGER: CronRuntimeLogger = {
   warn: () => undefined,
 };
 
-export class CronRuntime {
+/** Native project-scoped provider for CronControlPort plus scheduler ownership. */
+export class CronRuntime implements CronControlPort {
   readonly config: CronConfig;
   readonly projectKey: string;
   readonly paths: CronPaths;
 
-  private readonly store: CronTaskStore;
+  private readonly store: CronTaskStorePort;
   private readonly now: () => Date;
   private readonly uuid: () => string;
   private readonly logger: CronRuntimeLogger;
   private readonly telemetry?: TelemetryClient;
+  private readonly onResultDelivery?: CronResultDeliveryHandler;
+  private readonly onTurnEvent?: CronTurnEventHandler;
   private readonly sessionOverrides: SessionConfigOverrides;
   private readonly tools: PilotDeckToolDefinition[];
   private readonly activeRuns = new Map<string, CronActiveRun>();
   private readonly sharedActiveRunCount?: () => number;
-  private gateway?: Gateway;
+  private agentGateway?: CronAgentGatewayPort;
   private fire?: CronFire;
   private scheduler?: CronScheduler;
 
   constructor(options: CreateCronRuntimeOptions) {
     this.config = options.config;
     this.projectKey = resolve(options.projectKey);
-    this.paths = resolveCronPaths({ pilotHome: options.pilotHome, projectKey: this.projectKey });
-    this.store = options.store ?? new CronTaskStore(this.paths);
+    const storage = options.store
+      ? {
+          paths: resolveCronPaths({ pilotHome: options.pilotHome, projectKey: this.projectKey }),
+          taskStore: options.store,
+        }
+      : (options.cronStorageProvider ?? createNativeCronProjectStorageProvider()).create({
+          pilotHome: options.pilotHome,
+          projectKey: this.projectKey,
+        });
+    this.paths = storage.paths;
+    this.store = storage.taskStore;
     this.now = options.now ?? (() => new Date());
     this.uuid = options.uuid ?? randomUUID;
     this.logger = options.logger ?? NOOP_LOGGER;
     this.telemetry = options.telemetry;
+    this.onResultDelivery = options.onResultDelivery;
+    this.onTurnEvent = options.onTurnEvent;
     this.sessionOverrides = options.sessionOverrides ?? new SessionConfigOverrides();
     this.sharedActiveRunCount = options.activeRunCount;
-    this.tools = options.skipToolCreation
-      ? []
-      : [
-          createCronCreateTool(this),
-          createCronListTool(this),
-          createCronDeleteTool(this),
-          createCronStopTool(this),
-        ];
+    this.tools = options.skipToolCreation ? [] : createCronToolDefinitions(this);
   }
 
   getTools(): PilotDeckToolDefinition[] {
@@ -100,13 +117,13 @@ export class CronRuntime {
     return [...this.tools];
   }
 
-  bindGateway(gateway: Gateway): void {
-    if (this.gateway) {
-      throw new Error("CronRuntime.bindGateway already called.");
+  bindAgentGateway(agentGateway: CronAgentGatewayPort): void {
+    if (this.agentGateway) {
+      throw new Error("CronRuntime.bindAgentGateway already called.");
     }
-    this.gateway = gateway;
+    this.agentGateway = agentGateway;
     this.fire = new CronFire({
-      gateway,
+      gateway: agentGateway,
       store: this.store,
       now: this.now,
       logger: this.logger,
@@ -116,6 +133,8 @@ export class CronRuntime {
       runTimeoutMs: this.config.runTimeoutMinutes * 60_000,
       defaultTimezone: this.config.timezone,
       releaseTaskSession: (task) => this.releaseTaskSession(task),
+      onResultDelivery: this.onResultDelivery,
+      onTurnEvent: this.onTurnEvent,
       onPhaseEvent: (event) => {
         this.telemetry?.trackFeatureLoopStage({
           module: "cron_job",
@@ -155,6 +174,11 @@ export class CronRuntime {
     });
   }
 
+  /** @deprecated Use bindAgentGateway; the parameter is intentionally only the turn facade. */
+  bindGateway(agentGateway: CronAgentGatewayPort): void {
+    this.bindAgentGateway(agentGateway);
+  }
+
   async start(): Promise<void> {
     if (!this.config.enabled) {
       this.logger.info("cron disabled in config; runtime is a no-op.");
@@ -172,15 +196,15 @@ export class CronRuntime {
 
   async stop(): Promise<void> {
     await this.scheduler?.stop();
-    if (this.gateway) {
+    if (this.agentGateway) {
       const activeRuns = [...this.activeRuns.values()];
       for (const active of activeRuns) {
         active.stopRequested = true;
       }
       await Promise.all(
         activeRuns.map((active) =>
-          this.gateway!
-            .abortTurn({ sessionKey: active.sessionKey, runId: active.runId })
+          this.agentGateway!
+            .abortTurn({ sessionKey: active.sessionKey, runId: active.runId, reason: "system:cron_shutdown" })
             .catch(() => undefined),
         ),
       );
@@ -200,7 +224,7 @@ export class CronRuntime {
     const now = this.now();
     const taskId = this.uuid();
     const sessionKey = buildCronSessionKey(taskId);
-    const schedule = normalizeSchedule(input, this.config.timezone);
+    const schedule = normalizeSchedule(input, this.config.timezone, now);
     const timezone = schedule.type === "cron"
       ? schedule.timezone
       : input.timezone ?? this.config.timezone;
@@ -219,6 +243,8 @@ export class CronRuntime {
       status: "scheduled",
       sessionKey,
       channelKey: "cron",
+      originSessionKey: input.sessionKey,
+      originChannelKey: input.channelKey,
       // Session-scoped callers should pass the originating project explicitly.
       // Keep the runtime root only as a compatibility fallback for direct callers.
       projectKey: input.projectKey ?? this.projectKey,
@@ -227,6 +253,7 @@ export class CronRuntime {
       createdAt: now.toISOString(),
       updatedAt: now.toISOString(),
       nextRunAt: nextRunAt.toISOString(),
+      revision: 0,
       scheduleComputationVersion: schedule.type === "cron" ? 2 : undefined,
     };
     this.registerTaskSession(task);
@@ -260,6 +287,69 @@ export class CronRuntime {
     return result;
   }
 
+  async updateTask(input: CronUpdateInput): Promise<CronUpdateResult> {
+    if (!this.config.enabled) {
+      throw new Error("Cron is disabled. Enable it in pilotdeck.yaml to update tasks.");
+    }
+    if (typeof input.projectKey !== "string" || !input.projectKey.trim() || !this.matchesProject(input.projectKey)) {
+      return { updated: false, reason: "not_found" };
+    }
+    if (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0) {
+      throw new Error("Cron task expectedRevision must be a non-negative integer.");
+    }
+    if (typeof input.message !== "string" || !input.message.trim()) {
+      throw new Error("Cron task message is required.");
+    }
+    if (input.timezone !== undefined && (typeof input.timezone !== "string" || !isValidCronTimezone(input.timezone))) {
+      throw new Error(`Invalid Cron timezone: ${input.timezone}`);
+    }
+
+    const now = this.now();
+    const schedule = normalizeSchedule(input, this.config.timezone, now);
+    const timezone = schedule.type === "cron"
+      ? schedule.timezone
+      : input.timezone ?? this.config.timezone;
+    const nextRunAt = computeNextRunAt(schedule, now, timezone);
+    if (!nextRunAt) {
+      throw new Error("Cron schedule does not produce a valid future run time.");
+    }
+    if (schedule.type === "once" && nextRunAt.getTime() < now.getTime()) {
+      throw new Error("One-time Cron tasks must be scheduled in the future.");
+    }
+
+    let reason: Extract<CronUpdateResult, { updated: false }>["reason"] | undefined;
+    const updated = await this.store.updateTask(input.taskId, (current) => {
+      const currentProjectKey = current.projectKey?.trim() ? resolve(current.projectKey) : this.projectKey;
+      if (currentProjectKey !== this.projectKey || currentProjectKey !== resolve(input.projectKey)) {
+        reason = "not_found";
+        return current;
+      }
+      if (current.status === "running") {
+        reason = "running";
+        return current;
+      }
+      if ((current.revision ?? 0) !== input.expectedRevision) {
+        reason = "conflict";
+        return current;
+      }
+      return {
+        ...current,
+        message: input.message,
+        schedule,
+        timezone,
+        nextRunAt: nextRunAt.toISOString(),
+        updatedAt: now.toISOString(),
+        revision: (current.revision ?? 0) + 1,
+        scheduleComputationVersion: schedule.type === "cron" ? 2 : undefined,
+      };
+    });
+
+    if (!updated) return { updated: false, reason: "not_found" };
+    if (reason) return { updated: false, reason };
+    this.scheduler?.poke();
+    return { updated: true, task: updated };
+  }
+
   async deleteTask(input: CronDeleteInput): Promise<CronDeleteResult> {
     let stoppedRunId: string | undefined;
     if (input.stopRunning) {
@@ -276,11 +366,11 @@ export class CronRuntime {
 
   async stopTask(input: CronStopInput): Promise<CronStopResult> {
     const active = this.findActiveRun(input);
-    if (!active || !this.gateway) {
+    if (!active || !this.agentGateway) {
       return { stopped: false, taskId: input.taskId, runId: input.runId };
     }
     active.stopRequested = true;
-    await this.gateway.abortTurn({ sessionKey: active.sessionKey, runId: active.runId });
+    await this.agentGateway.abortTurn({ sessionKey: active.sessionKey, runId: active.runId });
     let deletedOneTimeTask = false;
     if (active.scheduleType === "once") {
       deletedOneTimeTask = await this.store.deleteTask(active.taskId);
@@ -301,13 +391,15 @@ export class CronRuntime {
     if (!task) return { started: false, reason: "not_found" };
     if (task.status === "running") return { started: false, reason: "already_running", taskId: task.taskId };
 
-    await this.createTask({
+    const created = await this.createTask({
       message: task.message,
       schedule: { type: "once", runAt: new Date().toISOString() },
       projectKey: task.projectKey,
+      sessionKey: task.originSessionKey,
+      channelKey: task.originChannelKey,
       mode: task.mode,
     });
-    return { started: true, taskId: task.taskId };
+    return { started: true, taskId: created.task.taskId };
   }
 
   runTickOnce(): Promise<void> {
@@ -343,6 +435,10 @@ export class CronRuntime {
     return undefined;
   }
 
+  private matchesProject(projectKey: string): boolean {
+    return resolve(projectKey) === this.projectKey;
+  }
+
   private async migrateLegacyTaskSessions(): Promise<void> {
     const tasks = await this.store.listTasks();
     let migratedCount = 0;
@@ -353,13 +449,14 @@ export class CronRuntime {
       }
       migratedCount += 1;
       this.sessionOverrides.delete(task.sessionKey);
-      await this.gateway
+      await this.agentGateway
         ?.closeSession({ sessionKey: task.sessionKey, reason: "cron/legacy-session-migrated" })
         .catch(() => undefined);
       await this.store.putTask({
         ...task,
         sessionKey: nextSessionKey,
         channelKey: "cron",
+        revision: (task.revision ?? 0) + 1,
         updatedAt: this.now().toISOString(),
       });
     }
@@ -381,7 +478,7 @@ export class CronRuntime {
     const tasks = await this.store.listTasks();
     for (const task of tasks) {
       this.registerTaskSession(task);
-      await this.gateway
+      await this.agentGateway
         ?.closeSession({ sessionKey: task.sessionKey, reason: "cron/unattended-policy-refresh" })
         .catch(() => undefined);
     }
@@ -389,7 +486,7 @@ export class CronRuntime {
 
   private async releaseTaskSession(task: CronTask): Promise<void> {
     this.sessionOverrides.delete(task.sessionKey);
-    await this.gateway
+    await this.agentGateway
       ?.closeSession({ sessionKey: task.sessionKey, reason: "cron/task-finished" })
       .catch(() => undefined);
   }
@@ -397,7 +494,7 @@ export class CronRuntime {
   private async releaseTaskSessionById(taskId: string): Promise<void> {
     const sessionKey = buildCronSessionKey(taskId);
     this.sessionOverrides.delete(sessionKey);
-    await this.gateway
+    await this.agentGateway
       ?.closeSession({ sessionKey, reason: "cron/task-removed" })
       .catch(() => undefined);
   }
@@ -453,6 +550,7 @@ export class CronRuntime {
         timezone,
         status: "scheduled",
         nextRunAt: computeNextRunAt(schedule, now, timezone)?.toISOString(),
+        revision: (task.revision ?? 0) + 1,
         scheduleComputationVersion: 2,
         updatedAt: now.toISOString(),
       });
@@ -468,9 +566,19 @@ export function createCronRuntime(options: CreateCronRuntimeOptions): CronRuntim
   return new CronRuntime(options);
 }
 
-function normalizeSchedule(input: CronCreateInput, configTimezone: string): CronTask["schedule"] {
+type CronScheduleInput = Pick<CronCreateInput, "schedule" | "timezone">
+  | Pick<CronUpdateInput, "schedule" | "timezone">;
+
+function normalizeSchedule(input: CronScheduleInput, configTimezone: string, now: Date): CronTask["schedule"] {
   if (input.schedule.type === "once") {
     return { type: "once", runAt: input.schedule.runAt };
+  }
+  if (input.schedule.type === "delay") {
+    const runAt = computeNextRunAt(input.schedule, now);
+    if (!runAt) {
+      throw new Error("Cron delay schedule must use a positive finite amount.");
+    }
+    return { type: "once", runAt: runAt.toISOString() };
   }
   const requestedTimezone = input.schedule.timezone ?? input.timezone;
   if (requestedTimezone && !isValidCronTimezone(requestedTimezone)) {

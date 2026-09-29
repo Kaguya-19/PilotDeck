@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { Project, ProjectSession } from '../types/app';
+import { stripDocumentSelectionPromptBlock } from '../types/documentSelection';
 
 /**
  * UI-only rename overlay for project + session display names.
@@ -90,16 +91,21 @@ export function setSessionCustomTitle(sessionId: string, override: string | null
 }
 
 /** Built-in fallback chain for the original session title. */
+function cleanSessionTitleCandidate(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  return stripDocumentSelectionPromptBlock(value).trim();
+}
+
 function nativeSessionTitle(session: ProjectSession): string {
-  const summary = (typeof session.summary === 'string' && session.summary) || '';
-  const title = (typeof session.title === 'string' && session.title) || '';
-  const name = (typeof session.name === 'string' && session.name) || '';
+  const summary = cleanSessionTitleCandidate(session.summary);
+  const title = cleanSessionTitleCandidate(session.title);
+  const name = cleanSessionTitleCandidate(session.name);
   return summary || title || name || session.id;
 }
 
 /** Read the label any UI surface should show for a session row/header. */
 export function sessionDisplayTitle(session: ProjectSession): string {
-  return getSessionCustomTitle(session.id) || nativeSessionTitle(session);
+  return cleanSessionTitleCandidate(getSessionCustomTitle(session.id)) || nativeSessionTitle(session);
 }
 
 // ── React subscription hook ──────────────────────────────────────────────

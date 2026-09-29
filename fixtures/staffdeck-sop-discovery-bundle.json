@@ -1,0 +1,46 @@
+{
+  "sops": [
+    {
+      "id": "skill_purchase_001",
+      "name": "Purchase",
+      "version": "1.0.0",
+      "content": {
+        "nodes": [
+          {
+            "node_id": "start",
+            "instruction": "Collect the purchase request.",
+            "expected_user_info": []
+          }
+        ]
+      }
+    },
+    {
+      "id": "skill_price_compare_001",
+      "name": "Compare",
+      "version": "1.0.0",
+      "content": {
+        "nodes": [
+          {
+            "node_id": "start",
+            "instruction": "Collect the products to compare.",
+            "expected_user_info": []
+          }
+        ]
+      }
+    },
+    {
+      "id": "expense_over_limit_approval",
+      "name": "Expense approval",
+      "version": "1.0.0",
+      "content": {
+        "nodes": [
+          {
+            "node_id": "start",
+            "instruction": "Collect the expense and approval context.",
+            "expected_user_info": []
+          }
+        ]
+      }
+    }
+  ]
+}

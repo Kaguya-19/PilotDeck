@@ -1,4 +1,14 @@
-export type PermissionMode = "default" | "plan" | "bypassPermissions";
+/** Permission policies accepted by runtime and transport consumers. */
+export const PERMISSION_MODES = ["default", "plan", "bypassPermissions"] as const;
+
+export type PermissionMode = (typeof PERMISSION_MODES)[number];
+
+/** Compatibility fallback used when a caller does not explicitly choose a policy. */
+export const DEFAULT_PERMISSION_MODE: PermissionMode = "default";
+
+export function isPermissionMode(value: unknown): value is PermissionMode {
+  return typeof value === "string" && PERMISSION_MODES.some((mode) => mode === value);
+}
 
 export type PermissionRuleBehavior = "allow" | "deny" | "ask";
 
@@ -9,6 +19,10 @@ export type PermissionRule = {
   behavior: PermissionRuleBehavior;
   toolName: string;
   pattern?: string;
+  /** Internal SDK adapter marker for an MCP ask rule that must remain
+   * interactive even when the session's broad mode is bypassPermissions.
+   * Native/project rules should leave this unset. */
+  force?: boolean;
 };
 
 export type PermissionRuleSet = {
@@ -23,8 +37,16 @@ export type PermissionContext = {
   cwd: string;
   additionalWorkingDirectories: string[];
   canPrompt: boolean;
+  /**
+   * A Gateway-enforced restrictive policy disabled interactive approval.
+   * Unlike ordinary `canPrompt`, this restriction remains effective in
+   * bypass mode. Omitted for all historical/native contexts.
+   */
+  policyCanPrompt?: false;
   bypassAvailable: boolean;
-  /** Absolute path of the project-local `.pilotdeck/plans` directory. */
+  /** SDK-only adapter: allow safe workspace file edits without prompting. */
+  acceptEdits?: boolean;
+  /** Absolute path of the current writable plan directory. */
   planDirectoryPath?: string;
 };
 
@@ -86,15 +108,19 @@ export function createDefaultPermissionContext(options: {
   cwd: string;
   mode?: PermissionMode;
   canPrompt?: boolean;
+  policyCanPrompt?: false;
   bypassAvailable?: boolean;
+  acceptEdits?: boolean;
   additionalWorkingDirectories?: string[];
   planDirectoryPath?: string;
   rules?: Partial<PermissionRuleSet>;
 }): PermissionContext {
   return {
-    mode: options.mode ?? "default",
+    mode: options.mode ?? DEFAULT_PERMISSION_MODE,
     canPrompt: options.canPrompt ?? false,
+    ...(options.policyCanPrompt === false ? { policyCanPrompt: false as const } : {}),
     bypassAvailable: options.bypassAvailable ?? false,
+    ...(options.acceptEdits !== undefined ? { acceptEdits: options.acceptEdits } : {}),
     cwd: options.cwd,
     additionalWorkingDirectories: options.additionalWorkingDirectories ?? [],
     ...(options.planDirectoryPath ? { planDirectoryPath: options.planDirectoryPath } : {}),

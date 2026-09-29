@@ -1,21 +1,40 @@
 import { normalizeAnthropicStreamEvent } from "../providers/anthropic/stream.js";
 import { createAnthropicStreamState, type AnthropicStreamState } from "../providers/anthropic/stream.js";
 import {
+  createGoogleStreamState,
+  normalizeGoogleStreamEvent,
+  type GoogleStreamState,
+} from "../providers/google/stream.js";
+import {
   createOpenAIStreamState,
   normalizeOpenAIStreamEvent,
   type OpenAIStreamState,
 } from "../providers/openai/stream.js";
+import {
+  createOpenAIResponsesStreamState,
+  normalizeOpenAIResponsesStreamEvent,
+  type OpenAIResponsesStreamState,
+} from "../providers/openai-responses/stream.js";
 import type { CanonicalModelEvent, ModelProtocol } from "../protocol/canonical.js";
 
 export type StreamNormalizerState = {
   anthropic?: AnthropicStreamState;
+  google?: GoogleStreamState;
   openai?: OpenAIStreamState;
+  openaiResponses?: OpenAIResponsesStreamState;
 };
 
 export function createStreamNormalizerState(protocol: ModelProtocol): StreamNormalizerState {
-  return protocol === "anthropic"
-    ? { anthropic: createAnthropicStreamState() }
-    : { openai: createOpenAIStreamState() };
+  if (protocol === "anthropic") {
+    return { anthropic: createAnthropicStreamState() };
+  }
+  if (protocol === "google") {
+    return { google: createGoogleStreamState() };
+  }
+  if (protocol === "openai-responses") {
+    return { openaiResponses: createOpenAIResponsesStreamState() };
+  }
+  return { openai: createOpenAIStreamState() };
 }
 
 export function normalizeStreamEvent(
@@ -26,6 +45,16 @@ export function normalizeStreamEvent(
   if (protocol === "anthropic") {
     state.anthropic ??= createAnthropicStreamState();
     return normalizeAnthropicStreamEvent(raw, state.anthropic);
+  }
+
+  if (protocol === "google") {
+    state.google ??= createGoogleStreamState();
+    return normalizeGoogleStreamEvent(raw, state.google);
+  }
+
+  if (protocol === "openai-responses") {
+    state.openaiResponses ??= createOpenAIResponsesStreamState();
+    return normalizeOpenAIResponsesStreamEvent(raw, state.openaiResponses);
   }
 
   state.openai ??= createOpenAIStreamState();

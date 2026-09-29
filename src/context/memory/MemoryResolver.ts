@@ -38,8 +38,19 @@ export type MemoryResolver = {
   captureTurn(input: MemoryCaptureTurnInput): Promise<void>;
 };
 
-export function canonicalMessagesToMemoryMessages(messages: CanonicalMessage[]): ContextMemoryMessage[] {
+export type CanonicalMessagesToMemoryMessagesOptions = {
+  includeForkCarryover?: boolean;
+};
+
+export function canonicalMessagesToMemoryMessages(
+  messages: CanonicalMessage[],
+  options: CanonicalMessagesToMemoryMessagesOptions = {},
+): ContextMemoryMessage[] {
   return messages.flatMap((message, index) => {
+    if (options.includeForkCarryover === false && message.metadata?.forkCarryover) {
+      return [];
+    }
+
     const entries: Array<Omit<ContextMemoryMessage, "msgId">> = [];
     const pushEntry = (role: string, text: string) => {
       const content = text.trim();
@@ -61,6 +72,8 @@ export function canonicalMessagesToMemoryMessages(messages: CanonicalMessage[]):
           block.content.map((item) => item.type === "text" ? item.text : `[${item.type}]`).join("\n"),
         );
       } else if (block.type === "tool_result_reference") {
+        pushEntry("tool", block.preview);
+      } else if (block.type === "media_reference") {
         pushEntry("tool", block.preview);
       }
     }

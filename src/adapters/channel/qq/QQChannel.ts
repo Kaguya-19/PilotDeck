@@ -2,7 +2,8 @@ import type { Gateway, GatewayChannelKey } from "../../../gateway/index.js";
 import type { ChannelAdapter, ChannelHandle, ChannelLogger, ChannelStartDeps } from "../protocol/ChannelAdapter.js";
 import { QQBotGateway, type QQBotCredentials, type QQGroupMessageEvent, type QQC2CMessageEvent } from "./qqbot-gateway.js";
 import { ImElicitationHelper } from "../protocol/ImElicitationHelper.js";
-import { QQSessionMapper } from "./QQSessionMapper.js";
+import { ImPermissionHelper } from "../protocol/ImPermissionHelper.js";
+import { QQSessionMapper, type QQSessionMapperState } from "./QQSessionMapper.js";
 import { renderQQEvent } from "./qq-render.js";
 
 export type QQChannelOptions = {
@@ -12,6 +13,7 @@ export type QQChannelOptions = {
   triggerPrefixes?: string[];
   mapper?: QQSessionMapper;
   maxMessageLength?: number;
+  onStateChange?: (state: QQSessionMapperState) => void;
 };
 
 const DEFAULT_PREFIXES = ["/ask", "/chat"];
@@ -25,12 +27,14 @@ export class QQChannel implements ChannelAdapter {
   private readonly triggerPrefixes: string[];
   private readonly mapper: QQSessionMapper;
   private readonly maxMessageLength: number;
+  private readonly onStateChange?: (state: QQSessionMapperState) => void;
 
   private gateway?: Gateway;
   private logger?: ChannelLogger;
   private botGateway?: QQBotGateway;
   private activeChats = new Set<string>();
   private readonly elicitation = new ImElicitationHelper();
+  private readonly permissions = new ImPermissionHelper();
 
   constructor(options: QQChannelOptions = {}) {
     this.credentials = {
@@ -41,6 +45,7 @@ export class QQChannel implements ChannelAdapter {
     this.triggerPrefixes = options.triggerPrefixes ?? DEFAULT_PREFIXES;
     this.mapper = options.mapper ?? new QQSessionMapper();
     this.maxMessageLength = options.maxMessageLength ?? DEFAULT_MAX_MSG_LEN;
+    this.onStateChange = options.onStateChange;
   }
 
   async start(deps: ChannelStartDeps): Promise<ChannelHandle> {
@@ -133,12 +138,41 @@ export class QQChannel implements ChannelAdapter {
       return;
     }
 
+    if (this.permissions.hasPending(chatKey) && this.gateway) {
+      let answerToken: number | undefined;
+      try {
+        const answer = await this.permissions.answerWithState(chatKey, text, this.gateway);
+        answerToken = answer?.answerToken;
+        if (answer?.text) {
+          const confirmationDelivered = await this.sendReply(groupOpenId, answer.text);
+          if (!confirmationDelivered) {
+            this.permissions.releaseAnswer(chatKey, answer.answerToken);
+            return;
+          }
+          if (!answer.canAdvance && !answer.retryPrompt) return;
+          const nextPrompt = this.permissions.takeNextPrompt(chatKey, answer.answerToken);
+          if (nextPrompt) {
+            const nextPromptRequestId = this.permissions.getPromptRequestId(chatKey, answer.answerToken);
+            const delivered = await this.sendReply(groupOpenId, nextPrompt);
+            this.permissions.confirmNextPrompt(chatKey, delivered, nextPromptRequestId, answer.answerToken);
+          }
+        }
+      } catch (e) {
+        if (answerToken !== undefined) this.permissions.releaseAnswer(chatKey, answerToken);
+        this.logger?.error?.(`qq: permission answer error: ${e}`);
+      }
+      return;
+    }
+
     if (this.activeChats.has(chatKey)) {
       this.logger?.info?.(`qq: chat ${chatKey} already active, skipping`);
       return;
     }
 
     const mapped = this.mapper.resolve({ groupId: groupOpenId, userId: userOpenId, text });
+    if (mapped.command === "new") {
+      this.onStateChange?.(this.mapper.snapshot());
+    }
 
     if (mapped.command === "new" && !mapped.message) {
       await this.sendReply(groupOpenId, "已创建新会话。", event.id);
@@ -149,7 +183,7 @@ export class QQChannel implements ChannelAdapter {
 
     this.activeChats.add(chatKey);
     try {
-      await this.processMessage(groupOpenId, mapped.sessionKey, mapped.message, event.id);
+      await this.processMessage(chatKey, groupOpenId, mapped.sessionKey, mapped.message, event.id);
     } finally {
       this.activeChats.delete(chatKey);
     }
@@ -170,6 +204,32 @@ export class QQChannel implements ChannelAdapter {
         if (confirmation) await this.sendC2CReply(userOpenId, confirmation);
       } catch (e) {
         this.logger?.error?.(`qq: elicitation answer error (c2c): ${e}`);
+      }
+      return;
+    }
+
+    if (this.permissions.hasPending(chatKey) && this.gateway) {
+      let answerToken: number | undefined;
+      try {
+        const answer = await this.permissions.answerWithState(chatKey, rawText, this.gateway);
+        answerToken = answer?.answerToken;
+        if (answer?.text) {
+          const confirmationDelivered = await this.sendC2CReply(userOpenId, answer.text);
+          if (!confirmationDelivered) {
+            this.permissions.releaseAnswer(chatKey, answer.answerToken);
+            return;
+          }
+          if (!answer.canAdvance && !answer.retryPrompt) return;
+          const nextPrompt = this.permissions.takeNextPrompt(chatKey, answer.answerToken);
+          if (nextPrompt) {
+            const nextPromptRequestId = this.permissions.getPromptRequestId(chatKey, answer.answerToken);
+            const delivered = await this.sendC2CReply(userOpenId, nextPrompt);
+            this.permissions.confirmNextPrompt(chatKey, delivered, nextPromptRequestId, answer.answerToken);
+          }
+        }
+      } catch (e) {
+        if (answerToken !== undefined) this.permissions.releaseAnswer(chatKey, answerToken);
+        this.logger?.error?.(`qq: permission answer error (c2c): ${e}`);
       }
       return;
     }
@@ -209,6 +269,11 @@ export class QQChannel implements ChannelAdapter {
           await this.sendC2CReplyChunked(userOpenId, questionText, msgId);
           continue;
         }
+        if (event.type === "permission_request") {
+          const questionText = this.permissions.capture(chatKey, sessionKey, event);
+          if (questionText) this.permissions.confirmInitialPrompt(chatKey, await this.sendC2CReplyChunked(userOpenId, questionText, msgId), event.requestId);
+          continue;
+        }
         const fragment = renderQQEvent(event);
         if (fragment != null) replyText += fragment;
       }
@@ -218,29 +283,33 @@ export class QQChannel implements ChannelAdapter {
     }
 
     this.elicitation.clear(chatKey);
+    this.permissions.clearAfterTurn(chatKey);
     const finalText = replyText.trim();
     if (finalText) {
       await this.sendC2CReplyChunked(userOpenId, finalText, msgId);
     }
   }
 
-  private async sendC2CReply(userOpenId: string, text: string, msgId?: string, msgSeq?: number): Promise<void> {
-    if (!this.botGateway) return;
+  private async sendC2CReply(userOpenId: string, text: string, msgId?: string, msgSeq?: number): Promise<boolean> {
+    if (!this.botGateway) return false;
     try {
       await this.botGateway.sendC2CMessage(userOpenId, text, msgId, msgSeq);
+      return true;
     } catch (e) {
       this.logger?.error?.(`qq: sendC2CMessage failed: ${e}`);
+      return false;
     }
   }
 
-  private async sendC2CReplyChunked(userOpenId: string, text: string, msgId: string): Promise<void> {
+  private async sendC2CReplyChunked(userOpenId: string, text: string, msgId: string): Promise<boolean> {
     const chunks = this.splitText(text, this.maxMessageLength);
     for (let i = 0; i < chunks.length; i++) {
-      await this.sendC2CReply(userOpenId, chunks[i], msgId, i + 1);
+      if (!await this.sendC2CReply(userOpenId, chunks[i], msgId, i + 1)) return false;
       if (chunks.length > 1) {
         await this.sleep(500);
       }
     }
+    return true;
   }
 
   private extractText(raw: string): string | null {
@@ -255,6 +324,7 @@ export class QQChannel implements ChannelAdapter {
   }
 
   private async processMessage(
+    chatKey: string,
     groupOpenId: string,
     sessionKey: string,
     message: string,
@@ -270,8 +340,13 @@ export class QQChannel implements ChannelAdapter {
         message,
       })) {
         if (event.type === "elicitation_request") {
-          const questionText = this.elicitation.capture(groupOpenId, sessionKey, event);
+          const questionText = this.elicitation.capture(chatKey, sessionKey, event);
           await this.sendReplyChunked(groupOpenId, questionText, msgId);
+          continue;
+        }
+        if (event.type === "permission_request") {
+          const questionText = this.permissions.capture(chatKey, sessionKey, event);
+          if (questionText) this.permissions.confirmInitialPrompt(chatKey, await this.sendReplyChunked(groupOpenId, questionText, msgId), event.requestId);
           continue;
         }
         const fragment = renderQQEvent(event);
@@ -282,30 +357,34 @@ export class QQChannel implements ChannelAdapter {
       replyText = "处理消息时发生错误，请重试。";
     }
 
-    this.elicitation.clear(groupOpenId);
+    this.elicitation.clear(chatKey);
+    this.permissions.clearAfterTurn(chatKey);
     const finalText = replyText.trim();
     if (finalText) {
       await this.sendReplyChunked(groupOpenId, finalText, msgId);
     }
   }
 
-  private async sendReply(groupOpenId: string, text: string, msgId?: string, msgSeq?: number): Promise<void> {
-    if (!this.botGateway) return;
+  private async sendReply(groupOpenId: string, text: string, msgId?: string, msgSeq?: number): Promise<boolean> {
+    if (!this.botGateway) return false;
     try {
       await this.botGateway.sendGroupMessage(groupOpenId, text, msgId, msgSeq);
+      return true;
     } catch (e) {
       this.logger?.error?.(`qq: sendGroupMessage failed: ${e}`);
+      return false;
     }
   }
 
-  private async sendReplyChunked(groupOpenId: string, text: string, msgId: string): Promise<void> {
+  private async sendReplyChunked(groupOpenId: string, text: string, msgId: string): Promise<boolean> {
     const chunks = this.splitText(text, this.maxMessageLength);
     for (let i = 0; i < chunks.length; i++) {
-      await this.sendReply(groupOpenId, chunks[i], msgId, i + 1);
+      if (!await this.sendReply(groupOpenId, chunks[i], msgId, i + 1)) return false;
       if (chunks.length > 1) {
         await this.sleep(500);
       }
     }
+    return true;
   }
 
   private splitText(text: string, maxLen: number): string[] {

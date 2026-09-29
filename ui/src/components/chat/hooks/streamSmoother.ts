@@ -67,7 +67,7 @@ export class SmoothTextStream {
   private targetContent = '';
   private renderedContent = '';
   private frame: FrameHandle | null = null;
-  private fallbackTimer: ReturnType<typeof setTimeout> | null = null;
+  private fallbackTimer: number | null = null;
   private lastChunkAtMs: number | null = null;
   private lastFrameAtMs: number | null = null;
   private averageCharsPerSecond = DEFAULT_AVERAGE_CHARS_PER_SECOND;
@@ -80,8 +80,17 @@ export class SmoothTextStream {
 
   append(text: string): void {
     if (!text) return;
+
+    const now = this.now();
+    if (this.lastChunkAtMs != null) {
+      const intervalSeconds = clamp((now - this.lastChunkAtMs) / 1000, 0.016, 1.5);
+      const currentRate = text.length / intervalSeconds;
+      this.averageCharsPerSecond = smooth(this.averageCharsPerSecond, currentRate);
+    }
+    this.lastChunkAtMs = now;
     this.targetContent += text;
     if (!this.paused) {
+      this.emitInitialContent();
       this.schedulePump();
     }
   }
@@ -170,9 +179,7 @@ export class SmoothTextStream {
     if (this.options.scheduleFrame) {
       return this.options.scheduleFrame(callback);
     }
-    // Use setTimeout(16ms) for frame-rate independent pumping at ~60fps.
-    // rAF fires at display Hz (120 on modern Macs) making text too fast.
-    return window.setTimeout(callback, 16) as unknown as FrameHandle;
+    return window.requestAnimationFrame(callback);
   }
 
   private cancelFrame(handle: FrameHandle): void {
@@ -180,7 +187,7 @@ export class SmoothTextStream {
       this.options.cancelFrame(handle);
       return;
     }
-    window.clearTimeout(handle as unknown as number);
+    window.cancelAnimationFrame(handle);
   }
 
   private cancelScheduledFrame(): void {
@@ -220,7 +227,21 @@ export class SmoothTextStream {
   }
 
   private emitInitialContent(): void {
-    // Let pump() handle all rendering uniformly to avoid burst-then-pause
+    if (this.renderedContent.length > 0 || this.targetContent.length === 0) {
+      return;
+    }
+
+    const charsToRender = this.getCharsForFrame(this.targetContent.length);
+    const minNextLength = Math.min(this.targetContent.length, this.minCharsPerFrame);
+    const maxNextLength = Math.min(this.targetContent.length, this.maxCharsPerFrame);
+    const nextLength = findBoundary(
+      this.targetContent,
+      minNextLength,
+      charsToRender,
+      maxNextLength,
+    );
+    this.renderedContent = this.targetContent.slice(0, nextLength);
+    this.options.emit(this.renderedContent);
   }
 
   private pump(): void {
@@ -234,6 +255,13 @@ export class SmoothTextStream {
       return;
     }
 
+    const now = this.now();
+    if (this.lastFrameAtMs != null && now - this.lastFrameAtMs < this.frameMs * 0.8) {
+      this.schedulePump();
+      return;
+    }
+    this.lastFrameAtMs = now;
+
     const remaining = this.targetContent.length - this.renderedContent.length;
     if (remaining <= 0) {
       if (this.draining) {
@@ -242,13 +270,19 @@ export class SmoothTextStream {
       return;
     }
 
-    // 2 chars/pump at 60 pumps/sec = 120 cps (frame-rate independent).
-    // Draining mode: 15 chars/pump for a smooth-but-quick finish.
-    // 15 chars × 60fps = ~900 chars/sec, so 150 chars finishes in ~170ms.
-    const chars = this.draining ? Math.min(15, remaining) : Math.min(2, remaining);
-    const nextLength = Math.min(
+    const charsToRender = this.draining
+      ? Math.min(15, remaining)
+      : this.getCharsForFrame(remaining);
+    const minNextLength = this.renderedContent.length + charsToRender;
+    const maxNextLength = Math.min(
       this.targetContent.length,
-      this.renderedContent.length + chars,
+      this.renderedContent.length + (this.draining ? 15 : this.maxCharsPerFrame),
+    );
+    const nextLength = findBoundary(
+      this.targetContent,
+      this.renderedContent.length + Math.min(this.minCharsPerFrame, remaining),
+      minNextLength,
+      maxNextLength,
     );
 
     this.renderedContent = this.targetContent.slice(0, nextLength);

@@ -1,7 +1,7 @@
 import type { WorkspaceType } from '../types';
 
 const SSH_PREFIXES = ['git@', 'ssh://'];
-const WINDOWS_DRIVE_PATTERN = /^[A-Za-z]:\\?$/;
+const WINDOWS_DRIVE_PATTERN = /^[A-Za-z]:[\\/]?$/;
 
 export const isSshGitUrl = (url: string): boolean => {
   const trimmedUrl = url.trim();
@@ -11,13 +11,25 @@ export const isSshGitUrl = (url: string): boolean => {
 export const shouldShowGithubAuthentication = (
   workspaceType: WorkspaceType,
   githubUrl: string,
-): boolean => workspaceType === 'new' && githubUrl.trim().length > 0 && !isSshGitUrl(githubUrl);
+): boolean => {
+  if (workspaceType !== 'new' || isSshGitUrl(githubUrl)) return false;
+  try {
+    const parsed = new URL(githubUrl.trim());
+    return parsed.protocol === 'https:' && parsed.hostname.toLowerCase() === 'github.com';
+  } catch {
+    return false;
+  }
+};
 
 export const isCloneWorkflow = (workspaceType: WorkspaceType, githubUrl: string): boolean =>
   workspaceType === 'new' && githubUrl.trim().length > 0;
 
 export const getSuggestionRootPath = (inputPath: string): string => {
   const trimmedPath = inputPath.trim();
+  if (/^[A-Za-z]:$/.test(trimmedPath)) {
+    return `${trimmedPath}\\`;
+  }
+
   const lastSeparatorIndex = Math.max(trimmedPath.lastIndexOf('/'), trimmedPath.lastIndexOf('\\'));
   if (lastSeparatorIndex === 2 && /^[A-Za-z]:/.test(trimmedPath)) {
     return `${trimmedPath.slice(0, 2)}\\`;
@@ -28,8 +40,11 @@ export const getSuggestionRootPath = (inputPath: string): string => {
 
 // Handles root edge cases for Unix-like and Windows paths.
 export const getParentPath = (currentPath: string): string | null => {
-  if (currentPath === '/' || WINDOWS_DRIVE_PATTERN.test(currentPath)) {
+  if (currentPath === '/') {
     return null;
+  }
+  if (WINDOWS_DRIVE_PATTERN.test(currentPath)) {
+    return '/';
   }
   if (currentPath === '~') {
     return '/';
@@ -50,6 +65,9 @@ export const getParentPath = (currentPath: string): string | null => {
 export const joinFolderPath = (basePath: string, folderName: string): string => {
   const normalizedBasePath = basePath.trim().replace(/[\\/]+$/, '');
   const separator =
-    normalizedBasePath.includes('\\') && !normalizedBasePath.includes('/') ? '\\' : '/';
+    WINDOWS_DRIVE_PATTERN.test(normalizedBasePath) ||
+    (normalizedBasePath.includes('\\') && !normalizedBasePath.includes('/'))
+      ? '\\'
+      : '/';
   return `${normalizedBasePath}${separator}${folderName.trim()}`;
 };

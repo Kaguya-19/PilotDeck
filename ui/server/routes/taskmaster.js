@@ -19,11 +19,17 @@ import os from 'os';
 import { extractProjectDirectory } from '../projects.js';
 import { detectTaskMasterMCPServer } from '../utils/mcp-detector.js';
 import { broadcastTaskMasterProjectUpdate, broadcastTaskMasterTasksUpdate } from '../utils/taskmaster-websocket.js';
+import { prepareCliSpawn } from '../utils/processSpawn.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 const router = express.Router();
+
+function spawnCli(command, args, options = {}) {
+    const prepared = prepareCliSpawn(command, args, options);
+    return spawn(prepared.command, prepared.args, prepared.options);
+}
 
 /**
  * Check if TaskMaster CLI is installed globally
@@ -32,7 +38,7 @@ const router = express.Router();
 async function checkTaskMasterInstallation() {
     return new Promise((resolve) => {
         // Check if task-master command is available
-        const child = spawn('which', ['task-master'], { 
+        const child = spawnCli('which', ['task-master'], {
             stdio: ['ignore', 'pipe', 'pipe'],
             shell: true 
         });
@@ -51,7 +57,7 @@ async function checkTaskMasterInstallation() {
         child.on('close', (code) => {
             if (code === 0 && output.trim()) {
                 // TaskMaster is installed, get version
-                const versionChild = spawn('task-master', ['--version'], { 
+                const versionChild = spawnCli('task-master', ['--version'], {
                     stdio: ['ignore', 'pipe', 'pipe'],
                     shell: true 
                 });
@@ -474,9 +480,7 @@ router.get('/next/:projectName', async (req, res) => {
 
         // Try to execute task-master next command
         try {
-            const { spawn } = await import('child_process');
-            
-            const nextTaskCommand = spawn('task-master', ['next'], {
+            const nextTaskCommand = spawnCli('task-master', ['next'], {
                 cwd: projectPath,
                 stdio: ['pipe', 'pipe', 'pipe'],
                 shell: true
@@ -997,7 +1001,7 @@ router.post('/init/:projectName', async (req, res) => {
         }
 
         // Run taskmaster init command
-        const initProcess = spawn('npx', ['task-master', 'init'], {
+        const initProcess = spawnCli('npx', ['task-master', 'init'], {
             cwd: projectPath,
             stdio: ['pipe', 'pipe', 'pipe'],
             shell: true
@@ -1101,7 +1105,7 @@ router.post('/add-task/:projectName', async (req, res) => {
         }
 
         // Run task-master add-task command
-        const addTaskProcess = spawn('npx', args, {
+        const addTaskProcess = spawnCli('npx', args, {
             cwd: projectPath,
             stdio: ['pipe', 'pipe', 'pipe'],
             shell: true
@@ -1182,7 +1186,7 @@ router.put('/update-task/:projectName/:taskId', async (req, res) => {
 
         // If only updating status, use set-status command
         if (status && Object.keys(req.body).length === 1) {
-            const setStatusProcess = spawn('npx', ['task-master-ai', 'set-status', `--id=${taskId}`, `--status=${status}`], {
+            const setStatusProcess = spawnCli('npx', ['task-master-ai', 'set-status', `--id=${taskId}`, `--status=${status}`], {
                 cwd: projectPath,
                 stdio: ['pipe', 'pipe', 'pipe'],
                 shell: true
@@ -1235,7 +1239,7 @@ router.put('/update-task/:projectName/:taskId', async (req, res) => {
             
             const prompt = `Update task with the following changes: ${updates.join(', ')}`;
 
-            const updateProcess = spawn('npx', ['task-master-ai', 'update-task', `--id=${taskId}`, `--prompt=${prompt}`], {
+            const updateProcess = spawnCli('npx', ['task-master-ai', 'update-task', `--id=${taskId}`, `--prompt=${prompt}`], {
                 cwd: projectPath,
                 stdio: ['pipe', 'pipe', 'pipe'],
                 shell: true
@@ -1335,7 +1339,7 @@ router.post('/parse-prd/:projectName', async (req, res) => {
         args.push('--research'); // Use research for better PRD parsing
 
         // Run task-master parse-prd command
-        const parsePRDProcess = spawn('npx', args, {
+        const parsePRDProcess = spawnCli('npx', args, {
             cwd: projectPath,
             stdio: ['pipe', 'pipe', 'pipe'],
             shell: true

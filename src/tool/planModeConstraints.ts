@@ -1,15 +1,16 @@
 /**
- * Plan-mode tool constraints shared by AgentLoop (schema filtering) and
- * ToolRuntime (runtime interception). Keeping them in the tool layer avoids
- * a circular dependency between tool → agent.
+ * Plan-mode tool constraints enforced by ToolRuntime. Plan mode keeps the
+ * model-visible non-plan tool catalog stable for prompt-cache reuse; this
+ * runtime boundary is the security check.
  */
 
 /**
- * Tools the model is allowed to see (and invoke) while plan mode is active.
- * Everything else is stripped from the model request and blocked at runtime.
+ * Tools the model is allowed to invoke while plan mode is active.
+ * Everything else is blocked at runtime.
  */
 export const PLAN_MODE_ALLOWED_TOOLS = new Set([
   "read_file",
+  "get_current_time",
   "grep",
   "glob",
   "web_search",
@@ -21,19 +22,12 @@ export const PLAN_MODE_ALLOWED_TOOLS = new Set([
   "structured_output",
   "agent",
   "bash",
+  "task_list",
+  "task_output",
+  "task_wait",
   "write_file",
   "edit_file",
 ]);
-
-/**
- * Description suffixes appended to restricted-but-visible tools so the model
- * understands the plan-mode constraints directly in the tool schema.
- */
-export const PLAN_MODE_DESCRIPTION_SUFFIX: Record<string, string> = {
-  bash: "\n\n[PLAN MODE] READ-ONLY commands only. Write/modify/delete commands will be rejected.",
-  write_file: "\n\n[PLAN MODE] ONLY for .md files under .pilotdeck/plans/. All other writes will be rejected.",
-  edit_file: "\n\n[PLAN MODE] ONLY for .md files under .pilotdeck/plans/. All other edits will be rejected.",
-};
 
 const PLAN_MODE_VIOLATION_HEADER = "[PLAN_MODE_VIOLATION]";
 

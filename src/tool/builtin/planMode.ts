@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import type { PilotDeckElicitationAnswer, PilotDeckElicitationRequest } from "../elicitation/PilotDeckElicitationChannel.js";
 import { PilotDeckToolRuntimeError } from "../protocol/errors.js";
 import type { PilotDeckToolDefinition } from "../protocol/types.js";
@@ -55,7 +54,7 @@ function buildEnterPlanModeResult(planDirectoryPath: string | undefined): string
       : ["4. When your plan is ready, call exit_plan_mode to present it for user approval"]),
     "",
     "## Rules",
-    `- DO NOT call write_file, edit_file, or bash (non-readonly) on any file${planDirectoryPath ? " except markdown plan files under the designated plan directory" : ""}`,
+    `- DO NOT call bash with write commands for any reason${planDirectoryPath ? "; use write_file/edit_file only for markdown plan files under the designated plan directory" : ""}`,
     "- You MAY use ask_user_question to clarify requirements or choose between approaches",
     "- Focus on understanding before proposing — read first, plan second",
   ].join("\n");
@@ -141,6 +140,7 @@ export function createEnterPlanModeTool(): PilotDeckToolDefinition<Record<string
     aliases: ["EnterPlanMode"],
     description: ENTER_PLAN_MODE_DESCRIPTION,
     kind: "session",
+    requiredRuntimeCapabilities: ["plan_workflow"],
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -170,6 +170,7 @@ export function createExitPlanModeTool(): PilotDeckToolDefinition<ExitPlanModeIn
     aliases: ["ExitPlanMode"],
     description: EXIT_PLAN_MODE_DESCRIPTION,
     kind: "session",
+    requiredRuntimeCapabilities: ["plan_workflow", "user_interaction"],
     inputSchema: {
       type: "object",
       required: ["plan_file_path"],
@@ -185,6 +186,12 @@ export function createExitPlanModeTool(): PilotDeckToolDefinition<ExitPlanModeIn
     isConcurrencySafe: () => true,
     requiresUserInteraction: () => true,
     execute: async (input, context) => {
+      if (context?.permissionMode !== "plan") {
+        throw new PilotDeckToolRuntimeError(
+          "tool_execution_failed",
+          "exit_plan_mode can only be used while plan mode is active.",
+        );
+      }
       const channel = context?.elicitation;
       if (!channel) {
         throw new PilotDeckToolRuntimeError(
@@ -192,17 +199,22 @@ export function createExitPlanModeTool(): PilotDeckToolDefinition<ExitPlanModeIn
           "exit_plan_mode requires a connected user interaction channel.",
         );
       }
-      const resolvedPlanFilePath = context?.planDirectory?.resolve(input.plan_file_path);
+      const planDirectory = context?.planDirectory;
+      if (!planDirectory) {
+        throw new PilotDeckToolRuntimeError(
+          "invalid_tool_input",
+          "plan_file_path must point to a markdown file under the current project's .pilotdeck/plans directory.",
+        );
+      }
+      const resolvedPlanFilePath = planDirectory?.resolve(input.plan_file_path);
       if (!resolvedPlanFilePath) {
         throw new PilotDeckToolRuntimeError(
           "invalid_tool_input",
           "plan_file_path must point to a markdown file under the current project's .pilotdeck/plans directory.",
         );
       }
-      let plan: string;
-      try {
-        plan = readFileSync(resolvedPlanFilePath, "utf8").trim();
-      } catch {
+      const plan = planDirectory.read(input.plan_file_path)?.trim();
+      if (plan === undefined) {
         throw new PilotDeckToolRuntimeError(
           "invalid_tool_input",
           `Plan file does not exist or could not be read: ${resolvedPlanFilePath}`,
@@ -256,7 +268,7 @@ export function createExitPlanModeTool(): PilotDeckToolDefinition<ExitPlanModeIn
       }
 
       if (action === EXIT_PLAN_MODE_EXECUTE) {
-        context.planTodo?.markPlanApproved(plan);
+        await context.planTodo?.markPlanApproved(plan, { turnId: context.turnId });
         const titleMatch = plan.match(/^#\s+(.+)$/m);
         const planTitle = titleMatch?.[1];
         const summaryLines = plan.split("\n").filter((l) => l.trim() && !l.startsWith("#"));

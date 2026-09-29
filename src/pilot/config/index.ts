@@ -1,5 +1,21 @@
 export { loadPilotConfig } from "./loadPilotConfig.js";
 export {
+  resolvePilotSdkSessionSettings,
+  validatePilotSdkSessionSettings,
+  validatePilotSdkSettingSources,
+  PilotSdkSessionSettingsError,
+  type PilotSdkSessionSettings,
+  type PilotSdkSettingSource,
+  type ResolvePilotSdkSessionSettingsOptions,
+} from "./sdkSessionSettings.js";
+export {
+  updatePilotLocalSettings,
+  PilotLocalSettingsError,
+  type PilotLocalSettingsUpdate,
+  type PilotLocalSettingsUpdateResult,
+  type UpdatePilotLocalSettingsOptions,
+} from "./updateLocalSettings.js";
+export {
   createPilotConfigStore,
   type PilotConfigListener,
   type PilotConfigStore,
@@ -26,6 +42,8 @@ export {
   type PilotRawConfig,
   type PilotAdaptersConfig,
   type PilotGatewayConfig,
+  type PilotCoreModuleConfig,
+  type PilotModulesConfig,
   type PilotRouterConfig,
   type PilotProxyConfig,
   type PilotToolsConfig,

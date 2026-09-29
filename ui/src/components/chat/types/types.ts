@@ -3,23 +3,57 @@ import type {
   ProjectSession,
   SessionProvider,
 } from '../../../types/app';
+import type { ContentReference } from '../../../types/contentReference';
+import type { PublicApprovalHost } from '../../../composition/modules/staffdeck/public-approval-inbox-mount';
 
 export type Provider = SessionProvider;
 
 export type PermissionMode = 'default' | 'bypassPermissions' | 'plan';
-export type ChatRunMode = 'agent' | 'plan';
+export type ChatRunMode = 'agent' | 'plan' | 'ask';
+export type SessionRuntimeState = 'synchronizing' | 'running' | 'inactive';
 
 export interface ChatImage {
   data: string;
   name: string;
+  path?: string;
   mimeType?: string;
+  size?: number;
 }
 
 export interface ChatAttachment {
+  kind?: 'file' | 'document-selection' | 'content-reference';
   name: string;
   path?: string;
   size?: number;
   mimeType?: string;
+  fileName?: string;
+  filePath?: string;
+  source?: 'pdf' | 'office-pdf';
+  pageNumbers?: number[];
+  selectedText?: string;
+  surroundingText?: string;
+  occurrenceIndex?: number | null;
+  createdAt?: string;
+  truncated?: boolean;
+  contentReference?: ContentReference;
+  /** Stable identity for a transient browser upload, not a workspace path. */
+  uploadId?: string;
+  attachmentId?: string;
+  /** Display-only preview; uploadedAttachments supplies the model's image. */
+  previewData?: string;
+}
+
+export interface ChatFileArtifact {
+  id: string;
+  name: string;
+  path: string;
+  operation: 'created' | 'updated';
+  source: 'tool' | 'workspace_diff';
+  status: 'complete' | 'incomplete';
+  size: number;
+  sha256: string;
+  mimeType?: string;
+  createdAt: string;
 }
 
 export interface ToolResult {
@@ -53,12 +87,19 @@ export interface SubagentChildTool {
 }
 
 export interface ChatMessage {
+  /** Durable backend implementation id for module-owned transcript content. */
+  moduleId?: string;
+  /** Actual generating model stored with this response. */
+  model?: string;
   id?: string;
+  renderKey?: string;
+  entryId?: string;
   type: string;
   content?: string;
   timestamp: string | number | Date;
   images?: ChatImage[];
   attachments?: ChatAttachment[];
+  artifacts?: ChatFileArtifact[];
   reasoning?: string;
   isThinking?: boolean;
   isStreaming?: boolean;
@@ -82,8 +123,14 @@ export interface ChatMessage {
   isCompactBoundary?: boolean;
   activityId?: string;
   runId?: string;
+  parentRunId?: string;
+  turnId?: string;
+  compactionId?: string;
+  compactState?: 'running' | 'completed' | 'failed' | 'cancelled';
   compactTrigger?: string;
   preTokens?: number;
+  postTokens?: number;
+  messagesSummarized?: number;
   compactLevel?: number;
   compactStage?: string;
   compactStageLabel?: string;
@@ -116,6 +163,7 @@ export interface ChatMessage {
 }
 
 export interface CompactProgress {
+  compaction_id?: string;
   level: number;
   stage: string;
   label: string;
@@ -150,6 +198,7 @@ export interface PilotDeckWorkStatus {
 
 export interface PilotDeckSettings {
   allowedTools: string[];
+  askTools: string[];
   disallowedTools: string[];
   skipPermissions: boolean;
   projectSortOrder: string;
@@ -167,7 +216,12 @@ export interface PermissionGrantResult {
   success: boolean;
   alreadyAllowed?: boolean;
   updatedSettings?: PilotDeckSettings;
+  completion?: Promise<PermissionGrantResult>;
 }
+
+export type SessionPermissionGrantResult = PermissionGrantResult & {
+  pending?: boolean;
+};
 
 export interface PendingPermissionRequest {
   requestId: string;
@@ -197,10 +251,18 @@ export interface Question {
 }
 
 export interface ChatInterfaceProps {
+  moduleHost?: {
+    selectedProject?: unknown;
+    selectedSession?: unknown;
+    projects?: unknown[];
+    navigate?: (path: string) => void;
+    approval?: PublicApprovalHost;
+  };
   selectedProject: Project | null;
   selectedSession: ProjectSession | null;
   ws: WebSocket | null;
-  sendMessage: (message: unknown) => void;
+  sendMessage: (message: unknown) => boolean;
+  subscribe?: (handler: (message: any) => void) => () => void;
   latestMessage: any;
   onFileOpen?: (filePath: string, diffInfo?: any) => void;
   onInputFocusChange?: (focused: boolean) => void;
@@ -215,13 +277,13 @@ export interface ChatInterfaceProps {
     projectName: string,
     sessionId: string,
     optimisticTitle?: string,
-  ) => void;
+    inputId?: string,
+  ) => void | (() => void);
   processingSessions?: Set<string>;
   onReplaceTemporarySession?: (sessionId?: string | null) => void;
   onNavigateToSession?: (targetSessionId: string) => void;
   onShowSettings?: () => void;
   autoExpandTools?: boolean;
-  showRawParameters?: boolean;
   showThinking?: boolean;
   inlineThinking?: boolean;
   autoScrollToBottom?: boolean;
@@ -235,4 +297,12 @@ export interface ChatInterfaceProps {
   // Fired the moment the user submits their first message from welcome
   // mode so the parent can leave any legacy welcome-only state.
   onExitWelcome?: () => void;
+  // Files workbench: render a quieter, narrow-panel empty state and keep the
+  // composer docked to the bottom instead of using the large welcome hero.
+  compact?: boolean;
+  projects?: Project[];
+  onStartNewSession?: (project: Project) => void;
+  onSelectWorkspace?: (project: Project) => void;
+  workspaceBinding?: Project | null;
+  onCreateProject?: () => void;
 }

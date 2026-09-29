@@ -10,6 +10,7 @@ export function createWebSocketAcceptValue(key: string): string {
 export class TextWebSocketConnection {
   private buffer = Buffer.alloc(0);
   private closed = false;
+  private closeNotified = false;
   private readonly messageHandlers: Array<(message: string) => void> = [];
   private readonly closeHandlers: Array<() => void> = [];
 
@@ -74,10 +75,11 @@ export class TextWebSocketConnection {
   }
 
   private emitClose(): void {
-    if (this.closed) {
+    if (this.closeNotified) {
       return;
     }
     this.closed = true;
+    this.closeNotified = true;
     for (const handler of this.closeHandlers) {
       handler();
     }

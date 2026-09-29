@@ -16,6 +16,7 @@ export type WebPlanStatus =
   | "ready"
   | "failed"
   | "completed"
+  | "completed_no_report"
   | "archived";
 
 export type WebPlanRecord = {
@@ -85,6 +86,7 @@ export const PLAN_STATUS_ORDER: Record<string, number> = {
   ready: 3,
   failed: 4,
   completed: 5,
+  completed_no_report: 5,
   archived: 7,
 };
 
@@ -116,6 +118,7 @@ export function computeExecutionStatus(
     plan.status === "queued" ||
     plan.status === "running" ||
     plan.status === "completed" ||
+    plan.status === "completed_no_report" ||
     plan.status === "failed"
   ) {
     return plan.status;

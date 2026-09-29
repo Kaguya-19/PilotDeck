@@ -1,3 +1,4 @@
+import { SessionTimeline, isTimelineMessage, mergeTimeline, type TimelinePosition } from './sessionTimeline';
 /**
  * Session-keyed message store.
  *
@@ -9,7 +10,9 @@
 
 import { useCallback, useMemo, useRef, useState } from 'react';
 import type { SessionProvider } from '../types/app';
-import { authenticatedFetch } from '../utils/api';
+import { authenticatedFetch, readAgentStatusErrorFromResponse } from '../utils/api';
+import { parseUserAttachmentNote } from '../components/chat/utils/attachmentNotes';
+import type { ChatAttachment } from '../components/chat/types/types';
 
 // ─── NormalizedMessage (mirrors server/adapters/types.js) ────────────────────
 
@@ -31,9 +34,11 @@ export type MessageKind =
   | 'interrupted'
   | 'compact_boundary'
   | 'agent_activity'
-  | 'agent_activity_summary';
+  | 'agent_activity_summary'
+  | 'file_artifacts';
 
 export interface CompactProgress {
+  compaction_id?: string;
   level: number;
   stage: string;
   label: string;
@@ -43,7 +48,17 @@ export interface CompactProgress {
 }
 
 export interface NormalizedMessage {
+  /** Durable backend implementation id for module-owned transcript content. */
+  moduleId?: string;
+  timeline?: TimelinePosition;
+  streamBoundary?: { turnId: string; through: number; revision: number };
+  streamState?: "open" | "closed";
+  model?: string;
   id: string;
+  /** Stable UI identity across streaming finalization. */
+  renderKey?: string;
+  /** Identity assigned by the model assembler and preserved in history. */
+  blockId?: string;
   sessionId: string;
   timestamp: string;
   provider: SessionProvider;
@@ -52,12 +67,27 @@ export interface NormalizedMessage {
   // kind-specific fields (flat for simplicity)
   role?: 'user' | 'assistant';
   content?: string;
+  reasoningContent?: string;
+  /** Stable identity of a queued input after it has been applied to a turn. */
+  queueItemId?: string;
+  /** True for a user direction injected at a model boundary during a running turn. */
+  isSteer?: boolean;
+  contentI18n?: { key: string; params?: Record<string, unknown> };
+  userHint?: string;
+  userHintI18n?: { key: string; params?: Record<string, unknown> };
   images?: string[];
-  attachments?: Array<{
+  attachments?: ChatAttachment[];
+  artifacts?: Array<{
+    id: string;
     name: string;
-    path?: string;
-    size?: number;
+    path: string;
+    operation: 'created' | 'updated';
+    source: 'tool' | 'workspace_diff';
+    status: 'complete' | 'incomplete';
+    size: number;
+    sha256: string;
     mimeType?: string;
+    createdAt: string;
   }>;
   toolName?: string;
   toolInput?: unknown;
@@ -72,6 +102,8 @@ export interface NormalizedMessage {
    */
   toolResultImages?: Array<{ data: string; mimeType?: string; name?: string }>;
   isError?: boolean;
+  /** True only when an error confirms that the parent turn has ended. */
+  terminal?: boolean;
   /**
    * `PilotDeckToolErrorCode` from the gateway when `kind === 'tool_result'`
    * and `isError === true` — flat on the frame because the bridge merges
@@ -79,6 +111,7 @@ export interface NormalizedMessage {
    * `pilotdeck-bridge.js#tool_call_finished` and `chatPermissions.ts`.
    */
   errorCode?: string;
+  resultPath?: string;
   text?: string;
   tokens?: number;
   canInterrupt?: boolean;
@@ -99,13 +132,21 @@ export interface NormalizedMessage {
   taskId?: string;
   outputFile?: string;
   taskResult?: string;
+  compactionId?: string;
+  compactState?: 'running' | 'completed' | 'failed' | 'cancelled';
   trigger?: string;
   preTokens?: number;
+  postTokens?: number;
+  messagesSummarized?: number;
   compactLevel?: number;
   compactStage?: string;
   compactStageLabel?: string;
   compactMetadata?: unknown;
   runId?: string;
+  /** Parent turn identity for activity rows whose own runId identifies a child. */
+  parentRunId?: string;
+  /** Stable transcript turn identity; history maps this to runId as well. */
+  turnId?: string;
   activityId?: string;
   phase?: string;
   state?: string;
@@ -130,10 +171,26 @@ export interface NormalizedMessage {
   // Cursor-specific ordering
   sequence?: number;
   rowid?: number;
-  // Streaming-only: id of slot.serverMessages tail at the moment the
-  // streaming row was created. computeMerged uses this for an id-based
-  // same-turn-snapshot test instead of a timestamp window.
-  serverTailIdAtStart?: string;
+  /** Transcript entry id for history fork targeting. */
+  entryId?: string;
+  /** True when the corresponding transcript entry has non-text prefill content. */
+  forkUnsupportedContent?: boolean;
+  forkUnsupportedReason?: string;
+  // Server-history tail captured when a live row was created. A null value
+  // means the history was empty. Reconciliation uses this as a turn boundary
+  // so an older persisted row cannot confirm a newer optimistic send.
+  serverTailIdAtStart?: string | null;
+  /** Latest tool boundary before an active thinking block began. */
+  toolBoundaryIdAtStart?: string;
+  /** The last tool/compaction/user boundary when this stream block began. */
+  streamBoundaryAtStart?: NormalizedMessage | null;
+  /** Previous completed response block, including same-turn continuations. */
+  streamPredecessorAtStart?: NormalizedMessage;
+  /** Persisted neighbours retained when refresh removes confirmed live rows. */
+  serverPredecessorId?: string;
+  serverSuccessorId?: string;
+  /** The optimistic row was created before its initial history request completed. */
+  serverHistoryPendingAtStart?: boolean;
 }
 
 // ─── Per-session slot ────────────────────────────────────────────────────────
@@ -141,6 +198,8 @@ export interface NormalizedMessage {
 export type SessionStatus = 'idle' | 'loading' | 'streaming' | 'error';
 
 export interface SessionSlot {
+  timeline?: SessionTimeline;
+  timelineServerRef?: NormalizedMessage[];
   serverMessages: NormalizedMessage[];
   realtimeMessages: NormalizedMessage[];
   activityMessages: NormalizedMessage[];
@@ -158,6 +217,48 @@ export interface SessionSlot {
   hasMore: boolean;
   offset: number;
   tokenUsage: unknown;
+  /** Monotonic id assigned when a server-history request starts. */
+  _serverRequestGeneration: number;
+  /** Latest server-history response that was successfully applied. */
+  _serverAppliedGeneration: number;
+  /** Explicit full-history load currently responsible for `status=loading`. */
+  _serverLoadingGeneration: number | null;
+}
+
+const TERMINAL_AGENT_ACTIVITY_STATES = new Set(['completed', 'failed', 'cancelled']);
+
+function isTerminalAgentActivity(activity: NormalizedMessage): boolean {
+  return activity.kind === 'agent_activity'
+    && TERMINAL_AGENT_ACTIVITY_STATES.has(String(activity.state || ''));
+}
+
+export function preserveTerminalAgentActivity(
+  existing: NormalizedMessage | undefined,
+  incoming: NormalizedMessage,
+): NormalizedMessage {
+  if (existing && isTerminalAgentActivity(existing) && !isTerminalAgentActivity(incoming)) {
+    return existing;
+  }
+  return incoming;
+}
+
+export function cancelRunningAgentActivities(
+  activities: NormalizedMessage[],
+  endedAt: string,
+): NormalizedMessage[] {
+  let changed = false;
+  const updated = activities.map((activity) => {
+    if (activity.kind !== 'agent_activity' || isTerminalAgentActivity(activity)) {
+      return activity;
+    }
+    changed = true;
+    return {
+      ...activity,
+      state: 'cancelled',
+      endedAt,
+    };
+  });
+  return changed ? updated : activities;
 }
 
 const EMPTY: NormalizedMessage[] = [];
@@ -179,11 +280,67 @@ function createEmptySlot(): SessionSlot {
     hasMore: false,
     offset: 0,
     tokenUsage: null,
+    _serverRequestGeneration: 0,
+    _serverAppliedGeneration: 0,
+    _serverLoadingGeneration: null,
   };
 }
 
 function normalizeRealtimeText(value?: string): string {
   return typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '';
+}
+
+function getUserAttachmentIdentity(
+  attachment: NonNullable<NormalizedMessage['attachments']>[number],
+): string {
+  const kind = attachment.kind || 'file';
+  const path = attachment.path || attachment.filePath || attachment.name;
+
+  if (kind === 'content-reference') {
+    return [kind, attachment.contentReference?.id || path].join('\0');
+  }
+
+  if (kind === 'document-selection') {
+    return [
+      kind,
+      path,
+      (attachment.pageNumbers || []).join(','),
+      normalizeRealtimeText(attachment.selectedText),
+      normalizeRealtimeText(attachment.surroundingText),
+      attachment.occurrenceIndex ?? '',
+    ].join('\0');
+  }
+
+  return [kind, path].join('\0');
+}
+
+function getConfirmedUserMessageIdentity(message: NormalizedMessage): {
+  text: string;
+  attachments: string[];
+  images: string[];
+} {
+  const parsed = parseUserAttachmentNote(message.content);
+  const attachments = message.attachments?.length
+    ? message.attachments
+    : parsed.attachments;
+
+  return {
+    text: normalizeRealtimeText(parsed.content),
+    attachments: attachments.map(getUserAttachmentIdentity),
+    images: Array.isArray(message.images) ? message.images : [],
+  };
+}
+
+function haveSameUserMessageInputs(
+  left: ReturnType<typeof getConfirmedUserMessageIdentity>,
+  right: ReturnType<typeof getConfirmedUserMessageIdentity>,
+): boolean {
+  if (left.attachments.length !== right.attachments.length || left.images.length !== right.images.length) {
+    return false;
+  }
+
+  return left.attachments.every((identity, index) => identity === right.attachments[index])
+    && left.images.every((image, index) => image === right.images[index]);
 }
 
 function parseTimestampMs(value?: string): number | null {
@@ -192,43 +349,298 @@ function parseTimestampMs(value?: string): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function getMessageTurnId(message: NormalizedMessage): string | null {
+  const value = message.turnId || message.runId;
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function getSameTurnServerCandidates(
+  realtimeMessage: NormalizedMessage,
+  serverMessages: NormalizedMessage[],
+): NormalizedMessage[] {
+  const realtimeTurnId = getMessageTurnId(realtimeMessage);
+  if (!realtimeTurnId) {
+    return serverMessages.filter((message) => !getMessageTurnId(message));
+  }
+  return serverMessages.filter((message) => getMessageTurnId(message) === realtimeTurnId);
+}
+
+function isUnconfirmedUserMessage(message: NormalizedMessage): boolean {
+  // Queue delivery emits a gateway text_<uuid> row, not a local_* bubble.
+  // Both represent the initial user input of a turn; steers remain distinct.
+  return message.kind === 'text'
+    && message.role === 'user'
+    && !message.isSteer
+    && (message.id.startsWith('local_') || Boolean(message.queueItemId));
+}
+
+function captureOptimisticUserServerTail(
+  message: NormalizedMessage,
+  serverMessages: NormalizedMessage[],
+  serverHistoryPending: boolean,
+): NormalizedMessage {
+  if (
+    !isUnconfirmedUserMessage(message)
+    || message.serverTailIdAtStart !== undefined
+  ) {
+    return message;
+  }
+
+  return {
+    ...message,
+    serverTailIdAtStart: serverMessages[serverMessages.length - 1]?.id ?? null,
+    ...(serverHistoryPending ? { serverHistoryPendingAtStart: true } : {}),
+  };
+}
+
+function captureRealtimePosition(message: NormalizedMessage, server: NormalizedMessage[]): NormalizedMessage {
+  const tail = server[server.length - 1];
+  return message.serverPredecessorId === undefined && tail
+    ? { ...message, serverPredecessorId: tail.id }
+    : message;
+}
+
+function isServerMessageAfterOptimisticTail(
+  realtimeMessage: NormalizedMessage,
+  serverMessages: NormalizedMessage[],
+  serverIndex: number,
+): boolean {
+  const tailId = realtimeMessage.serverTailIdAtStart;
+  // Rows created before tail tracking was introduced retain the legacy
+  // timestamp-based reconciliation behavior.
+  if (tailId === undefined || tailId === null) return true;
+
+  const tailIndex = serverMessages.findIndex((message) => message.id === tailId);
+  return tailIndex >= 0 && serverIndex > tailIndex;
+}
+
+const CONFIRMED_USER_WINDOW_MS = 10_000;
+
+function getConfirmedUserMessageMatchDistance(
+  realtimeMessage: NormalizedMessage,
+  realtimeIdentity: ReturnType<typeof getConfirmedUserMessageIdentity>,
+  serverMessage: NormalizedMessage,
+  serverIdentity: ReturnType<typeof getConfirmedUserMessageIdentity>,
+  serverMessages: NormalizedMessage[],
+  serverIndex: number,
+): number | null {
+  if (getMessageTurnId(realtimeMessage) || getMessageTurnId(serverMessage)) return null;
+  if (!isServerMessageAfterOptimisticTail(realtimeMessage, serverMessages, serverIndex)) return null;
+  if (
+    serverIdentity.text !== realtimeIdentity.text
+    || !haveSameUserMessageInputs(serverIdentity, realtimeIdentity)
+  ) {
+    return null;
+  }
+
+  const realtimeTimestamp = parseTimestampMs(realtimeMessage.timestamp);
+  const serverTimestamp = parseTimestampMs(serverMessage.timestamp);
+  if (realtimeMessage.serverHistoryPendingAtStart) {
+    // The initial response is allowed to confirm a send that landed while it
+    // was in flight, but history from before the optimistic send is not.
+    if (realtimeTimestamp == null || serverTimestamp == null || serverTimestamp < realtimeTimestamp) {
+      return null;
+    }
+  }
+  if (realtimeTimestamp == null || serverTimestamp == null) return CONFIRMED_USER_WINDOW_MS;
+
+  const distance = Math.abs(serverTimestamp - realtimeTimestamp);
+  return distance <= CONFIRMED_USER_WINDOW_MS ? distance : null;
+}
+
+function findConfirmedUserMessageDuplicateIndex(
+  realtimeMessage: NormalizedMessage,
+  serverMessages: NormalizedMessage[],
+): number {
+  if (!isUnconfirmedUserMessage(realtimeMessage)) return -1;
+
+  const realtimeTurnId = getMessageTurnId(realtimeMessage);
+  if (realtimeTurnId) {
+    return serverMessages.findIndex((message) => (
+      message.kind === 'text'
+      && message.role === 'user'
+      && getMessageTurnId(message) === realtimeTurnId
+    ));
+  }
+
+  const realtimeIdentity = getConfirmedUserMessageIdentity(realtimeMessage);
+  if (!realtimeIdentity.text) return -1;
+
+  for (let index = 0; index < serverMessages.length; index += 1) {
+    const serverMessage = serverMessages[index];
+    if (
+      serverMessage.kind !== 'text'
+      || serverMessage.role !== 'user'
+      || getMessageTurnId(serverMessage)
+    ) {
+      continue;
+    }
+
+    const serverIdentity = getConfirmedUserMessageIdentity(serverMessage);
+    if (getConfirmedUserMessageMatchDistance(
+      realtimeMessage,
+      realtimeIdentity,
+      serverMessage,
+      serverIdentity,
+      serverMessages,
+      index,
+    ) != null) return index;
+  }
+
+  return -1;
+}
+
 function isConfirmedUserMessageDuplicate(
   realtimeMessage: NormalizedMessage,
   serverMessages: NormalizedMessage[],
 ): boolean {
-  if (
-    realtimeMessage.kind !== 'text'
-    || realtimeMessage.role !== 'user'
-    || !realtimeMessage.id.startsWith('local_')
-  ) {
-    return false;
+  return findConfirmedUserMessageDuplicateIndex(realtimeMessage, serverMessages) >= 0;
+}
+
+function getConfirmedRealtimeUserIndexes(
+  serverMessages: NormalizedMessage[],
+  realtimeMessages: NormalizedMessage[],
+): Set<number> {
+  const persistedUserTurnIds = new Set(
+    serverMessages
+      .filter((message) => message.kind === 'text' && message.role === 'user')
+      .map(getMessageTurnId)
+      .filter((turnId): turnId is string => Boolean(turnId)),
+  );
+  const confirmedRealtimeIndexes = new Set<number>();
+  realtimeMessages.forEach((message, index) => {
+    const turnId = isUnconfirmedUserMessage(message) ? getMessageTurnId(message) : null;
+    if (turnId && persistedUserTurnIds.has(turnId)) {
+      confirmedRealtimeIndexes.add(index);
+    }
+  });
+
+  const realtimeCandidates = realtimeMessages
+    .map((message, index) => ({ message, index }))
+    .filter(({ message }) => isUnconfirmedUserMessage(message) && !getMessageTurnId(message))
+    .map(({ message, index }) => ({
+      message,
+      index,
+      identity: getConfirmedUserMessageIdentity(message),
+    }))
+    .filter(({ identity }) => Boolean(identity.text));
+  const serverCandidates = serverMessages
+    .map((message, index) => ({ message, index }))
+    .filter(({ message }) => (
+      message.kind === 'text'
+      && message.role === 'user'
+      && !getMessageTurnId(message)
+    ))
+    .map(({ message, index }) => ({
+      message,
+      index,
+      identity: getConfirmedUserMessageIdentity(message),
+    }))
+    .filter(({ identity }) => Boolean(identity.text));
+  if (realtimeCandidates.length === 0 || serverCandidates.length === 0) {
+    return confirmedRealtimeIndexes;
   }
 
-  const realtimeText = normalizeRealtimeText(realtimeMessage.content);
-  if (!realtimeText) return false;
-
-  const realtimeTimestamp = parseTimestampMs(realtimeMessage.timestamp);
-
-  return serverMessages.some((serverMessage) => {
-    if (serverMessage.kind !== 'text' || serverMessage.role !== 'user') {
-      return false;
+  const rowCount = realtimeCandidates.length;
+  const unmatchedCost = (rowCount + 1) * (CONFIRMED_USER_WINDOW_MS + 1);
+  const forbiddenCost = unmatchedCost * 2;
+  const costs = realtimeCandidates.map(({ message, identity }) => [
+    ...serverCandidates.map((server) => (
+      getConfirmedUserMessageMatchDistance(
+        message,
+        identity,
+        server.message,
+        server.identity,
+        serverMessages,
+        server.index,
+      ) ?? forbiddenCost
+    )),
+    ...Array.from({ length: rowCount }, () => unmatchedCost),
+  ]);
+  const assignment = findMinimumCostAssignment(costs);
+  assignment.forEach((column, row) => {
+    if (column >= 0 && column < serverCandidates.length && costs[row][column] < unmatchedCost) {
+      confirmedRealtimeIndexes.add(realtimeCandidates[row].index);
     }
-
-    if (normalizeRealtimeText(serverMessage.content) !== realtimeText) {
-      return false;
-    }
-
-    if (realtimeTimestamp == null) {
-      return true;
-    }
-
-    const serverTimestamp = parseTimestampMs(serverMessage.timestamp);
-    if (serverTimestamp == null) {
-      return true;
-    }
-
-    return Math.abs(serverTimestamp - realtimeTimestamp) <= 10_000;
   });
+  return confirmedRealtimeIndexes;
+}
+
+/** Hungarian assignment for a rectangular matrix with rows <= columns. */
+function findMinimumCostAssignment(costs: number[][]): number[] {
+  const rowCount = costs.length;
+  const columnCount = costs[0]?.length ?? 0;
+  const rowPotential = Array(rowCount + 1).fill(0);
+  const columnPotential = Array(columnCount + 1).fill(0);
+  const matchedRowByColumn = Array(columnCount + 1).fill(0);
+  const previousColumn = Array(columnCount + 1).fill(0);
+
+  for (let row = 1; row <= rowCount; row += 1) {
+    matchedRowByColumn[0] = row;
+    let currentColumn = 0;
+    const minimumReducedCost = Array(columnCount + 1).fill(Number.POSITIVE_INFINITY);
+    const used = Array(columnCount + 1).fill(false);
+
+    do {
+      used[currentColumn] = true;
+      const currentRow = matchedRowByColumn[currentColumn];
+      let delta = Number.POSITIVE_INFINITY;
+      let nextColumn = 0;
+      for (let column = 1; column <= columnCount; column += 1) {
+        if (used[column]) continue;
+        const reducedCost = costs[currentRow - 1][column - 1]
+          - rowPotential[currentRow]
+          - columnPotential[column];
+        if (reducedCost < minimumReducedCost[column]) {
+          minimumReducedCost[column] = reducedCost;
+          previousColumn[column] = currentColumn;
+        }
+        if (minimumReducedCost[column] < delta) {
+          delta = minimumReducedCost[column];
+          nextColumn = column;
+        }
+      }
+      for (let column = 0; column <= columnCount; column += 1) {
+        if (used[column]) {
+          rowPotential[matchedRowByColumn[column]] += delta;
+          columnPotential[column] -= delta;
+        } else {
+          minimumReducedCost[column] -= delta;
+        }
+      }
+      currentColumn = nextColumn;
+    } while (matchedRowByColumn[currentColumn] !== 0);
+
+    do {
+      const nextColumn = previousColumn[currentColumn];
+      matchedRowByColumn[currentColumn] = matchedRowByColumn[nextColumn];
+      currentColumn = nextColumn;
+    } while (currentColumn !== 0);
+  }
+
+  const assignment = Array(rowCount).fill(-1);
+  for (let column = 1; column <= columnCount; column += 1) {
+    if (matchedRowByColumn[column] > 0) {
+      assignment[matchedRowByColumn[column] - 1] = column - 1;
+    }
+  }
+  return assignment;
+}
+
+function settlePendingOptimisticServerTail(
+  message: NormalizedMessage,
+  serverMessages: NormalizedMessage[],
+): NormalizedMessage {
+  if (
+    !isUnconfirmedUserMessage(message)
+    || !message.serverHistoryPendingAtStart
+    || serverMessages.length === 0
+  ) return message;
+  return {
+    ...message,
+    serverTailIdAtStart: serverMessages[serverMessages.length - 1]?.id ?? null,
+    serverHistoryPendingAtStart: false,
+  };
 }
 
 /**
@@ -267,30 +679,536 @@ function isLocalInterruptDuplicate(
 // prior turns). The refreshFromServer cleanup already removes non-streaming
 // realtime messages once the server commits the current turn's data.
 
+function hasEquivalentServerMessage(
+  realtimeMessage: NormalizedMessage,
+  serverMessages: NormalizedMessage[],
+): boolean {
+  const realtimeText = normalizeRealtimeText(realtimeMessage.content);
+  if (!realtimeText) return false;
+
+  let candidates = serverMessages;
+  if (realtimeMessage.serverTailIdAtStart) {
+    const tailIndex = serverMessages.findIndex((message) =>
+      message.id === realtimeMessage.serverTailIdAtStart
+    );
+    if (tailIndex < 0) return false;
+    candidates = serverMessages.slice(tailIndex + 1);
+  } else {
+    let lastUserIndex = -1;
+    for (let index = serverMessages.length - 1; index >= 0; index -= 1) {
+      const message = serverMessages[index];
+      if (message.kind === 'text' && message.role === 'user') {
+        lastUserIndex = index;
+        break;
+      }
+    }
+    if (lastUserIndex >= 0) {
+      candidates = serverMessages.slice(lastUserIndex + 1);
+    }
+  }
+
+  return candidates.some((serverMessage) => {
+    if (serverMessage.kind !== realtimeMessage.kind) return false;
+    if (serverMessage.role !== realtimeMessage.role) return false;
+    return normalizeRealtimeText(serverMessage.content) === realtimeText;
+  });
+}
+
+function hasSameTurnServerFinalMessage(
+  realtimeMessage: NormalizedMessage,
+  serverMessages: NormalizedMessage[],
+): boolean {
+  if (
+    realtimeMessage.isFinal !== true ||
+    (realtimeMessage.kind !== 'text' && realtimeMessage.kind !== 'thinking') ||
+    !realtimeMessage.serverTailIdAtStart
+  ) {
+    return false;
+  }
+
+  const tailIndex = serverMessages.findIndex((message) => (
+    message.id === realtimeMessage.serverTailIdAtStart
+  ));
+  if (tailIndex < 0) return false;
+  const realtimeTimestamp = parseTimestampMs(realtimeMessage.timestamp);
+  if (realtimeTimestamp == null) return false;
+  const realtimeText = normalizeRealtimeText(realtimeMessage.content);
+  if (!realtimeText) return false;
+
+  return serverMessages.slice(tailIndex + 1).some((serverMessage) => {
+    if (serverMessage.kind !== realtimeMessage.kind) return false;
+    if (serverMessage.role !== realtimeMessage.role) return false;
+    if (realtimeMessage.runId != null && serverMessage.runId != null && serverMessage.runId !== realtimeMessage.runId) {
+      return false;
+    }
+    const serverTimestamp = parseTimestampMs(serverMessage.timestamp);
+    if (serverTimestamp == null) return false;
+    if (serverTimestamp < realtimeTimestamp) return false;
+    return normalizeRealtimeText(serverMessage.content) === realtimeText;
+  });
+}
+
+function areArtifactSetsEquivalent(
+  realtimeMessage: NormalizedMessage,
+  candidates: NormalizedMessage[],
+): boolean {
+  const realtimeArtifacts = realtimeMessage.artifacts ?? [];
+  if (realtimeArtifacts.length === 0) return false;
+  const serverArtifacts = candidates.flatMap((message) => message.artifacts ?? []);
+  return realtimeArtifacts.every((artifact) => serverArtifacts.some((candidate) => (
+    candidate.path === artifact.path
+    && candidate.operation === artifact.operation
+    && (!artifact.sha256 || !candidate.sha256 || candidate.sha256 === artifact.sha256)
+  )));
+}
+
+function hasEquivalentCompactBoundary(
+  realtimeMessage: NormalizedMessage,
+  candidates: NormalizedMessage[],
+): boolean {
+  return candidates.some((candidate) => {
+    if (candidate.kind !== 'compact_boundary') return false;
+
+    if (candidate.compactionId && realtimeMessage.compactionId) {
+      return candidate.compactionId === realtimeMessage.compactionId;
+    }
+
+    // Backward compatibility for transcripts written before compactionId was
+    // introduced. Trigger and messagesSummarized are intentionally excluded:
+    // older live/history producers derived those fields differently.
+    if (
+      !Number.isFinite(candidate.preTokens)
+      || candidate.preTokens !== realtimeMessage.preTokens
+      || candidate.postTokens !== realtimeMessage.postTokens
+    ) {
+      return false;
+    }
+
+    const candidateTime = parseTimestampMs(candidate.timestamp);
+    const realtimeTime = parseTimestampMs(realtimeMessage.timestamp);
+    return candidateTime != null
+      && realtimeTime != null
+      && Math.abs(candidateTime - realtimeTime) <= 30_000;
+  });
+}
+
+/**
+ * Whether a live row is already represented by the persisted projection.
+ * Identity is scoped to a turn whenever available; this avoids both duplicate
+ * live/history rows and false cross-turn content deduplication.
+ */
+export function isRealtimeMessageRepresentedOnServer(
+  realtimeMessage: NormalizedMessage,
+  serverMessages: NormalizedMessage[],
+): boolean {
+  if (serverMessages.some((message) => message.id === realtimeMessage.id)) return true;
+  if (realtimeMessage.blockId) {
+    return serverMessages.some(message => message.blockId === realtimeMessage.blockId
+      && getMessageTurnId(message) === getMessageTurnId(realtimeMessage)
+      && normalizeRealtimeText(message.content).startsWith(normalizeRealtimeText(realtimeMessage.content)));
+  }
+  if (isTrackedStream(realtimeMessage) && getMessageTurnId(realtimeMessage)) {
+    return getStreamSnapshotCandidateIndexes(serverMessages, realtimeMessage).some(index => (
+      normalizeRealtimeText(serverMessages[index].content).startsWith(normalizeRealtimeText(realtimeMessage.content))
+    ));
+  }
+  if (isConfirmedUserMessageDuplicate(realtimeMessage, serverMessages)) return true;
+  if (isLocalInterruptDuplicate(realtimeMessage, serverMessages)) return true;
+
+  // Local user bubbles must only match through isConfirmedUserMessageDuplicate,
+  // which includes attachment and image input identity. The generic text path
+  // below would otherwise collapse distinct queued sends with the same text.
+  if (isUnconfirmedUserMessage(realtimeMessage)) {
+    return false;
+  }
+
+  const candidates = getSameTurnServerCandidates(realtimeMessage, serverMessages);
+  switch (realtimeMessage.kind) {
+    case 'text':
+    case 'thinking': {
+      const content = normalizeRealtimeText(realtimeMessage.content);
+      if (!content) return false;
+      if (candidates.some((message) => (
+        message.kind === realtimeMessage.kind
+        && message.role === realtimeMessage.role
+        && normalizeRealtimeText(message.content) === content
+      ))) return true;
+      // Once the live row has a turn identity, never fall back to global text
+      // equality: two consecutive turns may legitimately produce the same text.
+      if (getMessageTurnId(realtimeMessage)) return false;
+      return hasSameTurnServerFinalMessage(realtimeMessage, serverMessages)
+        || hasEquivalentServerMessage(realtimeMessage, serverMessages);
+    }
+    case 'tool_use':
+      return Boolean(realtimeMessage.toolId && candidates.some((message) => (
+        message.kind === 'tool_use' && message.toolId === realtimeMessage.toolId
+      )));
+    case 'tool_result':
+      return Boolean(realtimeMessage.toolId && candidates.some((message) => (
+        message.kind === 'tool_result' && message.toolId === realtimeMessage.toolId
+      )));
+    case 'file_artifacts':
+      return areArtifactSetsEquivalent(realtimeMessage, candidates);
+    case 'compact_boundary':
+      return hasEquivalentCompactBoundary(realtimeMessage, candidates);
+    case 'error':
+    case 'interrupted':
+    case 'interactive_prompt':
+    case 'task_notification':
+      return candidates.some((message) => (
+        message.kind === realtimeMessage.kind
+        && normalizeRealtimeText(message.content || message.summary) ===
+          normalizeRealtimeText(realtimeMessage.content || realtimeMessage.summary)
+      ));
+    default:
+      return false;
+  }
+}
+
+const PERSISTED_RENDERABLE_KINDS = new Set<MessageKind>([
+  'text',
+  'thinking',
+  'tool_use',
+  'tool_result',
+  'file_artifacts',
+  'compact_boundary',
+  'error',
+  'interrupted',
+  'interactive_prompt',
+  'task_notification',
+]);
+
+/** Convert live compression progress into the same transcript entity as its result. */
+export function normalizeCompactionMessage(message: NormalizedMessage): NormalizedMessage {
+  const progress = message.compactProgress;
+  const id = message.compactionId || progress?.compaction_id;
+  if (message.kind === 'status' && id && progress) {
+    return {
+      ...message,
+      id: `compact_boundary:${message.sessionId}:${getMessageTurnId(message) || 'unknown-run'}:${id}`,
+      kind: 'compact_boundary', compactionId: id,
+      compactState: progress.state === 'failed' ? 'failed' : progress.state === 'completed' ? 'completed' : 'running',
+      preTokens: progress.pre_tokens, trigger: progress.reason,
+      compactStage: progress.stage, compactStageLabel: progress.label,
+    };
+  }
+  if (message.kind === 'compact_boundary' && !message.compactState) {
+    const metadata = message.compactMetadata as { status?: string } | undefined;
+    return { ...message, compactState: metadata?.status === 'failed' ? 'failed' : 'completed' };
+  }
+  return message;
+}
+
+export function getUnpersistedRealtimeTurnMessages(
+  realtimeMessages: NormalizedMessage[],
+  serverMessages: NormalizedMessage[],
+  turnId?: string,
+): NormalizedMessage[] {
+  if (!turnId) return [];
+  return realtimeMessages.filter((message) => (
+    getMessageTurnId(message) === turnId
+    && PERSISTED_RENDERABLE_KINDS.has(message.kind)
+    && !isRealtimeMessageRepresentedOnServer(message, serverMessages)
+  ));
+}
+
+export function shouldKeepRealtimeAfterServerRefresh(
+  realtimeMessage: NormalizedMessage,
+  serverMessages: NormalizedMessage[],
+): boolean {
+  if (realtimeMessage.id.startsWith('__streaming_')) {
+    return true;
+  }
+  if (!PERSISTED_RENDERABLE_KINDS.has(realtimeMessage.kind)) return false;
+  if (isUnconfirmedUserMessage(realtimeMessage)) {
+    return !isConfirmedUserMessageDuplicate(realtimeMessage, serverMessages);
+  }
+  return !isRealtimeMessageRepresentedOnServer(realtimeMessage, serverMessages);
+}
+
+export function getRealtimeMessagesToKeepAfterServerRefresh(
+  realtimeMessages: NormalizedMessage[],
+  serverMessages: NormalizedMessage[],
+): NormalizedMessage[] {
+  const confirmedRealtimeIndexes = getConfirmedRealtimeUserIndexes(serverMessages, realtimeMessages);
+  const anchors = getRealtimeServerAnchors(serverMessages, realtimeMessages);
+  return realtimeMessages
+    .filter((message, index) => {
+      if (isUnconfirmedUserMessage(message)) return !confirmedRealtimeIndexes.has(index);
+      return shouldKeepRealtimeAfterServerRefresh(message, serverMessages);
+    })
+    .map((message) => {
+      if (isUnconfirmedUserMessage(message)) return settlePendingOptimisticServerTail(message, serverMessages);
+      const index = realtimeMessages.indexOf(message);
+      const before = anchors.before[index];
+      const after = anchors.after[index];
+      if (before === undefined && after === undefined) return message;
+      return {
+        ...message,
+        ...(before !== undefined ? { serverPredecessorId: serverMessages[before].id } : {}),
+        ...(after !== undefined ? { serverSuccessorId: serverMessages[after].id } : {}),
+      };
+    });
+}
+
+function findRealtimeServerIndex(server: NormalizedMessage[], message: NormalizedMessage): number {
+  const byId = server.findIndex(candidate => candidate.id === message.id);
+  if (byId >= 0) return byId;
+  if (isTrackedStream(message)) return getStreamSnapshotCandidateIndexes(server, message)[0] ?? -1;
+  if (isUnconfirmedUserMessage(message)) return findConfirmedUserMessageDuplicateIndex(message, server);
+  return server.findIndex(candidate => isRealtimeMessageRepresentedOnServer(message, [candidate]));
+}
+
+function getRealtimeServerAnchors(server: NormalizedMessage[], realtime: NormalizedMessage[]) {
+  const matches = realtime.map(message => findRealtimeServerIndex(server, message));
+  const before: Array<number | undefined> = [];
+  const after: Array<number | undefined> = [];
+  let previous: number | undefined;
+  for (let index = 0; index < matches.length; index += 1) {
+    before[index] = previous;
+    if (matches[index] >= 0) previous = matches[index];
+  }
+  let next: number | undefined;
+  for (let index = matches.length - 1; index >= 0; index -= 1) {
+    after[index] = next;
+    if (matches[index] >= 0) next = matches[index];
+  }
+  return { before, after };
+}
+
+function mergeRealtimeInOrder(
+  server: NormalizedMessage[],
+  extra: NormalizedMessage[],
+  realtime: NormalizedMessage[] = extra,
+): NormalizedMessage[] {
+  const anchors = getRealtimeServerAnchors(server, realtime);
+
+  const getTailBoundary = (message: NormalizedMessage): number => {
+    const tailId = message.serverTailIdAtStart;
+    // Historical fixtures and externally-created realtime rows may predate
+    // tail capture. Keep their timestamp-based placement for compatibility.
+    if (tailId === undefined) return 0;
+    if (tailId === null) {
+      return message.serverHistoryPendingAtStart ? server.length : 0;
+    }
+    const tailIndex = server.findIndex((serverMessage) => serverMessage.id === tailId);
+    return tailIndex >= 0 ? tailIndex + 1 : server.length;
+  };
+
+  const getInsertionIndex = (message: NormalizedMessage): number => {
+    const optimisticTimestamp = parseTimestampMs(message.timestamp);
+    if (optimisticTimestamp == null) return server.length;
+
+    for (let serverIndex = getTailBoundary(message); serverIndex < server.length; serverIndex += 1) {
+      const serverTimestamp = parseTimestampMs(server[serverIndex].timestamp);
+      if (serverTimestamp == null || optimisticTimestamp <= serverTimestamp) {
+        return serverIndex;
+      }
+    }
+    return server.length;
+  };
+
+  // Retain the arrival order of a realtime turn (user, streaming answer,
+  // next user) while anchoring each optimistic user after its server tail.
+  const extrasByServerIndex = new Map<number, NormalizedMessage[]>();
+  let previousInsertionIndex: number | null = null;
+  for (const message of extra) {
+    const realtimeIndex = realtime.indexOf(message);
+    const successor = server.findIndex(candidate => candidate.id === message.serverSuccessorId);
+    const predecessor = server.findIndex(candidate => candidate.id === message.serverPredecessorId);
+    const after = anchors.after[realtimeIndex] ?? (successor >= 0 ? successor : undefined);
+    const before = anchors.before[realtimeIndex] ?? (predecessor >= 0 ? predecessor : undefined);
+    let insertionIndex: number = isUnconfirmedUserMessage(message)
+      ? getInsertionIndex(message)
+      : after ?? (before !== undefined ? before + 1 : previousInsertionIndex ?? server.length);
+    if (previousInsertionIndex != null) {
+      insertionIndex = Math.max(insertionIndex, previousInsertionIndex);
+    }
+    const messages = extrasByServerIndex.get(insertionIndex) || [];
+    messages.push(message);
+    extrasByServerIndex.set(insertionIndex, messages);
+    previousInsertionIndex = insertionIndex;
+  }
+
+  const result: NormalizedMessage[] = [];
+  for (let serverIndex = 0; serverIndex <= server.length; serverIndex += 1) {
+    result.push(...(extrasByServerIndex.get(serverIndex) || []));
+    if (serverIndex < server.length) result.push(server[serverIndex]);
+  }
+  return result;
+}
+
+function isTrackedStream(message: NormalizedMessage): boolean {
+  return message.serverTailIdAtStart !== undefined && (
+    message.kind === 'thinking'
+    || message.kind === 'stream_delta'
+    || (message.kind === 'text' && message.role === 'assistant' && message.isFinal === true)
+  );
+}
+
+function matchesBoundary(boundary: NormalizedMessage, candidate: NormalizedMessage): boolean {
+  if (boundary.id === candidate.id) return true;
+  if (getMessageTurnId(boundary) !== getMessageTurnId(candidate)) return false;
+  if (boundary.kind === 'tool_use' || boundary.kind === 'tool_result') {
+    return (candidate.kind === 'tool_use' || candidate.kind === 'tool_result')
+      && Boolean(boundary.toolId) && boundary.toolId === candidate.toolId;
+  }
+  if (boundary.kind === 'compact_boundary') return hasEquivalentCompactBoundary(boundary, [candidate]);
+  return boundary.kind === 'text' && boundary.role === 'user'
+    && candidate.kind === 'text' && candidate.role === 'user'
+    && getConfirmedUserMessageIdentity(boundary).text === getConfirmedUserMessageIdentity(candidate).text;
+}
+
+function getStreamSnapshotCandidateIndexes(
+  server: NormalizedMessage[],
+  stream: NormalizedMessage,
+): number[] {
+  const turnId = getMessageTurnId(stream);
+  if (!isTrackedStream(stream) || !turnId) return [];
+  if (stream.blockId) {
+    return server.flatMap((message, index) => message.blockId === stream.blockId
+      && getMessageTurnId(message) === turnId ? [index] : []);
+  }
+  const kind = stream.kind === 'thinking' ? 'thinking' : 'text';
+  let startIndex = 0;
+  if (stream.serverTailIdAtStart !== null) {
+    const tailIndex = server.findIndex(message => message.id === stream.serverTailIdAtStart);
+    if (tailIndex < 0) return [];
+    // Legacy frames have no block ID. HTTP can already contain this block
+    // when its first buffered delta arrives, so the captured tail itself
+    // remains a candidate. An observed predecessor below disambiguates a
+    // genuinely new block whose text happens to equal the old tail.
+    startIndex = tailIndex + (server[tailIndex].kind === kind && server[tailIndex].role !== 'user'
+      && getMessageTurnId(server[tailIndex]) === turnId ? 0 : 1);
+  } else {
+    // The initial request may have been in flight at stream start. Earlier
+    // turns in that response are not part of this stream's search range.
+    startIndex = server.findIndex(message => PERSISTED_RENDERABLE_KINDS.has(message.kind)
+      && getMessageTurnId(message) === turnId);
+    if (startIndex < 0) return [];
+  }
+
+  const boundary = stream.streamBoundaryAtStart;
+  if (boundary || stream.toolBoundaryIdAtStart) {
+    let boundaryIndex = boundary && isUnconfirmedUserMessage(boundary)
+      ? findConfirmedUserMessageDuplicateIndex(boundary, server)
+      : -1;
+    // A boundary can be the captured tail itself, or already before it.
+    for (let index = server.length - 1; boundaryIndex < 0 && index >= 0; index -= 1) {
+      const message = server[index];
+      if (getMessageTurnId(message) !== turnId) continue;
+      if (boundary ? matchesBoundary(boundary, message) : (
+        (message.kind === 'tool_use' || message.kind === 'tool_result')
+        && message.toolId === stream.toolBoundaryIdAtStart
+      )) {
+        boundaryIndex = index;
+        break;
+      }
+    }
+    if (boundaryIndex < 0) return [];
+    startIndex = Math.max(startIndex, boundaryIndex + 1);
+  } else if (boundary === undefined && stream.kind === 'thinking' && !stream.isFinal) {
+    // Compatibility for streams created before explicit phase capture.
+    for (let index = server.length - 1; index >= startIndex; index -= 1) {
+      const message = server[index];
+      if (getMessageTurnId(message) === turnId
+        && (message.kind === 'tool_use' || message.kind === 'tool_result' || message.kind === 'compact_boundary')) {
+        startIndex = index + 1;
+        break;
+      }
+    }
+  }
+
+  if (stream.streamPredecessorAtStart) {
+    const predecessor = stream.streamPredecessorAtStart;
+    const byId = server.findIndex(message => message.id === predecessor.id);
+    const predecessorIndex = byId >= 0 ? byId : getStreamSnapshotCandidateIndexes(server, predecessor)[0];
+    if (predecessorIndex === undefined) return [];
+    startIndex = Math.max(startIndex, predecessorIndex + 1);
+  }
+
+  const content = normalizeRealtimeText(stream.content);
+  if (!content) return [];
+  for (let index = startIndex; index < server.length; index += 1) {
+    const message = server[index];
+    // Runtime status events are overlaid independently of transcript order.
+    // A status for the next turn can precede this turn's persisted reasoning.
+    if (!PERSISTED_RENDERABLE_KINDS.has(message.kind)) continue;
+    if (getMessageTurnId(message) !== turnId) break;
+    if (index === startIndex && stream.serverTailIdAtStart === null && boundary === null
+      && message.kind === 'text' && message.role === 'user') continue;
+    // Never search through the next phase to find a similar later block.
+    if (message.kind === 'tool_use' || message.kind === 'tool_result'
+      || message.kind === 'compact_boundary'
+      || (message.kind === 'text' && message.role === 'user')) break;
+    if (message.kind !== kind) {
+      if (kind === 'text' && message.kind === 'thinking') continue;
+      if (message.kind === 'thinking' || message.kind === 'text') break;
+      continue;
+    }
+    const persisted = normalizeRealtimeText(message.content);
+    if (persisted && (persisted.startsWith(content) || content.startsWith(persisted))) return [index];
+    // Two separate text/thinking blocks are not interchangeable.
+    break;
+  }
+  return [];
+}
+
+function reconcileStreamSnapshots(
+  server: NormalizedMessage[],
+  extra: NormalizedMessage[],
+): { server: NormalizedMessage[]; extra: NormalizedMessage[] } {
+  let reconciled = server;
+  const confirmed = new Set<NormalizedMessage>();
+  const usedIndexes = new Set<number>();
+  for (const stream of extra) {
+    const index = getStreamSnapshotCandidateIndexes(server, stream)[0];
+    if (index === undefined || usedIndexes.has(index)) continue;
+    usedIndexes.add(index);
+    confirmed.add(stream);
+    const persisted = server[index];
+    const longer = normalizeRealtimeText(stream.content).length > normalizeRealtimeText(persisted.content).length;
+    const replacement = longer ? stream : (
+      stream.renderKey && !persisted.renderKey ? { ...persisted, renderKey: stream.renderKey } : persisted
+    );
+    if (replacement !== persisted) {
+      if (reconciled === server) reconciled = [...server];
+      // Keep the transcript position while updating the visible content.
+      reconciled[index] = replacement;
+    }
+  }
+  return { server: reconciled, extra: extra.filter(message => !confirmed.has(message)) };
+}
+
 /**
  * Compute merged messages: server + realtime, deduped by id.
  * Server messages take priority (they're the persisted source of truth).
  * Realtime messages that aren't yet in server stay (in-flight streaming).
  */
-function computeMerged(server: NormalizedMessage[], realtime: NormalizedMessage[]): NormalizedMessage[] {
+export function computeMerged(server: NormalizedMessage[], realtime: NormalizedMessage[]): NormalizedMessage[] {
+  if (!server.some(isTimelineMessage) && !realtime.some(isTimelineMessage)) return computeLegacyMerged(server, realtime);
+  const timeline = new SessionTimeline();
+  for (const message of [...server, ...realtime]) timeline.apply(message);
+  return mergeTimeline(computeLegacyMerged(server.filter(m => !isTimelineMessage(m)), realtime.filter(m => !isTimelineMessage(m))), timeline.values(null));
+}
+
+function computeLegacyMerged(server: NormalizedMessage[], realtime: NormalizedMessage[]): NormalizedMessage[] {
   if (realtime.length === 0) {
     return server;
   }
   if (server.length === 0) return realtime;
-  const serverIds = new Set(server.map(m => m.id));
-  const serverToolIds = new Set(
-    server.filter(m => m.kind === 'tool_use' && m.toolId).map(m => m.toolId!)
-  );
-  const extra = realtime.filter((message) => {
-    if (serverIds.has(message.id)) return false;
-    if (isConfirmedUserMessageDuplicate(message, server)) return false;
-    if (isLocalInterruptDuplicate(message, server)) return false;
-    // Dedup tool_use by toolId (invocation ID) — the message envelope ID
-    // may differ between WebSocket replay and server-persisted copy, but
-    // the underlying tool invocation is the same.
-    if (message.kind === 'tool_use' && message.toolId && serverToolIds.has(message.toolId)) return false;
-    return true;
+  server = enrichConfirmedUsers(server, realtime);
+  const confirmedRealtimeIndexes = getConfirmedRealtimeUserIndexes(server, realtime);
+  let extra = realtime.filter((message, index) => {
+    if (isUnconfirmedUserMessage(message)) return !confirmedRealtimeIndexes.has(index);
+    return (isTrackedStream(message) && Boolean(getMessageTurnId(message)))
+      || !isRealtimeMessageRepresentedOnServer(message, server);
   });
+  if (extra.length === 0) return server;
+
+  const streamReconciliation = reconcileStreamSnapshots(server, extra);
+  server = streamReconciliation.server;
+  extra = streamReconciliation.extra;
   if (extra.length === 0) return server;
 
   // Structural dedup: if there's an active __streaming_ message in extras
@@ -307,47 +1225,215 @@ function computeMerged(server: NormalizedMessage[], realtime: NormalizedMessage[
   // captured into `serverTailIdAtStart`, so a `lastServer.id ===
   // streamMsg.serverTailIdAtStart` match means "still the same tail
   // that was there at turn start" → don't dedup.
-  const streamIdx = extra.findIndex(m => m.id.startsWith('__streaming_'));
-  if (streamIdx >= 0 && server.length > 0) {
+  const streamIdx = extra.findIndex((message) => (
+    message.kind === 'stream_delta' && message.id.startsWith('__streaming_')
+  ));
+  if (streamIdx >= 0 && server.length > 0 && extra[streamIdx].streamBoundaryAtStart === undefined) {
     const lastServer = server[server.length - 1];
     const streamMsg = extra[streamIdx];
     const isAssistantText = lastServer.kind === 'text' && lastServer.role === 'assistant';
-    const tailIdChanged = streamMsg.serverTailIdAtStart !== undefined
+    const streamTurn = getMessageTurnId(streamMsg);
+    const serverTurn = getMessageTurnId(lastServer);
+    const sameTurn = streamTurn || serverTurn
+      ? Boolean(streamTurn && streamTurn === serverTurn)
+      : typeof streamMsg.serverTailIdAtStart === 'string';
+    const tailIdChanged = sameTurn && streamMsg.serverTailIdAtStart !== undefined
       && lastServer.id !== streamMsg.serverTailIdAtStart;
     if (isAssistantText && tailIdChanged) {
-      return [...server.slice(0, -1), ...extra];
+      return mergeRealtimeInOrder(server.slice(0, -1), extra, realtime);
     }
   }
 
-  const result = [...server, ...extra];
+  return mergeRealtimeInOrder(server, extra, realtime);
+}
+
+function enrichConfirmedUsers(server: NormalizedMessage[], realtime: NormalizedMessage[]): NormalizedMessage[] {
+  let result = server;
+  for (const index of getConfirmedRealtimeUserIndexes(server, realtime)) {
+    const live = realtime[index];
+    const serverIndex = findConfirmedUserMessageDuplicateIndex(live, server);
+    if (serverIndex < 0) continue;
+    const persisted = result[serverIndex];
+    const images = !persisted.images?.length && live.images?.length ? live.images : undefined;
+    const attachments = !persisted.attachments?.length && live.attachments?.length ? live.attachments : undefined;
+    if (!images && !attachments) continue;
+    if (result === server) result = [...server];
+    result[serverIndex] = {
+      ...persisted,
+      ...(images ? { images } : {}),
+      ...(attachments ? { attachments } : {}),
+    };
+  }
   return result;
 }
 
+function preserveUserInputs(message: NormalizedMessage, previous?: NormalizedMessage): NormalizedMessage {
+  if (!previous || message.kind !== 'text' || message.role !== 'user') return message;
+  const images = !message.images?.length && previous.images?.length ? previous.images : undefined;
+  const attachments = !message.attachments?.length && previous.attachments?.length ? previous.attachments : undefined;
+  return images || attachments ? {
+    ...message,
+    ...(images ? { images } : {}),
+    ...(attachments ? { attachments } : {}),
+  } : message;
+}
+
 function getUpsertKey(message: NormalizedMessage): string {
+  if (message.blockId) return `block::${getMessageTurnId(message)}::${message.blockId}`;
+  if (isUnconfirmedUserMessage(message) && getMessageTurnId(message)) {
+    return `optimistic_user::${getMessageTurnId(message)}`;
+  }
+  if (message.kind === 'compact_boundary' && message.compactionId) {
+    const turnId = getMessageTurnId(message) || 'unknown-turn';
+    return `compact_boundary::${turnId}::${message.compactionId}`;
+  }
   if ((message.kind === 'tool_use' || message.kind === 'tool_result') && message.toolId) {
     return `${message.id}::${message.kind}::${message.toolId}`;
   }
   return message.id;
 }
 
-function upsertRealtimeMessages(
+function isCompatibleRealtimeTextRun(a: NormalizedMessage, b: NormalizedMessage): boolean {
+  if (a.blockId || b.blockId) return a.blockId === b.blockId && getMessageTurnId(a) === getMessageTurnId(b);
+  if (a.runId != null && b.runId != null) return a.runId === b.runId;
+  const hasActiveStream = a.kind === 'stream_delta' || b.kind === 'stream_delta';
+  if (!hasActiveStream) return false;
+  const aTime = parseTimestampMs(a.timestamp);
+  const bTime = parseTimestampMs(b.timestamp);
+  if (aTime == null || bTime == null) return false;
+  return Math.abs(aTime - bTime) <= 10_000;
+}
+
+function findDuplicateAssistantRealtimeTextIndex(
+  messages: NormalizedMessage[],
+  incoming: NormalizedMessage,
+): number {
+  if (incoming.kind !== 'text' || incoming.role !== 'assistant') return -1;
+  const incomingText = normalizeRealtimeText(incoming.content);
+  if (!incomingText) return -1;
+
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const existing = messages[index];
+    if (isCompatibleRealtimeTextRun(existing, incoming)
+      && (existing.kind === 'tool_use' || existing.kind === 'tool_result'
+        || existing.kind === 'compact_boundary' || (existing.kind === 'text' && existing.role === 'user'))) break;
+    const isAssistantText = existing.kind === 'text' && existing.role === 'assistant';
+    const isActiveAssistantStream = existing.kind === 'stream_delta' && String(existing.id || '').startsWith('__streaming_');
+    if (!isAssistantText && !isActiveAssistantStream) continue;
+    if (!isCompatibleRealtimeTextRun(existing, incoming)) continue;
+    if (normalizeRealtimeText(existing.content) !== incomingText) continue;
+    return index;
+  }
+
+  return -1;
+}
+
+export function upsertRealtimeMessages(
   existing: NormalizedMessage[],
   incoming: NormalizedMessage[],
 ): NormalizedMessage[] {
   if (incoming.length === 0) return existing;
   const updated = [...existing];
   const indexByKey = new Map(updated.map((message, index) => [getUpsertKey(message), index]));
-  for (const message of incoming) {
+  for (let message of incoming) {
+    message = normalizeCompactionMessage(message);
+    if (message.kind === 'tool_result' && message.toolId && message.resultPath) {
+      const existingToolResultIndex = findLatestToolResultIndex(updated, message.toolId);
+      if (existingToolResultIndex >= 0) {
+        updated[existingToolResultIndex] = {
+          ...updated[existingToolResultIndex],
+          resultPath: message.resultPath,
+        };
+        continue;
+      }
+    }
+    const duplicateAssistantTextIndex = findDuplicateAssistantRealtimeTextIndex(updated, message);
+    if (duplicateAssistantTextIndex >= 0) {
+      const previousKey = getUpsertKey(updated[duplicateAssistantTextIndex]);
+      updated[duplicateAssistantTextIndex] = {
+        ...message,
+        renderKey: updated[duplicateAssistantTextIndex].renderKey ?? message.renderKey,
+        serverTailIdAtStart: message.serverTailIdAtStart ?? updated[duplicateAssistantTextIndex].serverTailIdAtStart,
+      };
+      indexByKey.delete(previousKey);
+      indexByKey.set(getUpsertKey(message), duplicateAssistantTextIndex);
+      continue;
+    }
     const key = getUpsertKey(message);
     const existingIndex = indexByKey.get(key);
     if (existingIndex === undefined) {
       indexByKey.set(key, updated.length);
       updated.push(message);
     } else {
-      updated[existingIndex] = message;
+      const previous = updated[existingIndex];
+      if (message.kind === 'compact_boundary') {
+        // Replayed starts cannot undo a result. Updates keep the insertion
+        // position, original timestamp, render identity and history anchors.
+        if (message.compactState === 'running' && previous.compactState !== 'running') continue;
+        updated[existingIndex] = {
+          ...previous, ...message, id: previous.id, timestamp: previous.timestamp,
+          renderKey: previous.renderKey ?? previous.id,
+          serverPredecessorId: previous.serverPredecessorId,
+          serverSuccessorId: previous.serverSuccessorId,
+        };
+        continue;
+      }
+      message = preserveUserInputs(message, updated[existingIndex]);
+      const existingTailId = updated[existingIndex].serverTailIdAtStart;
+      const existingHistoryPending = updated[existingIndex].serverHistoryPendingAtStart;
+      const renderKey = updated[existingIndex].renderKey;
+      updated[existingIndex] = existingTailId === undefined && existingHistoryPending === undefined && !renderKey
+        ? message
+        : {
+            ...message,
+            ...(renderKey ? { renderKey } : {}),
+            ...(existingTailId !== undefined ? { serverTailIdAtStart: existingTailId } : {}),
+            ...(existingHistoryPending !== undefined
+              ? { serverHistoryPendingAtStart: existingHistoryPending }
+              : {}),
+          };
     }
   }
   return updated;
+}
+
+function findLatestToolResultIndex(messages: NormalizedMessage[], toolId: string): number {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.kind === 'tool_result' && message.toolId === toolId) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+/** Carry UI identity through the server's confirmation of a displayed stream. */
+export function inheritMessageRenderKeys(previous: NormalizedMessage[], next: NormalizedMessage[]): NormalizedMessage[] {
+  const candidates = previous.filter((message) => message.renderKey);
+  if (candidates.length === 0) return next;
+  const used = new Set(next.flatMap((message) => message.renderKey ? [message.renderKey] : []));
+  let changed = false;
+  const result = next.map((message) => {
+    if (message.renderKey) {
+      used.add(message.renderKey);
+      return message;
+    }
+    const match = candidates.find((candidate) => {
+      if (!candidate.renderKey || used.has(candidate.renderKey)) return false;
+      if (candidate.id === message.id) return true;
+      const turn = getMessageTurnId(candidate);
+      if (!turn || turn !== getMessageTurnId(message)) return false;
+      if (candidate.blockId || message.blockId) return candidate.blockId === message.blockId;
+      const sameKind = candidate.kind === message.kind
+        || (candidate.kind === 'stream_delta' && message.kind === 'text' && message.role === 'assistant');
+      return sameKind && Boolean(candidate.content) && candidate.content === message.content;
+    });
+    if (!match?.renderKey) return message;
+    used.add(match.renderKey);
+    changed = true;
+    return { ...message, renderKey: match.renderKey };
+  });
+  return changed ? result : next;
 }
 
 /**
@@ -360,14 +1446,111 @@ function recomputeMergedIfNeeded(slot: SessionSlot): boolean {
   }
   slot._lastServerRef = slot.serverMessages;
   slot._lastRealtimeRef = slot.realtimeMessages;
-  slot.merged = computeMerged(slot.serverMessages, slot.realtimeMessages);
+  const timeline = slot.timeline ??= new SessionTimeline();
+  if (slot.timelineServerRef !== slot.serverMessages) {
+    for (const message of slot.serverMessages) timeline.apply(message);
+    slot.timelineServerRef = slot.serverMessages;
+  }
+  slot.merged = inheritMessageRenderKeys(slot.merged, mergeTimeline(
+    computeLegacyMerged(slot.serverMessages.filter(m => !isTimelineMessage(m)), slot.realtimeMessages.filter(m => !isTimelineMessage(m))),
+    timeline.values(),
+  ));
   return true;
 }
 
 function forceRecomputeMerged(slot: SessionSlot): void {
   slot._lastServerRef = slot.serverMessages;
   slot._lastRealtimeRef = slot.realtimeMessages;
-  slot.merged = computeMerged(slot.serverMessages, slot.realtimeMessages);
+  const timeline = slot.timeline ??= new SessionTimeline();
+  if (slot.timelineServerRef !== slot.serverMessages) {
+    for (const message of slot.serverMessages) timeline.apply(message);
+    slot.timelineServerRef = slot.serverMessages;
+  }
+  slot.merged = inheritMessageRenderKeys(slot.merged, mergeTimeline(
+    computeLegacyMerged(slot.serverMessages.filter(m => !isTimelineMessage(m)), slot.realtimeMessages.filter(m => !isTimelineMessage(m))),
+    timeline.values(),
+  ));
+}
+
+/** All live and restored child updates retain messages outside the timeline
+ * protocol (notably model errors). Protocol rows are replaced by identity.
+ */
+function syncSubagentTimeline(slot: SessionSlot, childId: string, additional: NormalizedMessage[] = []): void {
+  const current = upsertRealtimeMessages(slot.subagentDetailMessages.get(childId) ?? [], additional);
+  const projected = slot.timeline?.values(childId) ?? [];
+  const remaining = new Map(projected.map(message => [message.id, message]));
+  const next = current.flatMap(message => {
+    if (!isTimelineMessage(message)) return [message];
+    const updated = remaining.get(message.id);
+    remaining.delete(message.id);
+    return updated ? [updated] : [];
+  });
+  next.push(...remaining.values());
+  slot.subagentDetailMessages.set(childId, next);
+}
+
+function applyTimelineFrames(slot: SessionSlot, frames: NormalizedMessage[]): boolean {
+  const timeline = slot.timeline ??= new SessionTimeline();
+  const affected = new Set<string>();
+  for (const raw of frames) {
+    const frame = normalizeCompactionMessage(raw);
+    timeline.apply(frame);
+    if (frame.subagentId && (frame.isSubagentDetail || frame.phase === 'subagent')) {
+      affected.add(frame.subagentId);
+      if (frame.isSubagentDetail && !isTimelineMessage(frame)) {
+        syncSubagentTimeline(slot, frame.subagentId, [frame]);
+      }
+    }
+  }
+  for (const childId of affected) syncSubagentTimeline(slot, childId);
+  return timeline.hasGap;
+}
+
+function reconcileTimelineHistory(slot: SessionSlot, messages: NormalizedMessage[], complete: boolean): void {
+  if (!complete) return;
+  const timeline = slot.timeline ??= new SessionTimeline();
+  const removed = timeline.reconcileHistory(slot.serverMessages, messages);
+  const keep = (message: NormalizedMessage) => !removed.has(message.runId || '')
+    && !removed.has(message.turnId || '') && !removed.has(message.parentRunId || '');
+  slot.realtimeMessages = slot.realtimeMessages.filter(keep);
+  slot.activityMessages = slot.activityMessages.filter(keep);
+  for (const [childId, detail] of slot.subagentDetailMessages) {
+    slot.subagentDetailMessages.set(childId, detail.filter(keep));
+    syncSubagentTimeline(slot, childId);
+  }
+}
+
+function streamingKey(sessionId: string, runId?: string): string {
+  return runId ? `${sessionId}_${runId}` : sessionId;
+}
+
+function captureStreamBoundary(messages: NormalizedMessage[], runId?: string): NormalizedMessage | null {
+  if (!runId) return null;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (getMessageTurnId(message) !== runId) continue;
+    if (message.kind === 'tool_use' || message.kind === 'tool_result'
+      || message.kind === 'compact_boundary' || (message.kind === 'text' && message.role === 'user')) {
+      const { id, sessionId, timestamp, provider, kind, role, content, toolId, compactionId, preTokens, postTokens, turnId, queueItemId, isSteer } = message;
+      return { id, sessionId, timestamp, provider, kind, role, content, toolId, compactionId, preTokens, postTokens, turnId, runId, queueItemId, isSteer };
+    }
+  }
+  return null;
+}
+
+function captureStreamPredecessor(messages: NormalizedMessage[], runId?: string): NormalizedMessage | undefined {
+  if (!runId) return undefined;
+  return [...messages].reverse().find(message => getMessageTurnId(message) === runId
+    && message.isFinal && isTrackedStream(message));
+}
+
+export function getFinalizedSubagentThinkingId(
+  sessionId: string,
+  subagentId: string,
+  timestamp?: string,
+): string {
+  const timestampSuffix = Date.parse(String(timestamp || '')) || Date.now();
+  return `subagent_thinking_${sessionId}_${subagentId}_${timestampSuffix}`;
 }
 
 /**
@@ -379,6 +1562,7 @@ export function patchMergedStreamingMessage(
   streamId: string,
   content: string,
   msgProvider?: SessionProvider,
+  model?: string,
 ): boolean {
   const mergedIdx = slot.merged.findIndex((message) => message.id === streamId);
   if (mergedIdx < 0) {
@@ -386,7 +1570,7 @@ export function patchMergedStreamingMessage(
   }
 
   const existing = slot.merged[mergedIdx];
-  if (existing.content === content && (msgProvider == null || existing.provider === msgProvider)) {
+  if (existing.content === content && (msgProvider == null || existing.provider === msgProvider) && (model === undefined || existing.model === model)) {
     return true;
   }
 
@@ -394,6 +1578,7 @@ export function patchMergedStreamingMessage(
     ...existing,
     content,
     ...(msgProvider != null ? { provider: msgProvider } : {}),
+    ...(model !== undefined ? { model } : {}),
   };
   slot.merged = slot.merged.slice();
   return true;
@@ -501,10 +1686,11 @@ export function useSessionStore() {
     } = {},
   ) => {
     const slot = getSlot(sessionId);
+    const requestGeneration = slot._serverRequestGeneration + 1;
+    slot._serverRequestGeneration = requestGeneration;
+    slot._serverLoadingGeneration = requestGeneration;
     slot.status = 'loading';
     notify(sessionId);
-
-    const fetchStartedAt = Date.now();
 
     try {
       const params = new URLSearchParams();
@@ -523,44 +1709,47 @@ export function useSessionStore() {
 
       const qs = params.toString();
       const url = `/api/sessions/${encodeURIComponent(sessionId)}/messages${qs ? `?${qs}` : ''}`;
-      const response = await authenticatedFetch(url);
+      const response = await authenticatedFetch(url, { suppressServerErrorToast: true });
 
       if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
+        const statusError = await readAgentStatusErrorFromResponse(response, {
+          event: 'web_http_request_failed',
+          code: 'session_messages_load_failed',
+          message: `Unable to load conversation messages (HTTP ${response.status}).`,
+          scope: 'session',
+        });
+        throw new Error(statusError.message);
       }
 
       const data = await response.json();
+      if (requestGeneration < slot._serverAppliedGeneration) return slot;
+      slot._serverAppliedGeneration = requestGeneration;
+      if (Array.isArray(data.stream?.messages)) applyTimelineFrames(slot, data.stream.messages);
       const messages: NormalizedMessage[] = data.messages || [];
+      reconcileTimelineHistory(slot, messages, !data.hasMore && (opts.offset ?? 0) === 0);
 
-      slot.serverMessages = messages;
+      const previousById = new Map(slot.serverMessages.map(message => [message.id, message]));
+      slot.serverMessages = enrichConfirmedUsers(messages, slot.realtimeMessages)
+        .map(message => preserveUserInputs(message, previousById.get(message.id)));
       slot.total = data.total ?? messages.length;
       slot.hasMore = Boolean(data.hasMore);
       slot.offset = (opts.offset ?? 0) + messages.length;
       slot.fetchedAt = Date.now();
-      slot.status = 'idle';
-      slot.lastError = null;
-
-      // Prune realtime messages covered by server data.  Use the later of
-      // fetchStartedAt and the latest server message timestamp as watermark
-      // so that messages finalized DURING the fetch (race window) are also
-      // pruned when the server response already includes them.
-      if (slot.realtimeMessages.length > 0 && messages.length > 0) {
-        const latestServerTs = messages.reduce(
-          (max, m) => Math.max(max, Date.parse(m.timestamp) || 0), 0,
-        );
-        const watermark = Math.max(fetchStartedAt, latestServerTs);
-        const serverIds = new Set(messages.map(m => m.id));
-        const serverToolIds = new Set(
-          messages.filter(m => m.kind === 'tool_use' && m.toolId).map(m => m.toolId!)
-        );
-        slot.realtimeMessages = slot.realtimeMessages.filter(m => {
-          if (m.id.startsWith('__streaming_')) return true;
-          if (serverIds.has(m.id)) return false;
-          if (m.kind === 'tool_use' && m.toolId && serverToolIds.has(m.toolId)) return false;
-          return (Date.parse(m.timestamp) || 0) > watermark;
-        });
+      if (slot._serverLoadingGeneration === requestGeneration) {
+        slot._serverLoadingGeneration = null;
+      }
+      if (
+        slot._serverLoadingGeneration === null
+        && (slot.status === 'loading' || slot.status === 'error')
+      ) {
+        slot.status = 'idle';
+        slot.lastError = null;
       }
 
+      // Full loads and background refreshes must retain the same ordering anchors.
+      if (slot.realtimeMessages.length > 0 && messages.length > 0) {
+        slot.realtimeMessages = getRealtimeMessagesToKeepAfterServerRefresh(slot.realtimeMessages, messages);
+      }
       recomputeMergedIfNeeded(slot);
       if (data.tokenUsage) {
         slot.tokenUsage = data.tokenUsage;
@@ -569,6 +1758,8 @@ export function useSessionStore() {
       notify(sessionId);
       return slot;
     } catch (error) {
+      if (slot._serverLoadingGeneration !== requestGeneration) return slot;
+      slot._serverLoadingGeneration = null;
       console.error(`[SessionStore] fetch failed for ${sessionId}:`, error);
       slot.status = 'error';
       slot.lastError = error instanceof Error ? error.message : 'Unknown error';
@@ -612,8 +1803,16 @@ export function useSessionStore() {
     const url = `/api/sessions/${encodeURIComponent(sessionId)}/messages${qs ? `?${qs}` : ''}`;
 
     try {
-      const response = await authenticatedFetch(url);
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const response = await authenticatedFetch(url, { suppressServerErrorToast: true });
+      if (!response.ok) {
+        const statusError = await readAgentStatusErrorFromResponse(response, {
+          event: 'web_http_request_failed',
+          code: 'session_messages_load_failed',
+          message: `Unable to load conversation messages (HTTP ${response.status}).`,
+          scope: 'session',
+        });
+        throw new Error(statusError.message);
+      }
       const data = await response.json();
       const olderMessages: NormalizedMessage[] = data.messages || [];
 
@@ -634,9 +1833,36 @@ export function useSessionStore() {
    * Append a realtime (WebSocket) message to the correct session slot.
    * This works regardless of which session is actively viewed.
    */
-  const appendRealtime = useCallback((sessionId: string, msg: NormalizedMessage) => {
+  const applyTimelineMessage = useCallback((sessionId: string, message: NormalizedMessage): boolean => {
     const slot = getSlot(sessionId);
-    let updated = upsertRealtimeMessages(slot.realtimeMessages, [msg]);
+    const gap = applyTimelineFrames(slot, [message]);
+    forceRecomputeMerged(slot);
+    notify(sessionId);
+    return gap;
+  }, [getSlot, notify]);
+
+  const closeTimeline = useCallback((sessionId: string, runId?: string, terminal = false, subagentId?: string, boundary?: NormalizedMessage["streamBoundary"]) => {
+    const slot = getSlot(sessionId);
+    const timeline = slot.timeline ??= new SessionTimeline();
+    timeline.close(runId, terminal, subagentId, boundary);
+    if (subagentId) syncSubagentTimeline(slot, subagentId);
+    else if (terminal) {
+      for (const childId of slot.subagentDetailMessages.keys()) syncSubagentTimeline(slot, childId);
+    }
+    forceRecomputeMerged(slot);
+    notify(sessionId);
+  }, [getSlot, notify]);
+
+  const appendRealtime = useCallback((sessionId: string, msg: NormalizedMessage) => {
+    if (isTimelineMessage(msg)) { applyTimelineMessage(sessionId, msg); return; }
+    msg = normalizeCompactionMessage(msg);
+    const slot = getSlot(sessionId);
+    const capturedMessage = captureOptimisticUserServerTail(
+      captureRealtimePosition(msg, slot.serverMessages),
+      slot.serverMessages,
+      slot.serverMessages.length === 0,
+    );
+    let updated = upsertRealtimeMessages(slot.realtimeMessages, [capturedMessage]);
     if (updated.length > MAX_REALTIME_MESSAGES) {
       updated = updated.slice(-MAX_REALTIME_MESSAGES);
     }
@@ -644,11 +1870,62 @@ export function useSessionStore() {
     // Skip expensive merged recomputation and React re-render for message
     // kinds that are invisible in the UI (they return null from conversion).
     // The next visible message will trigger the recompute anyway.
-    const INVISIBLE_KINDS = new Set(['status', 'session_created', 'permission_cancelled', 'compact_boundary']);
+    const INVISIBLE_KINDS = new Set(['status', 'session_created', 'permission_cancelled']);
     if (!INVISIBLE_KINDS.has(msg.kind)) {
       recomputeMergedIfNeeded(slot);
       notify(sessionId);
     }
+  }, [getSlot, notify, applyTimelineMessage]);
+
+  /**
+   * Replace the transcript tail in-place after the gateway atomically removes
+   * the latest turn. Because editing is limited to the last user message, all
+   * rendered rows at and after that turn belong to the discarded turn.
+   */
+  const replaceLastTurn = useCallback((
+    sessionId: string,
+    replacedTurnId: string,
+    replacement: NormalizedMessage,
+  ) => {
+    const slot = getSlot(sessionId);
+    const belongsToReplacedTurn = (message: NormalizedMessage) => (
+      getMessageTurnId(message) === replacedTurnId
+      || message.parentRunId === replacedTurnId
+    );
+    const truncateAtTurn = (messages: NormalizedMessage[]) => {
+      // Status rows can be inserted before earlier turns because their sequence
+      // numbers are turn-local. Only the discarded user message is a safe tail
+      // boundary; remove any misplaced rows from that turn in the retained prefix.
+      const index = messages.findIndex((message) => (
+        message.kind === 'text'
+        && message.role === 'user'
+        && getMessageTurnId(message) === replacedTurnId
+      ));
+      const prefix = index >= 0 ? messages.slice(0, index) : messages;
+      return prefix.filter((message) => !belongsToReplacedTurn(message));
+    };
+
+    const previousServerMessageCount = slot.serverMessages.length;
+    slot.timeline?.removeTurn(replacedTurnId);
+    slot.serverMessages = truncateAtTurn(slot.serverMessages);
+    slot.realtimeMessages = [
+      ...truncateAtTurn(slot.realtimeMessages),
+      captureOptimisticUserServerTail(replacement, slot.serverMessages, false),
+    ];
+    slot.activityMessages = slot.activityMessages.filter((message) => !belongsToReplacedTurn(message));
+    const removedServerMessageCount = previousServerMessageCount - slot.serverMessages.length;
+    slot.total = Math.max(
+      slot.serverMessages.length + 1,
+      slot.total - removedServerMessageCount + 1,
+    );
+    slot.offset = Math.max(
+      slot.serverMessages.length + 1,
+      slot.offset - removedServerMessageCount + 1,
+    );
+    slot.status = 'streaming';
+    slot.lastError = null;
+    recomputeMergedIfNeeded(slot);
+    notify(sessionId);
   }, [getSlot, notify]);
 
   const upsertActivity = useCallback((sessionId: string, msg: NormalizedMessage) => {
@@ -660,7 +1937,8 @@ export function useSessionStore() {
 
     if (existingIndex >= 0) {
       const updated = [...slot.activityMessages];
-      updated[existingIndex] = msg;
+      updated[existingIndex] = preserveTerminalAgentActivity(updated[existingIndex], msg);
+      if (updated[existingIndex] === slot.activityMessages[existingIndex]) return;
       slot.activityMessages = updated;
     } else {
       slot.activityMessages = [...slot.activityMessages, msg];
@@ -671,9 +1949,14 @@ export function useSessionStore() {
 
   const recordSubagentLink = useCallback((sessionId: string, msg: NormalizedMessage) => {
     const slot = getSlot(sessionId);
-    const toolCallId = (msg as Record<string, unknown>).toolCallId as string | undefined;
-    const subagentId = (msg as Record<string, unknown>).subagentId as string | undefined;
-    const subagentType = (msg as Record<string, unknown>).subagentType as string | undefined;
+    const linkMessage = msg as unknown as {
+      toolCallId?: string;
+      subagentId?: string;
+      subagentType?: string;
+    };
+    const toolCallId = linkMessage.toolCallId;
+    const subagentId = linkMessage.subagentId;
+    const subagentType = linkMessage.subagentType;
     if (toolCallId && subagentId) {
       const nextLinks = new Map(slot.subagentLinks);
       nextLinks.set(toolCallId, { subagentId, subagentType: subagentType || 'agent' });
@@ -688,6 +1971,11 @@ export function useSessionStore() {
     msg: NormalizedMessage,
   ) => {
     const slot = getSlot(sessionId);
+    if (isTimelineMessage(msg)) {
+      applyTimelineFrames(slot, [{ ...msg, subagentId, isSubagentDetail: true }]);
+      notify(sessionId);
+      return;
+    }
     const current = slot.subagentDetailMessages.get(subagentId) ?? [];
     let msgToStore = msg;
     if ((msg.kind === 'tool_use' || msg.kind === 'tool_result') && msg.toolId) {
@@ -700,10 +1988,7 @@ export function useSessionStore() {
         msgToStore = { ...msg, id: existing.id };
       }
     }
-    const updated = upsertRealtimeMessages(current, [msgToStore]);
-    const nextMap = new Map(slot.subagentDetailMessages);
-    nextMap.set(subagentId, updated);
-    slot.subagentDetailMessages = nextMap;
+    syncSubagentTimeline(slot, subagentId, [msgToStore]);
     notify(sessionId);
   }, [getSlot, notify]);
 
@@ -732,6 +2017,7 @@ export function useSessionStore() {
         ...current,
         {
           id: streamId,
+          renderKey: `${streamId}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
           sessionId,
           timestamp: new Date().toISOString(),
           provider: msgProvider,
@@ -795,6 +2081,7 @@ export function useSessionStore() {
         ...current,
         {
           id: streamId,
+          renderKey: `${streamId}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
           sessionId,
           timestamp: new Date().toISOString(),
           provider: msgProvider,
@@ -823,7 +2110,7 @@ export function useSessionStore() {
     const updated = [...current];
     updated[existingIndex] = {
       ...stream,
-      id: `subagent_thinking_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      id: getFinalizedSubagentThinkingId(sessionId, subagentId, stream.timestamp),
     };
     const nextMap = new Map(slot.subagentDetailMessages);
     nextMap.set(subagentId, updated);
@@ -841,15 +2128,34 @@ export function useSessionStore() {
   const setActivities = useCallback((sessionId: string, msgs: NormalizedMessage[]) => {
     const slot = getSlot(sessionId);
     const byKey = new Map<string, NormalizedMessage>();
+    const existingByKey = new Map(
+      slot.activityMessages.map((activity) => [activity.activityId || activity.id, activity]),
+    );
 
     for (const msg of msgs) {
       if (msg.kind !== 'agent_activity') continue;
-      byKey.set(msg.activityId || msg.id, msg);
+      const key = msg.activityId || msg.id;
+      byKey.set(key, preserveTerminalAgentActivity(existingByKey.get(key), msg));
     }
 
     slot.activityMessages = Array.from(byKey.values());
     notify(sessionId);
   }, [getSlot, notify]);
+
+  const cancelRunningActivities = useCallback((sessionId: string) => {
+    const slot = storeRef.current.get(sessionId);
+    if (!slot) return;
+    const activities = cancelRunningAgentActivities(slot.activityMessages, new Date().toISOString());
+    const hasRunningCompact = slot.realtimeMessages.some(message => message.kind === 'compact_boundary' && message.compactState === 'running');
+    if (activities === slot.activityMessages && !hasRunningCompact) return;
+    slot.activityMessages = activities;
+    if (hasRunningCompact) {
+      slot.realtimeMessages = slot.realtimeMessages.map(message => message.kind === 'compact_boundary' && message.compactState === 'running'
+        ? { ...message, compactState: 'cancelled' } : message);
+      recomputeMergedIfNeeded(slot);
+    }
+    notify(sessionId);
+  }, [notify]);
 
   /**
    * Append multiple realtime messages at once (batch).
@@ -857,7 +2163,14 @@ export function useSessionStore() {
   const appendRealtimeBatch = useCallback((sessionId: string, msgs: NormalizedMessage[]) => {
     if (msgs.length === 0) return;
     const slot = getSlot(sessionId);
-    let updated = upsertRealtimeMessages(slot.realtimeMessages, msgs);
+    const capturedMessages = msgs.map((message) => (
+      captureOptimisticUserServerTail(
+        captureRealtimePosition(message, slot.serverMessages),
+        slot.serverMessages,
+        slot.serverMessages.length === 0,
+      )
+    ));
+    let updated = upsertRealtimeMessages(slot.realtimeMessages, capturedMessages);
     if (updated.length > MAX_REALTIME_MESSAGES) {
       updated = updated.slice(-MAX_REALTIME_MESSAGES);
     }
@@ -881,6 +2194,8 @@ export function useSessionStore() {
     } = {},
   ) => {
     const slot = getSlot(sessionId);
+    const requestGeneration = slot._serverRequestGeneration + 1;
+    slot._serverRequestGeneration = requestGeneration;
     try {
       const params = new URLSearchParams();
       if (opts.provider) params.append('provider', opts.provider);
@@ -894,33 +2209,71 @@ export function useSessionStore() {
 
       const qs = params.toString();
       const url = `/api/sessions/${encodeURIComponent(sessionId)}/messages${qs ? `?${qs}` : ''}`;
-      const response = await authenticatedFetch(url);
+      const response = await authenticatedFetch(url, { suppressServerErrorToast: true });
 
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      if (!response.ok) {
+        const statusError = await readAgentStatusErrorFromResponse(response, {
+          event: 'web_http_request_failed',
+          code: 'session_messages_load_failed',
+          message: `Unable to refresh conversation messages (HTTP ${response.status}).`,
+          scope: 'session',
+        });
+        throw new Error(statusError.message);
+      }
       const data = await response.json();
-
       const incomingMessages = data.messages || [];
+      if (requestGeneration < slot._serverAppliedGeneration) return;
+      // A just-opened session may still have its authoritative full-history
+      // request in flight. An empty background refresh is commonly the
+      // transcript-commit race described below, so it must not supersede that
+      // load merely because the refresh started later.
+      if (
+        incomingMessages.length === 0
+        && slot._serverLoadingGeneration !== null
+        && requestGeneration > slot._serverLoadingGeneration
+      ) {
+        return;
+      }
+      slot._serverAppliedGeneration = requestGeneration;
+      if (Array.isArray(data.stream?.messages)) applyTimelineFrames(slot, data.stream.messages);
       // Don't overwrite existing server messages with empty response
       // (race condition: server hasn't committed yet after stop/complete).
       if (incomingMessages.length > 0 || slot.serverMessages.length === 0) {
-        slot.serverMessages = incomingMessages;
+        reconcileTimelineHistory(slot, incomingMessages, !data.hasMore);
+        const previousById = new Map(slot.serverMessages.map(message => [message.id, message]));
+        slot.serverMessages = enrichConfirmedUsers(incomingMessages, slot.realtimeMessages)
+          .map(message => preserveUserInputs(message, previousById.get(message.id)));
       }
       slot.total = data.total ?? slot.serverMessages.length;
       slot.hasMore = Boolean(data.hasMore);
       slot.fetchedAt = Date.now();
-      // Server is authoritative — keep only active streaming messages in
-      // realtime (they have live content the server hasn't persisted yet).
-      // All other realtime messages are now redundant.
-      // BUT: only clean realtime if server actually returned data THIS time.
-      // If server returned empty (messages not committed yet), keep realtime intact.
+      // Server is authoritative, but a post-complete refresh can race the
+      // transcript writer/read path and return a non-empty yet not-quite-final
+      // snapshot. Keep finalized local stream text until the server returns
+      // an equivalent assistant message; otherwise the UI can show "complete"
+      // while the model's visible answer disappears.
       if (slot.realtimeMessages.length > 0 && incomingMessages.length > 0) {
-        slot.realtimeMessages = slot.realtimeMessages.filter(m =>
-          m.id.startsWith('__streaming_')
+        slot.realtimeMessages = getRealtimeMessagesToKeepAfterServerRefresh(
+          slot.realtimeMessages,
+          incomingMessages,
         );
       }
       recomputeMergedIfNeeded(slot);
+      const supersedesLoading = slot._serverLoadingGeneration !== null
+        && requestGeneration > slot._serverLoadingGeneration;
+      if (supersedesLoading) {
+        slot._serverLoadingGeneration = null;
+      }
+      if (
+        slot._serverLoadingGeneration === null
+        && (slot.status === 'loading' || slot.status === 'error')
+      ) {
+        slot.status = 'idle';
+        slot.lastError = null;
+      }
       notify(sessionId);
     } catch (error) {
+      if (requestGeneration < slot._serverAppliedGeneration) return;
       console.error(`[SessionStore] refresh failed for ${sessionId}:`, error);
     }
   }, [getSlot, notify]);
@@ -947,24 +2300,26 @@ export function useSessionStore() {
    * Update or create a streaming message (accumulated text so far).
    * Uses a well-known ID so subsequent calls replace the same message.
    */
-  const updateStreaming = useCallback((sessionId: string, accumulatedText: string, msgProvider: SessionProvider) => {
+  const updateStreaming = useCallback((sessionId: string, accumulatedText: string, msgProvider: SessionProvider, runId?: string, model?: string, blockId?: string) => {
     const slot = getSlot(sessionId);
-    const streamId = `__streaming_${sessionId}`;
+    const streamId = `__streaming_${streamingKey(sessionId, runId)}`;
     const idx = slot.realtimeMessages.findIndex(m => m.id === streamId);
     if (idx >= 0) {
       // Subsequent delta — preserve the original turn-start timestamp so
       // computeMerged can tell which server snapshots belong to this turn.
       const existing = slot.realtimeMessages[idx];
-      if (existing.content === accumulatedText && existing.provider === msgProvider) {
+      if (existing.content === accumulatedText && existing.provider === msgProvider && (model === undefined || existing.model === model)) {
         return;
       }
-      if (!patchMergedStreamingMessage(slot, streamId, accumulatedText, msgProvider)) {
+      if (!patchMergedStreamingMessage(slot, streamId, accumulatedText, msgProvider, model)) {
         existing.content = accumulatedText;
         existing.provider = msgProvider;
+        if (model !== undefined) existing.model = model;
         forceRecomputeMerged(slot);
       } else {
         existing.content = accumulatedText;
         existing.provider = msgProvider;
+        if (model !== undefined) existing.model = model;
       }
       notify(sessionId);
       return;
@@ -980,12 +2335,18 @@ export function useSessionStore() {
         : null;
       const msg: NormalizedMessage = {
         id: streamId,
+        renderKey: `${streamId}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
         sessionId,
         timestamp: new Date().toISOString(),
         provider: msgProvider,
         kind: 'stream_delta',
         content: accumulatedText,
-        serverTailIdAtStart: serverTailId ?? undefined,
+        ...(model ? { model } : {}),
+        runId,
+        serverTailIdAtStart: serverTailId,
+        streamBoundaryAtStart: captureStreamBoundary(slot.realtimeMessages, runId),
+        streamPredecessorAtStart: blockId ? undefined : captureStreamPredecessor(slot.realtimeMessages, runId),
+        ...(blockId ? { blockId } : {}),
       };
       slot.realtimeMessages = [...slot.realtimeMessages, msg];
     }
@@ -997,10 +2358,10 @@ export function useSessionStore() {
    * Finalize streaming: convert the streaming message to a regular text message.
    * The well-known streaming ID is replaced with a unique text message ID.
    */
-  const finalizeStreaming = useCallback((sessionId: string) => {
+  const finalizeStreaming = useCallback((sessionId: string, runId?: string) => {
     const slot = storeRef.current.get(sessionId);
     if (!slot) return;
-    const streamId = `__streaming_${sessionId}`;
+    const streamId = `__streaming_${streamingKey(sessionId, runId)}`;
     const idx = slot.realtimeMessages.findIndex(m => m.id === streamId);
     if (idx >= 0) {
       const stream = slot.realtimeMessages[idx];
@@ -1011,6 +2372,7 @@ export function useSessionStore() {
         id: newId,
         kind: 'text',
         role: 'assistant',
+        isFinal: true,
       };
       recomputeMergedIfNeeded(slot);
       notify(sessionId);
@@ -1021,9 +2383,9 @@ export function useSessionStore() {
    * Update or create a streaming thinking message (accumulated thinking so far).
    * Mirrors updateStreaming but uses kind='thinking' and a separate well-known ID.
    */
-  const updateStreamingThinking = useCallback((sessionId: string, accumulatedText: string, msgProvider: SessionProvider) => {
+  const updateStreamingThinking = useCallback((sessionId: string, accumulatedText: string, msgProvider: SessionProvider, runId?: string, blockId?: string) => {
     const slot = getSlot(sessionId);
-    const streamId = `__streaming_thinking_${sessionId}`;
+    const streamId = `__streaming_thinking_${streamingKey(sessionId, runId)}`;
     const idx = slot.realtimeMessages.findIndex(m => m.id === streamId);
     if (idx >= 0) {
       const existing = slot.realtimeMessages[idx];
@@ -1042,13 +2404,25 @@ export function useSessionStore() {
       notify(sessionId);
       return;
     } else {
+      const serverTailId = slot.serverMessages.length > 0
+        ? slot.serverMessages[slot.serverMessages.length - 1].id
+        : null;
+      const streamBoundaryAtStart = captureStreamBoundary(slot.realtimeMessages, runId);
+      const toolBoundaryIdAtStart = streamBoundaryAtStart?.toolId;
       const msg: NormalizedMessage = {
         id: streamId,
+        renderKey: `${streamId}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
         sessionId,
         timestamp: new Date().toISOString(),
         provider: msgProvider,
         kind: 'thinking',
         content: accumulatedText,
+        runId,
+        serverTailIdAtStart: serverTailId,
+        streamBoundaryAtStart,
+        streamPredecessorAtStart: blockId ? undefined : captureStreamPredecessor(slot.realtimeMessages, runId),
+        ...(blockId ? { blockId } : {}),
+        ...(toolBoundaryIdAtStart ? { toolBoundaryIdAtStart } : {}),
       };
       slot.realtimeMessages = [...slot.realtimeMessages, msg];
     }
@@ -1060,10 +2434,10 @@ export function useSessionStore() {
    * Finalize streaming thinking: replace the well-known streaming thinking ID
    * with a unique ID so subsequent thinking blocks don't overwrite it.
    */
-  const finalizeStreamingThinking = useCallback((sessionId: string) => {
+  const finalizeStreamingThinking = useCallback((sessionId: string, runId?: string) => {
     const slot = storeRef.current.get(sessionId);
     if (!slot) return;
-    const streamId = `__streaming_thinking_${sessionId}`;
+    const streamId = `__streaming_thinking_${streamingKey(sessionId, runId)}`;
     const idx = slot.realtimeMessages.findIndex(m => m.id === streamId);
     if (idx >= 0) {
       const stream = slot.realtimeMessages[idx];
@@ -1072,6 +2446,7 @@ export function useSessionStore() {
       slot.realtimeMessages[idx] = {
         ...stream,
         id: newId,
+        isFinal: true,
       };
       recomputeMergedIfNeeded(slot);
       notify(sessionId);
@@ -1088,6 +2463,21 @@ export function useSessionStore() {
       recomputeMergedIfNeeded(slot);
       notify(sessionId);
     }
+  }, [notify]);
+
+  const clearAssistantRealtime = useCallback((sessionId: string) => {
+    const slot = storeRef.current.get(sessionId);
+    if (!slot) return;
+    const nextRealtime = slot.realtimeMessages.filter((message) => {
+      if (message.kind === 'thinking' || message.kind === 'stream_delta' || message.kind === 'stream_end') {
+        return false;
+      }
+      return !(message.kind === 'text' && message.role === 'assistant');
+    });
+    if (nextRealtime.length === slot.realtimeMessages.length) return;
+    slot.realtimeMessages = nextRealtime;
+    recomputeMergedIfNeeded(slot);
+    notify(sessionId);
   }, [notify]);
 
   /**
@@ -1113,9 +2503,11 @@ export function useSessionStore() {
     has,
     fetchFromServer,
     fetchMore,
-    appendRealtime,
+    appendRealtime, applyTimelineMessage, closeTimeline,
+    replaceLastTurn,
     upsertActivity,
     setActivities,
+    cancelRunningActivities,
     appendRealtimeBatch,
     refreshFromServer,
     setActiveSession,
@@ -1126,6 +2518,7 @@ export function useSessionStore() {
     updateStreamingThinking,
     finalizeStreamingThinking,
     clearRealtime,
+    clearAssistantRealtime,
     getMessages,
     getActivityMessages,
     getSubagentDetailMessages,
@@ -1138,10 +2531,10 @@ export function useSessionStore() {
     finalizeSubagentDetailThinking,
   }), [
     getSlot, has, fetchFromServer, fetchMore,
-    appendRealtime, upsertActivity, setActivities, appendRealtimeBatch, refreshFromServer,
+    appendRealtime, applyTimelineMessage, closeTimeline, replaceLastTurn, upsertActivity, setActivities, cancelRunningActivities, appendRealtimeBatch, refreshFromServer,
     setActiveSession, setStatus, isStale, updateStreaming, finalizeStreaming,
     updateStreamingThinking, finalizeStreamingThinking,
-    clearRealtime, getMessages, getActivityMessages, getSubagentDetailMessages, getSessionSlot,
+    clearRealtime, clearAssistantRealtime, getMessages, getActivityMessages, getSubagentDetailMessages, getSessionSlot,
     recordSubagentLink, appendSubagentDetailMessage, updateSubagentDetailStreaming,
     finalizeSubagentDetailStreaming, updateSubagentDetailThinking, finalizeSubagentDetailThinking,
   ]);

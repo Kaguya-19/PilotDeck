@@ -7,7 +7,7 @@ import type { PilotAdaptersConfig, PilotPlatformAdapterConfig } from "../../pilo
  */
 const CHANNEL_LOADERS: Record<
   string,
-  (cfg: PilotPlatformAdapterConfig) => Promise<ChannelAdapter>
+  (cfg: PilotPlatformAdapterConfig, options: LoadEnabledChannelsOptions) => Promise<ChannelAdapter>
 > = {
   telegram: async (cfg) => {
     const { TelegramChannel } = await import("./telegram/TelegramChannel.js");
@@ -27,12 +27,13 @@ const CHANNEL_LOADERS: Record<
       appToken: cfg.extra?.appToken as string | undefined,
     });
   },
-  matrix: async (cfg) => {
+  matrix: async (cfg, options) => {
     const { MatrixChannel } = await import("./matrix/MatrixChannel.js");
     return new MatrixChannel({
       accessToken: cfg.token,
       homeserver: cfg.extra?.homeserver as string | undefined,
       userId: cfg.extra?.userId as string | undefined,
+      pilotHome: options.pilotHome,
     });
   },
   mattermost: async (cfg) => {
@@ -69,13 +70,6 @@ const CHANNEL_LOADERS: Record<
     return new DingTalkChannel({
       clientId: cfg.extra?.clientId as string | undefined,
       clientSecret: cfg.extra?.clientSecret as string | undefined,
-    });
-  },
-  wecom: async (cfg) => {
-    const { WeComChannel } = await import("./wecom/WeComChannel.js");
-    return new WeComChannel({
-      botKey: cfg.token,
-      extra: cfg.extra,
     });
   },
   wecomCallback: async (cfg) => {
@@ -120,7 +114,14 @@ const CHANNEL_LOADERS: Record<
   },
 };
 
-export async function loadEnabledChannels(adapters: PilotAdaptersConfig | undefined): Promise<ChannelAdapter[]> {
+export type LoadEnabledChannelsOptions = {
+  pilotHome?: string;
+};
+
+export async function loadEnabledChannels(
+  adapters: PilotAdaptersConfig | undefined,
+  options: LoadEnabledChannelsOptions = {},
+): Promise<ChannelAdapter[]> {
   if (!adapters) return [];
   const channels: ChannelAdapter[] = [];
 
@@ -129,7 +130,7 @@ export async function loadEnabledChannels(adapters: PilotAdaptersConfig | undefi
     if (!cfg?.enabled) continue;
 
     try {
-      channels.push(await loader(cfg));
+      channels.push(await loader(cfg, options));
     } catch (e) {
       console.error(`[adapters] Failed to load channel "${key}": ${e}`);
     }

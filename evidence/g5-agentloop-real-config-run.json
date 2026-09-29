@@ -1,0 +1,201 @@
+{
+  "status": "PASS",
+  "mode": "live-staffdeck-discovery",
+  "modelSource": "/Users/a1/.pilotdeck/pilotdeck.yaml (provider1/qwen3.6-flash-distill)",
+  "staffdeckUrl": "http://127.0.0.1:16224",
+  "agentId": "agent_tenant_demo_overall",
+  "routeResponses": [
+    {
+      "decision": "start_new_task",
+      "selected_sop_id": "skill_purchase_001",
+      "target_step_id": "collect_user_name",
+      "candidate_sop_ids": [
+        "project_delivery_plan",
+        "lark_approval_submit",
+        "business_metric_analysis",
+        "procurement_request_checklist",
+        "marketing_content_brief",
+        "sales_opportunity_guidance",
+        "skill_expense_quota_query",
+        "seal_application_approval",
+        "skill_clause_modification",
+        "skill_leave_balance_query",
+        "expense_travel_reimbursement",
+        "contract_risk_review",
+        "fault_report_v1",
+        "skill_meeting_room_book",
+        "skill_overtime_compensatory_leave",
+        "expense_over_limit_approval",
+        "skill_hr_cert_issue_001",
+        "skill_perm_grant_routing_001",
+        "skill_office_supply_request",
+        "leave_apply_v1",
+        "partner_onboarding_dd",
+        "skill_graph_visual_demo",
+        "skill_purchase_001",
+        "after_sales_exchange",
+        "after_sales_refund",
+        "skill_price_compare_001"
+      ]
+    },
+    {
+      "decision": "start_new_task",
+      "selected_sop_id": "skill_price_compare_001",
+      "target_step_id": "collect_products",
+      "candidate_sop_ids": [
+        "project_delivery_plan",
+        "lark_approval_submit",
+        "business_metric_analysis",
+        "procurement_request_checklist",
+        "marketing_content_brief",
+        "sales_opportunity_guidance",
+        "skill_expense_quota_query",
+        "seal_application_approval",
+        "skill_clause_modification",
+        "skill_leave_balance_query",
+        "expense_travel_reimbursement",
+        "contract_risk_review",
+        "fault_report_v1",
+        "skill_meeting_room_book",
+        "skill_overtime_compensatory_leave",
+        "expense_over_limit_approval",
+        "skill_hr_cert_issue_001",
+        "skill_perm_grant_routing_001",
+        "skill_office_supply_request",
+        "leave_apply_v1",
+        "partner_onboarding_dd",
+        "skill_graph_visual_demo",
+        "skill_purchase_001",
+        "after_sales_exchange",
+        "after_sales_refund",
+        "skill_price_compare_001"
+      ]
+    },
+    {
+      "decision": "start_new_task",
+      "selected_sop_id": "expense_over_limit_approval",
+      "target_step_id": "collect_over_limit_info",
+      "candidate_sop_ids": [
+        "project_delivery_plan",
+        "lark_approval_submit",
+        "business_metric_analysis",
+        "procurement_request_checklist",
+        "marketing_content_brief",
+        "sales_opportunity_guidance",
+        "skill_expense_quota_query",
+        "seal_application_approval",
+        "skill_clause_modification",
+        "skill_leave_balance_query",
+        "expense_travel_reimbursement",
+        "contract_risk_review",
+        "fault_report_v1",
+        "skill_meeting_room_book",
+        "skill_overtime_compensatory_leave",
+        "expense_over_limit_approval",
+        "skill_hr_cert_issue_001",
+        "skill_perm_grant_routing_001",
+        "skill_office_supply_request",
+        "leave_apply_v1",
+        "partner_onboarding_dd",
+        "skill_graph_visual_demo",
+        "skill_purchase_001",
+        "after_sales_exchange",
+        "after_sales_refund",
+        "skill_price_compare_001"
+      ]
+    },
+    {
+      "decision": "answer_only",
+      "selected_sop_id": null,
+      "target_step_id": null,
+      "candidate_sop_ids": [
+        "project_delivery_plan",
+        "lark_approval_submit",
+        "business_metric_analysis",
+        "procurement_request_checklist",
+        "marketing_content_brief",
+        "sales_opportunity_guidance",
+        "skill_expense_quota_query",
+        "seal_application_approval",
+        "skill_clause_modification",
+        "skill_leave_balance_query",
+        "expense_travel_reimbursement",
+        "contract_risk_review",
+        "fault_report_v1",
+        "skill_meeting_room_book",
+        "skill_overtime_compensatory_leave",
+        "expense_over_limit_approval",
+        "skill_hr_cert_issue_001",
+        "skill_perm_grant_routing_001",
+        "skill_office_supply_request",
+        "leave_apply_v1",
+        "partner_onboarding_dd",
+        "skill_graph_visual_demo",
+        "skill_purchase_001",
+        "after_sales_exchange",
+        "after_sales_refund",
+        "skill_price_compare_001"
+      ]
+    }
+  ],
+  "lifecycle": [
+    {
+      "kind": "prepare",
+      "sessionId": "purchase-session",
+      "sopId": "skill_purchase_001",
+      "version": "1.0.0"
+    },
+    {
+      "kind": "prepare",
+      "sessionId": "compare-session",
+      "sopId": "skill_price_compare_001",
+      "version": "1.0.0"
+    },
+    {
+      "kind": "prepare",
+      "sessionId": "approval-session",
+      "sopId": "expense_over_limit_approval",
+      "version": "1.0.0"
+    },
+    {
+      "kind": "submit",
+      "sessionId": "approval-session",
+      "sopId": "expense_over_limit_approval",
+      "status": "awaiting_user"
+    },
+    {
+      "kind": "prepare",
+      "sessionId": "approval-session",
+      "sopId": "expense_over_limit_approval",
+      "version": "1.0.0"
+    }
+  ],
+  "observations": [
+    {
+      "sessionId": "purchase-session",
+      "hasSopTool": true,
+      "hasSopPrompt": true
+    },
+    {
+      "sessionId": "compare-session",
+      "hasSopTool": true,
+      "hasSopPrompt": true
+    },
+    {
+      "sessionId": "approval-session",
+      "hasSopTool": true,
+      "hasSopPrompt": true
+    },
+    {
+      "sessionId": "approval-session",
+      "hasSopTool": true,
+      "hasSopPrompt": true
+    },
+    {
+      "sessionId": "ordinary-session",
+      "hasSopTool": false,
+      "hasSopPrompt": false
+    }
+  ],
+  "stateRoot": "/var/folders/xd/mml9c6fj2g95x40hgf_n6lrr0000gn/T/pilotdeck-sop-chain-OJt7iS"
+}

@@ -1,10 +1,15 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { MutableRefObject } from 'react';
 import { authenticatedFetch } from '../../../utils/api';
-import type { ChatMessage, ClaudeWorkStatus, PilotDeckWorkStatus } from '../types/types';
+import type {
+  ChatMessage,
+  ClaudeWorkStatus,
+  PilotDeckWorkStatus,
+  SessionRuntimeState,
+} from '../types/types';
 import {
   getSessionRequestParams,
-  isBackgroundTaskSession,
+  isReadOnlySession,
   type Project,
   type ProjectSession,
   type SessionProvider,
@@ -12,12 +17,24 @@ import {
 import type { SessionStore, NormalizedMessage } from '../../../stores/useSessionStore';
 import { parseUserAttachmentNote } from '../utils/attachmentNotes';
 import { createCachedDiffCalculator, type DiffCalculator } from '../utils/messageTransforms';
+import {
+  buildSessionStatusRequestIfIdle,
+  invalidateSessionStatusResponses,
+} from '../sessionStatusProtocol';
 import { normalizedToChatMessages } from './useChatMessages';
+import { useScrollFollow, type ReadingAnchor } from './useScrollFollow';
 
 const MESSAGES_PER_PAGE = 20;
 const INITIAL_VISIBLE_MESSAGES = 100;
 const EMPTY_NORMALIZED_MESSAGES: NormalizedMessage[] = [];
 export const BOTTOM_FOLLOW_THRESHOLD_PX = 96;
+
+export function shouldFollowConversationScroll(
+  autoScrollToBottom: boolean | undefined,
+  isUserScrolledUp: boolean,
+): boolean {
+  return Boolean(autoScrollToBottom) && !isUserScrolledUp;
+}
 
 type PendingViewSession = {
   sessionId: string | null;
@@ -35,11 +52,6 @@ interface UseChatSessionStateArgs {
   resetStreamingState: () => void;
   pendingViewSessionRef: MutableRefObject<PendingViewSession | null>;
   sessionStore: SessionStore;
-}
-
-interface ScrollRestoreState {
-  height: number;
-  top: number;
 }
 
 export function isScrollNearBottom(
@@ -90,6 +102,40 @@ export function shouldRenderPendingBubble(
   return pendingTargetSessionId !== null && pendingTargetSessionId === activeSessionId;
 }
 
+/**
+ * Keep the bounded history window turn-aware. A long-running turn can emit
+ * more than `visibleMessageCount` process messages after its user prompt. A
+ * plain tail slice would then discard the prompt, leaving the live-process
+ * grouping code without a visible row to attach the collapsed process to.
+ *
+ * Preserve the most recent user message by replacing the oldest tail entry,
+ * so the render cap remains unchanged while the active turn keeps its anchor.
+ */
+export function selectVisibleMessages(
+  messages: ChatMessage[],
+  visibleMessageCount: number,
+): ChatMessage[] {
+  if (messages.length <= visibleMessageCount) return messages;
+
+  const tail = messages.slice(-visibleMessageCount);
+  const tailStartIndex = messages.length - tail.length;
+  let latestUserIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.type === 'user') {
+      latestUserIndex = index;
+      break;
+    }
+  }
+
+  if (latestUserIndex < 0 || latestUserIndex >= tailStartIndex) {
+    return tail;
+  }
+  if (tail.length <= 1) {
+    return [messages[latestUserIndex]];
+  }
+  return [messages[latestUserIndex], ...tail.slice(1)];
+}
+
 export function getStreamContentKey(messages: ChatMessage[]): string {
   const lastMessage = messages[messages.length - 1];
   if (!lastMessage) {
@@ -113,7 +159,7 @@ export function getStreamContentKey(messages: ChatMessage[]): string {
 /*  Helper: Convert a ChatMessage to a NormalizedMessage for the store */
 /* ------------------------------------------------------------------ */
 
-function chatMessageToNormalized(
+export function chatMessageToNormalized(
   msg: ChatMessage,
   sessionId: string,
   provider: SessionProvider,
@@ -124,7 +170,14 @@ function chatMessageToNormalized(
     : typeof msg.timestamp === 'number'
       ? new Date(msg.timestamp).toISOString()
       : String(msg.timestamp);
-  const base = { id, sessionId, timestamp: ts, provider };
+  const base = {
+    id,
+    sessionId,
+    timestamp: ts,
+    provider,
+    ...(msg.runId ? { runId: msg.runId } : {}),
+    ...(msg.turnId ? { turnId: msg.turnId } : {}),
+  };
 
   if (msg.isToolUse) {
     return {
@@ -150,7 +203,12 @@ function chatMessageToNormalized(
     } as NormalizedMessage;
   }
   if (msg.type === 'error') {
-    return { ...base, kind: 'error', content: msg.content || '' } as NormalizedMessage;
+    return {
+      ...base,
+      kind: 'error',
+      content: msg.content || '',
+      ...((msg as any).userHint ? { userHint: (msg as any).userHint } : {}),
+    } as NormalizedMessage;
   }
   // Carry user-attached image data URLs through the normalize round-trip
   // so the optimistic message render and any re-derivation from the
@@ -189,13 +247,18 @@ function getUserAttachmentNames(message: ChatMessage): string[] {
   return [...explicitNames, ...parsedNames].sort();
 }
 
-function hasEquivalentUserMessage(messages: ChatMessage[], pendingUserMessage: ChatMessage): boolean {
+export function hasEquivalentUserMessage(messages: ChatMessage[], pendingUserMessage: ChatMessage): boolean {
+  const pendingTurnId = pendingUserMessage.turnId || pendingUserMessage.runId;
   const pendingText = normalizeUserMessageText(pendingUserMessage.content);
   const pendingImageCount = Array.isArray(pendingUserMessage.images) ? pendingUserMessage.images.length : 0;
   const pendingAttachmentNames = getUserAttachmentNames(pendingUserMessage);
 
   return messages.some((message) => {
     if (message.type !== 'user') return false;
+    const messageTurnId = message.turnId || message.runId;
+    if (pendingTurnId || messageTurnId) {
+      return Boolean(pendingTurnId && messageTurnId && pendingTurnId === messageTurnId);
+    }
     if (normalizeUserMessageText(message.content) !== pendingText) return false;
 
     const imageCount = Array.isArray(message.images) ? message.images.length : 0;
@@ -204,6 +267,27 @@ function hasEquivalentUserMessage(messages: ChatMessage[], pendingUserMessage: C
     const attachmentNames = getUserAttachmentNames(message);
     return attachmentNames.join('\n') === pendingAttachmentNames.join('\n');
   });
+}
+
+type ConversationScrollPosition = {
+  top: number;
+  distanceFromBottom: number;
+  following?: boolean;
+  anchor?: ReadingAnchor | null;
+};
+
+const CONVERSATION_SCROLL_BOTTOM_THRESHOLD = 40;
+
+export function resolveConversationScrollTop(
+  position: ConversationScrollPosition,
+  scrollHeight: number,
+  clientHeight: number,
+): number {
+  const maximumScrollTop = Math.max(0, scrollHeight - clientHeight);
+  if (position.following ?? position.distanceFromBottom <= CONVERSATION_SCROLL_BOTTOM_THRESHOLD) {
+    return maximumScrollTop;
+  }
+  return Math.min(Math.max(0, position.top), maximumScrollTop);
 }
 
 /* ------------------------------------------------------------------ */
@@ -222,7 +306,17 @@ export function useChatSessionState({
   pendingViewSessionRef,
   sessionStore,
 }: UseChatSessionStateArgs) {
-  const [isLoading, setIsLoading] = useState(false);
+  const [isLoading, setIsLoadingState] = useState(false);
+  const [sessionRuntimeState, setSessionRuntimeState] = useState<SessionRuntimeState>(() => (
+    selectedSession && !isReadOnlySession(selectedSession) ? 'synchronizing' : 'inactive'
+  ));
+  const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  const activeRunIdRef = useRef<string | null>(activeRunId);
+  activeRunIdRef.current = activeRunId;
+  const setIsLoading = useCallback((loading: boolean) => {
+    setIsLoadingState(loading);
+    if (loading) setSessionRuntimeState('running');
+  }, []);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(selectedSession?.id || null);
   const [isLoadingSessionMessages, setIsLoadingSessionMessages] = useState(false);
   const [isLoadingMoreMessages] = useState(false);
@@ -230,7 +324,6 @@ export function useChatSessionState({
   const [totalMessages, setTotalMessages] = useState(0);
   const [canAbortSession, setCanAbortSession] = useState(false);
   const [isAborting, setIsAborting] = useState(false);
-  const [isUserScrolledUp, setIsUserScrolledUp] = useState(false);
   const [tokenBudget, setTokenBudget] = useState<Record<string, unknown> | null>(null);
   const [visibleMessageCount, setVisibleMessageCount] = useState(INITIAL_VISIBLE_MESSAGES);
   const [claudeStatus, setClaudeStatus] = useState<ClaudeWorkStatus | null>(null);
@@ -248,23 +341,18 @@ export function useChatSessionState({
   const isLoadingMoreRef = useRef(false);
   const allMessagesLoadedRef = useRef(false);
   const topLoadLockRef = useRef(false);
-  const pendingScrollRestoreRef = useRef<ScrollRestoreState | null>(null);
   const pendingInitialScrollRef = useRef(true);
   const messagesOffsetRef = useRef(0);
-  const scrollPositionRef = useRef({ height: 0, top: 0 });
+  const conversationScrollPositionsRef = useRef(new Map<string, ConversationScrollPosition>());
+  const pendingConversationScrollRestoreRef = useRef<{
+    key: string;
+    position: ConversationScrollPosition;
+  } | null>(null);
   const loadAllFinishedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const loadAllOverlayTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastLoadedSessionKeyRef = useRef<string | null>(null);
-  const followScrollFrameRef = useRef<number | null>(null);
 
   const createDiff = useMemo<DiffCalculator>(() => createCachedDiffCalculator(), []);
-
-  useEffect(() => () => {
-    if (followScrollFrameRef.current !== null) {
-      cancelAnimationFrame(followScrollFrameRef.current);
-      followScrollFrameRef.current = null;
-    }
-  }, []);
 
   /* ---------------------------------------------------------------- */
   /*  Derive chatMessages from the store                              */
@@ -323,7 +411,10 @@ export function useChatSessionState({
   }
 
   const activeSessionId = selSid ?? effectiveCurrentRef.current;
-  const isReadOnlyBackgroundSession = isBackgroundTaskSession(selectedSession);
+  const activeScrollKey = selectedProject && activeSessionId
+    ? `${selectedProject.name}:${activeSessionId}`
+    : null;
+  const sessionIsReadOnly = isReadOnlySession(selectedSession);
   const sessionRequestParams = useMemo(
     () => getSessionRequestParams(selectedSession),
     [selectedSession],
@@ -409,7 +500,10 @@ export function useChatSessionState({
     return all;
   }, [storeMessages, viewHiddenCount, pendingUserMessage, activeSessionId, pendingTargetSessionId, subagentLinks]);
 
-  const activityMessages = normalizedToChatMessages(activityStoreMessages);
+  const activityMessages = useMemo(
+    () => normalizedToChatMessages(activityStoreMessages),
+    [activityStoreMessages],
+  );
 
   /* ---------------------------------------------------------------- */
   /*  addMessage / clearMessages / rewindMessages                     */
@@ -435,21 +529,28 @@ export function useChatSessionState({
 
   const rewindMessages = useCallback((count: number) => setViewHiddenCount(count), []);
 
-  const scrollToBottom = useCallback(() => {
-    const container = scrollContainerRef.current;
-    if (!container) return;
-    container.scrollTop = container.scrollHeight;
-  }, []);
-
-  const scheduleScrollToBottom = useCallback(() => {
-    if (followScrollFrameRef.current !== null) {
-      return;
-    }
-    followScrollFrameRef.current = requestAnimationFrame(() => {
-      followScrollFrameRef.current = null;
-      scrollToBottom();
-    });
-  }, [scrollToBottom]);
+  const {
+    isPaused: isUserScrolledUp,
+    canReturnToLatest,
+    setPaused: setIsUserScrolledUp,
+    getIsPaused,
+    pause: pauseScrollFollowing,
+    scrollToBottom,
+    scheduleFollow: scheduleScrollToBottom,
+    scheduleInitialPosition,
+    captureAnchor: captureReadingAnchor,
+    getReadingAnchor,
+    restoreReadingAnchor,
+  } = useScrollFollow({
+    containerRef: scrollContainerRef,
+    enabled: Boolean(autoScrollToBottom),
+    scopeKey: activeScrollKey,
+    contentKey: isLoadingSessionMessages || chatMessages.length === 0,
+    contentSelector: '[data-chat-scroll-content]',
+    canFollow: () => !searchScrollActiveRef.current && !isLoadingMoreRef.current && !isLoadingSessionMessages,
+  });
+  const activeScrollKeyRef = useRef(activeScrollKey);
+  activeScrollKeyRef.current = activeScrollKey;
 
   const scrollToBottomAndReset = useCallback(() => {
     scrollToBottom();
@@ -474,8 +575,8 @@ export function useChatSessionState({
       if (!hasMoreMessages || !selectedSession || !selectedProject) return false;
 
       isLoadingMoreRef.current = true;
-      const previousScrollHeight = container.scrollHeight;
-      const previousScrollTop = container.scrollTop;
+      const requestScrollKey = activeScrollKey;
+      captureReadingAnchor();
 
       try {
         const slot = await sessionStore.fetchMore(selectedSession.id, {
@@ -485,9 +586,7 @@ export function useChatSessionState({
           ...sessionRequestParams,
           limit: MESSAGES_PER_PAGE,
         });
-        if (!slot || slot.serverMessages.length === 0) return false;
-
-        pendingScrollRestoreRef.current = { height: previousScrollHeight, top: previousScrollTop };
+        if (!slot || slot.serverMessages.length === 0 || activeScrollKeyRef.current !== requestScrollKey) return false;
         setHasMoreMessages(slot.hasMore);
         setTotalMessages(slot.total);
         setVisibleMessageCount((prev) => prev + MESSAGES_PER_PAGE);
@@ -497,6 +596,8 @@ export function useChatSessionState({
       }
     },
     [
+      activeScrollKey,
+      captureReadingAnchor,
       hasMoreMessages,
       isLoadingMoreMessages,
       selectedProject,
@@ -510,8 +611,17 @@ export function useChatSessionState({
     const container = scrollContainerRef.current;
     if (!container) return;
 
-    const nearBottom = isNearBottom();
-    setIsUserScrolledUp(!nearBottom);
+    if (activeScrollKey) {
+      conversationScrollPositionsRef.current.set(activeScrollKey, {
+        top: container.scrollTop,
+        following: Boolean(autoScrollToBottom) && !getIsPaused(),
+        anchor: getReadingAnchor(),
+        distanceFromBottom: Math.max(
+          0,
+          container.scrollHeight - container.scrollTop - container.clientHeight,
+        ),
+      });
+    }
 
     if (!allMessagesLoadedRef.current) {
       const scrolledNearTop = container.scrollTop < 100;
@@ -523,35 +633,71 @@ export function useChatSessionState({
       const didLoad = await loadOlderMessages(container);
       if (didLoad) topLoadLockRef.current = true;
     }
-  }, [isNearBottom, loadOlderMessages]);
-
-  useLayoutEffect(() => {
-    if (!pendingScrollRestoreRef.current || !scrollContainerRef.current) return;
-    const { height, top } = pendingScrollRestoreRef.current;
-    const container = scrollContainerRef.current;
-    const newScrollHeight = container.scrollHeight;
-    container.scrollTop = top + Math.max(newScrollHeight - height, 0);
-    pendingScrollRestoreRef.current = null;
-  }, [chatMessages.length]);
+  }, [activeScrollKey, autoScrollToBottom, getIsPaused, getReadingAnchor, loadOlderMessages]);
 
   // Reset scroll/pagination state on session change
-  useEffect(() => {
+  useLayoutEffect(() => {
+    const savedScrollPosition = activeScrollKey
+      ? conversationScrollPositionsRef.current.get(activeScrollKey) ?? null
+      : null;
+    pendingConversationScrollRestoreRef.current = activeScrollKey && savedScrollPosition
+      ? { key: activeScrollKey, position: savedScrollPosition }
+      : null;
     if (!searchScrollActiveRef.current) {
-      pendingInitialScrollRef.current = true;
+      pendingInitialScrollRef.current = !savedScrollPosition;
       setVisibleMessageCount(INITIAL_VISIBLE_MESSAGES);
     }
     topLoadLockRef.current = false;
-    pendingScrollRestoreRef.current = null;
-    setIsUserScrolledUp(false);
-  }, [selectedProject?.name, selectedSession?.id]);
+    setIsUserScrolledUp(Boolean(
+      savedScrollPosition
+      && !(savedScrollPosition.following ?? savedScrollPosition.distanceFromBottom <= CONVERSATION_SCROLL_BOTTOM_THRESHOLD)
+    ));
+  }, [activeScrollKey, setIsUserScrolledUp]);
+
+  useLayoutEffect(() => {
+    const pendingRestore = pendingConversationScrollRestoreRef.current;
+    const container = scrollContainerRef.current;
+    if (
+      !pendingRestore
+      || pendingRestore.key !== activeScrollKey
+      || !container
+      || isLoadingSessionMessages
+      || chatMessages.length === 0
+    ) {
+      return;
+    }
+
+    container.scrollTop = resolveConversationScrollTop(
+      pendingRestore.position,
+      container.scrollHeight,
+      container.clientHeight,
+    );
+    const wasFollowing = pendingRestore.position.following
+      ?? pendingRestore.position.distanceFromBottom <= CONVERSATION_SCROLL_BOTTOM_THRESHOLD;
+    if (!wasFollowing && pendingRestore.position.anchor) restoreReadingAnchor(pendingRestore.position.anchor);
+    else captureReadingAnchor();
+    pendingConversationScrollRestoreRef.current = null;
+    pendingInitialScrollRef.current = false;
+  }, [activeScrollKey, chatMessages.length, isLoadingSessionMessages, captureReadingAnchor, restoreReadingAnchor]);
+
+  useLayoutEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!activeScrollKey || !container || pendingConversationScrollRestoreRef.current) return;
+    conversationScrollPositionsRef.current.set(activeScrollKey, {
+      top: container.scrollTop,
+      distanceFromBottom: Math.max(0, container.scrollHeight - container.scrollTop - container.clientHeight),
+      following: Boolean(autoScrollToBottom) && !isUserScrolledUp,
+      anchor: getReadingAnchor(),
+    });
+  }, [activeScrollKey, autoScrollToBottom, isUserScrolledUp, getReadingAnchor]);
 
   // Initial scroll to bottom
   useEffect(() => {
     if (!pendingInitialScrollRef.current || !scrollContainerRef.current || isLoadingSessionMessages) return;
     if (chatMessages.length === 0) { pendingInitialScrollRef.current = false; return; }
     pendingInitialScrollRef.current = false;
-    if (!searchScrollActiveRef.current) setTimeout(() => scrollToBottom(), 200);
-  }, [chatMessages.length, isLoadingSessionMessages, scrollToBottom]);
+    if (!searchScrollActiveRef.current) scheduleInitialPosition();
+  }, [chatMessages.length, isLoadingSessionMessages, scheduleInitialPosition]);
 
   // Main session loading effect — store-based
   useEffect(() => {
@@ -586,6 +732,8 @@ export function useChatSessionState({
       setCanAbortSession(false);
       setIsAborting(false);
       setIsLoading(false);
+      setSessionRuntimeState('inactive');
+      setActiveRunId(null);
       setSessionLoadError(null);
       setCurrentSessionId(null);
       messagesOffsetRef.current = 0;
@@ -597,7 +745,29 @@ export function useChatSessionState({
     }
 
     const provider = 'pilotdeck';
-    const sessionKey = `${selectedSession.id}:${selectedProject.name}:${provider}`;
+    const sessionKey = JSON.stringify([
+      selectedSession.id,
+      selectedProject.name,
+      provider,
+      sessionRequestParams.sessionKind ?? '',
+      sessionRequestParams.parentSessionId ?? '',
+      sessionRequestParams.relativeTranscriptPath ?? '',
+      sessionIsReadOnly ? 'readonly' : 'readwrite',
+    ]);
+    const isEnteringSession = lastLoadedSessionKeyRef.current !== sessionKey;
+    const sessionChanged = didLoadedSessionChange(lastLoadedSessionKeyRef.current, sessionKey);
+    const isPendingSessionHandoff = pendingViewSessionRef.current?.sessionId === selectedSession.id;
+
+    if (isEnteringSession) {
+      setSessionRuntimeState(
+        sessionIsReadOnly
+          ? 'inactive'
+          : isPendingSessionHandoff && !sessionChanged
+            ? 'running'
+            : 'synchronizing',
+      );
+      if (sessionIsReadOnly) setActiveRunId(null);
+    }
 
     // Skip if already loaded and fresh, or if stale but has live realtime
     // content (re-fetching while streaming would prune in-flight messages).
@@ -611,9 +781,10 @@ export function useChatSessionState({
     // See `didLoadedSessionChange` for why we don't compare `currentSessionId`
     // against `selectedSession.id` here (the render-phase mirror nullifies
     // that check on real session-to-session switches).
-    const sessionChanged = didLoadedSessionChange(lastLoadedSessionKeyRef.current, sessionKey);
     if (sessionChanged) {
       resetStreamingState();
+      activeRunIdRef.current = null;
+      setActiveRunId(null);
       pendingViewSessionRef.current = null;
       setClaudeStatus(null);
       setPilotDeckStatus(null);
@@ -645,8 +816,15 @@ export function useChatSessionState({
     setSessionLoadError(null);
 
     // Check session status
-    if (ws && !isReadOnlyBackgroundSession) {
-      sendMessage({ type: 'check-session-status', sessionId: selectedSession.id, provider });
+    if (ws && !sessionIsReadOnly) {
+      invalidateSessionStatusResponses(selectedSession.id);
+      const request = buildSessionStatusRequestIfIdle({
+        sessionId: selectedSession.id,
+        provider,
+        expectedActiveRunId: activeRunIdRef.current,
+        includeActiveTurnMessages: true,
+      });
+      if (request) sendMessage(request);
     }
 
     lastLoadedSessionKeyRef.current = sessionKey;
@@ -690,8 +868,9 @@ export function useChatSessionState({
     selectedProject,
     selectedSession,
     sendMessage,
+    setIsLoading,
     ws,
-    isReadOnlyBackgroundSession,
+    sessionIsReadOnly,
     sessionRequestParams,
     sessionStore,
   ]);
@@ -711,8 +890,8 @@ export function useChatSessionState({
             ...sessionRequestParams,
           });
 
-          if (Boolean(autoScrollToBottom) && isNearBottom()) {
-            setTimeout(() => scrollToBottom(), 200);
+          if (autoScrollToBottom && isNearBottom()) {
+            scheduleScrollToBottom();
           }
         }
       } catch (error) {
@@ -725,7 +904,7 @@ export function useChatSessionState({
     autoScrollToBottom,
     externalMessageUpdate,
     isNearBottom,
-    scrollToBottom,
+    scheduleScrollToBottom,
     selectedProject,
     selectedSession,
     sessionRequestParams,
@@ -752,11 +931,30 @@ export function useChatSessionState({
   }, [pendingViewSessionRef, selectedSession?.id]);
 
   // Scroll to search target
+  const hasChatMessages = chatMessages.length > 0;
   useEffect(() => {
-    if (!searchTarget || chatMessages.length === 0 || isLoadingSessionMessages) return;
+    if (!searchTarget || !hasChatMessages || isLoadingSessionMessages) return;
 
     const target = searchTarget;
-    setSearchTarget(null);
+    setIsUserScrolledUp(true);
+    let cancelled = false;
+    const timers = new Set<ReturnType<typeof setTimeout>>();
+    const container = scrollContainerRef.current;
+    const later = (callback: () => void, delay: number) => {
+      const timer = setTimeout(() => { timers.delete(timer); if (!cancelled) callback(); }, delay);
+      timers.add(timer);
+    };
+    const cancelNavigation = () => {
+      cancelled = true;
+      searchScrollActiveRef.current = false;
+      setSearchTarget(null);
+    };
+    const cancelOnKey = (event: KeyboardEvent) => {
+      if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) cancelNavigation();
+    };
+    container?.addEventListener('wheel', cancelNavigation, { passive: true });
+    container?.addEventListener('touchmove', cancelNavigation, { passive: true });
+    container?.addEventListener('keydown', cancelOnKey);
 
     const scrollToTarget = async () => {
       if (!allMessagesLoadedRef.current && selectedSession && selectedProject) {
@@ -770,6 +968,7 @@ export function useChatSessionState({
               limit: null,
               offset: 0,
             });
+            if (cancelled) return;
             if (slot) {
               setHasMoreMessages(false);
               setTotalMessages(slot.total);
@@ -784,9 +983,11 @@ export function useChatSessionState({
           }
         }
       }
+      if (cancelled) return;
       setVisibleMessageCount(Infinity);
 
       const findAndScroll = (retriesLeft: number) => {
+        if (cancelled) return;
         const container = scrollContainerRef.current;
         if (!container) return;
 
@@ -821,25 +1022,35 @@ export function useChatSessionState({
           targetElement.classList.add('search-highlight-flash');
           setTimeout(() => targetElement?.classList.remove('search-highlight-flash'), 4000);
           searchScrollActiveRef.current = false;
+          setSearchTarget(null);
         } else if (retriesLeft > 0) {
-          setTimeout(() => findAndScroll(retriesLeft - 1), 200);
+          later(() => findAndScroll(retriesLeft - 1), 200);
         } else {
           searchScrollActiveRef.current = false;
+          setSearchTarget(null);
         }
       };
 
-      setTimeout(() => findAndScroll(15), 150);
+      later(() => findAndScroll(15), 150);
     };
 
     scrollToTarget();
-  }, [chatMessages.length, isLoadingSessionMessages, searchTarget, selectedProject, selectedSession, sessionRequestParams, sessionStore]);
+    return () => {
+      cancelled = true;
+      timers.forEach(clearTimeout);
+      container?.removeEventListener('wheel', cancelNavigation);
+      container?.removeEventListener('touchmove', cancelNavigation);
+      container?.removeEventListener('keydown', cancelOnKey);
+      searchScrollActiveRef.current = false;
+    };
+  }, [hasChatMessages, isLoadingSessionMessages, searchTarget, selectedProject, selectedSession, sessionRequestParams, sessionStore, setIsUserScrolledUp]);
 
   useEffect(() => {
     if (!selectedProject || !selectedSession?.id || selectedSession.id.startsWith('new-session-')) {
       setTokenBudget(null);
       return;
     }
-    if (isReadOnlyBackgroundSession) {
+    if (sessionIsReadOnly) {
       setTokenBudget(null);
       return;
     }
@@ -858,48 +1069,26 @@ export function useChatSessionState({
       }
     };
     fetchInitialTokenUsage();
-  }, [isReadOnlyBackgroundSession, selectedProject, selectedSession?.id]);
+  }, [sessionIsReadOnly, selectedProject, selectedSession?.id]);
 
-  const visibleMessages = useMemo(() => {
-    if (chatMessages.length <= visibleMessageCount) return chatMessages;
-    return chatMessages.slice(-visibleMessageCount);
-  }, [chatMessages, visibleMessageCount]);
-  const streamContentKey = useMemo(
-    () => getStreamContentKey(visibleMessages),
-    [visibleMessages],
-  );
-
-  useEffect(() => {
-    if (!autoScrollToBottom && scrollContainerRef.current) {
-      const container = scrollContainerRef.current;
-      scrollPositionRef.current = { height: container.scrollHeight, top: container.scrollTop };
-    }
-  });
-
-  useEffect(() => {
-    if (!scrollContainerRef.current || chatMessages.length === 0) return;
-    if (isLoadingMoreRef.current || isLoadingMoreMessages || pendingScrollRestoreRef.current) return;
-    if (searchScrollActiveRef.current) return;
-
-    if (autoScrollToBottom) {
-      if (!isUserScrolledUp) scheduleScrollToBottom();
-      return;
-    }
-
-    const container = scrollContainerRef.current;
-    const prevHeight = scrollPositionRef.current.height;
-    const prevTop = scrollPositionRef.current.top;
-    const newHeight = container.scrollHeight;
-    const heightDiff = newHeight - prevHeight;
-    if (heightDiff > 0 && prevTop > 0) container.scrollTop = prevTop + heightDiff;
-  }, [
-    autoScrollToBottom,
-    chatMessages.length,
-    isLoadingMoreMessages,
-    isUserScrolledUp,
-    scheduleScrollToBottom,
-    streamContentKey,
-  ]);
+  // Keep each conversation's reading window, including pages exposed while
+  // follow is disabled, so revisiting it can restore the same message/offset.
+  const visibleWindowStartsRef = useRef(new Map<string | null, number>());
+  const visibleWindowScopeRef = useRef(activeScrollKey);
+  const changedWindowScope = visibleWindowScopeRef.current !== activeScrollKey;
+  visibleWindowScopeRef.current = activeScrollKey;
+  const preserveVisibleWindow = isUserScrolledUp || !autoScrollToBottom
+    || (changedWindowScope && activeScrollKey != null
+      && conversationScrollPositionsRef.current.get(activeScrollKey)?.following === false);
+  const defaultStart = Math.max(0, chatMessages.length - visibleMessageCount);
+  const previousStart = visibleWindowStartsRef.current.get(activeScrollKey);
+  const windowStart = preserveVisibleWindow && previousStart != null
+    ? Math.min(previousStart, defaultStart) : defaultStart;
+  if (chatMessages.length > 0) visibleWindowStartsRef.current.set(activeScrollKey, windowStart);
+  const effectiveVisibleCount = preserveVisibleWindow
+    ? Math.max(visibleMessageCount, chatMessages.length - windowStart)
+    : visibleMessageCount;
+  const visibleMessages = useMemo(() => selectVisibleMessages(chatMessages, effectiveVisibleCount), [chatMessages, effectiveVisibleCount]);
 
   useEffect(() => {
     const container = scrollContainerRef.current;
@@ -912,13 +1101,54 @@ export function useChatSessionState({
     const pendingSessionId = pendingViewSessionRef.current?.sessionId ?? null;
     const activeViewSessionId =
       selectedSession?.id || (pendingSessionId === currentSessionId ? currentSessionId : null);
+    if (sessionIsReadOnly) return;
     if (!activeViewSessionId || !processingSessions) return;
     const shouldBeProcessing = processingSessions.has(activeViewSessionId);
     if (shouldBeProcessing && !isLoading) {
       setIsLoading(true);
       setCanAbortSession(true);
     }
-  }, [currentSessionId, isLoading, pendingViewSessionRef, processingSessions, selectedSession?.id]);
+  }, [
+    currentSessionId,
+    isLoading,
+    pendingViewSessionRef,
+    processingSessions,
+    selectedSession?.id,
+    sessionIsReadOnly,
+    setIsLoading,
+  ]);
+
+  useEffect(() => {
+    const pendingSessionId = pendingViewSessionRef.current?.sessionId ?? null;
+    const activeViewSessionId =
+      selectedSession?.id || (pendingSessionId === currentSessionId ? currentSessionId : null);
+    if (sessionIsReadOnly) return;
+    if (!activeViewSessionId || !processingSessions) return;
+    if (!processingSessions.has(activeViewSessionId)) return;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+    const requestStatus = () => {
+      const request = buildSessionStatusRequestIfIdle({
+        sessionId: activeViewSessionId,
+        provider: 'pilotdeck',
+        expectedActiveRunId: activeRunIdRef.current,
+        includeActiveTurnMessages: false,
+      });
+      if (request) sendMessage(request);
+    };
+
+    requestStatus();
+    const timer = setInterval(requestStatus, 1200);
+    return () => clearInterval(timer);
+  }, [
+    currentSessionId,
+    pendingViewSessionRef,
+    processingSessions,
+    selectedSession?.id,
+    sendMessage,
+    sessionIsReadOnly,
+    ws,
+  ]);
 
   // "Load all" overlay
   const prevLoadingRef = useRef(false);
@@ -947,9 +1177,8 @@ export function useChatSessionState({
     setIsLoadingAllMessages(true);
     setShowLoadAllOverlay(true);
 
-    const container = scrollContainerRef.current;
-    const previousScrollHeight = container ? container.scrollHeight : 0;
-    const previousScrollTop = container ? container.scrollTop : 0;
+    const requestScrollKey = activeScrollKey;
+    captureReadingAnchor();
 
     try {
       const slot = await sessionStore.fetchFromServer(requestSessionId, {
@@ -961,13 +1190,9 @@ export function useChatSessionState({
         offset: 0,
       });
 
-      if (currentSessionId !== requestSessionId) return;
+      if (activeScrollKeyRef.current !== requestScrollKey) return;
 
       if (slot) {
-        if (container) {
-          pendingScrollRestoreRef.current = { height: previousScrollHeight, top: previousScrollTop };
-        }
-
         setHasMoreMessages(false);
         setTotalMessages(slot.total);
         messagesOffsetRef.current = slot.total;
@@ -993,14 +1218,16 @@ export function useChatSessionState({
     selectedSession,
     selectedProject,
     isLoadingAllMessages,
-    currentSessionId,
+    activeScrollKey,
+    captureReadingAnchor,
     sessionRequestParams,
     sessionStore,
   ]);
 
   const loadEarlierMessages = useCallback(() => {
+    pauseScrollFollowing();
     setVisibleMessageCount((prev) => prev + 100);
-  }, []);
+  }, [pauseScrollFollowing]);
 
   return {
     chatMessages,
@@ -1010,6 +1237,10 @@ export function useChatSessionState({
     rewindMessages,
     isLoading,
     setIsLoading,
+    sessionRuntimeState,
+    setSessionRuntimeState,
+    activeRunId,
+    setActiveRunId,
     currentSessionId,
     setCurrentSessionId,
     isLoadingSessionMessages,
@@ -1022,6 +1253,7 @@ export function useChatSessionState({
     isAborting,
     setIsAborting,
     isUserScrolledUp,
+    canReturnToLatest,
     setIsUserScrolledUp,
     tokenBudget,
     setTokenBudget,
@@ -1041,6 +1273,8 @@ export function useChatSessionState({
     scrollContainerRef,
     scrollToBottom,
     scrollToBottomAndReset,
+    scheduleScrollToBottom,
+    pauseScrollFollowing,
     isNearBottom,
     handleScroll,
   };

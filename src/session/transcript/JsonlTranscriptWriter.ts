@@ -1,21 +1,24 @@
-import { randomUUID } from "node:crypto";
-import { mkdir, appendFile } from "node:fs/promises";
 import { basename, dirname, join, relative } from "node:path";
 import type { CanonicalMessage } from "../../model/index.js";
 import type { AgentTurnResult } from "../../agent/protocol/result.js";
+import { JsonlSessionEventStore } from "../events/JsonlSessionEventStore.js";
+import { SessionRuntime } from "../events/SessionRuntime.js";
+import type { SessionEventDraft, SessionEventStore } from "../events/SessionEventStore.js";
 import {
   classifyDurableMessageEntry,
   truncatePreview,
   SUBAGENT_PROMPT_PREVIEW_BYTES,
   SUBAGENT_SUMMARY_PREVIEW_BYTES,
   type AgentControlBoundaryTranscriptEntry,
+  type AgentFileSnapshotRecordedTranscriptEntry,
   type AgentMessageTranscriptEntry,
   type AgentSubagentCompletedTranscriptEntry,
-  type AgentSubagentStartedTranscriptEntry,
   type AgentTranscriptEntry,
+  type FileHistorySnapshotRecord,
   type SessionMetadataValue,
 } from "./TranscriptEntry.js";
 import type { AgentTranscriptWriter, AgentTranscriptWriterState } from "./TranscriptWriter.js";
+import type { FileArtifact } from "../artifacts/FileArtifact.js";
 
 export type SubagentTranscriptHandle = {
   /** UUID v4 of the subagent (matches sidechain filename). */
@@ -29,6 +32,14 @@ export type SubagentTranscriptHandle = {
 export type JsonlTranscriptWriterOptions = {
   path: string;
   now?: () => Date;
+  uuid?: () => string;
+  eventStore?: SessionEventStore;
+  /**
+   * Optional durable append sink. When supplied, entries are serialized by
+   * this writer but persisted by the owning host instead of the local JSONL
+   * file. The sink must provide atomic append semantics for its key.
+   */
+  appendEntry?: (path: string, entry: AgentTranscriptEntry) => void | Promise<void>;
   /**
    * Optional resolver mapping a subagentId → absolute sidechain path. Wired
    * by the parent session so {@link JsonlTranscriptWriter#forSubagent} can
@@ -39,13 +50,29 @@ export type JsonlTranscriptWriterOptions = {
 };
 
 export class JsonlTranscriptWriter implements AgentTranscriptWriter {
-  private sequence = 0;
-  private writeChain: Promise<void> = Promise.resolve();
-  private lastEntryId: string | null = null;
+  private readonly eventStore: SessionEventStore;
   private readonly now: () => Date;
+  private writeTail: Promise<void> = Promise.resolve();
+  private closed = false;
 
   constructor(private readonly options: JsonlTranscriptWriterOptions) {
     this.now = options.now ?? (() => new Date());
+    if (options.eventStore) {
+      this.eventStore = options.eventStore;
+    } else if (options.appendEntry) {
+      const eventStore = new SessionRuntime({ now: this.now, uuid: options.uuid });
+      eventStore.subscribe(
+        (entry) => options.appendEntry!(options.path, entry),
+        { failureMode: "propagate" },
+      );
+      this.eventStore = eventStore;
+    } else {
+      this.eventStore = new JsonlSessionEventStore({
+        path: options.path,
+        now: this.now,
+        uuid: options.uuid,
+      });
+    }
   }
 
   /**
@@ -55,46 +82,83 @@ export class JsonlTranscriptWriter implements AgentTranscriptWriter {
    * existing entries.
    */
   restoreState(maxSequence: number, lastEntryId: string | null): void {
-    this.sequence = maxSequence;
-    this.lastEntryId = lastEntryId;
+    this.eventStore.restoreState({ sequence: maxSequence, lastEntryId });
   }
 
   snapshotState(): AgentTranscriptWriterState {
-    return {
-      sequence: this.sequence,
-      lastEntryId: this.lastEntryId,
-    };
+    return this.eventStore.snapshotState();
   }
 
-  recordAcceptedInput(sessionId: string, turnId: string, messages: CanonicalMessage[]): Promise<void> {
-    return this.recordEntry({
+  recordSessionEvent(sessionId: string, turnId: string, event: SessionEventDraft): Promise<void> {
+    return this.append(sessionId, turnId, event);
+  }
+
+  recordAcceptedInput(
+    sessionId: string,
+    turnId: string,
+    messages: CanonicalMessage[],
+    metadata?: Record<string, unknown>,
+  ): Promise<void> {
+    return this.append(sessionId, turnId, {
       type: "accepted_input",
-      ...this.baseEntry(sessionId, turnId),
       messages,
+      ...(metadata && Object.keys(metadata).length > 0 ? { metadata } : {}),
     });
   }
 
   recordDurableMessage(sessionId: string, turnId: string, message: CanonicalMessage): Promise<void> {
     const type: AgentMessageTranscriptEntry["type"] = classifyDurableMessageEntry(message);
-    return this.recordEntry({
+    return this.append(sessionId, turnId, {
       type,
-      ...this.baseEntry(sessionId, turnId),
       message,
     });
   }
 
+  recordAgentStatusMessage(
+    sessionId: string,
+    turnId: string,
+    status: { event: string; kind: "status" | "error"; text: string; detail?: Record<string, unknown> },
+  ): Promise<void> {
+    return this.append(sessionId, turnId, {
+      type: "agent_status_message",
+      event: status.event,
+      kind: status.kind,
+      text: status.text,
+      ...(status.detail && Object.keys(status.detail).length > 0 ? { detail: status.detail } : {}),
+    });
+  }
+
+  recordFileArtifacts(sessionId: string, turnId: string, artifacts: FileArtifact[]): Promise<void> {
+    if (artifacts.length === 0) return Promise.resolve();
+    return this.append(sessionId, turnId, {
+      type: "file_artifacts",
+      artifacts,
+    });
+  }
+
+  recordFileHistorySnapshot(
+    sessionId: string,
+    turnId: string,
+    snapshot: FileHistorySnapshotRecord,
+    snapshotKind: "create" | "update",
+  ): Promise<void> {
+    return this.append(sessionId, turnId, {
+      type: "file_snapshot_recorded",
+      snapshotKind,
+      ...snapshot,
+    });
+  }
+
   recordTurnResult(sessionId: string, turnId: string, result: AgentTurnResult): Promise<void> {
-    return this.recordEntry({
+    return this.append(sessionId, turnId, {
       type: "turn_result",
-      ...this.baseEntry(sessionId, turnId),
       result,
     });
   }
 
   recordSessionMetadata(sessionId: string, turnId: string, metadata: SessionMetadataValue): Promise<void> {
-    return this.recordEntry({
+    return this.append(sessionId, turnId, {
       type: "session_metadata",
-      ...this.baseEntry(sessionId, turnId),
       metadata,
     });
   }
@@ -104,21 +168,44 @@ export class JsonlTranscriptWriter implements AgentTranscriptWriter {
     turnId: string,
     boundary: AgentControlBoundaryTranscriptEntry["boundary"],
   ): Promise<void> {
-    return this.recordEntry({
+    return this.append(sessionId, turnId, {
       type: "control_boundary",
-      ...this.baseEntry(sessionId, turnId),
       boundary,
     });
   }
 
-  recordEntry(entry: AgentTranscriptEntry): Promise<void> {
-    this.sequence = Math.max(this.sequence, entry.sequence);
-    this.lastEntryId = entry.entryId ?? this.lastEntryId;
-    this.writeChain = this.writeChain.then(async () => {
-      await mkdir(dirname(this.options.path), { recursive: true, mode: 0o700 });
-      await appendFile(this.options.path, `${JSON.stringify(entry)}\n`, { encoding: "utf8", mode: 0o600 });
+  recordCompactionReplacement(
+    sessionId: string,
+    turnId: string,
+    boundary: Extract<AgentControlBoundaryTranscriptEntry["boundary"], { kind: "compact"; subtype: "compact_boundary" }>,
+    messages: CanonicalMessage[],
+  ): Promise<void> {
+    return this.append(sessionId, turnId, {
+      type: "control_boundary",
+      boundary: {
+        ...boundary,
+        snapshot: { version: 1, messages: messages.map((message) => structuredClone(message)) },
+      },
     });
-    return this.writeChain;
+  }
+
+  recordEntry(entry: AgentTranscriptEntry): Promise<void> {
+    const stableEntry = structuredClone(entry);
+    return this.enqueueWrite(() => this.eventStore.appendRecorded(stableEntry));
+  }
+
+  recordFileSnapshot(
+    sessionId: string,
+    turnId: string,
+    snapshot: Omit<AgentFileSnapshotRecordedTranscriptEntry, "type" | "sessionId" | "turnId" | "sequence" | "createdAt" | "entryId" | "parentEntryId">,
+  ): Promise<void> {
+    return this.append(sessionId, turnId, { type: "file_snapshot_recorded", ...snapshot });
+  }
+
+  async close(): Promise<void> {
+    this.closed = true;
+    await this.writeTail.catch(() => undefined);
+    await this.eventStore.flush();
   }
 
   /**
@@ -138,17 +225,15 @@ export class JsonlTranscriptWriter implements AgentTranscriptWriter {
     },
   ): Promise<void> {
     const { preview, truncated } = truncatePreview(args.prompt, SUBAGENT_PROMPT_PREVIEW_BYTES);
-    const entry: AgentSubagentStartedTranscriptEntry = {
+    return this.append(sessionId, turnId, {
       type: "subagent_started",
-      ...this.baseEntry(sessionId, turnId),
       subagentId: args.subagentId,
       subagentType: args.subagentType,
       promptPreview: preview,
       promptTruncated: truncated,
       transcriptRelativePath: args.transcriptRelativePath,
       subagentSessionId: args.subagentSessionId,
-    };
-    return this.recordEntry(entry);
+    });
   }
 
   /** C3.S1 — record the parent-side `subagent_completed` reference. */
@@ -166,9 +251,8 @@ export class JsonlTranscriptWriter implements AgentTranscriptWriter {
     },
   ): Promise<void> {
     const { preview, truncated } = truncatePreview(args.summary, SUBAGENT_SUMMARY_PREVIEW_BYTES);
-    const entry: AgentSubagentCompletedTranscriptEntry = {
+    return this.append(sessionId, turnId, {
       type: "subagent_completed",
-      ...this.baseEntry(sessionId, turnId),
       subagentId: args.subagentId,
       subagentType: args.subagentType,
       summaryPreview: preview,
@@ -177,8 +261,7 @@ export class JsonlTranscriptWriter implements AgentTranscriptWriter {
       turns: args.turns,
       durationMs: args.durationMs,
       errored: args.errored,
-    };
-    return this.recordEntry(entry);
+    });
   }
 
   /**
@@ -190,7 +273,12 @@ export class JsonlTranscriptWriter implements AgentTranscriptWriter {
     const path =
       this.options.subagentTranscriptPath?.(subagentId) ??
       defaultSubagentPath(this.options.path, subagentId);
-    const writer = new JsonlTranscriptWriter({ path, now: now ?? this.now });
+    const writer = new JsonlTranscriptWriter({
+      path,
+      now: now ?? this.now,
+      uuid: this.options.uuid,
+      ...(this.options.appendEntry ? { appendEntry: this.options.appendEntry } : {}),
+    });
     return { subagentId, writer, transcriptPath: path };
   }
 
@@ -206,18 +294,18 @@ export class JsonlTranscriptWriter implements AgentTranscriptWriter {
     return relative(dirname(this.options.path), sidechain);
   }
 
-  private baseEntry(
-    sessionId: string,
-    turnId: string,
-  ): Pick<AgentTranscriptEntry, "sessionId" | "turnId" | "sequence" | "createdAt" | "entryId" | "parentEntryId"> {
-    return {
-      sessionId,
-      turnId,
-      sequence: ++this.sequence,
-      createdAt: this.now().toISOString(),
-      entryId: randomUUID(),
-      parentEntryId: this.lastEntryId,
-    };
+  private append(sessionId: string, turnId: string, event: SessionEventDraft): Promise<void> {
+    // Capture before queuing IO. Compaction callers can release or reuse the
+    // source message array as soon as this method returns.
+    const stableEvent = structuredClone(event);
+    return this.enqueueWrite(() => this.eventStore.append(sessionId, turnId, stableEvent).then(() => undefined));
+  }
+
+  private enqueueWrite(operation: () => Promise<void>): Promise<void> {
+    if (this.closed) return Promise.resolve();
+    const write = this.writeTail.then(() => this.closed ? undefined : operation());
+    this.writeTail = write.then(() => undefined, () => undefined);
+    return write;
   }
 }
 

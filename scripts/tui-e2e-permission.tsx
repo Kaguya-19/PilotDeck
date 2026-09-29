@@ -26,8 +26,22 @@ const noop = async () => {};
 const stub = <T,>(v: T) => async () => v;
 
 class MockGateway implements Gateway {
+  async steerTurn(): Promise<{ accepted: boolean; reason?: "no_active_turn" }> {
+    return { accepted: false, reason: "no_active_turn" };
+  }
+  async cancelSteer(): Promise<{ cancelled: boolean; reason?: "no_active_turn" }> {
+    return { cancelled: false, reason: "no_active_turn" };
+  }
   private pending = new Map<string, PendingPermission>();
   private aborted = false;
+
+  async replaceLastTurn(): Promise<never> {
+    throw new Error("replaceLastTurn is not used by this TUI test.");
+  }
+
+  async finalizeLastTurnReplacement(): Promise<never> {
+    throw new Error("finalizeLastTurnReplacement is not used by this TUI test.");
+  }
 
   async *submitTurn(input: GatewaySubmitTurnInput): AsyncIterable<GatewayEvent> {
     this.aborted = false;
@@ -91,13 +105,16 @@ class MockGateway implements Gateway {
   describeServer = stub({ mode: "in_process" as const });
   cronCreate = stub({ taskId: "c", task: {} as any, created: true }) as unknown as Gateway["cronCreate"];
   cronList = stub({ tasks: [] }) as Gateway["cronList"];
+  cronUpdate = stub({ updated: false, reason: "not_found" }) as Gateway["cronUpdate"];
   cronDelete = stub({ deleted: true }) as Gateway["cronDelete"];
   cronStop = stub({ stopped: true }) as Gateway["cronStop"];
   cronRunNow = stub({ triggered: true }) as unknown as Gateway["cronRunNow"];
   respondElicitation = stub({ delivered: false }) as Gateway["respondElicitation"];
+  respondUserDialog = stub({ delivered: false }) as Gateway["respondUserDialog"];
   grantSessionPermission = stub({ granted: false }) as Gateway["grantSessionPermission"];
   readSessionMessages = stub({ messages: [], hasMore: false, session: {} as any }) as unknown as Gateway["readSessionMessages"];
   readSubagentMessages = stub({ messages: [], total: 0 }) as unknown as Gateway["readSubagentMessages"];
+  forkSession = stub({ newSessionKey: "web:s_fork", prefillText: "", carriedMessageCount: 0 }) as unknown as Gateway["forkSession"];
   listProjects = stub({ projects: [] }) as Gateway["listProjects"];
   describeProject = stub({ projectKey: "", name: "", root: "", fullPath: "", sessionCount: 0 }) as unknown as Gateway["describeProject"];
 }

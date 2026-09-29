@@ -15,6 +15,12 @@ import type {
   PilotDeckMcpServerSpec,
   PilotDeckMcpToolSpec,
 } from "../protocol/types.js";
+import type {
+  McpRuntimeFactory,
+  McpRuntimePort,
+  McpRuntimeServerInfo,
+  McpToolCallResult,
+} from "./McpRuntimePort.js";
 
 export type McpRuntimeOptions = {
   /** Max parallel `connect()` calls during `start()`. M4. Default 5. */
@@ -23,7 +29,7 @@ export type McpRuntimeOptions = {
   clientOptions?: McpClientOptions;
 };
 
-export class McpRuntime {
+export class McpRuntime implements McpRuntimePort {
   private readonly clients = new Map<string, McpClient>();
   private readonly options: Required<Pick<McpRuntimeOptions, "connectConcurrency">> &
     Pick<McpRuntimeOptions, "clientOptions">;
@@ -76,6 +82,30 @@ export class McpRuntime {
     return this.clients.get(serverId);
   }
 
+  getServerInfo(serverId: string): McpRuntimeServerInfo | undefined {
+    const spec = this.clients.get(serverId)?.spec;
+    if (!spec) return undefined;
+    return {
+      transport: spec.transport,
+      ...(spec.transport === "stdio" && spec.cwd ? { cwd: spec.cwd } : {}),
+    };
+  }
+
+  async callTool(
+    serverId: string,
+    toolName: string,
+    input: unknown,
+    options: { signal?: AbortSignal; timeoutMs?: number } = {},
+  ): Promise<McpToolCallResult> {
+    const client = this.clients.get(serverId);
+    if (!client) {
+      const error = new Error(`MCP server ${serverId} is not registered`) as Error & { code?: string };
+      error.code = "mcp_server_not_registered";
+      throw error;
+    }
+    return await client.callTool(toolName, input, options);
+  }
+
   async stop(): Promise<void> {
     await Promise.all([...this.clients.values()].map((c) => c.close()));
   }
@@ -115,3 +145,6 @@ export class McpRuntime {
     }));
   }
 }
+
+/** Native MCP runtime provider selected by local Gateway composition. */
+export const createNativeMcpRuntime: McpRuntimeFactory = (servers) => new McpRuntime(servers);

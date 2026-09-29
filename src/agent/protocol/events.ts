@@ -1,12 +1,14 @@
-import type { CanonicalMessage, CanonicalModelEvent, CanonicalToolCall } from "../../model/index.js";
+import type { TimelinePosition, StreamBoundary } from "../../model/protocol/timeline.js";
+import type { CanonicalMessage, CanonicalModelError, CanonicalModelEvent, CanonicalToolCall } from "../../model/index.js";
 import type { PilotDeckToolResult } from "../../tool/index.js";
 import type { AgentError } from "./errors.js";
 import type { AgentTurnResult } from "./result.js";
 import type { AgentLoopTransition } from "./state.js";
 import type { TokenBudgetSnapshot } from "../../context/budget/TokenBudgetManager.js";
 import type { RouterRetryProgressEvent } from "../../router/protocol/events.js";
+import type { FileArtifact } from "../../session/artifacts/FileArtifact.js";
 
-export type AgentEvent =
+export type AgentEvent = { timeline?: TimelinePosition; streamBoundary?: StreamBoundary; moduleId?: string } & (
   | { type: "session_started"; sessionId: string }
   | { type: "session_ended"; sessionId: string; reason: string }
   | { type: "turn_started"; sessionId: string; turnId: string }
@@ -14,24 +16,115 @@ export type AgentEvent =
   | { type: "user_prompt_submitted"; sessionId: string; turnId: string; prompt: string }
   | { type: "setup_completed"; sessionId: string }
   | { type: "model_request_started"; sessionId: string; turnId: string; model: string; provider: string }
-  | { type: "model_event"; sessionId: string; turnId: string; event: CanonicalModelEvent }
+  | { type: "model_event"; sessionId: string; turnId: string; event: CanonicalModelEvent; blockId?: string }
   | { type: "instructions_loaded"; sessionId: string; turnId: string; hasSystemPrompt: boolean }
   | { type: "assistant_message"; sessionId: string; turnId: string; message: CanonicalMessage }
+  /** Gateway-owned, opt-in post-turn suggestion; never persisted as conversation state. */
+  | { type: "prompt_suggestion"; sessionId: string; turnId: string; suggestion: string }
+  | { type: "steer_applied"; sessionId: string; turnId: string; itemId: string; message: CanonicalMessage }
+  | { type: "steer_unapplied"; sessionId: string; turnId: string; itemId: string; reason: "turn_ended" }
   | { type: "tool_calls_detected"; sessionId: string; turnId: string; calls: CanonicalToolCall[] }
   | { type: "pre_tool_execute"; sessionId: string; turnId: string; toolCallId: string; toolName: string }
   | { type: "post_tool_execute"; sessionId: string; turnId: string; toolCallId: string; toolName: string; success: boolean }
+  /** Transient incremental tool output; deliberately excluded from transcripts. */
+  | {
+      type: "tool_progress";
+      sessionId: string;
+      turnId: string;
+      toolCallId: string;
+      toolName: string;
+      message: string;
+      metadata?: Record<string, unknown>;
+      createdAt: string;
+    }
   | { type: "permission_requested"; sessionId: string; turnId: string; toolCallId: string; toolName: string }
   | { type: "permission_denied"; sessionId: string; turnId: string; toolName: string; reason: string }
   | { type: "tool_result"; sessionId: string; turnId: string; result: PilotDeckToolResult }
   | { type: "tool_results_projected"; sessionId: string; turnId: string; message: CanonicalMessage }
+  | { type: "file_artifacts"; sessionId: string; turnId: string; artifacts: FileArtifact[] }
   | { type: "mode_change_requested"; sessionId: string; turnId: string; mode: string }
   | { type: "stop_requested"; sessionId: string; turnId: string }
   | { type: "stop_failure"; sessionId: string; turnId: string; error: string }
-  | { type: "compact_started"; sessionId: string; turnId: string; trigger: string; preTokens: number }
-  | { type: "compact_completed"; sessionId: string; turnId: string; status: string; preTokens: number; postTokens?: number }
+  | {
+      type: "compact_started";
+      sessionId: string;
+      turnId: string;
+      compactionId: string;
+      trigger: string;
+      preTokens: number;
+    }
+  | {
+      type: "compact_completed";
+      sessionId: string;
+      turnId: string;
+      compactionId: string;
+      trigger: string;
+      status: string;
+      preTokens: number;
+      postTokens?: number;
+      messagesSummarized?: number;
+      cacheReset?: boolean;
+      cacheReadTokens?: number;
+      cacheWriteTokens?: number;
+    }
   | { type: "context_budget"; sessionId: string; turnId: string; snapshot: TokenBudgetSnapshot }
+  | { type: "warning"; sessionId: string; turnId: string; code: string; message: string; metadata?: Record<string, unknown> }
+  | {
+      type: "agent_status";
+      sessionId: string;
+      turnId: string;
+      event: string;
+      kind?: "status" | "error";
+      text?: string;
+      detail?: Record<string, unknown>;
+    }
+  | {
+      type: "token_cap_adjusted";
+      sessionId: string;
+      turnId: string;
+      provider: string;
+      model: string;
+      cap: "context" | "output";
+      previous?: number;
+      next: number;
+      reason: string;
+    }
+  | {
+      type: "empty_output_recovery";
+      sessionId: string;
+      turnId: string;
+      provider: string;
+      model: string;
+      finishReason: string;
+      previousMaxOutputTokens?: number;
+      nextMaxOutputTokens?: number;
+    }
+  | { type: "model_recovery_failed"; sessionId: string; turnId: string; provider: string; model: string; error: CanonicalModelError }
   | { type: "subagent_started"; sessionId: string; turnId: string; subagentId: string; subagentType: string; toolCallId?: string }
-  | { type: "subagent_completed"; sessionId: string; turnId: string; subagentId: string; subagentType: string; success: boolean; durationMs: number }
+  | {
+      type: "subagent_completed";
+      sessionId: string;
+      turnId: string;
+      subagentId: string;
+      subagentType: string;
+      success: boolean;
+      aborted?: boolean;
+      durationMs: number;
+    }
+  /** Detached read-only report from an AgentDefinition observer. */
+  | {
+      type: "observer_report";
+      sessionId: string;
+      turnId: string;
+      observedSubagentId: string;
+      observedSubagentType: string;
+      observerSubagentId: string;
+      observerSubagentType: string;
+      success: boolean;
+      report?: string;
+      error?: string;
+      durationMs: number;
+    }
   | {
       type: "subagent_status";
       sessionId: string;
@@ -44,7 +137,7 @@ export type AgentEvent =
       success?: boolean;
       durationMs?: number;
     }
-  | { type: "subagent_model_event"; sessionId: string; turnId: string; subagentId: string; subagentType: string; event: CanonicalModelEvent }
+  | { type: "subagent_model_event"; sessionId: string; turnId: string; subagentId: string; subagentType: string; event: CanonicalModelEvent; blockId?: string }
   | { type: "subagent_tool_calls_detected"; sessionId: string; turnId: string; subagentId: string; subagentType: string; calls: CanonicalToolCall[] }
   | { type: "subagent_tool_result"; sessionId: string; turnId: string; subagentId: string; subagentType: string; result: PilotDeckToolResult }
   | { type: "elicitation_requested"; sessionId: string; turnId: string; requestId: string; toolName: string }
@@ -53,7 +146,7 @@ export type AgentEvent =
   | { type: "turn_completed"; sessionId: string; turnId: string; result: AgentTurnResult }
   | { type: "turn_failed"; sessionId: string; turnId: string; error: AgentError }
   | { type: "retry_progress"; sessionId: string; turnId: string; detail: RouterRetryProgressEvent }
-  | { type: "session_aborted"; sessionId: string; reason?: string };
+  | { type: "session_aborted"; sessionId: string; reason?: string });
 
 export type AgentEventEmitter = (event: AgentEvent) => void;
 

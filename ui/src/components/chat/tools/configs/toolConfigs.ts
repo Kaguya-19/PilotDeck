@@ -1,3 +1,4 @@
+import i18n, { type TFunction } from 'i18next';
 /**
  * Centralized tool configuration registry
  * Defines display behavior for all tool types 
@@ -47,6 +48,13 @@ type ParsedTodoItem = {
   status: 'pending' | 'in_progress' | 'completed';
 };
 
+type SearchToolResultData = {
+  files?: unknown;
+  filenames?: unknown;
+  count?: unknown;
+  numFiles?: unknown;
+};
+
 const TODO_LINE_PATTERN = /^\s*[-*]\s+\[( |x|X)\]\s+(.*?)\s*$/u;
 
 function parseTodoMarkdown(markdown: unknown): ParsedTodoItem[] {
@@ -85,7 +93,28 @@ function parseTodoMarkdown(markdown: unknown): ParsedTodoItem[] {
   });
 }
 
-export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
+export function getSearchToolResultFiles(result: unknown): unknown[] {
+  const toolData = ((result as { toolUseResult?: SearchToolResultData } | undefined)?.toolUseResult || {}) as SearchToolResultData;
+  if (Array.isArray(toolData.files)) return toolData.files;
+  if (Array.isArray(toolData.filenames)) return toolData.filenames;
+  return [];
+}
+
+export function getSearchToolResultCount(result: unknown): number {
+  const toolData = ((result as { toolUseResult?: SearchToolResultData } | undefined)?.toolUseResult || {}) as SearchToolResultData;
+  if (typeof toolData.count === 'number') return toolData.count;
+  if (typeof toolData.numFiles === 'number') return toolData.numFiles;
+  return getSearchToolResultFiles(result).length;
+}
+
+export function getSearchToolResultFileCount(result: unknown): number {
+  const toolData = ((result as { toolUseResult?: SearchToolResultData } | undefined)?.toolUseResult || {}) as SearchToolResultData;
+  if (typeof toolData.numFiles === 'number') return toolData.numFiles;
+  return getSearchToolResultFiles(result).length;
+}
+
+function createToolConfigs(t: TFunction): Record<string, ToolDisplayConfig> {
+  return {
   // ============================================================================
   // COMMAND TOOLS
   // ============================================================================
@@ -111,9 +140,9 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
       type: 'collapsible',
       title: (data) => {
         const content = typeof data === 'string' ? data : data?.content;
-        if (!content) return 'Output (empty)';
+        if (!content) return t('common:uiText.emptyOutput');
         const lines = content.split('\n').length;
-        return `Output (${lines} line${lines > 1 ? 's' : ''})`;
+        return t('common:uiText.outputLines', { count: lines });
       },
       defaultOpen: false,
       contentType: 'text',
@@ -224,7 +253,7 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
       type: 'one-line',
       label: 'Grep',
       getValue: (input) => input.pattern,
-      getSecondary: (input) => input.path ? `in ${input.path}` : undefined,
+      getSecondary: (input) => input.path ? t('common:uiText.inPath', { path: input.path }) : undefined,
       action: 'jump-to-results',
       colorScheme: {
         primary: 'text-gray-700 dark:text-gray-300',
@@ -238,15 +267,13 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
       type: 'collapsible',
       defaultOpen: false,
       title: (result) => {
-        const toolData = result.toolUseResult || {};
-        const count = toolData.numFiles || toolData.filenames?.length || 0;
-        return `Found ${count} ${count === 1 ? 'file' : 'files'}`;
+        const count = getSearchToolResultFileCount(result);
+        return t('common:uiText.foundFiles', { count });
       },
       contentType: 'file-list',
       getContentProps: (result) => {
-        const toolData = result.toolUseResult || {};
         return {
-          files: toolData.filenames || []
+          files: getSearchToolResultFiles(result)
         };
       }
     }
@@ -257,7 +284,7 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
       type: 'one-line',
       label: 'Glob',
       getValue: (input) => input.pattern,
-      getSecondary: (input) => input.path ? `in ${input.path}` : undefined,
+      getSecondary: (input) => input.path ? t('common:uiText.inPath', { path: input.path }) : undefined,
       action: 'jump-to-results',
       colorScheme: {
         primary: 'text-gray-700 dark:text-gray-300',
@@ -271,15 +298,13 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
       type: 'collapsible',
       defaultOpen: false,
       title: (result) => {
-        const toolData = result.toolUseResult || {};
-        const count = toolData.numFiles || toolData.filenames?.length || 0;
-        return `Found ${count} ${count === 1 ? 'file' : 'files'}`;
+        const count = getSearchToolResultCount(result);
+        return t('common:uiText.foundFiles', { count });
       },
       contentType: 'file-list',
       getContentProps: (result) => {
-        const toolData = result.toolUseResult || {};
         return {
-          files: toolData.filenames || []
+          files: getSearchToolResultFiles(result)
         };
       }
     }
@@ -292,7 +317,7 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
   TodoWrite: {
     input: {
       type: 'collapsible',
-      title: 'Updating todo list',
+      title: () => t('common:uiText.updatingTodos'),
       defaultOpen: false,
       contentType: 'todo-list',
       getContentProps: (input) => ({
@@ -309,7 +334,7 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
   todo_write: {
     input: {
       type: 'collapsible',
-      title: 'Updating todo list',
+      title: () => t('common:uiText.updatingTodos'),
       defaultOpen: false,
       contentType: 'todo-list',
       getContentProps: (input) => ({
@@ -327,7 +352,7 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
     input: {
       type: 'one-line',
       label: 'TodoRead',
-      getValue: () => 'reading list',
+      getValue: () => t('common:uiText.readingList'),
       action: 'none',
       colorScheme: {
         primary: 'text-gray-500 dark:text-gray-400',
@@ -361,7 +386,7 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
     input: {
       type: 'one-line',
       label: 'CronCreate',
-      getValue: (input) => input.prompt || 'schedule job',
+      getValue: (input) => input.prompt || t('common:uiText.scheduleJob'),
       getSecondary: (input) => {
         const cadence = input.recurring === false ? 'one-shot' : 'recurring';
         const storage = input.durable ? 'durable' : 'session';
@@ -398,7 +423,7 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
     input: {
       type: 'one-line',
       label: 'CronDelete',
-      getValue: (input) => input.id || 'cancel scheduled job',
+      getValue: (input) => input.id || t('common:uiText.cancelJob'),
       action: 'none',
       colorScheme: {
         primary: 'text-gray-700 dark:text-gray-300',
@@ -412,7 +437,7 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
       title: (result) => {
         const toolData = result?.toolUseResult || {};
         const job = toolData.data || toolData;
-        return job.id ? `Cancelled ${job.id}` : 'Cancelled scheduled job';
+        return job.id ? t('common:uiText.cancelledJobId', { id: job.id }) : t('common:uiText.cancelledJob');
       },
       contentType: 'text',
       getContentProps: (result) => ({
@@ -426,7 +451,7 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
     input: {
       type: 'one-line',
       label: 'CronList',
-      getValue: () => 'listing scheduled jobs',
+      getValue: () => t('common:uiText.listingJobs'),
       action: 'none',
       colorScheme: {
         primary: 'text-gray-700 dark:text-gray-300',
@@ -441,7 +466,7 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
         const toolData = result?.toolUseResult || {};
         const jobs = toolData.data?.jobs || toolData.jobs || [];
         const count = Array.isArray(jobs) ? jobs.length : 0;
-        return `${count} scheduled ${count === 1 ? 'job' : 'jobs'}`;
+        return t('common:uiText.scheduledJobs', { count });
       },
       contentType: 'text',
       getContentProps: (result) => ({
@@ -459,8 +484,8 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
     input: {
       type: 'one-line',
       label: 'Task',
-      getValue: (input) => input.subject || 'Creating task',
-      getSecondary: (input) => input.status || undefined,
+      getValue: (input) => input.subject || t('common:uiText.creatingTask'),
+      getSecondary: (input) => input.status ? t(`common:uiText.taskStatus.${input.status}`, { defaultValue: input.status }) : undefined,
       action: 'none',
       colorScheme: {
         primary: 'text-gray-700 dark:text-gray-300',
@@ -480,9 +505,9 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
       getValue: (input) => {
         const parts = [];
         if (input.taskId) parts.push(`#${input.taskId}`);
-        if (input.status) parts.push(input.status);
+        if (input.status) parts.push(t(`common:uiText.taskStatus.${input.status}`, { defaultValue: input.status }));
         if (input.subject) parts.push(`"${input.subject}"`);
-        return parts.join(' → ') || 'updating';
+        return parts.join(' → ') || t('common:uiText.updating');
       },
       action: 'none',
       colorScheme: {
@@ -500,7 +525,7 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
     input: {
       type: 'one-line',
       label: 'Tasks',
-      getValue: () => 'listing tasks',
+      getValue: () => t('common:uiText.listingTasks'),
       action: 'none',
       colorScheme: {
         primary: 'text-gray-500 dark:text-gray-400',
@@ -511,7 +536,7 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
     result: {
       type: 'collapsible',
       defaultOpen: true,
-      title: 'Task list',
+      title: () => t('common:uiText.taskList'),
       contentType: 'task',
       getContentProps: (result) => ({
         content: String(result?.content || '')
@@ -523,7 +548,7 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
     input: {
       type: 'one-line',
       label: 'Task',
-      getValue: (input) => input.taskId ? `#${input.taskId}` : 'fetching',
+      getValue: (input) => input.taskId ? `#${input.taskId}` : t('common:uiText.fetching'),
       action: 'none',
       colorScheme: {
         primary: 'text-gray-700 dark:text-gray-300',
@@ -534,7 +559,7 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
     result: {
       type: 'collapsible',
       defaultOpen: true,
-      title: 'Task details',
+      title: () => t('common:uiText.taskDetails'),
       contentType: 'task',
       getContentProps: (result) => ({
         content: String(result?.content || '')
@@ -551,8 +576,8 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
       type: 'collapsible',
       title: (input) => {
         const subagentType = input.subagent_type || 'Agent';
-        const description = input.description || 'Running task';
-        return `Subagent / ${subagentType}: ${description}`;
+        const description = input.description || t('common:uiText.runningTask');
+        return t('common:uiText.subagentTitle', { type: subagentType, description });
       },
       defaultOpen: false,
       contentType: 'markdown',
@@ -595,7 +620,7 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
     },
     result: {
       type: 'collapsible',
-      title: 'Subagent result',
+      title: () => t('common:uiText.subagentResult'),
       defaultOpen: false,
       contentType: 'markdown',
       getContentProps: (result) => {
@@ -620,12 +645,12 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
               .filter((item: any) => item.type === 'text')
               .map((item: any) => item.text)
               .join('\n\n');
-            return { content: textContent || 'No response text' };
+            return { content: textContent || t('common:uiText.noResponseText') };
           }
           return { content: String(content) };
         }
         // Fallback to string representation
-        return { content: String(result || 'No response') };
+        return { content: String(result || t('common:uiText.noResponse')) };
       }
     }
   },
@@ -648,13 +673,13 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
           !Array.isArray(answers) &&
           Object.keys(answers).length > 0;
         if (count === 1) {
-          const header = questions[0]?.header || 'Question';
-          return hasAnswers ? `${header} — answered` : header;
+          const header = questions[0]?.header || t('common:uiText.question');
+          return hasAnswers ? t('common:uiText.answeredHeader', { header }) : header;
         }
         if (count === 0 && input.questions) {
-          return 'Question payload';
+          return t('common:uiText.questionPayload');
         }
-        return hasAnswers ? `${count} questions — answered` : `${count} questions`;
+        return hasAnswers ? t('common:uiText.answeredQuestions', { count }) : t('common:uiText.questionsCount', { count });
       },
       defaultOpen: true,
       contentType: 'question-answer',
@@ -712,7 +737,7 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
   Default: {
     input: {
       type: 'collapsible',
-      title: 'Parameters',
+      title: () => t('common:uiText.parameters'),
       defaultOpen: false,
       contentType: 'text',
       getContentProps: (input) => ({
@@ -730,6 +755,12 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
     }
   }
 };
+
+}
+
+// The application initializes the shared instance; this registry has no initialization side effects.
+export const TOOL_CONFIGS = createToolConfigs(((...args: Parameters<TFunction>) => i18n.t(...args)) as TFunction);
+const translatedConfigs = new WeakMap<TFunction, Record<string, ToolDisplayConfig>>();
 
 const TOOL_NAME_ALIASES: Record<string, string> = {
   agent: 'Task',
@@ -749,9 +780,14 @@ export function getCanonicalToolName(toolName: string): string {
 /**
  * Get configuration for a tool, with fallback to default
  */
-export function getToolConfig(toolName: string): ToolDisplayConfig {
+export function getToolConfig(toolName: string, t?: TFunction): ToolDisplayConfig {
+  let configs = TOOL_CONFIGS;
+  if (t) {
+    configs = translatedConfigs.get(t) ?? createToolConfigs(t);
+    translatedConfigs.set(t, configs);
+  }
   const canonicalToolName = getCanonicalToolName(toolName);
-  return TOOL_CONFIGS[canonicalToolName] || TOOL_CONFIGS.Default;
+  return configs[canonicalToolName] || configs.Default;
 }
 
 /**
@@ -762,8 +798,10 @@ export function shouldHideToolResult(toolName: string, toolResult: any): boolean
 
   if (!config.result) return false;
 
-  // Always hidden
-  if (config.result.hidden) return true;
+  // Hide successful noise (for example read_file content already appears in
+  // the model context), but never hide failures: users need the exact tool
+  // error and recovery hint to understand why the turn got stuck.
+  if (config.result.hidden && !toolResult?.isError) return true;
 
   // Hide on success only
   if (config.result.hideOnSuccess && toolResult && !toolResult.isError) {

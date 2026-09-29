@@ -36,6 +36,7 @@ export function startPluginServer(name, pluginDir, serverEntry) {
         PLUGIN_NAME: name,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: process.platform === 'win32',
     });
 
     let resolved = false;

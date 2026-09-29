@@ -1,0 +1,41 @@
+{
+  "status": "passed",
+  "mode": "controlled-scripted-model",
+  "naturalEntry": false,
+  "nativeStaffDeck": false,
+  "graph": {
+    "from": "build_plan",
+    "condition": "no_scope_change",
+    "to": "finalize_plan"
+  },
+  "selectedTransitions": [
+    "no_scope_change"
+  ],
+  "modelCalls": 1,
+  "terminal": {
+    "status": "completed",
+    "activeStep": "finalize_plan"
+  },
+  "eventTypes": [
+    "session_started",
+    "setup_completed",
+    "turn_started",
+    "input_accepted",
+    "user_prompt_submitted",
+    "model_request_started",
+    "model_event",
+    "model_event",
+    "model_event",
+    "model_event",
+    "assistant_message",
+    "tool_calls_detected",
+    "instructions_loaded",
+    "tool_result",
+    "tool_results_projected",
+    "agent_status",
+    "assistant_message",
+    "file_artifacts",
+    "turn_completed",
+    "session_ended"
+  ]
+}

@@ -2,12 +2,9 @@ import fs from 'fs';
 import fsPromises from 'fs/promises';
 import path from 'path';
 import {
-  configToYaml,
   getPilotDeckConfigPath,
-  maskSecrets,
-  rawYamlToMaskedString,
   readPilotDeckConfigFile,
-  validatePilotDeckConfig,
+  serializePilotDeckConfigResponse,
 } from './pilotdeckConfig.js';
 import { reloadPilotDeckConfig } from './pilotdeckConfigReloader.js';
 
@@ -62,20 +59,21 @@ async function handleChange(configPath) {
     return;
   }
 
-  const validation = validatePilotDeckConfig(record.config);
-  // Mirror serializeConfigResponse: emit the masked disk YAML so the
-  // UI's hot-reload sees full router/gateway/adapters/etc. segments
-  // when the file changes from any source (UI save, vim, external tool).
-  const hasDiskYaml = record.rawYaml && typeof record.rawYaml === 'object' && Object.keys(record.rawYaml).length > 0;
-  const maskedRaw = hasDiskYaml ? rawYamlToMaskedString(record.rawYaml) : configToYaml(maskSecrets(record.config));
-
-  if (!validation.valid) {
+  if (record.parseError) {
     onEventHandler?.({
       source: 'watcher',
-      path: record.configPath,
-      raw: maskedRaw,
-      validation: { valid: false, errors: validation.errors, warnings: validation.warnings },
-      reload: null,
+      ...serializePilotDeckConfigResponse(record),
+      timestamp: new Date().toISOString(),
+    });
+    return;
+  }
+
+  const response = serializePilotDeckConfigResponse(record);
+
+  if (!response.validation.valid) {
+    onEventHandler?.({
+      source: 'watcher',
+      ...response,
       timestamp: new Date().toISOString(),
     });
     return;
@@ -87,10 +85,7 @@ async function handleChange(configPath) {
   } catch (error) {
     onEventHandler?.({
       source: 'watcher',
-      path: record.configPath,
-      raw: maskedRaw,
-      validation: { valid: true, errors: [], warnings: validation.warnings },
-      reload: null,
+      ...response,
       error: error instanceof Error ? error.message : String(error),
       timestamp: new Date().toISOString(),
     });
@@ -99,10 +94,7 @@ async function handleChange(configPath) {
 
   onEventHandler?.({
     source: 'watcher',
-    path: record.configPath,
-    raw: maskedRaw,
-    validation: { valid: true, errors: [], warnings: validation.warnings },
-    reload: reloadResult,
+    ...serializePilotDeckConfigResponse(record, reloadResult),
     timestamp: new Date().toISOString(),
   });
 }

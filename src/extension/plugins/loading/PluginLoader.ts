@@ -4,7 +4,8 @@ import { parseHooksConfig } from "../../hooks/config/parseHooksConfig.js";
 import type { PilotDeckPluginManifest } from "../protocol/manifest.js";
 import type { PilotDeckLoadedPlugin, PilotDeckPluginSourceKind } from "../protocol/plugin.js";
 import { parsePluginManifest } from "../config/parsePluginManifest.js";
-import { loadPluginCommands } from "./PluginCommandLoader.js";
+import { loadPluginCommands, loadStandaloneSkill } from "./PluginCommandLoader.js";
+import type { LoadedPluginCommand } from "./PluginCommandLoader.js";
 
 /**
  * Loads a standalone skill directory (containing SKILL.md) as a pseudo-plugin.
@@ -15,13 +16,13 @@ export async function loadSkillFromPath(
   source: PilotDeckPluginSourceKind,
 ): Promise<PilotDeckLoadedPlugin> {
   const name = skillDir.split(/[\\/]/u).at(-1) ?? "skill";
-  const skills = await loadPluginCommands({ pluginName: name, baseDir: skillDir });
+  const skill = await loadStandaloneSkill({ name, skillDir });
   return {
     name,
     path: skillDir,
     source,
     manifest: { name, version: "0.0.0" },
-    skills,
+    skills: [skill],
   };
 }
 
@@ -31,10 +32,11 @@ export async function loadPluginFromPath(
 ): Promise<PilotDeckLoadedPlugin> {
   const manifestPath = join(pluginPath, "plugin.json");
   const manifest = parsePluginManifest(JSON.parse(await readFile(manifestPath, "utf8")) as unknown);
+  const pluginName = pluginPath.split(/[\\/]/u).at(-1) ?? manifest.name;
   const hooksConfig = await loadHooksConfig(pluginPath, manifest);
-  const commands = await loadConfiguredMarkdown(pluginPath, manifest.commands, "commands");
-  const skills = await loadConfiguredMarkdown(pluginPath, manifest.skills, "skills");
-  const outputStyles = await loadConfiguredMarkdown(pluginPath, manifest.outputStyles, "output-styles");
+  const commands = await loadConfiguredMarkdown(pluginPath, manifest.commands, "commands", pluginName);
+  const skills = await loadConfiguredMarkdown(pluginPath, manifest.skills, "skills", pluginName);
+  const outputStyles = await loadConfiguredMarkdown(pluginPath, manifest.outputStyles, "output-styles", pluginName);
 
   return {
     name: manifest.name,
@@ -47,6 +49,23 @@ export async function loadPluginFromPath(
     outputStyles,
     mcpServers: manifest.mcpServers,
     lspServers: manifest.lspServers,
+  };
+}
+
+/** Load only output-style markdown for an existing disk plugin. */
+export async function loadPluginOutputStylesFromPath(
+  pluginPath: string,
+  source: PilotDeckPluginSourceKind,
+): Promise<{ name: string; path: string; source: PilotDeckPluginSourceKind; outputStyles: LoadedPluginCommand[] }> {
+  const manifestPath = join(pluginPath, "plugin.json");
+  const manifest = parsePluginManifest(JSON.parse(await readFile(manifestPath, "utf8")) as unknown);
+  const pluginName = pluginPath.split(/[\\/]/u).at(-1) ?? manifest.name;
+  const outputStyles = await loadConfiguredMarkdown(pluginPath, manifest.outputStyles, "output-styles", pluginName);
+  return {
+    name: manifest.name || pluginName,
+    path: pluginPath,
+    source,
+    outputStyles,
   };
 }
 
@@ -67,16 +86,11 @@ async function loadConfiguredMarkdown(
   pluginPath: string,
   configured: string | string[] | undefined,
   fallbackDir: "commands" | "skills" | "output-styles",
+  pluginName: string,
 ) {
   const dirs = configured === undefined ? [fallbackDir] : Array.isArray(configured) ? configured : [configured];
   const loaded = await Promise.all(
-    dirs.map((dir) => loadPluginCommands({ pluginName: "", baseDir: join(pluginPath, dir) }).catch(() => [])),
+    dirs.map((dir) => loadPluginCommands({ pluginName, baseDir: join(pluginPath, dir) }).catch(() => [])),
   );
-  const pluginName = pluginPath.split(/[\\/]/u).at(-1) ?? "";
-  return loaded.flat().map((command) => ({
-    ...command,
-    name: command.name.startsWith(":")
-      ? `${pluginName}${command.name}`
-      : command.name.replace(/^:/u, `${pluginName}:`),
-  }));
+  return loaded.flat();
 }

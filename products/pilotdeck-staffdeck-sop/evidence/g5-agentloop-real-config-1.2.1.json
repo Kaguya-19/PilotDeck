@@ -1,0 +1,32 @@
+{
+  "status": "passed",
+  "provider": "provider1",
+  "model": "qwen3.6-flash-distill",
+  "configuredDefinitionsPath": "products/pilotdeck-staffdeck-sop/evidence/g5-pilotdeck-page-published-1.2.1.json",
+  "published": {
+    "sopId": "project_delivery_plan",
+    "version": "1.2.1",
+    "nodes": 4,
+    "edges": 4
+  },
+  "firstTurn": {
+    "businessTools": [
+      { "toolName": "read_file", "ok": true },
+      { "toolName": "submit_step_result", "ok": true }
+    ],
+    "status": "handoff"
+  },
+  "wait": {
+    "kind": "handoff",
+    "waitId": "86d8334e-8c95-4b85-a725-3760dae64d6a",
+    "reloadedSameWaitId": true
+  },
+  "resume": {
+    "accepted": true,
+    "duplicateReplay": true
+  },
+  "terminal": {
+    "status": "completed"
+  },
+  "source": "normal createLocalGateway().submitTurn() with the configured real model; no runner-injected SOP bundle"
+}

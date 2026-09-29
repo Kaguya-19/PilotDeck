@@ -1,3 +1,4 @@
+import type { TimelinePosition } from "../../model/protocol/timeline.js";
 /**
  * Web-facing message DTO + reducer.
  *
@@ -7,6 +8,7 @@
  */
 
 import type { WebGatewayEvent } from "./protocol.js";
+import { isVisibleFailureStatusDetail } from "../../status/agentStatus.js";
 
 function normalizeToolDisplayName(name: string): string {
   const aliases: Record<string, string> = {
@@ -25,16 +27,51 @@ function normalizeToolDisplayName(name: string): string {
   return name;
 }
 
-function isPlanModeToolDenyText(text: unknown): boolean {
-  if (typeof text !== "string") return false;
-  return /\[PLAN_MODE_VIOLATION\]/i.test(text) || /plan mode denies side-effecting tool\b/i.test(text);
+function isReadOnlyModeToolDenyText(text: unknown): "plan_mode_denied" | "ask_mode_denied" | undefined {
+  if (typeof text !== "string") return undefined;
+  if (/\[PLAN_MODE_VIOLATION\]/i.test(text) || /plan mode denies side-effecting tool\b/i.test(text)) {
+    return "plan_mode_denied";
+  }
+  if (/\[ASK_MODE_VIOLATION\]/i.test(text) || /ask mode denies side-effecting tool\b/i.test(text)) {
+    return "ask_mode_denied";
+  }
+  return undefined;
 }
 
 function normalizeToolErrorCode(errorCode: string | undefined, resultPreview: unknown): string | undefined {
   if (errorCode === "plan_mode_violation") return "plan_mode_denied";
-  if (isPlanModeToolDenyText(resultPreview)) return "plan_mode_denied";
-  return errorCode;
+  if (errorCode === "ask_mode_violation") return "ask_mode_denied";
+  return isReadOnlyModeToolDenyText(resultPreview) ?? errorCode;
 }
+
+const ERROR_AGENT_STATUS_EVENTS = new Set([
+  "model_empty_response_exhausted",
+  "max_turns_reached",
+  "max_output_recovery_exhausted",
+  "model_request_failed",
+  "tool_call_recovery_exhausted",
+  "tool_error_loop",
+  "lifecycle_blocked",
+  "turn_failed",
+  "turn_timeout",
+  "gateway_submit_failed",
+  "session_busy",
+  "gateway_bridge_error",
+  "gateway_stream_ended_without_completion",
+  "web_http_request_failed",
+  "project_unavailable",
+  "config_invalid",
+  "gateway_unavailable",
+  "channel_submit_failed",
+  "subagent_failed",
+  "content_filter_stop",
+  "unknown_finish_reason",
+]);
+
+const STATUS_AGENT_STATUS_EVENTS = new Set([
+  "structured_output_completed",
+  "turn_aborted",
+]);
 
 export type WebMessageRole =
   | "user"
@@ -56,7 +93,8 @@ export type WebMessageKind =
   | "interrupted"
   | "error"
   | "structured_output"
-  | "compact_boundary";
+  | "compact_boundary"
+  | "file_artifacts";
 
 export type WebMessage = {
   id: string;
@@ -66,16 +104,32 @@ export type WebMessage = {
   provider: "pilotdeck" | (string & {});
   role: WebMessageRole;
   kind: WebMessageKind;
+  /** Durable backend implementation id for a module-owned history row. */
+  moduleId?: string;
+  /** Logical agent turn that owns this message. Stable across live/history projections. */
+  turnId?: string;
+  /** Shared identity of a model output block in live events and history. */
+  blockId?: string;
+  timeline?: TimelinePosition;
+  /** Stable queued-input identity, used to reconcile recovered in-flight guidance. */
+  queueItemId?: string;
+  /** Transcript ordering sequence for deterministic history reconciliation. */
+  sequence?: number;
   toolCallId?: string;
   toolName?: string;
   requestId?: string;
   ok?: boolean;
   text?: string;
+  /** Actual generating model, without the provider prefix. */
+  model?: string;
+  contentI18n?: { key: string; params?: Record<string, unknown> };
+  userHintI18n?: { key: string; params?: Record<string, unknown> };
   images?: Array<{
     data: string;
     name?: string;
     mimeType?: string;
   }>;
+  artifacts?: import("../../session/artifacts/FileArtifact.js").FileArtifact[];
   /**
    * `PilotDeckToolErrorCode` of the underlying failure when
    * `kind === 'tool_result'` and `ok === false`. Empty for non-error or
@@ -83,12 +137,15 @@ export type WebMessage = {
    * uses this.
    */
   errorCode?: string;
+  resultPath?: string;
   /** UUID of the subagent spawned by this tool_use (agent/Task) call. */
   subagentId?: string;
   payload?: unknown;
   source: "live" | "history";
   finishReason?: string;
   usage?: Record<string, number>;
+  /** Transcript entry id when projected from history (used for history fork). */
+  entryId?: string;
 };
 
 export type WebMessageReducerOptions = {
@@ -108,13 +165,27 @@ export type WebMessageReducerState = {
   currentThinkingId?: string;
   /** Map toolCallId -> message id so we can flip to tool_result on finish. */
   toolMessageByCallId: Record<string, string>;
+  /** True after this turn has already shown a visible failure status. */
+  hasVisibleFailureStatus: boolean;
 };
 
 export function createWebMessageReducerState(): WebMessageReducerState {
   return {
     messages: [],
     toolMessageByCallId: {},
+    hasVisibleFailureStatus: false,
   };
+}
+
+const MAX_WEB_TOOL_RESULT_PREVIEW_CHARS = 20_000;
+
+function limitToolResultPreview(value: string | undefined): string | undefined {
+  if (value === undefined || value.length <= MAX_WEB_TOOL_RESULT_PREVIEW_CHARS) {
+    return value;
+  }
+  const headLength = Math.floor(MAX_WEB_TOOL_RESULT_PREVIEW_CHARS / 2);
+  const tailLength = MAX_WEB_TOOL_RESULT_PREVIEW_CHARS - headLength;
+  return `${value.slice(0, headLength)}\n\n... [UI preview truncated: ${value.length - MAX_WEB_TOOL_RESULT_PREVIEW_CHARS} characters omitted] ...\n\n${value.slice(-tailLength)}`;
 }
 
 export function applyWebGatewayEvent(
@@ -132,6 +203,7 @@ export function applyWebGatewayEvent(
         ...state,
         currentAssistantId: undefined,
         currentThinkingId: undefined,
+        hasVisibleFailureStatus: false,
       };
 
     case "assistant_text_delta": {
@@ -143,7 +215,7 @@ export function applyWebGatewayEvent(
           ...state,
           messages: state.messages.map((m) =>
             m.id === state.currentAssistantId
-              ? { ...m, text: `${m.text ?? ""}${event.text}` }
+              ? { ...m, text: `${m.text ?? ""}${event.text}`, ...(event.model ? { model: event.model } : {}) }
               : m,
           ),
         };
@@ -158,6 +230,7 @@ export function applyWebGatewayEvent(
         role: "assistant",
         kind: "text",
         text: event.text,
+        ...(event.model ? { model: event.model } : {}),
         source: "live",
       };
       return {
@@ -198,6 +271,22 @@ export function applyWebGatewayEvent(
         messages: [...state.messages, message],
         currentThinkingId: id,
       };
+    }
+
+    case "file_artifacts": {
+      const id = newId();
+      const message: WebMessage = {
+        id,
+        sessionKey: options.sessionKey,
+        projectKey: options.projectKey,
+        createdAt: stamp,
+        provider: "pilotdeck",
+        role: "assistant",
+        kind: "file_artifacts",
+        artifacts: event.artifacts,
+        source: "live",
+      };
+      return { ...state, messages: [...state.messages, message] };
     }
 
     case "tool_call_started": {
@@ -245,7 +334,7 @@ export function applyWebGatewayEvent(
                   ...m,
                   kind: "tool_result",
                   ok: event.ok,
-                  text: event.resultPreview ?? m.text,
+                  text: limitToolResultPreview(event.resultPreview) ?? m.text,
                   ...(eventImages ? { images: eventImages } : {}),
                   ...(normalizedErrorCode && { errorCode: normalizedErrorCode }),
                 }
@@ -264,7 +353,7 @@ export function applyWebGatewayEvent(
         kind: "tool_result",
         toolCallId: event.toolCallId,
         ok: event.ok,
-        text: event.resultPreview,
+        text: limitToolResultPreview(event.resultPreview),
         ...(eventImages ? { images: eventImages } : {}),
         ...(normalizedErrorCode && { errorCode: normalizedErrorCode }),
         source: "live",
@@ -272,6 +361,24 @@ export function applyWebGatewayEvent(
       return {
         ...state,
         messages: [...state.messages, message],
+      };
+    }
+
+    case "tool_result_detail_available": {
+      const matchedId = state.toolMessageByCallId[event.toolCallId];
+      if (!matchedId) {
+        return state;
+      }
+      return {
+        ...state,
+        messages: state.messages.map((m) =>
+          m.id === matchedId
+            ? {
+                ...m,
+                ...(event.resultPath ? { resultPath: event.resultPath } : {}),
+              }
+            : m,
+        ),
       };
     }
 
@@ -388,7 +495,57 @@ export function applyWebGatewayEvent(
       };
     }
 
+    case "agent_status": {
+      const isErrorStatus = isErrorAgentStatusEvent(event);
+      if (!isErrorStatus && !STATUS_AGENT_STATUS_EVENTS.has(event.event)) {
+        return state;
+      }
+      const detail = event.detail ?? {};
+      const kind = isErrorStatus ? "error" : "status";
+      const text = typeof detail.message === "string" && detail.message.length > 0
+        ? detail.message
+        : kind === "error"
+          ? "The model stream ended unexpectedly, so the response may be incomplete."
+          : "This turn ended before producing a standard assistant response.";
+      const id = newId();
+      const message: WebMessage = {
+        id,
+        sessionKey: options.sessionKey,
+        projectKey: options.projectKey,
+        createdAt: stamp,
+        provider: "pilotdeck",
+        role: kind === "error" ? "error" : "system",
+        kind,
+        text,
+        ...(isI18nDescriptor(detail.messageI18n) ? { contentI18n: detail.messageI18n } : {}),
+        ...(isI18nDescriptor(detail.userHintI18n) ? { userHintI18n: detail.userHintI18n } : {}),
+        payload: {
+          event: event.event,
+          detail,
+          ...(typeof detail.userHint === "string" ? { userHint: detail.userHint } : {}),
+          ...(isI18nDescriptor(detail.messageI18n) ? { contentI18n: detail.messageI18n } : {}),
+          ...(isI18nDescriptor(detail.userHintI18n) ? { userHintI18n: detail.userHintI18n } : {}),
+        },
+        source: "live",
+      };
+      return {
+        ...state,
+        messages: [...state.messages, message],
+        currentAssistantId: undefined,
+        currentThinkingId: undefined,
+        hasVisibleFailureStatus: state.hasVisibleFailureStatus
+          || (kind === "error" && detail.visible !== false),
+      };
+    }
+
     case "error": {
+      if (state.hasVisibleFailureStatus) {
+        return {
+          ...state,
+          currentAssistantId: undefined,
+          currentThinkingId: undefined,
+        };
+      }
       const id = newId();
       const message: WebMessage = {
         id,
@@ -399,7 +556,11 @@ export function applyWebGatewayEvent(
         role: "error",
         kind: "error",
         text: event.message,
-        payload: { code: event.code, recoverable: event.recoverable },
+        payload: {
+          code: event.code,
+          recoverable: event.recoverable,
+          ...(event.userHint ? { userHint: event.userHint } : {}),
+        },
         source: "live",
       };
       return {
@@ -422,4 +583,14 @@ function defaultNewId(): string {
     return c.randomUUID();
   }
   return `web-${Math.random().toString(36).slice(2)}-${Date.now().toString(36)}`;
+}
+
+function isI18nDescriptor(value: unknown): value is { key: string; params?: Record<string, unknown> } {
+  return typeof value === "object"
+    && value !== null
+    && typeof (value as { key?: unknown }).key === "string";
+}
+
+function isErrorAgentStatusEvent(event: WebGatewayEvent & { type: "agent_status" }): boolean {
+  return ERROR_AGENT_STATUS_EVENTS.has(event.event) || isVisibleFailureStatusDetail(event.detail);
 }

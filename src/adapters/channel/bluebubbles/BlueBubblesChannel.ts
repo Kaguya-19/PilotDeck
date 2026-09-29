@@ -5,6 +5,7 @@ import type { ChannelAdapter, ChannelHandle, ChannelLogger, ChannelStartDeps } f
 import { BlueBubblesSessionMapper } from "./BlueBubblesSessionMapper.js";
 import { renderBlueBubblesEvent } from "./bluebubbles-render.js";
 import { ImElicitationHelper } from "../protocol/ImElicitationHelper.js";
+import { ImPermissionHelper } from "../protocol/ImPermissionHelper.js";
 
 const POLL_MS = 2500;
 const MESSAGE_LIMIT = 50;
@@ -43,6 +44,7 @@ export class BlueBubblesChannel implements ChannelAdapter {
   private seenGuids = new Set<string>();
   private activeChats = new Set<string>();
   private readonly elicitation = new ImElicitationHelper();
+  private readonly permissions = new ImPermissionHelper();
   private running = false;
 
   constructor(options: BlueBubblesChannelOptions = {}) {
@@ -149,6 +151,33 @@ export class BlueBubblesChannel implements ChannelAdapter {
       return;
     }
 
+    if (this.permissions.hasPending(chatGuid) && this.gateway) {
+      let answerToken: number | undefined;
+      try {
+        const answer = await this.permissions.answerWithState(chatGuid, text, this.gateway);
+        answerToken = answer?.answerToken;
+        if (answer?.text) {
+          const confirmationDelivered = await this.sendReply(chatGuid, answer.text);
+          if (!confirmationDelivered) {
+            this.permissions.releaseAnswer(chatGuid, answer.answerToken);
+            return;
+          }
+          if (!answer.canAdvance && !answer.retryPrompt) return;
+          const nextPrompt = this.permissions.takeNextPrompt(chatGuid, answer.answerToken);
+          if (nextPrompt) {
+            const nextPromptRequestId = this.permissions.getPromptRequestId(chatGuid, answer.answerToken);
+
+            const delivered = await this.sendReply(chatGuid, nextPrompt);
+            this.permissions.confirmNextPrompt(chatGuid, delivered, nextPromptRequestId, answer.answerToken);
+          }
+        }
+      } catch (e) {
+        if (answerToken !== undefined) this.permissions.releaseAnswer(chatGuid, answerToken);
+        this.logger?.error?.(`bluebubbles: permission answer error: ${e}`);
+      }
+      return;
+    }
+
     if (this.activeChats.has(chatGuid)) {
       this.logger?.info?.(`bluebubbles: chat ${chatGuid} already active, skipping`);
       return;
@@ -184,6 +213,11 @@ export class BlueBubblesChannel implements ChannelAdapter {
           await this.sendReply(chatGuid, questionText);
           continue;
         }
+        if (event.type === "permission_request") {
+          const questionText = this.permissions.capture(chatGuid, sessionKey, event);
+          if (questionText) this.permissions.confirmInitialPrompt(chatGuid, await this.sendReply(chatGuid, questionText), event.requestId);
+          continue;
+        }
         const fragment = renderBlueBubblesEvent(event);
         if (fragment != null) replyText += fragment;
       }
@@ -193,6 +227,7 @@ export class BlueBubblesChannel implements ChannelAdapter {
     }
 
     this.elicitation.clear(chatGuid);
+    this.permissions.clearAfterTurn(chatGuid);
 
     const finalText = replyText.trim();
     if (finalText) {
@@ -200,8 +235,8 @@ export class BlueBubblesChannel implements ChannelAdapter {
     }
   }
 
-  private async sendReply(chatGuid: string, text: string): Promise<void> {
-    if (!this.running) return;
+  private async sendReply(chatGuid: string, text: string): Promise<boolean> {
+    if (!this.running) return false;
     const url = new URL("/api/v1/message/text", this.serverUrl);
     const tempGuid = randomUUID();
     const body: Record<string, unknown> = {
@@ -224,9 +259,12 @@ export class BlueBubblesChannel implements ChannelAdapter {
         const raw: any = await res.json().catch(() => ({}));
         const err = raw?.message ?? raw?.error ?? res.statusText;
         this.logger?.error?.(`bluebubbles: send HTTP ${res.status}: ${err}`);
+        return false;
       }
+      return true;
     } catch (e) {
       this.logger?.error?.(`bluebubbles: send failed: ${e}`);
+      return false;
     }
   }
 }

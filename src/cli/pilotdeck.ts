@@ -1,9 +1,7 @@
 #!/usr/bin/env node
 import { resolve } from "node:path";
-import { createAlwaysOnManager, createApplyHandler, SessionConfigOverrides, type AlwaysOnManager, type AlwaysOnConfig } from "../always-on/index.js";
-import { createCronManager, type CronManager, type CronConfig } from "../cron/index.js";
 import { connectRemoteGatewayIfAvailable, type Gateway, type GatewayEvent, type GatewaySubmitTurnInput } from "../gateway/index.js";
-import { CliChannel, TuiChannel, FeishuChannel, WeixinChannel, QQChannel, loadEnabledChannels } from "../adapters/index.js";
+import { CliChannel, TuiChannel } from "../adapters/index.js";
 import {
   migrateSkillsToPilotDeck,
   type SkillMigrationConflictMode,
@@ -16,11 +14,25 @@ import { startPilotDeckServer } from "./pilotdeckServer.js";
 import { installGlobalProxy, reinstallGlobalProxy } from "./proxy.js";
 import { createShutdownAndExit } from "./shutdownCoordinator.js";
 import { createTelemetryCollector } from "../telemetry/index.js";
+import {
+  createProjectSessionDataPlane,
+  createProjectSessionSearchPort,
+  createProjectSessionTranscriptReader,
+} from "../session/index.js";
+import { ProjectAutomationBundle } from "./ProjectAutomationBundle.js";
+import { PilotDeckServerShutdownBundle } from "./PilotDeckServerShutdownBundle.js";
+import { PilotDeckServerBootstrapBundle } from "./PilotDeckServerBootstrapBundle.js";
+import { ChannelAdapterBundle } from "./ChannelAdapterBundle.js";
+import { runSdkCli } from "./sdkCli.js";
 
 await installGlobalProxy();
 
 async function main(argv = process.argv.slice(2)): Promise<void> {
   const command = argv[0];
+  if (command === "run" || command === "resume" || command === "sessions" || command === "settings" || command === "help" || command === "--help" || command === "-h") {
+    await runSdkCli(argv);
+    return;
+  }
   if (command === "server") {
     const projectRoot = process.cwd();
     const env = process.env;
@@ -37,114 +49,99 @@ async function main(argv = process.argv.slice(2)): Promise<void> {
       await installGlobalProxy(snapshot.config.proxy.url);
     }
 
-    let alwaysOn: AlwaysOnManager | undefined;
-    let cron: CronManager | undefined;
     let deferredBroadcast: ((name: string, payload?: unknown) => void) | undefined;
-    const sessionOverrides = new SessionConfigOverrides();
-
-    const alwaysOnLogger = {
-      info: (message: string, data?: Record<string, unknown>) =>
-        console.log(`[always-on] ${message}${data ? ` ${JSON.stringify(data)}` : ""}`),
-      warn: (message: string, data?: Record<string, unknown>) =>
-        console.warn(`[always-on] ${message}${data ? ` ${JSON.stringify(data)}` : ""}`),
-    };
-    const cronLogger = {
-      info: (message: string, data?: Record<string, unknown>) =>
-        console.log(`[cron] ${message}${data ? ` ${JSON.stringify(data)}` : ""}`),
-      warn: (message: string, data?: Record<string, unknown>) =>
-        console.warn(`[cron] ${message}${data ? ` ${JSON.stringify(data)}` : ""}`),
-    };
-
-    function buildAlwaysOn(config: AlwaysOnConfig | undefined): AlwaysOnManager | undefined {
-      if (!config?.enabled) return undefined;
-      return createAlwaysOnManager({
-        config,
-        pilotHome,
-        sessionOverrides,
-        logger: alwaysOnLogger,
-        telemetry,
-        onWorktreeCreated: (runId, cwd) => {
-          deferredBroadcast?.("worktree_created", { runId, cwd });
-        },
-        onWorktreeRemoved: (cwd) => {
-          deferredBroadcast?.("worktree_removed", { cwd });
-        },
-        onTurnEvent: (sessionKey, channelKey, event) => {
-          deferredBroadcast?.("always-on:turn-event", { sessionKey, channelKey, event });
-        },
-      });
-    }
-
-    function buildCron(config: CronConfig | undefined): CronManager | undefined {
-      if (!config) return undefined;
-      return createCronManager({
-        config,
-        pilotHome,
-        sessionOverrides,
-        logger: cronLogger,
-        telemetry,
-      });
-    }
-
-    alwaysOn = buildAlwaysOn(snapshot.config.alwaysOn);
-    cron = buildCron(snapshot.config.cron);
+    let serverRef: Awaited<ReturnType<typeof startPilotDeckServer>> | undefined;
+    const sessionDataPlane = createProjectSessionDataPlane();
+    const sessionCatalog = sessionDataPlane.catalog;
+    const sessionSearch = sessionDataPlane.search;
+    const sessionTranscriptReader = createProjectSessionTranscriptReader({
+      storageProvider: sessionDataPlane.persistence,
+    });
+    const automation = new ProjectAutomationBundle({
+      config: snapshot.config,
+      pilotHome,
+      telemetry,
+      alwaysOnLogger: {
+        info: (message, data) =>
+          console.log(`[always-on] ${message}${data ? ` ${JSON.stringify(data)}` : ""}`),
+        warn: (message, data) =>
+          console.warn(`[always-on] ${message}${data ? ` ${JSON.stringify(data)}` : ""}`),
+      },
+      cronLogger: {
+        info: (message, data) =>
+          console.log(`[cron] ${message}${data ? ` ${JSON.stringify(data)}` : ""}`),
+        warn: (message, data) =>
+          console.warn(`[cron] ${message}${data ? ` ${JSON.stringify(data)}` : ""}`),
+      },
+      onWorktreeCreated: (runId, cwd) => {
+        deferredBroadcast?.("worktree_created", { runId, cwd });
+      },
+      onWorktreeRemoved: (cwd) => {
+        deferredBroadcast?.("worktree_removed", { cwd });
+      },
+      onAlwaysOnTurnEvent: (sessionKey, channelKey, event) => {
+        deferredBroadcast?.("always-on:turn-event", { sessionKey, channelKey, event });
+      },
+      onCronTurnEvent: (sessionKey, channelKey, event) => {
+        deferredBroadcast?.("always-on:turn-event", { sessionKey, channelKey, event });
+      },
+      onCronResultDelivery: (delivery) => {
+        void serverRef?.deliverCronResult(delivery)
+          .then((delivered) => {
+            if (!delivered) {
+              console.warn(`[cron] result delivery was not handled task=${delivery.taskId} run=${delivery.runId}`);
+            }
+          })
+          .catch((error: unknown) => {
+            console.warn(`[cron] result delivery failed ${error instanceof Error ? error.message : String(error)}`);
+          });
+      },
+      sessionCatalog,
+      sessionTranscriptReader,
+    });
+    const initialAutomation = automation.getInitialGatewayOptions();
 
     const {
       gateway, configStore, dispose: disposeGateway,
-      bindServer, isProjectBusy, updateSubsystems,
+      bindServer, isProjectBusy, updateSubsystems, getPublicHostCapabilities, getPublicApprovals,
     } = createLocalGateway({
       projectRoot,
       pilotHome,
       env,
-      skipDefaultProject: !!env.PILOTDECK_SKIP_DEFAULT_PROJECT,
-      extraTools: [...(alwaysOn?.getTools() ?? []), ...(cron?.getTools() ?? [])],
-      sessionOverrides,
-      cron,
+      fallbackProjectRoot: pilotHome,
+      ...initialAutomation,
       telemetry,
+      sessionCatalog,
+      sessionDataPlane,
     });
 
-    const standaloneApply = createApplyHandler({
-      gateway,
-      pilotHome,
-      sessionOverrides,
-      alwaysOnConfig: snapshot.config.alwaysOn,
+    const bootstrap = new PilotDeckServerBootstrapBundle({
+      automation,
+      disposeGateway,
       telemetry,
-      onTurnEvent: (sessionKey, channelKey, event) => {
-        deferredBroadcast?.("always-on:turn-event", { sessionKey, channelKey, event });
-      },
+      warn: (message, error) => console.warn(message, String(error)),
     });
 
-    if (alwaysOn) {
-      alwaysOn.bindGateway(gateway, { isProjectBusy });
-      await alwaysOn.start();
-    }
-    updateSubsystems({
-      extraTools: [...(alwaysOn?.getTools() ?? []), ...(cron?.getTools() ?? [])],
-      sessionOverrides,
-      cron,
-      alwaysOnApply: alwaysOn
-        ? (input) => alwaysOn!.applyCycle(input)
-        : standaloneApply,
-      alwaysOnRerunPlan: alwaysOn
-        ? (input) => alwaysOn!.rerunPlan(input)
-        : undefined,
+    await bootstrap.run(async () => {
+      automation.attach({
+        agentGateway: gateway,
+        isProjectBusy,
+        updateSubsystems,
+      });
+      await bootstrap.startAutomation();
     });
-    if (cron) {
-      cron.bindGateway(gateway);
-      await cron.start();
-    }
 
     // --- Subsystem hot-reload on config change ---
 
     let reloadChain = Promise.resolve();
 
     configStore.subscribe((event) => {
-      if (event.changedPaths.some((p) => p.startsWith("telemetry."))) {
+      if (event.changedPaths.some((p) => p.startsWith("telemetry.") || p === "telemetry")) {
         telemetry.setEnabled(event.nextSnapshot.config.telemetry?.enabled ?? false);
       }
 
-      const aoChanged = event.changedPaths.some((p) => p.startsWith("alwaysOn."));
-      const cronChanged = event.changedPaths.some((p) => p.startsWith("cron."));
+      const aoChanged = event.changedPaths.some((p) => p.startsWith("alwaysOn.") || p === "alwaysOn");
+      const cronChanged = event.changedPaths.some((p) => p.startsWith("cron.") || p === "cron");
       const proxyChanged = event.changedPaths.some((p) => p.startsWith("proxy.") || p === "proxy");
       const adapterChanged = event.changedPaths.some((p) => p.startsWith("adapters."));
 
@@ -179,79 +176,30 @@ async function main(argv = process.argv.slice(2)): Promise<void> {
       cronChanged: boolean,
       config: (typeof snapshot)["config"],
     ): Promise<void> {
-      if (aoChanged) {
-        await alwaysOn?.stop();
-        alwaysOn = undefined;
-      }
-      if (cronChanged) {
-        await cron?.stop();
-        cron = undefined;
-      }
-
-      if (aoChanged) alwaysOn = buildAlwaysOn(config.alwaysOn);
-      if (cronChanged) cron = buildCron(config.cron);
-
-      if (aoChanged && alwaysOn) {
-        alwaysOn.bindGateway(gateway, { isProjectBusy });
-        await alwaysOn.start();
-      }
-
-      const fallbackApply = createApplyHandler({
-        gateway,
-        pilotHome,
-        sessionOverrides,
-        alwaysOnConfig: config.alwaysOn,
-        telemetry,
-        onTurnEvent: (sessionKey, channelKey, event) => {
-          deferredBroadcast?.("always-on:turn-event", { sessionKey, channelKey, event });
-        },
+      const status = await automation.reload({
+        config,
+        alwaysOnChanged: aoChanged,
+        cronChanged,
       });
-
-      updateSubsystems({
-        extraTools: [...(alwaysOn?.getTools() ?? []), ...(cron?.getTools() ?? [])],
-        sessionOverrides,
-        cron,
-        alwaysOnApply: alwaysOn ? (input) => alwaysOn!.applyCycle(input) : fallbackApply,
-        alwaysOnRerunPlan: alwaysOn ? (input) => alwaysOn!.rerunPlan(input) : undefined,
-      });
-      if (cronChanged && cron) {
-        cron.bindGateway(gateway);
-        await cron.start();
-      }
 
       const parts: string[] = [];
-      if (aoChanged) parts.push(`always-on=${alwaysOn ? "started" : "stopped"}`);
-      if (cronChanged) parts.push(`cron=${cron ? "started" : "stopped"}`);
+      if (aoChanged) parts.push(`always-on=${status.alwaysOn ? "started" : "stopped"}`);
+      if (cronChanged) parts.push(`cron=${status.cron ? "started" : "stopped"}`);
       console.log(`[pilotdeck] Subsystem hot-reload complete: ${parts.join(", ")}`);
     }
 
+    const channelAdapters = new ChannelAdapterBundle({ pilotHome });
+
     // --- Adapter hot-reload ---
 
-    let serverRef: Awaited<ReturnType<typeof startPilotDeckServer>> | undefined;
+    async function hotStartWeixinChannel(): Promise<void> {
+      if (!serverRef) return;
+      await channelAdapters.hotStartWeixin(serverRef);
+    }
 
     async function handleAdapterHotReload(config: (typeof snapshot)["config"]): Promise<void> {
       if (!serverRef) return;
-      const parts: string[] = [];
-
-      const fCfg = config.adapters?.feishu;
-      if (fCfg?.enabled === true) {
-        const ch = new FeishuChannel({
-          appId: fCfg.appId,
-          appSecret: fCfg.appSecret,
-          encryptKey: fCfg.encryptKey,
-          verifyToken: fCfg.verifyToken,
-          connectionMode: fCfg.connectionMode,
-          domainName: fCfg.domainName,
-        });
-        await serverRef.hotStartChannel(ch);
-        parts.push("feishu=started");
-      }
-
-      const wCfg = config.adapters?.weixin;
-      if (wCfg?.enabled === true) {
-        await serverRef.hotStartChannel(new WeixinChannel());
-        parts.push("weixin=started");
-      }
+      const parts = await channelAdapters.reload(serverRef, config);
 
       if (parts.length) {
         console.log(`[pilotdeck] Adapter hot-reload complete: ${parts.join(", ")}`);
@@ -260,51 +208,57 @@ async function main(argv = process.argv.slice(2)): Promise<void> {
 
     // --- Server startup ---
 
-    const envPort = Number.parseInt(env.PILOTDECK_GATEWAY_PORT ?? "", 10);
-    const extraChannels = await loadEnabledChannels(snapshot.config.adapters);
-    const feishuCfg = snapshot.config.adapters?.feishu;
-    const feishuChannel = feishuCfg?.enabled === true
-      ? new FeishuChannel({
-          appId: feishuCfg.appId,
-          appSecret: feishuCfg.appSecret,
-          encryptKey: feishuCfg.encryptKey,
-          verifyToken: feishuCfg.verifyToken,
-          connectionMode: feishuCfg.connectionMode,
-          domainName: feishuCfg.domainName,
-        })
-      : undefined;
-    const weixinCfg = snapshot.config.adapters?.weixin;
-    const weixinChannel = weixinCfg?.enabled === true ? new WeixinChannel() : undefined;
-    const server = await startPilotDeckServer({
-      gateway,
-      port: readPort(argv) ?? (Number.isFinite(envPort) ? envPort : 18789),
-      staticAssetsPath: resolve(projectRoot, "ui/dist"),
-      feishu: feishuChannel,
-      weixin: weixinChannel,
-      qq: new QQChannel(),
-      channels: extraChannels,
-      config: snapshot.config,
+    const server = await bootstrap.run(async () => {
+      const envPort = Number.parseInt(env.PILOTDECK_GATEWAY_PORT ?? "", 10);
+      const startupChannels = await channelAdapters.createStartupAdapters(snapshot.config);
+      const nextServer = await startPilotDeckServer({
+        publicHostCapabilities: () => getPublicHostCapabilities(),
+        publicApprovals: getPublicApprovals(),
+        gateway,
+        port: readPort(argv) ?? (Number.isFinite(envPort) ? envPort : 18789),
+        staticAssetsPath: resolve(projectRoot, "ui/dist"),
+        feishu: startupChannels.feishu,
+        weixin: startupChannels.weixin,
+        qq: startupChannels.qq,
+        channels: startupChannels.channels,
+        config: snapshot.config,
+        pilotHome,
+        sessionSearch,
+      });
+      serverRef = nextServer;
+      (
+        gateway as {
+          setPrepareWeixinLogin?: (
+            handler: () => Promise<{ requested: boolean; requestedAt: string; reason?: "unsupported" }>
+          ) => void;
+        }
+      ).setPrepareWeixinLogin?.(async () => {
+        const requestedAt = new Date().toISOString();
+        if (!serverRef) {
+          return { requested: false, requestedAt, reason: "unsupported" };
+        }
+        await hotStartWeixinChannel();
+        return { requested: true, requestedAt };
+      });
+      bindServer(nextServer);
+      deferredBroadcast = (name, payload) => nextServer.broadcastNotification(name, payload);
+      return nextServer;
     });
-    serverRef = server;
-    bindServer(server);
-    deferredBroadcast = (name, payload) => server.broadcastNotification(name, payload);
     console.log(`PilotDeck server listening: ${server.url}`);
     console.log(`WebSocket: ${server.wsUrl}`);
     if (server.tokenPath) {
       console.log(`Token: ${server.tokenPath}`);
     }
-    const stop = async () => {
-      try {
-        console.log(`[telemetry] shutdown snapshot ${JSON.stringify(telemetry.snapshot())}`);
-        disposeGateway();
-        await alwaysOn?.stop();
-        await cron?.stop();
-        await telemetry.shutdown();
-      } catch (error) {
-        console.warn(`[runtime] stop failed: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    };
-    const shutdownAndExit = createShutdownAndExit(stop, (exitCode) => process.exit(exitCode));
+    const shutdown = new PilotDeckServerShutdownBundle({
+      automation,
+      closeServer: () => server.close(),
+      flushChannelState: () => channelAdapters.flush(),
+      disposeGateway,
+      telemetry,
+      log: (message) => console.log(message),
+    });
+    bootstrap.commit();
+    const shutdownAndExit = createShutdownAndExit(() => shutdown.stop(), (exitCode) => process.exit(exitCode));
     process.on("uncaughtException", (error) => {
       telemetry.trackError(error, { module: "runtime", metadata: { source: "uncaughtException" } });
       void shutdownAndExit(1);
@@ -330,7 +284,7 @@ async function main(argv = process.argv.slice(2)): Promise<void> {
       await runGatewaySetup(argv.slice(2));
       return;
     }
-    console.error("Usage: pilotdeck gateway setup [feishu|weixin]");
+    console.error("Usage: pilotdeck gateway setup [feishu|weixin|wecom]");
     process.exitCode = 1;
     return;
   }
@@ -347,6 +301,12 @@ async function main(argv = process.argv.slice(2)): Promise<void> {
 
   if (command === "skills") {
     await handleSkillsCommand(argv.slice(1));
+    return;
+  }
+
+  if (command === "chat") {
+    const { runChatSearchCli } = await import("./commands/chatSearch.js");
+    await runChatSearchCli(argv.slice(1), createProjectSessionSearchPort());
     return;
   }
 
@@ -384,59 +344,12 @@ async function main(argv = process.argv.slice(2)): Promise<void> {
 }
 
 async function handleUpdateCommand(argv: string[]): Promise<void> {
-  const { execFileSync } = await import("node:child_process");
-  const { resolve: resolvePath, dirname } = await import("node:path");
-  const { fileURLToPath } = await import("node:url");
-
-  const __filename = fileURLToPath(import.meta.url);
-  const projectRoot = resolvePath(dirname(__filename), "..", "..", "..");
-  const scriptPath = resolvePath(projectRoot, "scripts", "update.sh");
-
-  const doRestart = argv.includes("--restart");
-  const checkOnly = argv.includes("--check");
-
-  if (checkOnly) {
-    try {
-      const branch = execFileSync("git", ["branch", "--show-current"], { cwd: projectRoot, encoding: "utf-8" }).trim() || "main";
-      execFileSync("git", ["fetch", "origin", branch], { cwd: projectRoot, encoding: "utf-8", stdio: "pipe" });
-      const local = execFileSync("git", ["rev-parse", "HEAD"], { cwd: projectRoot, encoding: "utf-8" }).trim();
-      const remote = execFileSync("git", ["rev-parse", `origin/${branch}`], { cwd: projectRoot, encoding: "utf-8" }).trim();
-
-      if (local === remote) {
-        console.log(`Already up-to-date (${local.slice(0, 8)}) on branch ${branch}`);
-      } else {
-        const countStr = execFileSync("git", ["rev-list", "--count", `HEAD..origin/${branch}`], { cwd: projectRoot, encoding: "utf-8" }).trim();
-        console.log(`Update available: ${countStr} new commit(s) on branch ${branch}`);
-        console.log(`  local:  ${local.slice(0, 8)}`);
-        console.log(`  remote: ${remote.slice(0, 8)}`);
-        const log = execFileSync("git", ["log", "--oneline", `HEAD..origin/${branch}`, "-5"], { cwd: projectRoot, encoding: "utf-8" }).trim();
-        if (log) {
-          console.log("\nRecent commits:");
-          console.log(log);
-        }
-      }
-    } catch (e: unknown) {
-      console.error(`Failed to check for updates: ${e instanceof Error ? e.message : String(e)}`);
-      process.exitCode = 1;
-    }
-    return;
-  }
-
-  const args = doRestart ? [scriptPath, "--restart"] : [scriptPath];
-
+  const { runUpdateProcess } = await import("../runtime/updateCommand.js");
   try {
-    execFileSync("bash", args, {
-      cwd: projectRoot,
-      stdio: "inherit",
-      env: { ...process.env, FORCE_COLOR: "1" },
-    });
-  } catch (e: unknown) {
-    const err = e as { status?: number };
-    if (err.status === 2) {
-      // Already up-to-date — not an error
-      return;
-    }
-    console.error(`Update failed with exit code ${err.status ?? "unknown"}`);
+    const result = await runUpdateProcess(argv, { output: chunk => process.stdout.write(chunk) });
+    if (result.code !== 0 && result.code !== 2) process.exitCode = 1;
+  } catch (error) {
+    console.error(`Update failed: ${error instanceof Error ? error.message : String(error)}`);
     process.exitCode = 1;
   }
 }
@@ -650,16 +563,27 @@ function createFallbackGateway(): Gateway {
   }
   return {
     submitTurn: errorStream,
+    steerTurn: async () => ({ accepted: false, reason: "no_active_turn" }),
+    cancelSteer: async () => ({ cancelled: false, reason: "no_active_turn" }),
     abortTurn: async () => undefined,
     listSessions: async () => ({ sessions: [] }),
     resumeSession: async (input) => input,
     newSession: async (input) => ({ sessionKey: `${input.channelKey}:project=${input.projectKey ?? process.cwd()}:s_local` }),
     closeSession: async () => undefined,
+    replaceLastTurn: async () => {
+      throw new Error("Message editing is unavailable while using the fallback gateway.");
+    },
+    finalizeLastTurnReplacement: async () => {
+      throw new Error("Message editing is unavailable while using the fallback gateway.");
+    },
     describeServer: async () => ({ mode: "in_process" }),
     cronCreate: async () => {
       throw new Error("Cron runtime is not configured.");
     },
     cronList: async () => {
+      throw new Error("Cron runtime is not configured.");
+    },
+    cronUpdate: async () => {
       throw new Error("Cron runtime is not configured.");
     },
     cronDelete: async () => {
@@ -672,6 +596,7 @@ function createFallbackGateway(): Gateway {
       throw new Error("Cron runtime is not configured.");
     },
     respondElicitation: async () => ({ delivered: false }),
+    respondUserDialog: async () => ({ delivered: false }),
     permissionDecide: async () => ({ delivered: false }),
     grantSessionPermission: async () => ({ granted: false }),
     readSessionMessages: async () => {
@@ -679,6 +604,9 @@ function createFallbackGateway(): Gateway {
     },
     readSubagentMessages: async () => {
       throw new Error("read_subagent_messages is not configured.");
+    },
+    forkSession: async () => {
+      throw new Error("fork_session is not configured.");
     },
     listProjects: async () => ({ projects: [] }),
     describeProject: async (input) => ({

@@ -1,8 +1,8 @@
-import type { Gateway, GatewayEvent } from "../../gateway/index.js";
-import type { CronRunRecord, CronRunOutcome, CronTask } from "../protocol/types.js";
-import type { CronTaskStore } from "../storage/CronTaskStore.js";
+import type { CronResultDeliveryHandler, CronRunRecord, CronRunOutcome, CronTask } from "../protocol/types.js";
 import { resolveCronTimezone } from "../CronTimezone.js";
 import { computeNextRunAt } from "./CronSchedule.js";
+import type { CronAgentGatewayPort, GatewayEvent } from "./CronAgentGatewayPort.js";
+import type { CronTaskStorePort } from "./CronProjectStorageProvider.js";
 
 export type CronActiveRun = {
   runId: string;
@@ -22,9 +22,11 @@ export type CronPhaseEventCallback = (event: {
   error?: { code: string; message: string };
 }) => void;
 
+export type CronTurnEventHandler = (sessionKey: string, channelKey: string, event: GatewayEvent) => void;
+
 export type CronFireDependencies = {
-  gateway: Gateway;
-  store: CronTaskStore;
+  gateway: CronAgentGatewayPort;
+  store: CronTaskStorePort;
   now: () => Date;
   registerActiveRun: (run: CronActiveRun) => void;
   unregisterActiveRun: (runId: string) => CronActiveRun | undefined;
@@ -32,6 +34,8 @@ export type CronFireDependencies = {
   runTimeoutMs: number;
   defaultTimezone: string;
   releaseTaskSession: (task: CronTask) => Promise<void>;
+  onResultDelivery?: CronResultDeliveryHandler;
+  onTurnEvent?: CronTurnEventHandler;
   logger?: {
     warn: (message: string, data?: Record<string, unknown>) => void;
   };
@@ -41,28 +45,45 @@ export type CronFireDependencies = {
 export class CronFire {
   constructor(private readonly deps: CronFireDependencies) {}
 
-  async runTask(task: CronTask, runId: string): Promise<void> {
+  async runTask(taskSnapshot: CronTask, runId: string): Promise<void> {
     const startedAt = this.deps.now();
     const activeRun: CronActiveRun = {
       runId,
-      taskId: task.taskId,
-      sessionKey: task.sessionKey,
-      scheduleType: task.schedule.type,
+      taskId: taskSnapshot.taskId,
+      sessionKey: taskSnapshot.sessionKey,
+      scheduleType: taskSnapshot.schedule.type,
       stopRequested: false,
     };
     this.deps.registerActiveRun(activeRun);
 
+    let task = taskSnapshot;
     let outcome: CronRunOutcome = "completed";
     let error: CronRunRecord["error"];
     let forcedFailure = false;
     let abortRequested = false;
+    let startedRun = false;
+    let assistantText = "";
     try {
-      await this.deps.store.putTask({
-        ...task,
-        status: "running",
-        lastRunId: runId,
-        updatedAt: startedAt.toISOString(),
+      let claimed = false;
+      const currentTask = await this.deps.store.updateTask(taskSnapshot.taskId, (current) => {
+        if (!matchesScheduledSnapshot(current, taskSnapshot)) {
+          return current;
+        }
+        claimed = true;
+        return {
+          ...current,
+          status: "running",
+          lastRunId: runId,
+          revision: (current.revision ?? 0) + 1,
+          updatedAt: startedAt.toISOString(),
+        };
       });
+      if (!claimed || !currentTask) {
+        outcome = "aborted";
+        return;
+      }
+      task = currentTask;
+      startedRun = true;
       this.deps.onPhaseEvent?.({
         phase: "cron_started",
         runId,
@@ -81,6 +102,10 @@ export class CronFire {
         timeoutMs: this.deps.runTimeoutMs,
       })) {
         await this.deps.store.appendRunEvent(runId, event);
+        this.forwardTurnEvent(task, event);
+        if (event.type === "assistant_text_delta") {
+          assistantText += event.text;
+        }
         if (event.type === "elicitation_request" || event.type === "permission_request") {
           outcome = "failed";
           forcedFailure = true;
@@ -91,7 +116,7 @@ export class CronFire {
           if (!abortRequested) {
             abortRequested = true;
             void this.deps.gateway
-              .abortTurn({ sessionKey: task.sessionKey, runId })
+              .abortTurn({ sessionKey: task.sessionKey, runId, reason: "system:interaction_required" })
               .catch(() => undefined);
           }
           continue;
@@ -127,6 +152,9 @@ export class CronFire {
         outcome = "stopped";
       }
       this.deps.unregisterActiveRun(runId);
+      if (!startedRun) {
+        return;
+      }
       const finishedAt = this.deps.now();
       await this.deps.store
         .appendRun({
@@ -156,7 +184,14 @@ export class CronFire {
         title: task.message.trimStart().split(/\r?\n/, 1)[0]?.trim().slice(0, 120),
         error,
       });
-      await this.updateTaskAfterRun(task, finishedAt, outcome).catch((updateError: unknown) => {
+      await this.deliverResult(task, runId, outcome, assistantText, error).catch((deliveryError: unknown) => {
+        this.deps.logger?.warn("cron result delivery failed", {
+          taskId: task.taskId,
+          runId,
+          error: deliveryError instanceof Error ? deliveryError.message : String(deliveryError),
+        });
+      });
+      await this.updateTaskAfterRun(task, runId, finishedAt, outcome).catch((updateError: unknown) => {
         this.deps.logger?.warn("cron task post-run update failed", {
           taskId: task.taskId,
           runId,
@@ -166,11 +201,54 @@ export class CronFire {
     }
   }
 
-  private async updateTaskAfterRun(task: CronTask, finishedAt: Date, outcome: CronRunOutcome): Promise<void> {
+  private forwardTurnEvent(task: CronTask, event: GatewayEvent): void {
+    try {
+      this.deps.onTurnEvent?.(task.sessionKey, task.channelKey, event);
+    } catch (error) {
+      this.deps.logger?.warn("cron turn event delivery failed", {
+        taskId: task.taskId,
+        runId: task.lastRunId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  private async deliverResult(
+    task: CronTask,
+    runId: string,
+    outcome: CronRunOutcome,
+    assistantText: string,
+    error: CronRunRecord["error"],
+  ): Promise<void> {
+    const text = outcome === "completed"
+      ? assistantText.trim()
+      : error?.message?.trim() || "Cron task failed.";
+    const deliveryText = text || "定时任务已完成，但没有返回内容。";
+    await this.deps.onResultDelivery?.({
+      taskId: task.taskId,
+      runId,
+      sessionKey: task.sessionKey,
+      channelKey: task.channelKey,
+      originSessionKey: task.originSessionKey,
+      originChannelKey: task.originChannelKey,
+      projectKey: task.projectKey,
+      outcome,
+      text: deliveryText,
+      error,
+    });
+  }
+
+  private async updateTaskAfterRun(task: CronTask, runId: string, finishedAt: Date, outcome: CronRunOutcome): Promise<void> {
     if (task.schedule.type === "once") {
-      try {
-        await this.deps.store.deleteTask(task.taskId);
-      } finally {
+      let deleted = false;
+      await this.deps.store.updateTask(task.taskId, (current) => {
+        if (!matchesRunningTask(current, task, runId)) {
+          return current;
+        }
+        deleted = true;
+        return undefined;
+      });
+      if (deleted) {
         await this.deps.releaseTaskSession(task);
       }
       return;
@@ -182,15 +260,34 @@ export class CronFire {
     );
     const schedule = { ...task.schedule, timezone };
     const nextRunAt = computeNextRunAt(schedule, finishedAt, timezone)?.toISOString();
-    await this.deps.store.updateTask(task.taskId, (current) => ({
-      ...current,
-      schedule,
-      timezone,
-      status: "scheduled",
-      nextRunAt,
-      scheduleComputationVersion: 2,
-      updatedAt: finishedAt.toISOString(),
-    }));
+    await this.deps.store.updateTask(task.taskId, (current) => {
+      if (!matchesRunningTask(current, task, runId)) {
+        return current;
+      }
+      return {
+        ...current,
+        schedule,
+        timezone,
+        status: "scheduled",
+        nextRunAt,
+        revision: (current.revision ?? 0) + 1,
+        scheduleComputationVersion: 2,
+        updatedAt: finishedAt.toISOString(),
+      };
+    });
     void outcome;
   }
+}
+
+function matchesScheduledSnapshot(current: CronTask, snapshot: CronTask): boolean {
+  return current.status === "scheduled"
+    && (current.revision ?? 0) === (snapshot.revision ?? 0)
+    && current.nextRunAt === snapshot.nextRunAt
+    && current.lastRunId === snapshot.lastRunId;
+}
+
+function matchesRunningTask(current: CronTask, claimedTask: CronTask, runId: string): boolean {
+  return current.status === "running"
+    && current.lastRunId === runId
+    && (current.revision ?? 0) === (claimedTask.revision ?? 0);
 }

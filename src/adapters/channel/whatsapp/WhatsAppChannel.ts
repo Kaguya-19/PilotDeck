@@ -1,7 +1,10 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import type { Gateway, GatewayChannelKey } from "../../../gateway/index.js";
+import type { CronResultDelivery } from "../../../cron/index.js";
 import type { ChannelAdapter, ChannelHandle, ChannelLogger, ChannelStartDeps } from "../protocol/ChannelAdapter.js";
+import { deliverChatCronResult } from "../protocol/ImCronDelivery.js";
 import { ImElicitationHelper } from "../protocol/ImElicitationHelper.js";
+import { ImPermissionHelper } from "../protocol/ImPermissionHelper.js";
 import { WhatsAppSessionMapper } from "./WhatsAppSessionMapper.js";
 import { renderWhatsAppEvent } from "./whatsapp-render.js";
 
@@ -40,6 +43,7 @@ export class WhatsAppChannel implements ChannelAdapter {
   private seenIds = new Set<string>();
   private activeChats = new Set<string>();
   private readonly elicitation = new ImElicitationHelper();
+  private readonly permissions = new ImPermissionHelper();
   private running = false;
 
   constructor(options: WhatsAppChannelOptions = {}) {
@@ -67,6 +71,7 @@ export class WhatsAppChannel implements ChannelAdapter {
     try {
       this.child = spawn(process.execPath, [this.bridgePath], {
         stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: process.platform === "win32",
         env: {
           ...process.env,
           ...(bridgePort != null ? { BRIDGE_PORT: String(bridgePort) } : {}),
@@ -125,6 +130,10 @@ export class WhatsAppChannel implements ChannelAdapter {
     } catch {
       return null;
     }
+  }
+
+  async deliverCronResult(delivery: CronResultDelivery): Promise<boolean> {
+    return deliverChatCronResult(delivery, this.channelKey, (chatId, text) => this.sendReply(chatId, text));
   }
 
   private async waitForBridgeReady(timeoutMs: number): Promise<boolean> {
@@ -199,6 +208,33 @@ export class WhatsAppChannel implements ChannelAdapter {
       return;
     }
 
+    if (this.permissions.hasPending(msg.chatId) && this.gateway) {
+      let answerToken: number | undefined;
+      try {
+        const answer = await this.permissions.answerWithState(msg.chatId, msg.text, this.gateway);
+        answerToken = answer?.answerToken;
+        if (answer?.text) {
+          const confirmationDelivered = await this.sendReply(msg.chatId, answer.text);
+          if (!confirmationDelivered) {
+            this.permissions.releaseAnswer(msg.chatId, answer.answerToken);
+            return;
+          }
+          if (!answer.canAdvance && !answer.retryPrompt) return;
+          const nextPrompt = this.permissions.takeNextPrompt(msg.chatId, answer.answerToken);
+          if (nextPrompt) {
+            const nextPromptRequestId = this.permissions.getPromptRequestId(msg.chatId, answer.answerToken);
+
+            const delivered = await this.sendReply(msg.chatId, nextPrompt);
+            this.permissions.confirmNextPrompt(msg.chatId, delivered, nextPromptRequestId, answer.answerToken);
+          }
+        }
+      } catch (e) {
+        if (answerToken !== undefined) this.permissions.releaseAnswer(msg.chatId, answerToken);
+        this.logger?.error?.(`whatsapp: permission answer error: ${e}`);
+      }
+      return;
+    }
+
     if (this.activeChats.has(msg.chatId)) {
       this.logger?.info?.(`whatsapp: chat ${msg.chatId} already active, skipping`);
       return;
@@ -234,6 +270,11 @@ export class WhatsAppChannel implements ChannelAdapter {
           await this.sendReply(chatId, questionText);
           continue;
         }
+        if (event.type === "permission_request") {
+          const questionText = this.permissions.capture(chatId, sessionKey, event);
+          if (questionText) this.permissions.confirmInitialPrompt(chatId, await this.sendReply(chatId, questionText), event.requestId);
+          continue;
+        }
         const fragment = renderWhatsAppEvent(event);
         if (fragment != null) replyText += fragment;
       }
@@ -243,14 +284,15 @@ export class WhatsAppChannel implements ChannelAdapter {
     }
 
     this.elicitation.clear(chatId);
+    this.permissions.clearAfterTurn(chatId);
     const finalText = replyText.trim();
     if (finalText) {
       await this.sendReply(chatId, finalText);
     }
   }
 
-  private async sendReply(chatId: string, text: string): Promise<void> {
-    if (!this.running) return;
+  private async sendReply(chatId: string, text: string): Promise<boolean> {
+    if (!this.running) return false;
     try {
       const res = await fetch(`${this.bridgeUrl}/send`, {
         method: "POST",
@@ -262,9 +304,12 @@ export class WhatsAppChannel implements ChannelAdapter {
         const raw: any = await res.json().catch(() => ({}));
         const err = raw?.error ?? res.statusText;
         this.logger?.error?.(`whatsapp: send HTTP ${res.status}: ${err}`);
+        return false;
       }
+      return true;
     } catch (e) {
       this.logger?.error?.(`whatsapp: send failed: ${e}`);
+      return false;
     }
   }
 

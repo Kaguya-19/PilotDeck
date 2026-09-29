@@ -1,0 +1,40 @@
+name: Retry Release Build
+
+on:
+  workflow_run:
+    workflows: [Daily Release]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: release-build-retry-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+jobs:
+  retry:
+    if: >-
+      ${{ github.event.workflow_run.run_attempt == 1 &&
+          github.event.workflow_run.conclusion == 'failure' &&
+          contains(fromJSON('["schedule", "workflow_dispatch"]'), github.event.workflow_run.event) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # workflow_run's SHA is from the default branch. Never execute code or
+      # download artifacts from the failed run in this write-enabled workflow.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Retry failed build jobs once
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const { retryReleaseBuild } = require('./apps/desktop/scripts/retry-release-build.cjs');
+            const result = await retryReleaseBuild({ github, context });
+            core.info(result.message);
+            await core.summary.addRaw(result.message).write();

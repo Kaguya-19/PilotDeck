@@ -34,11 +34,15 @@ const appendAuthToken = (url) => {
 // Utility function for authenticated API calls
 export const authenticatedFetch = (url, options = {}) => {
   const token = localStorage.getItem('auth-token');
+  const {
+    suppressServerErrorToast = false,
+    ...fetchOptions
+  } = options;
 
   const defaultHeaders = {};
 
   // Only set Content-Type for non-FormData requests
-  if (!(options.body instanceof FormData)) {
+  if (!(fetchOptions.body instanceof FormData)) {
     defaultHeaders['Content-Type'] = 'application/json';
   }
 
@@ -47,17 +51,17 @@ export const authenticatedFetch = (url, options = {}) => {
   }
 
   return fetch(url, {
-    ...options,
+    ...fetchOptions,
     headers: {
       ...defaultHeaders,
-      ...options.headers,
+      ...fetchOptions.headers,
     },
   }).then((response) => {
     const refreshedToken = response.headers.get('X-Refreshed-Token');
     if (refreshedToken) {
       localStorage.setItem('auth-token', refreshedToken);
     }
-    if (response.status >= 500) {
+    if (!suppressServerErrorToast && response.status >= 500) {
       window.dispatchEvent(new CustomEvent('pilotdeck:toast', {
         detail: { kind: 'error', message: `Server error (${response.status}): ${response.statusText || 'Internal Server Error'}` },
       }));
@@ -65,6 +69,88 @@ export const authenticatedFetch = (url, options = {}) => {
     return response;
   });
 };
+
+export const createWebHttpAgentStatus = ({
+  event = 'web_http_request_failed',
+  message,
+  code,
+  status,
+  statusText,
+  userHint,
+  scope = 'http',
+  detail = {},
+} = {}) => ({
+  type: 'agent_status',
+  event,
+  detail: Object.fromEntries(Object.entries({
+    message: message || `Request failed${status ? ` (${status})` : ''}.`,
+    code: code || event,
+    severity: 'error',
+    visible: true,
+    userHint: userHint || defaultWebHttpUserHint(status),
+    scope,
+    source: 'web_http',
+    status,
+    statusText,
+    ...detail,
+  }).filter(([, value]) => value !== undefined)),
+});
+
+export const extractAgentStatusFromBody = (body) => {
+  if (!body || typeof body !== 'object') return null;
+  const status = body.agent_status || body.agentStatus;
+  if (
+    status &&
+    status.type === 'agent_status' &&
+    typeof status.event === 'string' &&
+    status.detail &&
+    typeof status.detail === 'object'
+  ) {
+    return status;
+  }
+  return null;
+};
+
+export const readAgentStatusErrorFromResponse = async (response, options = {}) => {
+  let body = null;
+  try {
+    body = await response.clone().json();
+  } catch {
+    body = null;
+  }
+  const status = extractAgentStatusFromBody(body) || createWebHttpAgentStatus({
+    event: options.event || 'web_http_request_failed',
+    code: options.code,
+    message: options.message || response.statusText || `Request failed with HTTP ${response.status}.`,
+    status: response.status,
+    statusText: response.statusText,
+    userHint: options.userHint,
+    scope: options.scope || 'http',
+  });
+  return {
+    status,
+    message: formatAgentStatusForDisplay(status),
+  };
+};
+
+export const formatAgentStatusForDisplay = (status) => {
+  const detail = status?.detail || {};
+  const message = typeof detail.message === 'string' && detail.message.trim()
+    ? detail.message.trim()
+    : 'Request failed.';
+  const hint = typeof detail.userHint === 'string' && detail.userHint.trim()
+    ? detail.userHint.trim()
+    : '';
+  return hint ? `${message}\n${hint}` : message;
+};
+
+function defaultWebHttpUserHint(status) {
+  if (status === 401 || status === 403) return 'Check authentication and permissions, then retry.';
+  if (status === 429) return 'Wait for the current request or rate limit to clear, then retry.';
+  if (status === 413) return 'Reduce the request size and retry.';
+  if (status && status >= 500) return 'The local server or gateway is unavailable. Retry after it recovers.';
+  return 'Check the request and retry.';
+}
 
 // API endpoints
 export const api = {
@@ -92,6 +178,16 @@ export const api = {
     authenticatedFetch(`/api/always-on/events?limit=${encodeURIComponent(limit)}${since ? `&since=${encodeURIComponent(since)}` : ''}`),
   allCronJobs: () =>
     authenticatedFetch('/api/always-on/cron-jobs'),
+  cronCreate: (payload) =>
+    authenticatedFetch('/api/always-on/cron-jobs', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  cronUpdate: (taskId, payload) =>
+    authenticatedFetch(`/api/always-on/cron-jobs/${encodeURIComponent(taskId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    }),
   cronRunNow: (taskId) =>
     authenticatedFetch(`/api/always-on/cron-jobs/${encodeURIComponent(taskId)}/run-now`, { method: 'POST' }),
   cronStop: (taskId) =>
@@ -154,6 +250,20 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ summary, provider }),
     }),
+  forkSession: (sessionId, { projectPath, fromEntryId }) =>
+    authenticatedFetch(`/api/sessions/${encodeURIComponent(sessionId)}/fork`, {
+      method: 'POST',
+      body: JSON.stringify({ projectPath, fromEntryId }),
+    }),
+  sopStatus: (sessionKey, projectKey = '') => {
+    const params = new URLSearchParams({ sessionKey });
+    if (projectKey) params.set('projectKey', projectKey);
+    return authenticatedFetch(`/api/sop/status?${params.toString()}`, { suppressServerErrorToast: true });
+  },
+  resumeSop: (payload) => authenticatedFetch('/api/sop/resume', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  }),
   deleteProject: (projectName, force = false) =>
     authenticatedFetch(`/api/projects/${projectName}${force ? '?force=true' : ''}`, {
       method: 'DELETE',
@@ -176,8 +286,106 @@ export const api = {
     }),
   readFile: (projectName, filePath) =>
     authenticatedFetch(`/api/projects/${projectName}/file?filePath=${encodeURIComponent(filePath)}`),
+  fileContentUrl: (projectName, filePath, options = {}) => {
+    const params = new URLSearchParams({ path: filePath });
+    if (options.download) params.set('download', '1');
+    if (options.cacheKey !== undefined && options.cacheKey !== null) {
+      params.set('_', String(options.cacheKey));
+    }
+    return appendAuthToken(`/api/projects/${encodeURIComponent(projectName)}/files/content?${params.toString()}`);
+  },
   readFileBlob: (projectName, filePath) =>
-    authenticatedFetch(`/api/projects/${projectName}/files/content?path=${encodeURIComponent(filePath)}`),
+    authenticatedFetch(api.fileContentUrl(projectName, filePath)),
+  fileContentSha256: (projectName, filePath) => {
+    const params = new URLSearchParams({ path: filePath, sha256: '1' });
+    return authenticatedFetch(
+      `/api/projects/${encodeURIComponent(projectName)}/files/content?${params.toString()}`,
+      { method: 'HEAD', cache: 'no-store' },
+    );
+  },
+  officePdfPreviewUrl: (projectName, filePath, options = {}) => {
+    const params = new URLSearchParams({ path: filePath });
+    if (options.force) {
+      params.set('force', '1');
+    }
+    if (options.cacheKey !== undefined && options.cacheKey !== null) {
+      params.set('_', String(options.cacheKey));
+    }
+    return appendAuthToken(`/api/projects/${encodeURIComponent(projectName)}/files/preview/pdf?${params.toString()}`);
+  },
+  readOfficePdfPreviewBlob: (projectName, filePath, options = {}) => {
+    return authenticatedFetch(api.officePdfPreviewUrl(projectName, filePath, {
+      force: options.force,
+      cacheKey: options.force ? Date.now() : options.cacheKey,
+    }), {
+      cache: 'no-store',
+    });
+  },
+  preflightOfficePdfPreview: (projectName, filePath, options = {}) =>
+    authenticatedFetch(api.officePdfPreviewUrl(projectName, filePath, {
+      force: options.force,
+      cacheKey: options.cacheKey,
+    }), {
+      cache: 'no-store',
+      headers: {
+        Range: 'bytes=0-0',
+      },
+      signal: options.signal,
+    }),
+  spreadsheetPreviewManifest: (projectName, filePath, options = {}) => {
+    const params = new URLSearchParams({ path: filePath });
+    if (options.force) params.set('force', '1');
+    if (options.cacheKey !== undefined && options.cacheKey !== null) {
+      params.set('_', String(options.cacheKey));
+    }
+    return authenticatedFetch(
+      `/api/projects/${encodeURIComponent(projectName)}/files/preview/spreadsheet/manifest?${params.toString()}`,
+      { cache: 'no-store', signal: options.signal },
+    );
+  },
+  spreadsheetInteractivePreview: (projectName, filePath, options = {}) => {
+    const params = new URLSearchParams({ path: filePath });
+    if (options.force) params.set('force', '1');
+    if (options.cacheKey !== undefined && options.cacheKey !== null) {
+      params.set('_', String(options.cacheKey));
+    }
+    return authenticatedFetch(
+      `/api/projects/${encodeURIComponent(projectName)}/files/preview/spreadsheet/data?${params.toString()}`,
+      { cache: 'no-store', signal: options.signal },
+    );
+  },
+  spreadsheetSheetPreviewUrl: (projectName, filePath, sheetIndex, options = {}) => {
+    const params = new URLSearchParams({
+      path: filePath,
+      sheet: String(sheetIndex),
+    });
+    if (options.force) params.set('force', '1');
+    if (options.cacheKey !== undefined && options.cacheKey !== null) {
+      params.set('_', String(options.cacheKey));
+    }
+    return appendAuthToken(
+      `/api/projects/${encodeURIComponent(projectName)}/files/preview/spreadsheet/sheet?${params.toString()}`,
+    );
+  },
+  preflightSpreadsheetSheetPreview: (projectName, filePath, sheetIndex, options = {}) =>
+    authenticatedFetch(api.spreadsheetSheetPreviewUrl(projectName, filePath, sheetIndex, {
+      force: options.force,
+      cacheKey: options.cacheKey,
+    }), {
+      cache: 'no-store',
+      headers: {
+        Range: 'bytes=0-0',
+      },
+      signal: options.signal,
+    }),
+  officePreviewStatus: (options = {}) => {
+    const params = new URLSearchParams();
+    if (options.refresh) params.set('refresh', '1');
+    const query = params.toString();
+    return authenticatedFetch(`/api/office-preview/status${query ? `?${query}` : ''}`);
+  },
+  pilotDeckConfig: () =>
+    authenticatedFetch('/api/config'),
   saveFile: (projectName, filePath, content) =>
     authenticatedFetch(`/api/projects/${projectName}/file`, {
       method: 'PUT',
@@ -224,9 +432,7 @@ export const api = {
     authenticatedFetch(`/api/projects/${encodeURIComponent(projectName)}/download`),
 
   fileDownloadUrl: (projectName, filePath) =>
-    appendAuthToken(
-      `/api/projects/${encodeURIComponent(projectName)}/files/content?path=${encodeURIComponent(filePath)}&download=1`,
-    ),
+    api.fileContentUrl(projectName, filePath, { download: true }),
 
   // TaskMaster endpoints
   taskmaster: {
@@ -292,6 +498,10 @@ export const api = {
         body: JSON.stringify({ gitName, gitEmail }),
       }),
     onboardingStatus: () => authenticatedFetch('/api/user/onboarding-status'),
+    runtimeStatus: () => authenticatedFetch('/api/user/runtime-status'),
+    retryGateway: () => authenticatedFetch('/api/user/runtime/gateway/retry', {
+      method: 'POST',
+    }),
     completeOnboarding: () =>
       authenticatedFetch('/api/user/complete-onboarding', {
         method: 'POST',

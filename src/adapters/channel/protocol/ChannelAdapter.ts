@@ -13,3 +13,10 @@ export {
   type ChannelCommand,
   type CommandExecContext,
 } from "./ChannelCommandRegistry.js";
+
+export {
+  ImLiveReplyController,
+  type ImLiveReplyHandle,
+  type ImLiveReplyTransport,
+  type ImLiveReplyControllerOptions,
+} from "./ImLiveReplyController.js";

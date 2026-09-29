@@ -189,12 +189,18 @@ function readMemoryApiType(value: unknown): PilotMemoryApiType | undefined {
   if (value === undefined) {
     return undefined;
   }
-  if (value === "openai-responses" || value === "responses" || value === "openai-completions") {
+  if (
+    value === "openai-responses"
+    || value === "responses"
+    || value === "openai-completions"
+    || value === "anthropic"
+    || value === "google"
+  ) {
     return value;
   }
   throw new PilotConfigError(
     "CONFIG_MEMORY_VALUE_INVALID",
-    "memory.apiType must be openai-responses, responses, or openai-completions.",
+    "memory.apiType must be openai-responses, responses, openai-completions, anthropic, or google.",
   );
 }
 

@@ -1,0 +1,84 @@
+/* Exact consumed icon/code-block declarations from the formal source styles.css.
+   No enterprise shell, private account page or global body stylesheet is copied. */
+.sd1-icon {
+  width: 18px;
+  height: 18px;
+  display: inline-block;
+  flex: 0 0 auto;
+  color: currentColor;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.65;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vertical-align: -0.22em;
+}
+
+.sd1-icon-more {
+  stroke-width: 2.4;
+}
+.code-block-vscode {
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 13px 15px;
+  overflow: auto;
+  border: 1px solid var(--code-border);
+  border-radius: 12px;
+  background: var(--code-bg);
+  color: var(--code-fg);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.62;
+  tab-size: 2;
+  white-space: pre;
+}
+
+.code-block-vscode code {
+  display: block;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.code-token.comment { color: var(--code-comment); }
+.code-token.string { color: var(--code-string); }
+.code-token.number { color: var(--code-number); }
+.code-token.keyword { color: var(--code-keyword); }
+.code-token.function { color: var(--code-function); }
+.code-token.builtin { color: var(--code-builtin); }
+.code-token.operator { color: var(--code-operator); }
+.code-token.punctuation { color: var(--code-punctuation); }
+.code-token.property { color: var(--code-property); }
+.code-token.boolean { color: var(--code-boolean); }
+
+.code-block-vscode {
+  --font-mono: "JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  --page-gradient-a: rgba(15, 118, 110, 0.055);
+  --page-gradient-top: #fbfaf6;
+  --page-gradient-bottom: #f3f0e8;
+  --panel-bg: rgba(249, 247, 241, 0.82);
+  --code-bg: #ffffff;
+  --code-fg: #1f1f1f;
+  --code-border: #e5e5e5;
+  --code-sidebar-bg: #f3f3f3;
+  --code-sidebar-active: #e8e8e8;
+  --code-tab-bg: #f3f3f3;
+  --code-selection: rgba(0, 120, 215, 0.24);
+  --code-comment: #008000;
+  --code-string: #a31515;
+  --code-number: #098658;
+  --code-keyword: #0000ff;
+  --code-function: #795e26;
+  --code-builtin: #267f99;
+  --code-operator: #1f1f1f;
+  --code-punctuation: #666666;
+  --code-property: #001080;
+  --code-boolean: #0000ff;
+
+}
+.sd1-icon-spin { animation: sd1-spin 1s linear infinite; }
+@keyframes sd1-spin { to { transform: rotate(360deg); } }

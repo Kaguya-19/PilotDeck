@@ -13,13 +13,15 @@ import type {
  *
  *   tools:
  *     webSearch:
- *       provider: glm                    # glm | tavily | custom
+ *       enabled: true
+ *       provider: glm                    # glm | tavily | custom | serper | brave
  *       apiKey: "..."
  *       endpoint: https://api.z.ai/api/paas/v4/web_search
  *
  * Unknown fields produce non-fatal warnings so future additions don't break
- * older deployments.  Returns `undefined` when the section is missing or
- * empty so callers can keep the field off the snapshot entirely.
+ * older deployments. Returns `undefined` when no webSearch block exists.
+ * Preserve a present but empty block: legacy configs use it to opt into
+ * search with credentials supplied by the environment.
  */
 export function parseToolsConfig(
   rawTools: unknown,
@@ -79,12 +81,36 @@ function parseWebSearch(
 
   const result: PilotWebSearchConfig = {};
 
+  if (raw.enabled !== undefined) {
+    if (typeof raw.enabled !== "boolean") {
+      diagnostics.push({
+        code: "TOOLS_WEB_SEARCH_ENABLED_INVALID",
+        severity: "fatal",
+        message: "tools.webSearch.enabled must be a boolean.",
+        path: "tools.webSearch.enabled",
+        recoverable: false,
+      });
+    } else {
+      result.enabled = raw.enabled;
+    }
+  }
+
+  if (result.enabled === false) {
+    return { enabled: false };
+  }
+
   if (raw.provider !== undefined) {
-    if (raw.provider !== "glm" && raw.provider !== "tavily" && raw.provider !== "custom") {
+    if (
+      raw.provider !== "glm"
+      && raw.provider !== "tavily"
+      && raw.provider !== "custom"
+      && raw.provider !== "serper"
+      && raw.provider !== "brave"
+    ) {
       diagnostics.push({
         code: "TOOLS_WEB_SEARCH_PROVIDER_INVALID",
         severity: "fatal",
-        message: "tools.webSearch.provider must be \"glm\", \"tavily\", or \"custom\".",
+        message: "tools.webSearch.provider must be \"glm\", \"tavily\", \"custom\", \"serper\", or \"brave\".",
         path: "tools.webSearch.provider",
         recoverable: false,
       });
@@ -117,7 +143,20 @@ function parseWebSearch(
         recoverable: false,
       });
     } else {
-      result.endpoint = raw.endpoint.trim();
+      const endpoint = raw.endpoint.trim();
+      try {
+        const parsed = new URL(endpoint);
+        if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("unsupported protocol");
+        result.endpoint = endpoint;
+      } catch {
+        diagnostics.push({
+          code: "TOOLS_WEB_SEARCH_ENDPOINT_INVALID",
+          severity: "fatal",
+          message: "tools.webSearch.endpoint must be an HTTP(S) URL.",
+          path: "tools.webSearch.endpoint",
+          recoverable: false,
+        });
+      }
     }
   }
 
@@ -150,7 +189,7 @@ function parseWebSearch(
   }
 
   for (const key of Object.keys(raw)) {
-    if (key !== "provider" && key !== "apiKey" && key !== "endpoint" && key !== "customProvider" && key !== "region" && key !== "tavilyApiKey") {
+    if (key !== "enabled" && key !== "provider" && key !== "apiKey" && key !== "endpoint" && key !== "customProvider" && key !== "region" && key !== "tavilyApiKey") {
       diagnostics.push({
         code: "TOOLS_WEB_SEARCH_UNKNOWN_FIELD",
         severity: "warning",
@@ -161,7 +200,8 @@ function parseWebSearch(
     }
   }
 
-  return Object.keys(result).length > 0 ? result : undefined;
+  // Presence is meaningful even if every legacy/unknown field was discarded.
+  return result;
 }
 
 function parseCustomProvider(

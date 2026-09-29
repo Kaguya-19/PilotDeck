@@ -13,11 +13,13 @@ export type RawProviderConfig = {
   timeoutMs?: unknown;
   headers?: unknown;
   extraBody?: unknown;
+  speedMapping?: unknown;
   retry?: unknown;
   models?: unknown;
 };
 
 export type RawModelDefinition = {
+  thinking?: unknown;
   displayName?: unknown;
   capabilities?: unknown;
   multimodal?: unknown;
@@ -33,5 +35,5 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export function isModelProtocol(value: unknown): value is ModelProtocol {
-  return value === "anthropic" || value === "openai";
+  return value === "anthropic" || value === "openai" || value === "openai-responses" || value === "google";
 }

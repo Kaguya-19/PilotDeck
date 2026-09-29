@@ -1,10 +1,14 @@
 import { useCallback, useEffect, useState } from 'react';
 import { authenticatedFetch } from '../../../utils/api';
+import { useWebSocket } from '../../../contexts/WebSocketContext';
 import { CLAUDE_MODELS } from '../../../../shared/modelConstants';
-import type { PendingPermissionRequest, PermissionMode } from '../types/types';
-import type { ProjectSession } from '../../../types/app';
+import type { PendingPermissionRequest } from '../types/types';
+import type { Project, ProjectSession } from '../../../types/app';
+import { useChatModelSelection } from './useChatModelSelection';
+import { useChatPermissionMode } from './useChatPermissionMode';
 
 interface UseChatProviderStateArgs {
+  selectedProject: Project | null;
   selectedSession: ProjectSession | null;
 }
 
@@ -13,44 +17,98 @@ type ModelOption = {
   label: string;
 };
 
+type ThinkingModelContext = {
+  providerId?: string;
+  providerUrl?: string;
+  protocol?: string;
+  modelId?: string;
+  supportsThinking?: boolean;
+  thinking?: { state?: string; efforts?: string[] };
+};
+
+export type ModelNumericCapability = {
+  type: 'range' | 'enum';
+  min?: number;
+  max?: number;
+  step?: number;
+  values?: number[];
+};
+
+export type ChatModelCatalogItem = {
+  id: string;
+  provider: string;
+  model: string;
+  displayName: string;
+  available: boolean;
+  capabilities: {
+    reasoning?: ModelNumericCapability;
+    speed?: ModelNumericCapability;
+  };
+};
+
+export type ChatModelSelection =
+  | { mode: 'auto' }
+  | {
+      mode: 'model';
+      provider: string;
+      model: string;
+      reasoning?: number;
+      speed?: number;
+    };
+
 const DEFAULT_MODEL_OPTIONS: ModelOption[] = CLAUDE_MODELS.OPTIONS.map((option) => ({
   ...option,
 }));
 
-const DEFAULT_PERMISSION_MODE_KEY = 'permissionMode-default';
-const COMPOSER_PERMISSION_MODES: PermissionMode[] = [
-  'default',
-  'bypassPermissions',
-];
-
-function readStoredPermissionMode(key: string): PermissionMode | null {
-  const stored = localStorage.getItem(key);
-  if (!stored) return null;
-  return COMPOSER_PERMISSION_MODES.includes(stored as PermissionMode)
-    ? (stored as PermissionMode)
+function readThinkingModelContext(config: unknown): ThinkingModelContext | null {
+  const configRecord = config && typeof config === 'object' ? config as Record<string, unknown> : null;
+  const agent = configRecord?.agent && typeof configRecord.agent === 'object' ? configRecord.agent as Record<string, unknown> : null;
+  const modelRef = typeof agent?.model === 'string' ? agent.model.trim() : '';
+  const slashIndex = modelRef.indexOf('/');
+  if (slashIndex <= 0 || slashIndex >= modelRef.length - 1) {
+    return null;
+  }
+  const providerId = modelRef.slice(0, slashIndex);
+  const modelId = modelRef.slice(slashIndex + 1);
+  const modelConfig = configRecord?.model && typeof configRecord.model === 'object' ? configRecord.model as Record<string, unknown> : null;
+  const providers = modelConfig?.providers && typeof modelConfig.providers === 'object'
+    ? modelConfig.providers as Record<string, unknown>
     : null;
+  const provider = providers?.[providerId] && typeof providers[providerId] === 'object'
+    ? providers[providerId] as Record<string, unknown>
+    : null;
+  const models = provider?.models && typeof provider.models === 'object'
+    ? provider.models as Record<string, unknown>
+    : null;
+  const modelDefinition = models?.[modelId] && typeof models[modelId] === 'object'
+    ? models[modelId] as Record<string, unknown>
+    : null;
+  const capabilities = modelDefinition?.capabilities && typeof modelDefinition.capabilities === 'object'
+    ? modelDefinition.capabilities as Record<string, unknown>
+    : null;
+  return {
+    providerId,
+    providerUrl: typeof provider?.url === 'string' ? provider.url : undefined,
+    protocol: typeof provider?.protocol === 'string' ? provider.protocol : undefined,
+    modelId,
+    thinking: modelDefinition?.thinking as ThinkingModelContext['thinking'],
+    supportsThinking: typeof capabilities?.supportsThinking === 'boolean' ? capabilities.supportsThinking : undefined,
+  };
 }
 
-export function useChatProviderState({ selectedSession }: UseChatProviderStateArgs) {
-  const [permissionMode, setPermissionModeState] = useState<PermissionMode>(() => {
-    return readStoredPermissionMode(DEFAULT_PERMISSION_MODE_KEY) || 'default';
-  });
+export function useChatProviderState({ selectedProject, selectedSession }: UseChatProviderStateArgs) {
+  const { subscribe } = useWebSocket();
+  const permissionState = useChatPermissionMode();
   const [pendingPermissionRequests, setPendingPermissionRequests] = useState<PendingPermissionRequest[]>([]);
   const [model, setModel] = useState<string>(() => {
     return localStorage.getItem('pilotdeck-model') || CLAUDE_MODELS.DEFAULT;
   });
   const [modelOptions, setModelOptions] = useState<ModelOption[]>(DEFAULT_MODEL_OPTIONS);
-
-  useEffect(() => {
-    const defaultMode = readStoredPermissionMode(DEFAULT_PERMISSION_MODE_KEY);
-    if (!selectedSession?.id) {
-      setPermissionModeState(defaultMode || 'default');
-      return;
-    }
-
-    const savedMode = readStoredPermissionMode(`permissionMode-${selectedSession.id}`);
-    setPermissionModeState(savedMode || defaultMode || 'default');
-  }, [selectedSession?.id]);
+  const [thinkingModelContext, setThinkingModelContext] = useState<ThinkingModelContext | null>(null);
+  const modelState = useChatModelSelection({
+    projectKey: selectedProject?.fullPath || selectedProject?.path || '',
+    sessionId: selectedSession?.id || '',
+  });
 
   useEffect(() => {
     setPendingPermissionRequests((previous) => {
@@ -95,18 +153,21 @@ export function useChatProviderState({ selectedSession }: UseChatProviderStateAr
         setModelOptions(runtimeOptions);
         setModel(nextModel);
         localStorage.setItem('pilotdeck-model', nextModel);
-
-        const backendMode = data?.permissions?.effectiveMode;
-        if (backendMode && COMPOSER_PERMISSION_MODES.includes(backendMode as PermissionMode)) {
-          const storedPerm = readStoredPermissionMode(DEFAULT_PERMISSION_MODE_KEY);
-          if (!storedPerm || storedPerm === 'default') {
-            setPermissionModeState(backendMode as PermissionMode);
-            localStorage.setItem(DEFAULT_PERMISSION_MODE_KEY, backendMode);
-          }
-        }
       })
       .catch((error) => {
         console.error('Error loading runtime config:', error);
+      });
+
+    authenticatedFetch('/api/config')
+      .then((response) => response.json())
+      .then((data) => {
+        if (cancelled) {
+          return;
+        }
+        setThinkingModelContext(readThinkingModelContext(data?.config));
+      })
+      .catch((error) => {
+        console.error('Error loading PilotDeck config:', error);
       });
 
     return () => {
@@ -114,32 +175,26 @@ export function useChatProviderState({ selectedSession }: UseChatProviderStateAr
     };
   }, []);
 
-  const setPermissionMode = useCallback((nextMode: PermissionMode) => {
-    const normalizedMode = COMPOSER_PERMISSION_MODES.includes(nextMode)
-      ? nextMode
-      : 'default';
-
-    setPermissionModeState(normalizedMode);
-    localStorage.setItem(DEFAULT_PERMISSION_MODE_KEY, normalizedMode);
-
-    if (selectedSession?.id) {
-      localStorage.setItem(`permissionMode-${selectedSession.id}`, normalizedMode);
-    }
-  }, [selectedSession?.id]);
+  useEffect(() => {
+    return subscribe((message: any) => {
+      if (message?.type !== 'config:reloaded') return;
+      setThinkingModelContext(readThinkingModelContext(message?.config));
+    });
+  }, [subscribe]);
 
   const cyclePermissionMode = useCallback(() => {
-    const currentIndex = COMPOSER_PERMISSION_MODES.indexOf(permissionMode);
-    const nextIndex = (currentIndex + 1) % COMPOSER_PERMISSION_MODES.length;
-    const nextMode = COMPOSER_PERMISSION_MODES[nextIndex];
-    setPermissionMode(nextMode);
-  }, [permissionMode, setPermissionMode]);
+    void permissionState.setPermissionMode(permissionState.permissionMode === 'default' ? 'bypassPermissions' : 'default').catch(() => {});
+  }, [permissionState.permissionMode, permissionState.setPermissionMode]);
+
 
   return {
-    model,
+    model: modelState.modelSelection?.mode === 'model'
+      ? `${modelState.modelSelection.provider}/${modelState.modelSelection.model}` : model,
     setModel,
     modelOptions,
-    permissionMode,
-    setPermissionMode,
+    ...modelState,
+    thinkingModelContext,
+    ...permissionState,
     pendingPermissionRequests,
     setPendingPermissionRequests,
     cyclePermissionMode,

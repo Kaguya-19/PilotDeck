@@ -1,8 +1,10 @@
 import type { ModelProtocol } from "../protocol/canonical.js";
+import { NetworkFetchError } from "../../network/fetch.js";
 import {
   BILLING_PATTERN,
   CONTEXT_OVERFLOW_PATTERN,
   IMAGE_TOO_LARGE_PATTERN,
+  INVALID_API_KEY_PATTERN,
   MAX_OUTPUT_REACHED_PATTERN,
   MODEL_NOT_FOUND_PATTERN,
   MULTIMODAL_PROCESSOR_PATTERN,
@@ -18,6 +20,7 @@ import {
   type CanonicalModelErrorCode,
   type SettingsFix,
 } from "../protocol/errors.js";
+import { parseTokenLimitError } from "./tokenLimitParsing.js";
 
 export function normalizeModelError(
   provider: string,
@@ -26,7 +29,7 @@ export function normalizeModelError(
   status?: number,
 ): CanonicalModelError {
   const raw = error;
-  const record = isRecord(error) ? error : undefined;
+  const record = firstErrorRecord(error);
   const nestedError = record && isRecord(record.error) ? record.error : undefined;
   const source = nestedError ?? record;
 
@@ -37,9 +40,10 @@ export function normalizeModelError(
 
   const message = sanitizeErrorMessage(rawMessage);
 
+  const networkCode = classifyNetworkError(error, message);
   const semanticCode = classifySemanticError(message, status, protocol);
   const code: CanonicalModelErrorCode | (string & {}) =
-    semanticCode ?? readString(source?.code) ?? readString(source?.type) ?? statusCodeToCode(status, message);
+    networkCode ?? semanticCode ?? readString(source?.code) ?? readString(source?.type) ?? statusCodeToCode(status, message);
 
   const hint = resolveUserHint(code, message, status, provider);
 
@@ -49,10 +53,24 @@ export function normalizeModelError(
     code,
     status,
     message,
-    retryable: isRetryable(status, code),
+    retryable: readBoolean(source?.retryable) ?? isRetryable(status, code),
     raw,
     ...hint,
   };
+  const retryAfterMs = readNumber(source?.retryAfterMs);
+  if (retryAfterMs !== undefined && retryAfterMs >= 0) {
+    result.retryAfterMs = retryAfterMs;
+  }
+  const tokenLimit = parseTokenLimitError(message);
+  if (tokenLimit.maxContextTokens !== undefined) {
+    result.maxContextTokens = tokenLimit.maxContextTokens;
+  }
+  if (tokenLimit.maxOutputTokens !== undefined) {
+    result.maxOutputTokens = tokenLimit.maxOutputTokens;
+  }
+  if (tokenLimit.availableOutputTokens !== undefined) {
+    result.availableOutputTokens = tokenLimit.availableOutputTokens;
+  }
   if (code === "prompt_too_long" || code === "context_overflow") {
     result.recoverableViaCompact = true;
   }
@@ -62,11 +80,53 @@ export function normalizeModelError(
   if (code === "image_too_large") {
     result.recoverableViaImageStrip = true;
   }
-  const retryAfterMs = parseRetryAfterFromMessage(rawMessage);
-  if (retryAfterMs !== undefined) {
-    result.retryAfterMs = retryAfterMs;
+  const retryAfterFromMessage = parseRetryAfterFromMessage(rawMessage);
+  if (retryAfterFromMessage !== undefined) {
+    result.retryAfterMs = retryAfterFromMessage;
   }
   return result;
+}
+
+function classifyNetworkError(error: unknown, message: string): CanonicalModelErrorCode | undefined {
+  if (error instanceof NetworkFetchError) {
+    switch (error.code) {
+      case "network_dns_error":
+        return "dns_error";
+      case "network_connection_reset":
+        return "connection_reset";
+      case "network_connection_refused":
+        return "connection_refused";
+      case "network_tls_error":
+        return "tls_error";
+      case "network_proxy_error":
+        return "proxy_error";
+      case "network_rate_limited":
+        return "rate_limit_error";
+      case "network_server_error":
+        return "server_error";
+      case "network_timeout":
+        return "timeout";
+      default:
+        return undefined;
+    }
+  }
+  const text = message.toLowerCase();
+  if (text.includes("enotfound") || text.includes("eai_again") || text.includes("dns")) return "dns_error";
+  if (text.includes("econnreset") || text.includes("socket hang up")) return "connection_reset";
+  if (text.includes("econnrefused")) return "connection_refused";
+  if (text.includes("certificate") || text.includes("tls") || text.includes("ssl")) return "tls_error";
+  if (text.includes("proxy connect") || text.includes("proxy error") || text.includes("tunnel") || text.includes("econnrefused proxy")) return "proxy_error";
+  return undefined;
+}
+
+function firstErrorRecord(error: unknown): Record<string, unknown> | undefined {
+  if (isRecord(error)) {
+    return error;
+  }
+  if (!Array.isArray(error)) {
+    return undefined;
+  }
+  return error.find(isRecord);
 }
 
 /**
@@ -78,6 +138,9 @@ function classifySemanticError(
   status: number | undefined,
   protocol: ModelProtocol,
 ): CanonicalModelErrorCode | undefined {
+  if (INVALID_API_KEY_PATTERN.test(message)) {
+    return "auth_error";
+  }
   if (PROMPT_TOO_LONG_ANTHROPIC_PATTERN.test(message)) {
     return "prompt_too_long";
   }
@@ -91,11 +154,15 @@ function classifySemanticError(
     return "max_output_reached";
   }
 
+  if (
+    status === 429
+    || RATE_LIMIT_MESSAGE_PATTERN.test(message)
+    || (USAGE_LIMIT_PATTERN.test(message) && TRANSIENT_USAGE_SIGNAL_PATTERN.test(message))
+  ) {
+    return "rate_limit_error";
+  }
   if (BILLING_PATTERN.test(message)) {
     return "billing";
-  }
-  if (RATE_LIMIT_MESSAGE_PATTERN.test(message)) {
-    return "rate_limit_error";
   }
   if (IMAGE_TOO_LARGE_PATTERN.test(message)) {
     return "image_too_large";
@@ -126,7 +193,16 @@ function isRetryable(status: number | undefined, code: string): boolean {
     return true;
   }
 
-  return ["rate_limit_error", "overloaded_error", "timeout", "server_error"].includes(code);
+  return [
+    "rate_limit_error",
+    "overloaded_error",
+    "timeout",
+    "server_error",
+    "dns_error",
+    "connection_reset",
+    "connection_refused",
+    "proxy_error",
+  ].includes(code);
 }
 
 /**
@@ -175,7 +251,7 @@ function resolveUserHint(
   switch (code) {
     case "billing":
       return {
-        userHint: "API account balance exhausted or quota depleted.",
+        userHint: `API account balance exhausted or quota depleted${provider ? ` for provider \"${provider}\"` : ""}. Top up provider billing or switch provider/model in Settings.`,
         settingsFix: {
           description: "Top up credits or switch to a different provider.",
           configPath: "model.provider",
@@ -183,7 +259,7 @@ function resolveUserHint(
       };
     case "auth_error":
       return {
-        userHint: "API key rejected by the provider. Verify the key is valid and not expired.",
+        userHint: `API key rejected${provider ? ` by provider \"${provider}\"` : " by the provider"}. Update the key in Settings → Model Provider or run pilotdeck setup.`,
         settingsFix: {
           description: "Reconfigure API key via setup.",
           command: "pilotdeck setup",
@@ -191,7 +267,7 @@ function resolveUserHint(
       };
     case "model_not_found":
       return {
-        userHint: "The requested model does not exist or your account lacks access.",
+        userHint: `The requested model does not exist or your account lacks access${provider ? ` on provider \"${provider}\"` : ""}. Select a valid model in Settings → Model Provider or add it under model.providers.<id>.models in pilotdeck.yaml.`,
         settingsFix: {
           description: "Switch to a valid model.",
           configPath: "model.default",
@@ -200,7 +276,7 @@ function resolveUserHint(
     case "context_overflow":
     case "prompt_too_long":
       return {
-        userHint: "Input exceeds the model context window. Try /compact to compress history or /new for a fresh session.",
+        userHint: "Input exceeds the model context window. Run /compact, start a new session with /new, remove large attachments, or switch to a larger-context model in Settings.",
       };
     case "image_too_large":
       return {
@@ -209,23 +285,32 @@ function resolveUserHint(
     case "payload_too_large":
     case "request_too_large":
       return {
-        userHint: "Request payload too large. Try /compact to reduce context, or start a new session with /new.",
+        userHint: "Request payload too large. Remove attachments, run /compact, start a new session with /new, or reduce the prompt size before retrying.",
       };
     case "rate_limit_error":
       return {
-        userHint: "Rate limited by the provider. The request will be retried automatically after a short wait.",
+        userHint: "Rate limited by the provider. Wait for the limit to reset, reduce concurrent requests, or switch provider/model in Settings.",
       };
     case "overloaded_error":
       return {
-        userHint: "Provider is temporarily overloaded. Retrying with backoff.",
+        userHint: "Provider is temporarily overloaded. Retry later, check provider API status, or switch provider/model in Settings if it repeats.",
       };
     case "max_output_reached":
       return {
-        userHint: "Model output hit the token limit. The system will attempt to resume automatically.",
+        userHint: "Model output hit the token limit. Increase max output tokens in Settings → Model Provider or ask the agent to split the answer into smaller parts.",
       };
     case "timeout":
+      if (/stream idle timeout|no data received/i.test(message)) {
+        return {
+          userHint: `Stream stalled${provider ? ` for provider \"${provider}\"` : ""}. Increase retry.streamIdleTimeoutMs in Settings → Advanced, or check local network/proxy and provider status.`,
+          settingsFix: {
+            description: "Increase stream idle timeout for this provider.",
+            configPath: "model.providers.<id>.retry.streamIdleTimeoutMs",
+          },
+        };
+      }
       return {
-        userHint: "Request timed out. For large prompts, try increasing provider.timeoutMs in config or use streaming mode.",
+        userHint: `Request timed out${provider ? ` for provider \"${provider}\"` : ""}. Increase provider.timeoutMs in Settings → Model Provider → Advanced, or check local network/proxy and provider status.`,
         settingsFix: {
           description: "Increase request timeout for this provider.",
           configPath: "model.providers.<id>.timeoutMs",
@@ -233,7 +318,7 @@ function resolveUserHint(
       };
     case "server_error":
       return {
-        userHint: "Provider returned a server error. Retrying automatically.",
+        userHint: "Provider returned a server error. Check provider API status/logs, retry later, or switch provider/model in Settings if it repeats.",
       };
     default:
       return {};
@@ -258,6 +343,14 @@ function sanitizeErrorMessage(raw: string): string {
 
 function readString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function readBoolean(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function readNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -1,9 +1,9 @@
-import { readFile, stat } from "node:fs/promises";
 import { extname, resolve } from "node:path";
 import type { CanonicalContentBlock, CanonicalMessage } from "../../model/index.js";
+import { createNodeAttachmentPort, type AttachmentPort } from "./AttachmentPort.js";
 
 export type AttachmentRequest =
-  | { type: "file"; path: string }
+  | { type: "file"; path: string; name?: string }
   | { type: "image"; path: string; mimeType?: string }
   | { type: "pdf"; path: string };
 
@@ -14,6 +14,7 @@ export type ResolvedAttachment = {
       | "attachment_missing"
       | "attachment_too_large"
       | "attachment_unsupported"
+      | "image_invalid"
       | "image_no_resize"
       | "pdf_size_estimate";
     severity: "info" | "warning" | "error";
@@ -28,13 +29,55 @@ export type AttachmentResolverOptions = {
   maxImageBytes?: number;
   /** Approximate bytes-per-page for PDF estimation (legacy fallback: 102_400). */
   bytesPerPdfPage?: number;
+  /** Attachment storage provider; defaults to the native filesystem provider. */
+  attachmentPort?: AttachmentPort;
 };
 
 const DEFAULT_MAX_FILE_BYTES = 1_000_000; // 1 MB
 const DEFAULT_MAX_IMAGE_BYTES = 5_242_880; // 5 MiB (legacy)
 const DEFAULT_BYTES_PER_PDF_PAGE = 102_400; // 100 KB (legacy fallback)
 
-const TEXT_EXTENSIONS = new Set([".txt", ".md", ".json", ".yaml", ".yml", ".ts", ".tsx", ".js", ".tsx", ".log"]);
+const TEXT_EXTENSIONS = new Set([
+  ".txt",
+  ".md",
+  ".json",
+  ".yaml",
+  ".yml",
+  ".csv",
+  ".tsv",
+  ".xml",
+  ".html",
+  ".css",
+  ".ts",
+  ".tsx",
+  ".js",
+  ".jsx",
+  ".py",
+  ".go",
+  ".rs",
+  ".java",
+  ".sh",
+  ".log",
+]);
+const BINARY_CONTAINER_EXTENSIONS = new Set([
+  ".zip",
+  ".gz",
+  ".tar",
+  ".7z",
+  ".rar",
+  ".doc",
+  ".docx",
+  ".ppt",
+  ".pptx",
+  ".xls",
+  ".xlsx",
+  ".odt",
+  ".ods",
+  ".odp",
+  ".pages",
+  ".key",
+  ".numbers",
+]);
 const IMAGE_MIME = new Map<string, string>([
   [".png", "image/png"],
   [".jpg", "image/jpeg"],
@@ -47,17 +90,19 @@ export class AttachmentResolver {
   private readonly maxFileBytes: number;
   private readonly maxImageBytes: number;
   private readonly bytesPerPdfPage: number;
+  private readonly attachmentPort: AttachmentPort;
 
   constructor(options: AttachmentResolverOptions = {}) {
     this.maxFileBytes = options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES;
     this.maxImageBytes = options.maxImageBytes ?? DEFAULT_MAX_IMAGE_BYTES;
     this.bytesPerPdfPage = options.bytesPerPdfPage ?? DEFAULT_BYTES_PER_PDF_PAGE;
+    this.attachmentPort = options.attachmentPort ?? createNodeAttachmentPort();
   }
 
   async resolve(request: AttachmentRequest): Promise<ResolvedAttachment> {
     switch (request.type) {
       case "file":
-        return this.resolveFile(request.path);
+        return this.resolveFile(request.path, request.name);
       case "image":
         return this.resolveImage(request.path, request.mimeType);
       case "pdf":
@@ -80,11 +125,11 @@ export class AttachmentResolver {
     return { role: "user", content: attachment.blocks };
   }
 
-  private async resolveFile(path: string): Promise<ResolvedAttachment> {
+  private async resolveFile(path: string, name?: string): Promise<ResolvedAttachment> {
     const absolute = resolve(path);
     let info;
     try {
-      info = await stat(absolute);
+      info = await this.attachmentPort.stat(absolute);
     } catch (error) {
       return {
         blocks: [],
@@ -93,6 +138,25 @@ export class AttachmentResolver {
             code: "attachment_missing",
             severity: "warning",
             message: `Attachment not found: ${absolute} (${error instanceof Error ? error.message : String(error)}).`,
+          },
+        ],
+      };
+    }
+    // Upload stores may use an opaque id as the on-disk path. Prefer the
+    // original filename for format detection while keeping the resolved path
+    // as the only filesystem target.
+    const ext = extname(name?.trim() ?? "").toLowerCase() || extname(absolute).toLowerCase();
+    if (!TEXT_EXTENSIONS.has(ext)) {
+      return {
+        blocks: [],
+        diagnostics: [
+          {
+            code: "attachment_unsupported",
+            // Office and archive formats are expected to be available only as
+            // registered paths. They need a document tool or conversion, but
+            // are not an upload failure that belongs in the user's message.
+            severity: BINARY_CONTAINER_EXTENSIONS.has(ext) ? "info" : "warning",
+            message: unsupportedFileMessage(absolute, ext),
           },
         ],
       };
@@ -109,20 +173,7 @@ export class AttachmentResolver {
         ],
       };
     }
-    const ext = extname(absolute).toLowerCase();
-    if (!TEXT_EXTENSIONS.has(ext)) {
-      return {
-        blocks: [],
-        diagnostics: [
-          {
-            code: "attachment_unsupported",
-            severity: "info",
-            message: `File extension ${ext || "(none)"} not in text whitelist; skipped (use a more specific resolver).`,
-          },
-        ],
-      };
-    }
-    const text = await readFile(absolute, "utf8");
+    const text = await this.attachmentPort.readText(absolute);
     return {
       blocks: [
         { type: "text", text: `<attachment path="${absolute}">\n${text}\n</attachment>` },
@@ -135,7 +186,7 @@ export class AttachmentResolver {
     const absolute = resolve(path);
     let info;
     try {
-      info = await stat(absolute);
+      info = await this.attachmentPort.stat(absolute);
     } catch (error) {
       return {
         blocks: [],
@@ -174,15 +225,53 @@ export class AttachmentResolver {
         ],
       };
     }
-    const buffer = await readFile(absolute);
+    const buffer = Buffer.from(await this.attachmentPort.readBytes(absolute));
+    const actualMime = detectImageMime(buffer);
+    if (!actualMime) {
+      return {
+        blocks: [],
+        diagnostics: [
+          {
+            code: "image_invalid",
+            severity: "warning",
+            message: `Image ${absolute} could not be identified from its bytes; skipped and left as a local path diagnostic.`,
+          },
+        ],
+      };
+    }
+    const repaired = await validateImageForProvider(buffer, actualMime);
+    if (!repaired.ok) {
+      return {
+        blocks: [],
+        diagnostics: [
+          {
+            code: "image_invalid",
+            severity: "warning",
+            message: `Image ${absolute} bytes look like ${actualMime} but could not be decoded locally; skipped. Diagnostic: ${repaired.error}`,
+          },
+        ],
+      };
+    }
+    if (!imageMimeCompatible(detectedMime, actualMime)) {
+      return {
+        blocks: [],
+        diagnostics: [
+          {
+            code: "image_invalid",
+            severity: "warning",
+            message: `Image ${absolute} was declared as ${detectedMime} but bytes look like ${actualMime}; skipped and left as a local path diagnostic.`,
+          },
+        ],
+      };
+    }
     return {
       blocks: [
         {
           type: "image",
           source: "base64",
-          data: buffer.toString("base64"),
-          mimeType: detectedMime,
-          bytes: info.size,
+          data: repaired.buffer.toString("base64"),
+          mimeType: repaired.mimeType,
+          bytes: repaired.buffer.byteLength,
         },
       ],
       diagnostics: [
@@ -199,7 +288,7 @@ export class AttachmentResolver {
     const absolute = resolve(path);
     let info;
     try {
-      info = await stat(absolute);
+      info = await this.attachmentPort.stat(absolute);
     } catch (error) {
       return {
         blocks: [],
@@ -212,17 +301,12 @@ export class AttachmentResolver {
         ],
       };
     }
-    const buffer = await readFile(absolute);
     const estimatedPages = Math.max(1, Math.round(info.size / this.bytesPerPdfPage));
     return {
       blocks: [
         {
-          type: "pdf",
-          source: "base64",
-          data: buffer.toString("base64"),
-          mimeType: "application/pdf",
-          bytes: info.size,
-          pages: estimatedPages,
+          type: "text",
+          text: `[PDF attachment: ${absolute}, ${info.size} bytes, estimated ${estimatedPages} pages. Use read_file on this registered attachment path to inspect it.]`,
         },
       ],
       diagnostics: [
@@ -234,4 +318,52 @@ export class AttachmentResolver {
       ],
     };
   }
+}
+
+function unsupportedFileMessage(absolute: string, ext: string): string {
+  const displayExt = ext || "(none)";
+  if (BINARY_CONTAINER_EXTENSIONS.has(ext)) {
+    return `Attachment ${absolute} has Office/archive/binary extension ${displayExt}; it was registered as a file path but not shown inline, and read_file cannot inspect this format directly.`;
+  }
+  return `File extension ${displayExt} is not in the inline text whitelist; skipped. If this is plain text, use read_file with the exact path; otherwise convert it before inspection.`;
+}
+
+function detectImageMime(buffer: Buffer): string | undefined {
+  if (buffer.length < 12) return undefined;
+  if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return "image/jpeg";
+  if (buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return "image/png";
+  const gifHeader = buffer.subarray(0, 6).toString("ascii");
+  if (gifHeader === "GIF87a" || gifHeader === "GIF89a") return "image/gif";
+  if (buffer.subarray(0, 4).toString("ascii") === "RIFF" && buffer.subarray(8, 12).toString("ascii") === "WEBP") return "image/webp";
+  return undefined;
+}
+
+function imageMimeCompatible(declared: string, actual: string): boolean {
+  return declared.toLowerCase() === actual.toLowerCase();
+}
+
+async function validateImageForProvider(buffer: Buffer, mimeType: string): Promise<
+  | { ok: true; buffer: Buffer; mimeType: string }
+  | { ok: false; error: string }
+> {
+  try {
+    const sharpModule = await import("sharp");
+    const sharp = sharpModule.default;
+    await sharp(buffer).metadata();
+    return { ok: true, buffer, mimeType };
+  } catch (error) {
+    try {
+      const sharpModule = await import("sharp");
+      const sharp = sharpModule.default;
+      const repaired = await sharp(buffer).rotate().jpeg({ quality: 90 }).toBuffer();
+      return { ok: true, buffer: repaired, mimeType: "image/jpeg" };
+    } catch (repairError) {
+      return { ok: false, error: formatImageError(repairError || error) };
+    }
+  }
+}
+
+function formatImageError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.replace(/\s+/g, " ").slice(0, 300) || "unknown image decode error";
 }

@@ -1,0 +1,696 @@
+{
+  "schemaVersion": 2,
+  "status": "PASS",
+  "mode": "mock",
+  "model": "native-probe",
+  "startup": {
+    "scope": {
+      "tenantId": "tenant_demo",
+      "actorUserId": "admin",
+      "agentId": "agent_7d062081c03b4e16"
+    },
+    "modelPortRange": [
+      16100,
+      16129
+    ],
+    "modelPort": 16100,
+    "runtimeIsolation": true,
+    "nodeVersion": "v22.23.1"
+  },
+  "allowed": {
+    "reply": "Owner approval is required before release. Native branch-only owner approval fact 7d062081c03b4e16. Source: [1].",
+    "runtimeError": null,
+    "stepResult": {
+      "action": "advance",
+      "reply": "Owner approval is required before release. Native branch-only owner approval fact 7d062081c03b4e16. Source: [1].",
+      "slot_updates": {},
+      "tool_call": null,
+      "knowledge_query": null,
+      "knowledge_results": [
+        {
+          "selected_buckets": [
+            {
+              "id": "kbucket_native_g4",
+              "tenant_id": "tenant_demo",
+              "knowledge_base_id": "kb_native_g4",
+              "document_id": "kdoc_native_g4",
+              "bucket_key": "release-approval",
+              "title": "Release owner approval",
+              "summary": "Owner approval is required before release. Native branch-only owner approval fact 7d062081c03b4e16",
+              "token_estimate": 0,
+              "chunk_count": 0,
+              "status": "ready",
+              "metadata": {
+                "content": "Native branch-only owner approval fact 7d062081c03b4e16",
+                "bucket_type": "policy",
+                "quality": {},
+                "section_ids": []
+              },
+              "created_at": "2026-09-22T17:07:20.334984",
+              "updated_at": "2026-09-22T17:07:20.334989"
+            }
+          ],
+          "chunks": [
+            {
+              "id": "kchunk_native_g4",
+              "tenant_id": "tenant_demo",
+              "knowledge_base_id": "kb_native_g4",
+              "document_id": "kdoc_native_g4",
+              "bucket_id": "kbucket_native_g4",
+              "chunk_index": 0,
+              "content": "Owner approval is required before release. Native branch-only owner approval fact 7d062081c03b4e16.",
+              "summary": "Native branch-only owner approval fact 7d062081c03b4e16",
+              "source_ref": "ultrarag://knowledge/documents/kdoc_native_g4",
+              "metadata": {
+                "section_path": "Release approval"
+              },
+              "created_at": "2026-09-22T17:07:20.335042",
+              "updated_at": "2026-09-22T17:07:20.335047"
+            }
+          ],
+          "trace": [
+            {
+              "phase": "document_route",
+              "message": "正在选择知识文档",
+              "candidate_count": 1,
+              "mode": "chat"
+            },
+            {
+              "phase": "document_route_failed",
+              "message": "Model returned an empty response after 1 attempts; provider returned no usable message.content; model=native-probe; endpoint=<redacted>; attempt_1: response_id=missing, choices=0"
+            },
+            {
+              "phase": "document_route_lexical_fallback",
+              "message": "模型路由不可用，已按检索相关性选择知识文档",
+              "selected_count": 1
+            },
+            {
+              "phase": "bucket_route",
+              "message": "正在选择内部索引",
+              "candidate_count": 1,
+              "selected_document_ids": [
+                "kdoc_native_g4"
+              ]
+            },
+            {
+              "phase": "bucket_selection_failed",
+              "message": "Model returned an empty response after 1 attempts; provider returned no usable message.content; model=native-probe; endpoint=<redacted>; attempt_1: response_id=missing, choices=0"
+            },
+            {
+              "phase": "bucket_route_lexical_fallback",
+              "message": "模型路由不可用，已按检索相关性选择内部索引",
+              "selected_count": 1
+            },
+            {
+              "phase": "section_expand",
+              "message": "正在展开章节",
+              "section_count": 0
+            },
+            {
+              "phase": "read_chunks",
+              "message": "读取引用来源",
+              "chunk_count": 1
+            },
+            {
+              "phase": "evidence_pack",
+              "message": "整理引用来源包",
+              "evidence_count": 1
+            }
+          ],
+          "route_trace": [
+            {
+              "phase": "document_route",
+              "message": "正在选择知识文档",
+              "candidate_count": 1,
+              "mode": "chat"
+            },
+            {
+              "phase": "document_route_failed",
+              "message": "Model returned an empty response after 1 attempts; provider returned no usable message.content; model=native-probe; endpoint=<redacted>; attempt_1: response_id=missing, choices=0"
+            },
+            {
+              "phase": "document_route_lexical_fallback",
+              "message": "模型路由不可用，已按检索相关性选择知识文档",
+              "selected_count": 1
+            },
+            {
+              "phase": "bucket_route",
+              "message": "正在选择内部索引",
+              "candidate_count": 1,
+              "selected_document_ids": [
+                "kdoc_native_g4"
+              ]
+            },
+            {
+              "phase": "bucket_selection_failed",
+              "message": "Model returned an empty response after 1 attempts; provider returned no usable message.content; model=native-probe; endpoint=<redacted>; attempt_1: response_id=missing, choices=0"
+            },
+            {
+              "phase": "bucket_route_lexical_fallback",
+              "message": "模型路由不可用，已按检索相关性选择内部索引",
+              "selected_count": 1
+            },
+            {
+              "phase": "section_expand",
+              "message": "正在展开章节",
+              "section_count": 0
+            },
+            {
+              "phase": "read_chunks",
+              "message": "读取引用来源",
+              "chunk_count": 1
+            },
+            {
+              "phase": "evidence_pack",
+              "message": "整理引用来源包",
+              "evidence_count": 1
+            }
+          ],
+          "selected_documents": [
+            {
+              "id": "kdoc_native_g4",
+              "knowledge_base_id": "kb_native_g4",
+              "title": "Approval policy",
+              "filename": "approval-policy.md",
+              "file_type": "md",
+              "summary": "",
+              "outline": [],
+              "key_entities": [],
+              "section_count": null,
+              "chunk_count": 1,
+              "updated_at": "2026-09-22T17:07:20.334922"
+            }
+          ],
+          "selected_concepts": [],
+          "expanded_sections": [],
+          "okf_citations": [],
+          "evidence_pack": [
+            {
+              "chunk_id": "kchunk_native_g4",
+              "related_group_id": null,
+              "related_chunk_ids": [],
+              "related_chunk_index": null,
+              "document_id": "kdoc_native_g4",
+              "bucket_id": "kbucket_native_g4",
+              "source_path": "ultrarag://knowledge/documents/kdoc_native_g4",
+              "section_path": "Release approval",
+              "summary": "Native branch-only owner approval fact 7d062081c03b4e16",
+              "content": "Owner approval is required before release. Native branch-only owner approval fact 7d062081c03b4e16.",
+              "excerpt": "Owner approval is required before release. Native branch-only owner approval fact 7d062081c03b4e16.",
+              "relevance_score": 14.72,
+              "confidence_reason": "引用来源摘要、章节路径或正文与查询相关"
+            }
+          ],
+          "query": "owner approval before release"
+        }
+      ],
+      "next_step_id": null,
+      "is_step_completed": true,
+      "handoff": false,
+      "structured_result": null
+    },
+    "invocations": [
+      {
+        "toolName": "knowledge:knowledge.search/v1",
+        "status": "completed",
+        "result": {
+          "success": true,
+          "data": {
+            "query": "owner approval before release",
+            "hit_count": 1,
+            "results": [
+              {
+                "label": "[1]",
+                "title": "",
+                "source": "ultrarag://knowledge/documents/kdoc_native_g4",
+                "excerpt": "Owner approval is required before release. Native branch-only owner approval fact 7d062081c03b4e16."
+              }
+            ],
+            "citations": [
+              {
+                "label": "[1]",
+                "title": "Release approval",
+                "source": "ultrarag://knowledge/documents/kdoc_native_g4"
+              }
+            ],
+            "instruction": "回答时用对应的 [N] 标注引用；没有命中的内容不要臆造。"
+          },
+          "error": null,
+          "citations": [
+            {
+              "id": "kref_1",
+              "label": "[1]",
+              "kind": "evidence",
+              "title": "Release approval",
+              "source_path": "ultrarag://knowledge/documents/kdoc_native_g4",
+              "content": "Owner approval is required before release. Native branch-only owner approval fact 7d062081c03b4e16.",
+              "excerpt": "Owner approval is required before release. Native branch-only owner approval fact 7d062081c03b4e16.",
+              "summary": "Native branch-only owner approval fact 7d062081c03b4e16",
+              "section_path": "Release approval",
+              "confidence_reason": "引用来源摘要、章节路径或正文与查询相关",
+              "document_id": "kdoc_native_g4",
+              "bucket_id": "kbucket_native_g4",
+              "chunk_id": "kchunk_native_g4",
+              "related_group_id": null,
+              "related_chunk_ids": [
+                "kchunk_native_g4"
+              ]
+            }
+          ],
+          "artifacts": []
+        }
+      }
+    ],
+    "modelResponses": [
+      {
+        "mode": "allowed",
+        "toolName": "mcp__staffdeck__knowledge_search",
+        "content": null
+      },
+      {
+        "mode": "allowed",
+        "toolName": null,
+        "content": "{\"selected_document_ids\": [\"kdoc_native_g4\"], \"selected_bucket_ids\": [\"kbucket_native_g4\"]}"
+      },
+      {
+        "mode": "allowed",
+        "toolName": null,
+        "content": "{\"selected_document_ids\": [\"kdoc_native_g4\"], \"selected_bucket_ids\": [\"kbucket_native_g4\"]}"
+      },
+      {
+        "mode": "allowed",
+        "toolName": null,
+        "content": "{\"selected_document_ids\": [\"kdoc_native_g4\"], \"selected_bucket_ids\": [\"kbucket_native_g4\"]}"
+      },
+      {
+        "mode": "allowed",
+        "toolName": null,
+        "content": "{\"selected_document_ids\": [\"kdoc_native_g4\"], \"selected_bucket_ids\": [\"kbucket_native_g4\"]}"
+      },
+      {
+        "mode": "allowed",
+        "toolName": "mcp__staffdeck__submit_step_result",
+        "content": null
+      },
+      {
+        "mode": "allowed",
+        "toolName": null,
+        "content": "Native StaffDeck turn completed."
+      }
+    ],
+    "modelToolSchemas": [
+      "mcp__staffdeck__capability_describe",
+      "mcp__staffdeck__capability_invoke",
+      "mcp__staffdeck__external_task_status",
+      "mcp__staffdeck__knowledge_search",
+      "mcp__staffdeck__sandbox_execute",
+      "mcp__staffdeck__submit_step_result"
+    ],
+    "toolResults": [
+      "{\"success\": true, \"data\": {\"query\": \"owner approval before release\", \"hit_count\": 1, \"results\": [{\"label\": \"[1]\", \"title\": \"\", \"source\": \"ultrarag://knowledge/documents/kdoc_native_g4\", \"excerpt\": \"Owner approval is required before release. Native branch-only owner approval fact 7d062081c03b4e16.\"}], \"citations\": [{\"label\": \"[1]\", \"title\": \"Release approval\", \"source\": \"ultrarag://knowledge/documents/kdoc_native_g4\"}], \"instruction\": \"回答时用对应的 [N] 标注引用；没有命中的内容不要臆造。\"}, \"citations\": [{\"id\": \"kref_1\", \"label\": \"[1]\", \"kind\": \"evidence\", \"title\": \"Release approval\", \"source_path\": \"ultrarag://knowledge/documents/kdoc_native_g4\", \"content\": \"Owner approval is required before release. Native branch-only owner approval fact 7d062081c03b4e16.\", \"excerpt\": \"Owner approval is required before release. Native branch-only owner approval fact 7d062081c03b4e16.\", \"summary\": \"Native branch-only owner approval fact 7d062081c03b4e16\", \"section_path\": \"Release approval\", \"confidence_reason\": \"引用来源摘要、章节路径或正文与查询相关\", \"document_id\": \"kdoc_native_g4\", \"bucket_id\": \"kbucket_native_g4\", \"chunk_id\": \"kchunk_native_g4\", \"related_group_id\": null, \"related_chunk_ids\": [\"kchunk_native_g4\"]}], \"receipt\": {\"invocation_id\": \"hcall_1_079fbfaf\", \"status\": \"completed\", \"replayed_from\": null}}",
+      "{\"success\": true, \"data\": {\"query\": \"owner approval before release\", \"hit_count\": 1, \"results\": [{\"label\": \"[1]\", \"title\": \"\", \"source\": \"ultrarag://knowledge/documents/kdoc_native_g4\", \"excerpt\": \"Owner approval is required before release. Native branch-only owner approval fact 7d062081c03b4e16.\"}], \"citations\": [{\"label\": \"[1]\", \"title\": \"Release approval\", \"source\": \"ultrarag://knowledge/documents/kdoc_native_g4\"}], \"instruction\": \"回答时用对应的 [N] 标注引用；没有命中的内容不要臆造。\"}, \"citations\": [{\"id\": \"kref_1\", \"label\": \"[1]\", \"kind\": \"evidence\", \"title\": \"Release approval\", \"source_path\": \"ultrarag://knowledge/documents/kdoc_native_g4\", \"content\": \"Owner approval is required before release. Native branch-only owner approval fact 7d062081c03b4e16.\", \"excerpt\": \"Owner approval is required before release. Native branch-only owner approval fact 7d062081c03b4e16.\", \"summary\": \"Native branch-only owner approval fact 7d062081c03b4e16\", \"section_path\": \"Release approval\", \"confidence_reason\": \"引用来源摘要、章节路径或正文与查询相关\", \"document_id\": \"kdoc_native_g4\", \"bucket_id\": \"kbucket_native_g4\", \"chunk_id\": \"kchunk_native_g4\", \"related_group_id\": null, \"related_chunk_ids\": [\"kchunk_native_g4\"]}], \"receipt\": {\"invocation_id\": \"hcall_1_079fbfaf\", \"status\": \"completed\", \"replayed_from\": null}}",
+      "{\"success\": true, \"data\": {\"accepted\": true, \"notice\": \"SOP 步骤结果已提交，请停止生成。\"}}"
+    ],
+    "modelRequests": 7,
+    "mode": "allowed",
+    "userMessage": "/sop native-g4-knowledge",
+    "routing": {
+      "kind": "lexical_fallback",
+      "phases": [
+        "document_route",
+        "document_route_failed",
+        "document_route_lexical_fallback",
+        "bucket_route",
+        "bucket_selection_failed",
+        "bucket_route_lexical_fallback",
+        "section_expand",
+        "read_chunks",
+        "evidence_pack"
+      ]
+    }
+  },
+  "overreach": {
+    "reply": "The requested base is not authorized.",
+    "runtimeError": null,
+    "stepResult": {
+      "action": "reply",
+      "reply": "The requested base is not authorized.",
+      "slot_updates": {},
+      "tool_call": null,
+      "knowledge_query": null,
+      "knowledge_results": [],
+      "next_step_id": null,
+      "is_step_completed": false,
+      "handoff": false,
+      "structured_result": null
+    },
+    "invocations": [
+      {
+        "toolName": "knowledge:knowledge.search/v1",
+        "status": "completed",
+        "result": {
+          "success": true,
+          "data": {
+            "query": "owner approval before release",
+            "hit_count": 1,
+            "results": [
+              {
+                "label": "[1]",
+                "title": "",
+                "source": "ultrarag://knowledge/documents/kdoc_native_g4",
+                "excerpt": "Owner approval is required before release. Native branch-only owner approval fact 7d062081c03b4e16."
+              }
+            ],
+            "citations": [
+              {
+                "label": "[1]",
+                "title": "Release approval",
+                "source": "ultrarag://knowledge/documents/kdoc_native_g4"
+              }
+            ],
+            "instruction": "回答时用对应的 [N] 标注引用；没有命中的内容不要臆造。"
+          },
+          "error": null,
+          "citations": [
+            {
+              "id": "kref_1",
+              "label": "[1]",
+              "kind": "evidence",
+              "title": "Release approval",
+              "source_path": "ultrarag://knowledge/documents/kdoc_native_g4",
+              "content": "Owner approval is required before release. Native branch-only owner approval fact 7d062081c03b4e16.",
+              "excerpt": "Owner approval is required before release. Native branch-only owner approval fact 7d062081c03b4e16.",
+              "summary": "Native branch-only owner approval fact 7d062081c03b4e16",
+              "section_path": "Release approval",
+              "confidence_reason": "引用来源摘要、章节路径或正文与查询相关",
+              "document_id": "kdoc_native_g4",
+              "bucket_id": "kbucket_native_g4",
+              "chunk_id": "kchunk_native_g4",
+              "related_group_id": null,
+              "related_chunk_ids": [
+                "kchunk_native_g4"
+              ]
+            }
+          ],
+          "artifacts": []
+        }
+      },
+      {
+        "toolName": "knowledge:knowledge.search/v1",
+        "status": "denied",
+        "result": {
+          "success": false,
+          "error": {
+            "code": "PERMISSION_DENIED",
+            "message": "no resource bound for this operation",
+            "details": {
+              "operation": "knowledge.search/v1"
+            }
+          }
+        }
+      }
+    ],
+    "modelResponses": [
+      {
+        "mode": "overreach",
+        "toolName": null,
+        "content": "{\"selected_document_ids\": [\"kdoc_native_g4\"], \"selected_bucket_ids\": [\"kbucket_native_g4\"]}"
+      },
+      {
+        "mode": "overreach",
+        "toolName": null,
+        "content": "{\"selected_document_ids\": [\"kdoc_native_g4\"], \"selected_bucket_ids\": [\"kbucket_native_g4\"]}"
+      },
+      {
+        "mode": "overreach",
+        "toolName": null,
+        "content": "{\"selected_document_ids\": [\"kdoc_native_g4\"], \"selected_bucket_ids\": [\"kbucket_native_g4\"]}"
+      },
+      {
+        "mode": "overreach",
+        "toolName": null,
+        "content": "{\"selected_document_ids\": [\"kdoc_native_g4\"], \"selected_bucket_ids\": [\"kbucket_native_g4\"]}"
+      },
+      {
+        "mode": "overreach",
+        "toolName": null,
+        "content": "{\"selected_document_ids\": [\"kdoc_native_g4\"], \"selected_bucket_ids\": [\"kbucket_native_g4\"]}"
+      },
+      {
+        "mode": "overreach",
+        "toolName": null,
+        "content": "{\"selected_document_ids\": [\"kdoc_native_g4\"], \"selected_bucket_ids\": [\"kbucket_native_g4\"]}"
+      },
+      {
+        "mode": "overreach",
+        "toolName": "mcp__staffdeck__knowledge_search",
+        "content": null
+      },
+      {
+        "mode": "overreach",
+        "toolName": "mcp__staffdeck__submit_step_result",
+        "content": null
+      },
+      {
+        "mode": "overreach",
+        "toolName": null,
+        "content": "Native StaffDeck turn completed."
+      }
+    ],
+    "modelToolSchemas": [
+      "mcp__staffdeck__capability_describe",
+      "mcp__staffdeck__capability_invoke",
+      "mcp__staffdeck__external_task_status",
+      "mcp__staffdeck__knowledge_search",
+      "mcp__staffdeck__sandbox_execute",
+      "mcp__staffdeck__submit_step_result"
+    ],
+    "toolResults": [
+      "Error: {\"success\": false, \"error\": {\"code\": \"PERMISSION_DENIED\", \"message\": \"no resource bound for this operation\"}, \"receipt\": {\"invocation_id\": \"hcall_3_bd48989c\", \"status\": \"denied\", \"replayed_from\": null}}",
+      "Error: {\"success\": false, \"error\": {\"code\": \"PERMISSION_DENIED\", \"message\": \"no resource bound for this operation\"}, \"receipt\": {\"invocation_id\": \"hcall_3_bd48989c\", \"status\": \"denied\", \"replayed_from\": null}}",
+      "{\"success\": true, \"data\": {\"accepted\": true, \"notice\": \"SOP 步骤结果已提交，请停止生成。\"}}"
+    ],
+    "modelRequests": 9,
+    "mode": "overreach",
+    "userMessage": "/sop native-g4-knowledge",
+    "routing": {
+      "kind": "normal_model_route",
+      "phases": []
+    }
+  },
+  "noGrant": {
+    "reply": "系统配置错误（SLASH_COMMAND_NOT_AVAILABLE）：指定的 SOP 不存在、未发布或未绑定到当前员工。请在管理端补齐配置后重试。",
+    "runtimeError": null,
+    "stepResult": null,
+    "invocations": [
+      {
+        "toolName": "knowledge:knowledge.search/v1",
+        "status": "completed",
+        "result": {
+          "success": true,
+          "data": {
+            "query": "owner approval before release",
+            "hit_count": 1,
+            "results": [
+              {
+                "label": "[1]",
+                "title": "",
+                "source": "ultrarag://knowledge/documents/kdoc_native_g4",
+                "excerpt": "Owner approval is required before release. Native branch-only owner approval fact 7d062081c03b4e16."
+              }
+            ],
+            "citations": [
+              {
+                "label": "[1]",
+                "title": "Release approval",
+                "source": "ultrarag://knowledge/documents/kdoc_native_g4"
+              }
+            ],
+            "instruction": "回答时用对应的 [N] 标注引用；没有命中的内容不要臆造。"
+          },
+          "error": null,
+          "citations": [
+            {
+              "id": "kref_1",
+              "label": "[1]",
+              "kind": "evidence",
+              "title": "Release approval",
+              "source_path": "ultrarag://knowledge/documents/kdoc_native_g4",
+              "content": "Owner approval is required before release. Native branch-only owner approval fact 7d062081c03b4e16.",
+              "excerpt": "Owner approval is required before release. Native branch-only owner approval fact 7d062081c03b4e16.",
+              "summary": "Native branch-only owner approval fact 7d062081c03b4e16",
+              "section_path": "Release approval",
+              "confidence_reason": "引用来源摘要、章节路径或正文与查询相关",
+              "document_id": "kdoc_native_g4",
+              "bucket_id": "kbucket_native_g4",
+              "chunk_id": "kchunk_native_g4",
+              "related_group_id": null,
+              "related_chunk_ids": [
+                "kchunk_native_g4"
+              ]
+            }
+          ],
+          "artifacts": []
+        }
+      },
+      {
+        "toolName": "knowledge:knowledge.search/v1",
+        "status": "denied",
+        "result": {
+          "success": false,
+          "error": {
+            "code": "PERMISSION_DENIED",
+            "message": "no resource bound for this operation",
+            "details": {
+              "operation": "knowledge.search/v1"
+            }
+          }
+        }
+      }
+    ],
+    "modelResponses": [],
+    "modelToolSchemas": [],
+    "toolResults": [],
+    "modelRequests": 0,
+    "mode": "allowed",
+    "userMessage": "/sop native-g4-knowledge",
+    "routing": {
+      "kind": "normal_model_route",
+      "phases": []
+    }
+  },
+  "noGrantNormal": {
+    "reply": "No Knowledge capability is available in this scope.",
+    "runtimeError": null,
+    "stepResult": {
+      "action": "advance",
+      "reply": "No Knowledge capability is available in this scope.",
+      "slot_updates": {},
+      "tool_call": null,
+      "knowledge_query": null,
+      "knowledge_results": [],
+      "next_step_id": null,
+      "is_step_completed": true,
+      "handoff": false,
+      "structured_result": null
+    },
+    "invocations": [
+      {
+        "toolName": "knowledge:knowledge.search/v1",
+        "status": "completed",
+        "result": {
+          "success": true,
+          "data": {
+            "query": "owner approval before release",
+            "hit_count": 1,
+            "results": [
+              {
+                "label": "[1]",
+                "title": "",
+                "source": "ultrarag://knowledge/documents/kdoc_native_g4",
+                "excerpt": "Owner approval is required before release. Native branch-only owner approval fact 7d062081c03b4e16."
+              }
+            ],
+            "citations": [
+              {
+                "label": "[1]",
+                "title": "Release approval",
+                "source": "ultrarag://knowledge/documents/kdoc_native_g4"
+              }
+            ],
+            "instruction": "回答时用对应的 [N] 标注引用；没有命中的内容不要臆造。"
+          },
+          "error": null,
+          "citations": [
+            {
+              "id": "kref_1",
+              "label": "[1]",
+              "kind": "evidence",
+              "title": "Release approval",
+              "source_path": "ultrarag://knowledge/documents/kdoc_native_g4",
+              "content": "Owner approval is required before release. Native branch-only owner approval fact 7d062081c03b4e16.",
+              "excerpt": "Owner approval is required before release. Native branch-only owner approval fact 7d062081c03b4e16.",
+              "summary": "Native branch-only owner approval fact 7d062081c03b4e16",
+              "section_path": "Release approval",
+              "confidence_reason": "引用来源摘要、章节路径或正文与查询相关",
+              "document_id": "kdoc_native_g4",
+              "bucket_id": "kbucket_native_g4",
+              "chunk_id": "kchunk_native_g4",
+              "related_group_id": null,
+              "related_chunk_ids": [
+                "kchunk_native_g4"
+              ]
+            }
+          ],
+          "artifacts": []
+        }
+      },
+      {
+        "toolName": "knowledge:knowledge.search/v1",
+        "status": "denied",
+        "result": {
+          "success": false,
+          "error": {
+            "code": "PERMISSION_DENIED",
+            "message": "no resource bound for this operation",
+            "details": {
+              "operation": "knowledge.search/v1"
+            }
+          }
+        }
+      }
+    ],
+    "modelResponses": [
+      {
+        "mode": "noGrant",
+        "toolName": null,
+        "content": "{\"selected_document_ids\": [\"kdoc_native_g4\"], \"selected_bucket_ids\": [\"kbucket_native_g4\"]}"
+      },
+      {
+        "mode": "noGrant",
+        "toolName": null,
+        "content": "No Knowledge capability is available in this scope."
+      }
+    ],
+    "modelToolSchemas": [
+      "mcp__staffdeck__capability_describe",
+      "mcp__staffdeck__capability_invoke",
+      "mcp__staffdeck__external_task_status",
+      "mcp__staffdeck__sandbox_execute"
+    ],
+    "toolResults": [],
+    "modelRequests": 2,
+    "mode": "noGrant",
+    "userMessage": "What is the owner approval requirement before release?",
+    "routing": {
+      "kind": "normal_model_route",
+      "phases": []
+    }
+  },
+  "checks": {
+    "allowedNativeKnowledgeAndSubmission": {
+      "passed": true
+    },
+    "overreachDeniedByNativeCapability": {
+      "passed": true
+    },
+    "noGrantHidesNativeKnowledgeTool": {
+      "passed": true
+    },
+    "noGrantNormalTurnReachesModelWithoutKnowledge": {
+      "passed": true
+    }
+  },
+  "routingComparison": {
+    "mockPath": "lexical_fallback",
+    "reason": "The deterministic mock intentionally returns empty routing choices; this is Harness/permission evidence, not normal model-selection evidence.",
+    "noGrantSlash": "pre_model_contract_rejection",
+    "noGrantNormal": "model_reached_without_knowledge_tool"
+  },
+  "cleanup": {
+    "runtimeHomeOwned": true,
+    "dataDirOwned": true,
+    "temporaryDatabaseRemoved": true,
+    "performed": true
+  }
+}

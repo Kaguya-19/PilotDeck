@@ -4,6 +4,7 @@ interface CollapsibleSectionProps {
   title: string;
   toolName?: string;
   open?: boolean;
+  onOpenChange?: (open: boolean) => void;
   action?: React.ReactNode;
   onTitleClick?: () => void;
   children: React.ReactNode;
@@ -18,6 +19,7 @@ export const CollapsibleSection: React.FC<CollapsibleSectionProps> = ({
   title,
   toolName,
   open = false,
+  onOpenChange,
   action,
   onTitleClick,
   children,
@@ -30,9 +32,21 @@ export const CollapsibleSection: React.FC<CollapsibleSectionProps> = ({
       open={open}
       data-auto-expand={autoExpandable ? undefined : 'false'}
     >
-      <summary className="flex cursor-pointer select-none items-center gap-1.5 py-0.5 text-xs group-open/details:sticky group-open/details:top-0 group-open/details:z-10 group-open/details:-mx-1 group-open/details:bg-background group-open/details:px-1">
+      <summary
+        onClick={onOpenChange
+          ? (event) => {
+              const interactiveTarget = (event.target as HTMLElement).closest(
+                'button, a, input, select, textarea',
+              );
+              if (interactiveTarget && interactiveTarget !== event.currentTarget) return;
+              event.preventDefault();
+              onOpenChange(!open);
+            }
+          : undefined}
+        className="flex cursor-pointer select-none items-center gap-2 py-0.5 text-[13px] group-open/details:sticky group-open/details:top-0 group-open/details:z-10 group-open/details:-mx-1 group-open/details:bg-background group-open/details:px-1"
+      >
         <svg
-          className="h-3 w-3 flex-shrink-0 text-gray-400 transition-transform duration-150 group-open/details:rotate-90 dark:text-gray-500"
+          className="h-3.5 w-3.5 flex-shrink-0 text-gray-400 transition-transform duration-150 group-open/details:rotate-90 dark:text-gray-500"
           fill="none"
           stroke="currentColor"
           viewBox="0 0 24 24"
@@ -59,7 +73,7 @@ export const CollapsibleSection: React.FC<CollapsibleSectionProps> = ({
         )}
         {action && <span className="ml-1 flex-shrink-0">{action}</span>}
       </summary>
-      <div className="mt-1.5 pl-[18px]">
+      <div className="ml-[22px] mt-1.5">
         {children}
       </div>
     </details>

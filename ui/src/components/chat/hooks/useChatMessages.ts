@@ -3,10 +3,10 @@
  * Converts NormalizedMessage[] from the session store into ChatMessage[] for the UI.
  */
 
-import type { NormalizedMessage } from '../../../stores/useSessionStore';
+import { normalizeCompactionMessage, type NormalizedMessage } from '../../../stores/useSessionStore';
 import type { ChatMessage, SubagentChildTool } from '../types/types';
-import { decodeHtmlEntities, unescapeWithMathProtection, formatUsageLimitText } from '../utils/chatFormatting';
-import { parseUserAttachmentNote } from '../utils/attachmentNotes';
+import { formatUsageLimitText } from '../utils/chatFormatting';
+import { mergeUserAttachments, parseUserAttachmentNote } from '../utils/attachmentNotes';
 
 // Per-message conversion cache keyed by NormalizedMessage reference.
 // When patchMergedStreamingMessage creates a new object for the streaming
@@ -15,11 +15,75 @@ import { parseUserAttachmentNote } from '../utils/attachmentNotes';
 // memo(MessageRowV2) for every message in the session.
 const msgConversionCache = new WeakMap<NormalizedMessage, ChatMessage | null>();
 
+type ConvertSingleMessageOptions = {
+  preserveEmptyAssistantShell?: boolean;
+};
+
+function normalizeAssistantText(content: string): string {
+  // The transport has already decoded JSON. Preserve Markdown/code verbatim.
+  return formatUsageLimitText(content);
+}
+
+function isEmptyAssistantTextMessage(msg: NormalizedMessage): boolean {
+  if (msg.kind !== 'text' || msg.role !== 'assistant') {
+    return false;
+  }
+  return normalizeAssistantText(msg.content || '').trim().length === 0;
+}
+
+function isNonRenderableTransportMessage(msg: NormalizedMessage): boolean {
+  return (
+    msg.kind === 'tool_result' ||
+    msg.kind === 'stream_end' ||
+    msg.kind === 'complete' ||
+    msg.kind === 'status' ||
+    msg.kind === 'permission_request' ||
+    msg.kind === 'permission_cancelled' ||
+    msg.kind === 'session_created'
+  );
+}
+
+function findNeighborRenderableMessage(
+  messages: NormalizedMessage[],
+  index: number,
+  direction: -1 | 1,
+): NormalizedMessage | null {
+  for (let i = index + direction; i >= 0 && i < messages.length; i += direction) {
+    const msg = messages[i];
+    if (!msg || isNonRenderableTransportMessage(msg)) {
+      continue;
+    }
+    return msg;
+  }
+  return null;
+}
+
+function shouldPreserveEmptyAssistantShell(
+  messages: NormalizedMessage[],
+  index: number,
+): boolean {
+  const msg = messages[index];
+  if (!msg || !isEmptyAssistantTextMessage(msg)) {
+    return false;
+  }
+
+  const previous = findNeighborRenderableMessage(messages, index, -1);
+  const next = findNeighborRenderableMessage(messages, index, 1);
+  return previous?.kind === 'tool_use' || next?.kind === 'tool_use';
+}
+
 function convertSingleMessage(
   msg: NormalizedMessage,
   toolResultMap: Map<string, NormalizedMessage>,
   subagentLinks?: Map<string, { subagentId: string; subagentType: string }>,
+  options: ConvertSingleMessageOptions = {},
 ): ChatMessage | null {
+  const turnIdentity = {
+    ...(msg.moduleId ? { moduleId: msg.moduleId } : {}),
+    ...(msg.renderKey ? { renderKey: msg.renderKey } : {}),
+    ...(msg.runId ? { runId: msg.runId } : {}),
+    ...(msg.turnId || msg.runId ? { turnId: msg.turnId || msg.runId } : {}),
+  };
   switch (msg.kind) {
     case 'text': {
       const parsedUserContent = msg.role === 'user'
@@ -29,10 +93,10 @@ function convertSingleMessage(
       const storedAttachments = Array.isArray(msg.attachments)
         ? msg.attachments.filter((attachment) => attachment && typeof attachment.name === 'string')
         : undefined;
-      const userAttachments = [
-        ...(storedAttachments || []),
-        ...parsedUserContent.attachments,
-      ];
+      const userAttachments = mergeUserAttachments(
+        storedAttachments || [],
+        parsedUserContent.attachments,
+      );
 
       if (msg.role === 'user') {
         const userImages = Array.isArray(msg.images)
@@ -43,24 +107,47 @@ function convertSingleMessage(
         if (!content.trim() && userAttachments.length === 0 && (!userImages || userImages.length === 0)) return null;
         return {
           id: msg.id,
+          entryId: msg.entryId,
           type: 'user',
-          content: unescapeWithMathProtection(decodeHtmlEntities(content)),
+          content,
           timestamp: msg.timestamp,
+          ...turnIdentity,
+          ...(msg.forkUnsupportedContent ? {
+            forkUnsupportedContent: true,
+            forkUnsupportedReason: msg.forkUnsupportedReason,
+          } : {}),
           ...(userImages && userImages.length > 0 ? { images: userImages } : {}),
           ...(userAttachments.length > 0 ? { attachments: userAttachments } : {}),
         };
       } else {
-        let text = decodeHtmlEntities(content);
-        text = unescapeWithMathProtection(text);
-        text = formatUsageLimitText(text);
+        const text = normalizeAssistantText(content);
+        if (!text.trim() && !options.preserveEmptyAssistantShell) return null;
         return {
           id: msg.id,
+          entryId: msg.entryId,
           type: 'assistant',
+          ...(msg.model ? { model: msg.model } : {}),
           content: text,
           timestamp: msg.timestamp,
+          ...turnIdentity,
         };
       }
     }
+
+    case 'file_artifacts':
+      if (Array.isArray(msg.artifacts) && msg.artifacts.length > 0) {
+        return {
+          id: msg.id,
+          entryId: msg.entryId,
+          type: 'assistant',
+          ...(msg.model ? { model: msg.model } : {}),
+          content: '',
+          artifacts: msg.artifacts,
+          timestamp: msg.timestamp,
+          ...turnIdentity,
+        };
+      }
+      return null;
 
     case 'tool_use': {
       const tr = msg.toolResult || (msg.toolId ? toolResultMap.get(msg.toolId) : null);
@@ -95,6 +182,7 @@ function convertSingleMessage(
             isError: Boolean(tr.isError),
             toolUseResult: (tr as any).toolUseResult,
             errorCode: (tr as any).errorCode,
+            resultPath: (tr as any).resultPath,
             ...(toolResultImages && toolResultImages.length > 0 ? { images: toolResultImages } : {}),
             ...((tr as any).planFilePath ? {
                 planFilePath: (tr as any).planFilePath,
@@ -107,13 +195,14 @@ function convertSingleMessage(
       const subagentLink = isSubagentContainer && msg.toolId
         ? subagentLinks?.get(msg.toolId)
         : undefined;
-      const msgSubagentId = (msg as Record<string, unknown>).subagentId as string | undefined;
+      const msgSubagentId = msg.subagentId;
 
       return {
         id: msg.id,
         type: 'assistant',
         content: '',
         timestamp: msg.timestamp,
+        ...turnIdentity,
         isToolUse: true,
         toolName: msg.toolName,
         toolInput: typeof msg.toolInput === 'string' ? msg.toolInput : JSON.stringify(msg.toolInput ?? '', null, 2),
@@ -132,18 +221,24 @@ function convertSingleMessage(
       };
     }
 
-    case 'thinking':
-      if (msg.content?.trim()) {
+    case 'thinking': {
+      const thinkingContent = msg.content?.trim()
+        ? msg.content
+        : msg.reasoningContent || '';
+      if (thinkingContent.trim()) {
         return {
           id: msg.id,
           type: 'assistant',
-          content: unescapeWithMathProtection(msg.content),
+          ...(msg.model ? { model: msg.model } : {}),
+          content: thinkingContent,
           timestamp: msg.timestamp,
+          ...turnIdentity,
           isThinking: true,
-          isStreaming: msg.id.startsWith('__streaming_thinking_'),
+          isStreaming: msg.timeline ? msg.streamState === 'open' : msg.id.startsWith('__streaming_thinking_') || msg.id.startsWith('__subagent_thinking_'),
         };
       }
       return null;
+    }
 
     case 'error':
       return {
@@ -152,6 +247,8 @@ function convertSingleMessage(
         content: msg.content || 'Unknown error',
         timestamp: msg.timestamp,
         ...(msg.userHint ? { userHint: msg.userHint } : {}),
+        ...(msg.contentI18n ? { contentI18n: msg.contentI18n } : {}),
+        ...(msg.userHintI18n ? { userHintI18n: msg.userHintI18n } : {}),
       };
 
     case 'interactive_prompt':
@@ -191,9 +288,15 @@ function convertSingleMessage(
         type: 'system',
         content: 'Context compacted',
         timestamp: msg.timestamp,
+        ...turnIdentity,
         isCompactBoundary: true,
+        compactionId: msg.compactionId,
+        compactState: normalizeCompactionMessage(msg).compactState,
+        renderKey: msg.compactionId ? `compact:${msg.sessionId}:${msg.turnId || msg.runId}:${msg.compactionId}` : msg.renderKey,
         compactTrigger: msg.trigger,
         preTokens: msg.preTokens,
+        postTokens: msg.postTokens,
+        messagesSummarized: msg.messagesSummarized,
         compactLevel: msg.compactLevel,
         compactStage: msg.compactStage,
         compactStageLabel: msg.compactStageLabel,
@@ -207,6 +310,7 @@ function convertSingleMessage(
         timestamp: msg.timestamp,
         isAgentActivity: true,
         runId: msg.runId,
+        parentRunId: msg.parentRunId,
         activityId: msg.activityId,
         phase: msg.phase,
         state: msg.state,
@@ -250,9 +354,11 @@ function convertSingleMessage(
         return {
           id: msg.id,
           type: 'assistant',
+          ...(msg.model ? { model: msg.model } : {}),
           content: msg.content,
           timestamp: msg.timestamp,
-          isStreaming: true,
+          ...turnIdentity,
+          isStreaming: msg.timeline ? msg.streamState === 'open' : true,
         };
       }
       return null;
@@ -289,7 +395,8 @@ function convertNormalizedMessages(
   }
   const toolResultMap = new Map<string, NormalizedMessage>();
 
-  for (const msg of messages) {
+  for (let index = 0; index < messages.length; index += 1) {
+    const msg = messages[index];
     // tool_use messages depend on toolResultMap + subagentLinks (external state) so skip cache
     if (msg.kind === 'tool_use') {
       if (msg.toolId && !msg.toolResult) {
@@ -303,19 +410,86 @@ function convertNormalizedMessages(
       continue;
     }
 
+    const preserveEmptyAssistantShell = shouldPreserveEmptyAssistantShell(messages, index);
+    const skipCache = isEmptyAssistantTextMessage(msg);
+
     // All other message types: use WeakMap cache for stable references
-    if (msgConversionCache.has(msg)) {
+    if (!skipCache && msgConversionCache.has(msg)) {
       const cached = msgConversionCache.get(msg);
       if (cached) converted.push(cached);
       continue;
     }
 
-    const result = convertSingleMessage(msg, toolResultMap);
-    msgConversionCache.set(msg, result);
+    const result = convertSingleMessage(msg, toolResultMap, undefined, { preserveEmptyAssistantShell });
+    if (!skipCache) {
+      msgConversionCache.set(msg, result);
+    }
     if (result) converted.push(result);
   }
 
-  return converted;
+  const isArtifactAnchor = (message: ChatMessage) => (
+    message.type === 'assistant'
+    && !message.isToolUse
+    && !message.isThinking
+    && !message.isAgentActivity
+    && !message.isAgentActivitySummary
+    && !message.isSubagentContainer
+    && !message.isTaskNotification
+    && typeof message.content === 'string'
+    && message.content.trim().length > 0
+  );
+  const turnKey = (message: ChatMessage) => message.turnId || message.runId || null;
+
+  // Resolve artifact ownership in two passes. Realtime delivery can put the
+  // artifact frame before the final prose frame, while history puts it after;
+  // anchoring by adjacency therefore produces different UIs until refresh.
+  // The last assistant prose in the same turn is the deterministic turn footer.
+  const finalAssistantByTurn = new Map<string, number>();
+  converted.forEach((message, index) => {
+    const key = turnKey(message);
+    if (key && isArtifactAnchor(message)) {
+      finalAssistantByTurn.set(key, index);
+    }
+  });
+
+  const artifactsByAnchor = new Map<number, NonNullable<ChatMessage['artifacts']>>();
+  const anchoredArtifactIndexes = new Set<number>();
+  converted.forEach((message, messageIndex) => {
+    if (!Array.isArray(message.artifacts) || message.artifacts.length === 0) return;
+
+    const key = turnKey(message);
+    let anchorIndex = key ? (finalAssistantByTurn.get(key) ?? -1) : -1;
+
+    // Legacy transcripts may not have turn identity. Keep the old nearest-
+    // preceding behavior as a compatibility fallback, bounded by the user turn.
+    if (anchorIndex < 0 && !key) {
+      for (let index = messageIndex - 1; index >= 0; index -= 1) {
+        const candidate = converted[index];
+        if (candidate.type === 'user') break;
+        if (isArtifactAnchor(candidate)) {
+          anchorIndex = index;
+          break;
+        }
+      }
+    }
+
+    if (anchorIndex < 0 || anchorIndex === messageIndex) return;
+    anchoredArtifactIndexes.add(messageIndex);
+    artifactsByAnchor.set(anchorIndex, [
+      ...(artifactsByAnchor.get(anchorIndex) ?? []),
+      ...message.artifacts,
+    ]);
+  });
+
+  return converted.flatMap((message, index) => {
+    if (anchoredArtifactIndexes.has(index)) return [];
+    const attachedArtifacts = artifactsByAnchor.get(index);
+    if (!attachedArtifacts) return [message];
+    return [{
+      ...message,
+      artifacts: [...(message.artifacts ?? []), ...attachedArtifacts],
+    }];
+  });
 }
 
 /**

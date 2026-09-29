@@ -8,7 +8,9 @@ export type ModelProviderAdapter = {
 
 const adapters: Record<ModelProtocol, ModelProviderAdapter> = {
   anthropic: { protocol: "anthropic", name: "Anthropic Messages API" },
+  google: { protocol: "google", name: "Google Gemini API" },
   openai: { protocol: "openai", name: "OpenAI Chat Completions API" },
+  "openai-responses": { protocol: "openai-responses", name: "OpenAI Responses API" },
 };
 
 export const ModelProviderRegistry = {

@@ -1,0 +1,268 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { AgentLoop, type AgentLoopInput } from "../../../src/agent/loop/AgentLoop.js";
+import type { AgentRuntimeConfig } from "../../../src/agent/runtime/AgentRuntimeConfig.js";
+import type { AgentRuntimeDependencies } from "../../../src/agent/runtime/AgentRuntimeDependencies.js";
+import { DefaultContextRuntime } from "../../../src/context/DefaultContextRuntime.js";
+import type { MemoryResolver } from "../../../src/context/memory/MemoryResolver.js";
+import type { CanonicalMessage, CanonicalModelRequest } from "../../../src/model/index.js";
+import { createDefaultPermissionContext } from "../../../src/permission/index.js";
+import { ToolRegistry } from "../../../src/tool/index.js";
+
+test("provider and model overrides retain configured speed and thinking defaults", async () => {
+  const thinking = { enabled: true, mode: "high" as const };
+  const config: AgentRuntimeConfig = {
+    provider: "openai",
+    model: "default-model",
+    cwd: "/workspace/project",
+    thinking,
+    permissionMode: "default",
+    permissionContext: createDefaultPermissionContext({
+      cwd: "/workspace/project",
+      mode: "default",
+      canPrompt: false,
+      bypassAvailable: true,
+    }),
+  };
+  const loop = AgentLoop.fromDependencies(config, {
+    router: {} as AgentRuntimeDependencies["router"],
+    tools: {
+      registry: new ToolRegistry(),
+      scheduler: { executeAll: async () => [] },
+    },
+  });
+  const messages: CanonicalMessage[] = [{ role: "user", content: [{ type: "text", text: "hello" }] }];
+  const input: AgentLoopInput = {
+    sessionId: "session-1",
+    turnId: "turn-1",
+    messages,
+    modelOverride: { provider: "anthropic", model: "selected-model", speed: 0.7 },
+  };
+
+  const request = await (loop as unknown as {
+    createModelRequest(
+      messages: CanonicalMessage[],
+      input: AgentLoopInput,
+      options: { emitInstructionEvents?: boolean },
+    ): Promise<CanonicalModelRequest>;
+  }).createModelRequest(messages, input, { emitInstructionEvents: false });
+
+  assert.equal(request.provider, "anthropic");
+  assert.equal(request.model, "selected-model");
+  assert.equal(request.speed, 0.7);
+  assert.deepEqual(request.thinking, thinking);
+});
+
+test("plan-mode reminder is appended after projection and recent3 cache indices are computed", async () => {
+  const config: AgentRuntimeConfig = {
+    provider: "modelbest",
+    model: "claude-test",
+    cwd: "/workspace/project",
+    systemPrompt: "stable system",
+    permissionMode: "plan",
+    permissionContext: createDefaultPermissionContext({
+      cwd: "/workspace/project",
+      mode: "plan",
+      canPrompt: false,
+      bypassAvailable: true,
+    }),
+  };
+  const loop = AgentLoop.fromDependencies(config, {
+    router: {} as AgentRuntimeDependencies["router"],
+    context: new DefaultContextRuntime(),
+    tools: {
+      registry: new ToolRegistry(),
+      scheduler: { executeAll: async () => [] },
+    },
+    getModelProtocol: () => "anthropic",
+    getModelSupportsPromptCache: () => true,
+  });
+  const messages: CanonicalMessage[] = Array.from({ length: 5 }, (_, index) => ({
+    role: index % 2 === 0 ? "user" as const : "assistant" as const,
+    content: [{ type: "text" as const, text: `message-${index}` }],
+  }));
+  const input: AgentLoopInput = {
+    sessionId: "plan-cache-session",
+    turnId: "plan-cache-turn",
+    messages,
+  };
+
+  const request = await (loop as unknown as {
+    createModelRequest(
+      messages: CanonicalMessage[],
+      input: AgentLoopInput,
+      options: { emitInstructionEvents?: boolean },
+    ): Promise<CanonicalModelRequest>;
+  }).createModelRequest(messages, input, { emitInstructionEvents: false });
+
+  assert.equal(request.messages.length, 6);
+  assert.equal(request.messages[5]?.metadata?.purpose, "plan_mode_reminder");
+  assert.deepEqual(request.cachePlan?.messages, [3, 4, 5]);
+  assert.deepEqual(request.cacheBreakpoints, [3, 4, 5]);
+});
+
+test("plan-mode reminder does not consume the context message limit", async () => {
+  const config: AgentRuntimeConfig = {
+    provider: "modelbest",
+    model: "claude-test",
+    cwd: "/workspace/project",
+    permissionMode: "plan",
+    permissionContext: createDefaultPermissionContext({
+      cwd: "/workspace/project",
+      mode: "plan",
+      canPrompt: false,
+      bypassAvailable: true,
+    }),
+    maxContextMessages: 1,
+  };
+  const loop = AgentLoop.fromDependencies(config, {
+    router: {} as AgentRuntimeDependencies["router"],
+    context: new DefaultContextRuntime(),
+    tools: {
+      registry: new ToolRegistry(),
+      scheduler: { executeAll: async () => [] },
+    },
+    getModelProtocol: () => "anthropic",
+    getModelSupportsPromptCache: () => true,
+  });
+  const input: AgentLoopInput = {
+    sessionId: "plan-limit-session",
+    turnId: "plan-limit-turn",
+    messages: [{ role: "user", content: [{ type: "text", text: "REAL USER REQUEST" }] }],
+  };
+
+  const request = await (loop as unknown as {
+    createModelRequest(
+      messages: CanonicalMessage[],
+      input: AgentLoopInput,
+      options: { emitInstructionEvents?: boolean },
+    ): Promise<CanonicalModelRequest>;
+  }).createModelRequest(input.messages, input, { emitInstructionEvents: false });
+
+  assert.equal(request.messages.length, 2);
+  assert.equal(request.messages[0]?.content[0]?.type, "text");
+  assert.equal(request.messages[0]?.content[0]?.text, "REAL USER REQUEST");
+  assert.equal(request.messages[1]?.metadata?.purpose, "plan_mode_reminder");
+  assert.deepEqual(request.cacheBreakpoints, [0, 1]);
+});
+
+test("plan-mode memory retrieval uses the real user request", async () => {
+  let query: string | undefined;
+  const memoryResolver: MemoryResolver = {
+    async retrieve(input) {
+      query = input.query;
+      return { systemContext: "relevant memory", diagnostics: [] };
+    },
+    async captureTurn() {},
+  };
+  const config: AgentRuntimeConfig = {
+    provider: "modelbest",
+    model: "claude-test",
+    cwd: "/workspace/project",
+    permissionMode: "plan",
+    permissionContext: createDefaultPermissionContext({
+      cwd: "/workspace/project",
+      mode: "plan",
+      canPrompt: false,
+      bypassAvailable: true,
+    }),
+  };
+  const loop = AgentLoop.fromDependencies(config, {
+    router: {} as AgentRuntimeDependencies["router"],
+    context: new DefaultContextRuntime({ memoryResolver }),
+    tools: {
+      registry: new ToolRegistry(),
+      scheduler: { executeAll: async () => [] },
+    },
+  });
+  const input: AgentLoopInput = {
+    sessionId: "plan-memory-session",
+    turnId: "plan-memory-turn",
+    messages: [{ role: "user", content: [{ type: "text", text: "REAL USER REQUEST" }] }],
+  };
+
+  await (loop as unknown as {
+    createModelRequest(
+      messages: CanonicalMessage[],
+      input: AgentLoopInput,
+      options: { emitInstructionEvents?: boolean },
+    ): Promise<CanonicalModelRequest>;
+  }).createModelRequest(input.messages, input, { emitInstructionEvents: false });
+
+  assert.equal(query, "REAL USER REQUEST");
+});
+
+test("direct model execution replaces cache indices with the compacted request projection", async () => {
+  const config: AgentRuntimeConfig = {
+    provider: "anthropic",
+    model: "cache-model",
+    cwd: "/workspace/project",
+    permissionMode: "default",
+    permissionContext: createDefaultPermissionContext({
+      cwd: "/workspace/project",
+      mode: "default",
+      canPrompt: false,
+      bypassAvailable: true,
+    }),
+  };
+  const loop = AgentLoop.fromDependencies(config, {
+    ports: {
+      model: {
+        prepare: async ({ request }) => ({
+          provider: request.provider,
+          model: request.model,
+          request,
+        }),
+        stream: async function* () {},
+      },
+      tools: { list: () => [], executeAll: async () => [] },
+    },
+  });
+  const original: CanonicalModelRequest = {
+    provider: "anthropic",
+    model: "cache-model",
+    systemPrompt: "stable",
+    messages: Array.from({ length: 9 }, (_, index) => ({
+      role: index % 2 === 0 ? "user" : "assistant",
+      content: [{ type: "text", text: `message-${index}` }],
+    })),
+    tools: [],
+    cacheBreakpoints: [8],
+    cachePlan: {
+      provider: "anthropic",
+      model: "cache-model",
+      system: true,
+      tools: false,
+      messages: [8],
+      fingerprint: "before",
+      generation: 1,
+    },
+  };
+  const compacted: CanonicalModelRequest = {
+    ...original,
+    messages: [{ role: "assistant", content: [{ type: "text", text: "summary" }] }],
+    cacheBreakpoints: [0],
+    cachePlan: {
+      provider: "anthropic",
+      model: "cache-model",
+      system: true,
+      tools: false,
+      messages: [0],
+      fingerprint: "after",
+      generation: 2,
+    },
+  };
+
+  const materialized = await (loop as unknown as {
+    materializePreparedRequest(
+      prepared: { provider: string; model: string; request: CanonicalModelRequest },
+      candidate: CanonicalModelRequest,
+    ): Promise<CanonicalModelRequest>;
+  }).materializePreparedRequest({ provider: "anthropic", model: "cache-model", request: original }, compacted);
+
+  assert.deepEqual(materialized.messages, compacted.messages);
+  assert.deepEqual(materialized.cacheBreakpoints, [0]);
+  assert.deepEqual(materialized.cachePlan, compacted.cachePlan);
+  assert.equal(materialized.systemPrompt, "stable");
+});

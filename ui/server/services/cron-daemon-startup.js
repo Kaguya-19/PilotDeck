@@ -4,6 +4,7 @@ import { mkdirSync } from 'fs';
 import os from 'os';
 import { spawn } from 'child_process';
 import { sendCronDaemonRequest } from './cron-daemon-owner.js';
+import { prepareBackgroundSpawnOptions } from '../utils/processSpawn.js';
 
 // Cron daemon entry point. The launcher script is discoverable on PATH
 // or supplied via PILOTDECK_CRON_DAEMON_BIN. Returning `null` falls back
@@ -149,12 +150,12 @@ export function startCronDaemonDetached({
   const stdio = fd === null ? 'ignore' : ['ignore', fd, fd];
   let child;
   try {
-    child = spawnFn(command, args, {
+    child = spawnFn(command, args, prepareBackgroundSpawnOptions({
       cwd: process.cwd(),
       env: buildCronDaemonEnv(),
       detached: true,
-      stdio
-    });
+      stdio,
+    }));
   } catch (err) {
     console.warn(`[WARN] Cron daemon spawn failed: ${err.message}`);
     return null;

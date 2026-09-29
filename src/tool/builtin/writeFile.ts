@@ -1,8 +1,9 @@
-import { stat } from "node:fs/promises";
 import type { PilotDeckToolDefinition } from "../protocol/types.js";
 import { PilotDeckToolRuntimeError } from "../protocol/errors.js";
 import { resolvePilotDeckWorkspacePath } from "./filesystem/pathSafety.js";
-import { writeTextFile } from "./filesystem/writeTextFile.js";
+import { checkFilesystemWritePermission } from "./filesystem/writePermissions.js";
+import { createNodeFsPort } from "../execution-world/NodeFsPort.js";
+import type { FsPort } from "../execution-world/FsPort.js";
 import {
   buildStructuredPatch,
   buildUnifiedDiff,
@@ -14,6 +15,7 @@ import {
   recordWriteSnapshot,
   validateWriteSnapshotFresh,
 } from "./filesystem/writeSnapshots.js";
+import { formatSyntaxDiagnostics } from "./filesystem/syntaxDiagnostics.js";
 
 export type WriteFileInput = {
   file_path: string;
@@ -32,12 +34,17 @@ export type WriteFileOutput = {
   };
 };
 
-export function createWriteFileTool(): PilotDeckToolDefinition<WriteFileInput, WriteFileOutput> {
+export type CreateWriteFileToolOptions = {
+  fs?: FsPort;
+};
+
+export function createWriteFileTool(options: CreateWriteFileToolOptions = {}): PilotDeckToolDefinition<WriteFileInput, WriteFileOutput> {
+  const fs = options.fs ?? createNodeFsPort();
   return {
     name: "write_file",
     aliases: ["Write"],
     description:
-      "Writes a UTF-8 text file inside the workspace.\n\nUsage:\n- The file_path parameter may be relative to the current workspace or an absolute path, but it must resolve inside the workspace.\n- This tool will overwrite the existing file if there is one at the provided path.\n- You must read an existing file with read_file before writing to it. This tool will fail if you did not read the file first.\n- If the target file changed after the last read, this tool will fail and you must read it again before writing.\n- Prefer the edit_file tool for modifying existing files. Only use this tool to create new files or for complete rewrites.\n- The returned filePath is always the resolved absolute path.\n- Do not create documentation files (*.md) or README files unless explicitly requested by the User.\n- Only use emojis if the user explicitly requests it. Avoid writing emojis to files unless asked.",
+      "Writes a UTF-8 text file inside the workspace, or outside the workspace after explicit host permission.\n\nUsage:\n- The file_path parameter may be relative to the current workspace or an absolute path. Paths outside the workspace require explicit user permission before execution.\n- You may create a new file directly; use ls/glob/git status if you need to confirm it does not exist.\n- This tool will overwrite the existing file if there is one at the provided path.\n- You must read an existing file with read_file before writing to it. This tool will fail if an existing file was not read first.\n- If the target file changed after the last read, this tool will fail and you must read it again before writing.\n- Prefer the edit_file tool for modifying existing files. Only use this tool to create new files or for complete rewrites.\n- Prefer this tool for reusable scripts, generators, and parameterized helpers before running them with bash.\n- The returned filePath is always the resolved absolute path.\n- Do not create documentation files (*.md) or README files unless explicitly requested by the User.\n- Only use emojis if the user explicitly requests it. Avoid writing emojis to files unless asked.",
     kind: "filesystem",
     inputSchema: {
       type: "object",
@@ -47,7 +54,7 @@ export function createWriteFileTool(): PilotDeckToolDefinition<WriteFileInput, W
         file_path: {
           type: "string",
           description:
-            "The path to the file to write. It may be relative to the current workspace or absolute, but it must resolve inside the workspace.",
+            "The path to the file to write. It may be relative to the current workspace or absolute. Paths outside the workspace require explicit user permission.",
         },
         content: {
           type: "string",
@@ -104,8 +111,13 @@ export function createWriteFileTool(): PilotDeckToolDefinition<WriteFileInput, W
     isReadOnly: () => false,
     isConcurrencySafe: () => false,
     isDestructive: () => true,
+    checkPermissions: async (input, context) =>
+      checkFilesystemWritePermission("write_file", input.file_path, context),
     validateInput: async (input, context) => {
-      const resolved = resolvePilotDeckWorkspacePath(input.file_path, context, { forWrite: true });
+      const resolved = resolvePilotDeckWorkspacePath(input.file_path, context, {
+        forWrite: true,
+        allowOutsideWorkspace: true,
+      });
       if (!resolved.ok) {
         return {
           ok: false,
@@ -118,7 +130,7 @@ export function createWriteFileTool(): PilotDeckToolDefinition<WriteFileInput, W
       }
 
       try {
-        await validateWriteSnapshotFresh(context, resolved.absolutePath);
+        await validateWriteSnapshotFresh(context, resolved.absolutePath, fs);
       } catch (error) {
         const normalized = error instanceof PilotDeckToolRuntimeError ? error.message : String(error);
         if (normalized === "File has not been read yet. Read it first before writing to it."
@@ -138,12 +150,15 @@ export function createWriteFileTool(): PilotDeckToolDefinition<WriteFileInput, W
       return { ok: true, input };
     },
     execute: async (input, context) => {
-      const resolved = resolvePilotDeckWorkspacePath(input.file_path, context, { forWrite: true });
+      const resolved = resolvePilotDeckWorkspacePath(input.file_path, context, {
+        forWrite: true,
+        allowOutsideWorkspace: context.currentPermissionDecision?.type === "allow",
+      });
       if (!resolved.ok) {
         throw new PilotDeckToolRuntimeError(resolved.error.code, resolved.error.message, resolved.error.details);
       }
 
-      const freshness = await ensureWriteSnapshotFresh(context, resolved.absolutePath);
+      const freshness = await ensureWriteSnapshotFresh(context, resolved.absolutePath, fs);
       if (context.fileHistory) {
         await context.fileHistory.trackEdit(
           resolved.absolutePath,
@@ -151,12 +166,18 @@ export function createWriteFileTool(): PilotDeckToolDefinition<WriteFileInput, W
         );
       }
 
-      const action = await writeTextFile(resolved.absolutePath, input.content, { allowOverwrite: true });
-      const fileStat = await stat(resolved.absolutePath);
+      const write = await fs.writeText(resolved.absolutePath, input.content, {
+        allowOverwrite: true,
+        workspaceRoot: resolved.root,
+      });
+      await context.fileHistory?.markEditCommitted?.(
+        resolved.absolutePath,
+        context.messageId ?? context.turnId,
+      );
       invalidateReadFileState(context, resolved.absolutePath);
-      recordWriteSnapshot(context, resolved.absolutePath, input.content, Math.floor(fileStat.mtimeMs));
+      recordWriteSnapshot(context, resolved.absolutePath, input.content, write.mtimeMs);
 
-      const type = action === "created" ? "create" : "update";
+      const type = write.action === "created" ? "create" : "update";
       const structuredPatch = buildStructuredPatch(freshness.previousContent, input.content);
       const gitDiffText = buildUnifiedDiff(resolved.relativePath, freshness.previousContent, input.content);
       const data: WriteFileOutput = {
@@ -178,12 +199,18 @@ export function createWriteFileTool(): PilotDeckToolDefinition<WriteFileInput, W
       await context.fileUpdateNotifier?.didChange?.(update);
       await context.fileUpdateNotifier?.didSave?.(update);
 
+      const successText = `${type === "create" ? "Created" : "Overwrote"} ${resolved.relativePath}.`;
+      const syntaxDiagnostics = await formatSyntaxDiagnostics(resolved.relativePath, input.content);
+
       return {
-        content: [{ type: "text", text: `${type === "create" ? "Created" : "Overwrote"} ${resolved.relativePath}.` }],
+        content: [{
+          type: "text",
+          text: syntaxDiagnostics ? `${successText}\n\n${syntaxDiagnostics}` : successText,
+        }],
         data,
         metadata: {
           bytesWritten: Buffer.byteLength(input.content, "utf8"),
-          mtimeMs: Math.floor(fileStat.mtimeMs),
+          mtimeMs: write.mtimeMs,
         },
       };
     },

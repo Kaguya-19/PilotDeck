@@ -1,7 +1,12 @@
 import type { AlwaysOnConfig } from "../../always-on/config/parseAlwaysOnConfig.js";
+import type { RuntimeContextSurface } from "../../context/RuntimeContextSurface.js";
 import type { CronConfig } from "../../cron/config/parseCronConfig.js";
+import type { InteractionProfileName } from "../../interaction/InteractionProfile.js";
+import type { SandboxMode } from "../../tool/execution-world/SandboxPort.js";
 import type { ModelConfig } from "../../model/protocol/canonical.js";
 import type { RouterConfig } from "../../router/config/schema.js";
+import type { SopRuntimeConfig } from "../../sop/staffdeck/types.js";
+import type { CoreModuleBinding } from "../../composition/types.js";
 
 export type PilotConfigSourceKind = "default" | "project" | "env";
 export type PilotConfigSourcePhase = "bootstrap" | "merge";
@@ -48,6 +53,7 @@ export type PilotRawConfig = {
   telemetry?: unknown;
   proxy?: unknown;
   webui?: unknown;
+  modules?: unknown;
 };
 
 export type PilotExtensionConfig = {
@@ -63,6 +69,12 @@ export type PilotAgentModelSelection = {
 
 export type PilotAgentConfig = {
   model: PilotAgentModelSelection;
+  /** File-effect profile for model-authored local processes (`execute_code`, `bash`, and `task_*`). */
+  sandboxMode?: SandboxMode;
+  /** Dynamic runtime-context projection selected by the agent profile. */
+  runtimeContextSurface?: RuntimeContextSurface;
+  /** Selects the question/approval providers composed for new agent sessions. */
+  interactionProfile?: InteractionProfileName;
   /**
    * Override the model catalog's context window size (tokens). When set,
    * auto-compaction thresholds (80% warn / 95% block) are computed against
@@ -70,9 +82,15 @@ export type PilotAgentConfig = {
    * or when you want compaction to kick in earlier.
    */
   maxContextTokens?: number;
+  /** Override the selected model catalog's output-token cap. */
+  maxOutputTokens?: number;
+  /** @deprecated Model thinking settings now control reasoning. */
   thinking?: { enabled: boolean; budgetTokens?: number };
   subagents?: {
+    default?: PilotAgentModelSelection;
     timeoutMs?: number;
+    /** Maximum nested delegation depth. Defaults to one child level. */
+    maxDepth?: number;
   };
 };
 
@@ -83,7 +101,12 @@ export type PilotAgentConfig = {
  */
 export type PilotRouterConfig = RouterConfig;
 
-export type PilotMemoryApiType = "openai-responses" | "responses" | "openai-completions";
+export type PilotMemoryApiType =
+  | "openai-responses"
+  | "responses"
+  | "openai-completions"
+  | "anthropic"
+  | "google";
 export type PilotMemoryReasoningMode = "answer_first" | "accuracy_first";
 
 export type PilotMemoryScheduleConfig = {
@@ -111,6 +134,8 @@ export type PilotGatewayConfig = {
   port: number;
   bindAddress: "127.0.0.1";
   idleSessionTimeoutMinutes: number;
+  idleSweepIntervalSeconds: number;
+  memoryDiagnostics: boolean;
   staticAssetsPath?: string;
   /**
    * Maximum number of concurrent per-session MCP instances (e.g. browser-use
@@ -120,7 +145,7 @@ export type PilotGatewayConfig = {
   maxPerSessionMcpInstances?: number;
 };
 
-export type PilotWebSearchProvider = "glm" | "tavily" | "custom";
+export type PilotWebSearchProvider = "glm" | "tavily" | "custom" | "serper" | "brave";
 export type PilotWebSearchCustomAuth = "bearer" | "bodyApiKey" | "queryApiKey" | "none";
 export type PilotWebSearchCustomMethod = "GET" | "POST";
 
@@ -143,6 +168,8 @@ export type PilotWebSearchCustomProviderConfig = {
  * runtime; `apiKey` and `endpoint` apply to the selected provider.
  */
 export type PilotWebSearchConfig = {
+  /** Missing webSearch section is off; legacy sections without this flag remain enabled. */
+  enabled?: boolean;
   provider?: PilotWebSearchProvider;
   apiKey?: string;
   endpoint?: string;
@@ -182,8 +209,17 @@ export type PilotAdaptersConfig = {
     defaultSessionLabel: string;
     connectionMode?: "stream" | "webhook";
     domainName?: "feishu" | "lark";
+    permissionMode?: "default" | "bypassPermissions";
   };
   weixin?: { enabled: boolean };
+  qq?: {
+    enabled: boolean;
+    appId?: string;
+    clientSecret?: string;
+    allowGroups?: string[];
+    triggerPrefixes?: string[];
+    maxMessageLength?: number;
+  };
   telegram?: PilotPlatformAdapterConfig;
   discord?: PilotPlatformAdapterConfig;
   slack?: PilotPlatformAdapterConfig;
@@ -206,6 +242,19 @@ export type PilotTelemetryConfig = {
   enabled: boolean;
 };
 
+export type PilotCoreModuleConfig = CoreModuleBinding;
+
+/** Deployment composition selected by YAML. */
+export type PilotModulesConfig = {
+  agentLoop?: PilotCoreModuleConfig;
+  skills?: PilotCoreModuleConfig;
+  modelProvider?: PilotCoreModuleConfig;
+  tools?: PilotCoreModuleConfig;
+  context?: PilotCoreModuleConfig;
+  sop?: SopRuntimeConfig;
+  knowledge?: PilotCoreModuleConfig;
+};
+
 export type PilotConfig = {
   agent: PilotAgentConfig;
   model: ModelConfig;
@@ -219,6 +268,7 @@ export type PilotConfig = {
   tools?: PilotToolsConfig;
   telemetry?: PilotTelemetryConfig;
   proxy?: PilotProxyConfig;
+  modules?: PilotModulesConfig;
 };
 
 export type PilotConfigSnapshot = {
@@ -233,6 +283,7 @@ export type PilotConfigSnapshot = {
 
 export type PilotConfigLoadOptions = {
   env?: Record<string, string | undefined>;
+  configPath?: string;
   projectRoot?: string;
   version?: number;
 };

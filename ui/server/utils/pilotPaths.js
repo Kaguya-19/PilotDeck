@@ -13,7 +13,7 @@
  * versa.
  */
 import { homedir } from 'node:os';
-import { resolve } from 'node:path';
+import { normalize, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 
@@ -35,6 +35,24 @@ function normalizeHomePath(p) {
  */
 export function resolvePilotHome(env = process.env) {
     return normalizeHomePath(env.PILOT_HOME ?? DEFAULT_PILOT_HOME);
+}
+
+export function isDesktopRuntimeProjectPath(projectRoot, env = process.env) {
+    if (!projectRoot || env.PILOTDECK_DESKTOP !== '1') return false;
+    const normalized = normalize(resolve(projectRoot));
+    if (
+        env.PILOTDECK_DESKTOP_RUNTIME_ROOT &&
+        normalized === normalize(resolve(env.PILOTDECK_DESKTOP_RUNTIME_ROOT))
+    ) {
+        return true;
+    }
+    return /[\\/]resources[\\/]runtime$/i.test(normalized);
+}
+
+export function isVirtualProjectPath(projectRoot, pilotHome = resolvePilotHome(), env = process.env) {
+    if (!projectRoot) return false;
+    const resolvedRoot = resolve(projectRoot);
+    return resolvedRoot === resolve(pilotHome) || isDesktopRuntimeProjectPath(resolvedRoot, env);
 }
 
 /**
@@ -106,7 +124,7 @@ function findStoredProjectId(projectRoot, pilotHome) {
     const projectsDir = resolve(pilotHome, 'projects');
     if (!existsSync(projectsDir)) return null;
 
-    const target = resolve(projectRoot);
+    const target = normalizeProjectPathForMarkerComparison(projectRoot);
     try {
         for (const entry of readdirSync(projectsDir, { withFileTypes: true })) {
             if (!entry.isDirectory()) continue;
@@ -117,7 +135,7 @@ function findStoredProjectId(projectRoot, pilotHome) {
             } catch {
                 continue;
             }
-            if (!marker || resolve(marker) !== target) continue;
+            if (!marker || normalizeProjectPathForMarkerComparison(marker) !== target) continue;
             try {
                 if (statSync(marker).isDirectory()) return entry.name;
             } catch {
@@ -128,4 +146,9 @@ function findStoredProjectId(projectRoot, pilotHome) {
         return null;
     }
     return null;
+}
+
+function normalizeProjectPathForMarkerComparison(projectRoot) {
+    const resolved = resolve(projectRoot);
+    return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
 }

@@ -1,81 +1,137 @@
-import { FileCog, Palette, Radio, Server, Shield, type LucideIcon } from 'lucide-react';
-import { useTranslation } from 'react-i18next';
-import { cn } from '../../../lib/utils';
-import { PillBar, Pill } from '../../../shared/view/ui';
-import type { SettingsMainTab } from '../types/types';
-
-type SettingsSidebarProps = {
-  activeTab: SettingsMainTab;
-  onChange: (tab: SettingsMainTab) => void;
-};
+import { useTranslation } from "react-i18next";
+import { cn } from "../../../lib/utils.js";
+import pilotdeckLogoDark from "../../../assets/pilotdeck-wordmark-dark.png";
+import pilotdeckLogoLight from "../../../assets/pilotdeck-wordmark-light.png";
+import type { SettingsMenuKey } from "../types";
+import type { Contribution } from "../../../composition/contracts";
+import {
+  SETTINGS_BACK_ICON,
+  SETTINGS_NAV_ICONS,
+} from "./navIcons";
 
 type NavItem = {
-  id: SettingsMainTab;
+  key: SettingsMenuKey;
   labelKey: string;
-  icon: LucideIcon;
+  label?: string;
+  showDot?: boolean;
 };
 
-// Adding a new tab? Update this list, the SettingsMainTab union,
-// SETTINGS_MAIN_TABS in constants.ts, and the switch in Settings.tsx.
-const NAV_ITEMS: NavItem[] = [
-  { id: 'appearance', labelKey: 'mainTabs.appearance', icon: Palette },
-  { id: 'permissions', labelKey: 'mainTabs.permissions', icon: Shield },
-  { id: 'config', labelKey: 'mainTabs.config', icon: FileCog },
-  { id: 'mcp', labelKey: 'mcpConfig.title', icon: Server },
-  { id: 'gateway', labelKey: 'gateway.title', icon: Radio },
-];
+type NavSection = {
+  id: string;
+  titleKey?: string;
+  nested?: boolean;
+  items: NavItem[];
+};
 
-export default function SettingsSidebar({ activeTab, onChange }: SettingsSidebarProps) {
-  const { t } = useTranslation('settings');
+const NAV_SECTIONS: NavSection[] = [];
+
+type SettingsSidebarProps = {
+  selectedKey: SettingsMenuKey;
+  onSelect: (key: SettingsMenuKey) => void;
+  onClose: () => void;
+  mobileVisible?: boolean;
+  moduleSettings?: Contribution[];
+};
+
+function SettingsIcon({ svg }: { svg: string }) {
+  return (
+    <span
+      className="nav-icon"
+      aria-hidden="true"
+      dangerouslySetInnerHTML={{ __html: svg }}
+    />
+  );
+}
+
+function NavButton({
+  item,
+  selectedKey,
+  onSelect,
+}: {
+  item: NavItem;
+  selectedKey: SettingsMenuKey;
+  onSelect: (key: SettingsMenuKey) => void;
+}) {
+  const { t } = useTranslation("settings");
+  const active = item.key === selectedKey;
+  const icon = SETTINGS_NAV_ICONS[item.key];
 
   return (
-    <>
-      {/* Desktop sidebar */}
-      <aside className="hidden w-56 flex-shrink-0 border-r border-border bg-muted/30 md:flex md:flex-col">
-        <nav className="flex flex-col gap-1 p-3">
-          {NAV_ITEMS.map((item) => {
-            const Icon = item.icon;
-            const isActive = activeTab === item.id;
+    <button
+      type="button"
+      onClick={() => onSelect(item.key)}
+      className={cn("nav-item", active && "active")}
+      aria-current={active ? "page" : undefined}
+    >
+      {icon ? <SettingsIcon svg={icon} /> : null}
+      <span>{item.label ?? t(item.labelKey)}</span>
+      {item.showDot ? <i className="nav-dot" /> : null}
+    </button>
+  );
+}
 
-            return (
-              <button
-                key={item.id}
-                onClick={() => onChange(item.id)}
-                className={cn(
-                  'flex items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm font-medium transition-colors duration-150',
-                  isActive
-                    ? 'bg-accent text-accent-foreground'
-                    : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground active:bg-accent/50',
-                )}
-              >
-                <Icon className="h-4 w-4 flex-shrink-0" />
-                {t(item.labelKey)}
-              </button>
-            );
-          })}
-        </nav>
-      </aside>
+export default function SettingsSidebar({
+  selectedKey,
+  onSelect,
+  onClose,
+  mobileVisible = true,
+  moduleSettings = [],
+}: SettingsSidebarProps) {
+  const { t } = useTranslation("settings");
 
-      {/* Mobile horizontal nav — pill bar */}
-      <div className="flex-shrink-0 border-b border-border px-3 py-2 md:hidden">
-        <PillBar className="scrollbar-hide w-full overflow-x-auto">
-          {NAV_ITEMS.map((item) => {
-            const Icon = item.icon;
-
-            return (
-              <Pill
-                key={item.id}
-                isActive={activeTab === item.id}
-                onClick={() => onChange(item.id)}
-                className="flex-shrink-0"
-              >
-                <Icon className="h-3.5 w-3.5" />
-                {t(item.labelKey)}
-              </Pill>
-            );
-          })}
-        </PillBar>
+  return (
+    <aside className={cn("settings-sidebar", !mobileVisible && "mobile-hidden")}>
+      <div className="sidebar-brand">
+        <img
+          alt="PilotDeck"
+          className="sidebar-brand-logo sidebar-brand-logo-light"
+          src={pilotdeckLogoLight}
+        />
+        <img
+          alt=""
+          aria-hidden="true"
+          className="sidebar-brand-logo sidebar-brand-logo-dark"
+          src={pilotdeckLogoDark}
+        />
       </div>
-    </>
+
+      <button type="button" className="back-to-app" onClick={onClose}>
+        <SettingsIcon svg={SETTINGS_BACK_ICON} />
+        <span>{t("settingsPage.backToProjects")}</span>
+      </button>
+
+      <nav className="settings-nav" aria-label={t("title")}>
+        {NAV_SECTIONS.map((section) => (
+          <section
+            key={section.id}
+            className={cn("nav-section", section.nested && "nav-section-nested")}
+          >
+            {section.titleKey ? <h2>{t(section.titleKey)}</h2> : null}
+            <div className="nav-items">
+              {section.items.map((item) => (
+                <NavButton
+                  key={item.key}
+                  item={item}
+                  selectedKey={selectedKey}
+                  onSelect={onSelect}
+                />
+              ))}
+            </div>
+          </section>
+        ))}
+        {moduleSettings.length > 0 ? (
+          <section className="nav-section nav-section-nested">
+            <h2>{t("settingsPage.modules.title")}</h2>
+            <div className="nav-items">
+              {Array.from(new Map(moduleSettings.map((setting) => [setting.settingsSection || setting.id, setting])).values()).map((setting) => {
+                const key = `module:${setting.settingsSection || setting.id}` as SettingsMenuKey;
+                return <NavButton key={key} item={{ key, labelKey: '', label: setting.labelKey ? t(setting.labelKey, { defaultValue: setting.label }) : setting.label }} selectedKey={selectedKey} onSelect={onSelect} />;
+              })}
+            </div>
+          </section>
+        ) : null}
+
+      </nav>
+    </aside>
   );
 }

@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import { memo, useMemo } from 'react';
 import { CheckCircle2, Circle, Clock, type LucideIcon } from 'lucide-react';
 import { Badge } from '../../../../../shared/view/ui';
@@ -59,6 +60,7 @@ const normalizeStatus = (status: string): TodoStatus => {
 
 const TodoRow = memo(
   ({ todo }: { todo: NormalizedTodoItem }) => {
+    const { t } = useTranslation('common');
     const statusConfig = STATUS_CONFIG[todo.status];
     const StatusIcon = statusConfig.icon;
 
@@ -77,7 +79,7 @@ const TodoRow = memo(
                 variant="outline"
                 className={`px-1.5 py-px text-[10px] ${statusConfig.badgeClassName}`}
               >
-                {todo.status.replace('_', ' ')}
+                {t(`uiText.taskStatus.${todo.status}`)}
               </Badge>
             </div>
           </div>
@@ -95,6 +97,7 @@ const TodoList = memo(
     todos: TodoItem[];
     isResult?: boolean;
   }) => {
+    const { t } = useTranslation('common');
     // Memoize normalization to avoid recomputing list metadata on every render.
     const normalizedTodos = useMemo<NormalizedTodoItem[]>(
       () =>
@@ -114,8 +117,7 @@ const TodoList = memo(
       <div className="space-y-1.5">
         {isResult && (
           <div className="mb-1.5 text-xs font-medium text-gray-600 dark:text-gray-400">
-            Todo List ({normalizedTodos.length}{' '}
-            {normalizedTodos.length === 1 ? 'item' : 'items'})
+            {t('uiText.todoCount', { count: normalizedTodos.length })}
           </div>
         )}
         {normalizedTodos.map((todo, index) => (

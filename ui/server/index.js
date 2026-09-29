@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { createBackgroundSessionForwarder, createSessionActivityRegistry } from './session-activity.js';
+import '../../scripts/check-node-runtime.mjs';
 // Load environment variables before other imports execute
 import { assertRequiredPilotDeckEnv } from './load-env.js';
 // Install global fetch proxy (PILOTDECK_PROXY / HTTPS_PROXY) before any network calls
@@ -7,6 +9,7 @@ installGlobalProxy();
 
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 
@@ -15,6 +18,9 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 const installMode = fs.existsSync(path.join(__dirname, '..', '..', '.git')) ? 'git' : 'npm';
+const serverInstanceId = crypto.randomUUID();
+const serverStartedAt = new Date().toISOString();
+const serverPid = process.pid;
 
 // ANSI color codes for terminal output
 const colors = {
@@ -40,36 +46,55 @@ assertRequiredPilotDeckEnv();
 console.log('SERVER_PORT from runtime config:', process.env.SERVER_PORT);
 
 import express from 'express';
+import { rateLimit } from 'express-rate-limit';
 import { WebSocketServer, WebSocket } from 'ws';
 import bcrypt from 'bcrypt';
-import crypto from 'crypto';
 import os from 'os';
 import http from 'http';
 import cors from 'cors';
 import { promises as fsPromises } from 'fs';
-import { spawn, exec } from 'child_process';
+import { spawn } from 'child_process';
 import pty from 'node-pty';
 import fetch from 'node-fetch';
 import mime from 'mime-types';
 import JSZip from 'jszip';
 import { readPermissionSettings } from './services/permissionSettings.js';
+import { regenerateLastMessageTransaction } from './services/regenerateLastMessage.js';
+import { getDefaultPtyShell } from './utils/defaultShell.js';
+import { pickNativeFolder } from './utils/nativeFolderPicker.js';
+import { browseDirectories } from './utils/browseDirectories.js';
+import { getOpenUrlSpawnCommand } from './utils/processSpawn.js';
+import { TerminalSessionRegistry } from './services/terminalSessionRegistry.js';
+import { createNodeTerminalPtyPort } from './services/terminalPtyPort.js';
+import { createProjectUpdateScheduler } from './projectUpdateScheduler.js';
 
-import { getProjects, getProjectCronJobsOverview, getSessions, renameProject, deleteSession, deleteProject, addProjectManually, extractProjectDirectory, clearProjectDirectoryCache, searchConversations } from './projects.js';
+import { getProjectsSnapshot, getProjectCronJobsOverview, getSessions, renameProject, deleteSession, deleteProject, addProjectManually, extractProjectDirectory, clearProjectDirectoryCache, searchConversations } from './projects.js';
 import {
     runChatViaGateway,
+    replaceLastTurnViaGateway,
+    finalizeLastTurnReplacementViaGateway,
     abortViaGateway,
     decidePermissionViaGateway,
     grantSessionPermissionViaGateway,
-    isSessionActiveViaGateway,
-    getActiveTurnSnapshotFramesViaGateway,
+    getSessionActivityViaGateway,
     getActiveSessionIdsViaGateway,
     elicitationRespondViaGateway,
     getRouterDashboardData,
     getRouterSessionStats,
     getRouterStatsSummary,
     getPilotDeckGateway,
+    getPilotDeckHostCapabilities,
+    isGatewayUnavailableError,
     registerAlwaysOnNotificationForwarding,
+    registerSessionInputNotificationForwarding,
     getSessionTokenBudget,
+    getInputQueueStateViaGateway,
+    enqueueInputViaGateway,
+    deleteQueuedInputViaGateway,
+    moveQueuedInputToFrontViaGateway,
+    pauseInputQueueViaGateway,
+    resumeInputQueueViaGateway,
+    steerQueuedInputViaGateway,
 } from './pilotdeck-bridge.js';
 import sessionManager from './sessionManager.js';
 import gitRoutes from './routes/git.js';
@@ -80,34 +105,79 @@ import memoryRoutes, { MEMORY_DASHBOARD_DIR } from './routes/memory.js';
 import mcpUtilsRoutes from './routes/mcp-utils.js';
 import commandsRoutes from './routes/commands.js';
 import skillsRoutes from './routes/skills.js';
+import uploadsRoutes from './routes/uploads.js';
+import modelsRoutes, { createSessionModelHandlers } from './routes/models.js';
 import settingsRoutes from './routes/settings.js';
 import configRoutes from './routes/config.js';
 import gatewayRoutes from './routes/gateway.js';
+import { createCronUpdateHandler } from './routes/cron-jobs.js';
+import {
+    OFFICE_PREVIEW_SERVICE_BUILTIN,
+    OFFICE_PREVIEW_SERVICE_LIBREOFFICE,
+    convertOfficeDocumentToPdf,
+    getConfiguredOfficePreviewSettings,
+    getConfiguredOfficePreviewService,
+    getLibreOfficeCandidateStatuses,
+    getLibreOfficeStatus,
+} from './services/officePreview.js';
+import {
+    SPREADSHEET_PREVIEW_EXTENSIONS,
+    getSpreadsheetInteractivePreview,
+    getSpreadsheetPreviewManifest,
+    getSpreadsheetSheetPreviewPdf,
+} from './services/spreadsheetPreview.js';
 import { startPilotDeckConfigWatcher, stopPilotDeckConfigWatcher } from './services/pilotdeckConfigWatcher.js';
 import { getAlwaysOnDashboardEvents } from './services/always-on-events.js';
 import agentRoutes from './routes/agent.js';
 import updateRoutes from './routes/update.js';
 import projectsRoutes, { WORKSPACES_ROOT, validateWorkspacePath } from './routes/projects.js';
+import onboardingRoutes from './routes/onboarding.js';
 import userRoutes from './routes/user.js';
 import pluginsRoutes from './routes/plugins.js';
 import messagesRoutes from './routes/messages.js';
+import sopRoutes from './routes/sop.js';
+import { createModuleRuntimeRouter } from './routes/modules.js';
 import { closeMemoryServices, startMemoryScheduler, stopMemoryScheduler } from './services/memoryService.js';
-import { createNormalizedMessage } from './pilotdeck-message.js';
+import { createNormalizedMessage, createOptimisticUserFrames } from './pilotdeck-message.js';
 import { startEnabledPluginServers, stopAllPlugins, getPluginPort } from './utils/plugin-process-manager.js';
 import { initializeDatabase, sessionNamesDb, applyCustomSessionNames, userDb } from './database/db.js';
 import { configureWebPush } from './services/vapid-keys.js';
-import { sendCronDaemonRequest } from './services/cron-daemon-owner.js';
-import { createAlwaysOnHeartbeatManager } from './always-on-heartbeat.js';
+import { runtimeCoordination } from './services/runtimeCoordination.js';
 
 import { runServerStartupBeforeListen, startServerAfterStartup } from './services/server-startup.js';
 import { validateApiKey, authenticateToken, authenticateWebSocket } from './middleware/auth.js';
 import { DISABLE_LOCAL_AUTH, IS_PLATFORM } from './constants/config.js';
 import { getConnectableHost } from '../shared/networkHosts.js';
 import { contentDispositionAttachment } from './utils/downloadHeaders.js';
+import { createSessionWatchRegistry } from './session-watch-registry.js';
+import { isPathInsideOrEqual } from './utils/pathSafety.js';
+import { isVirtualProjectPath, resolvePilotHome } from './utils/pilotPaths.js';
 
 // PilotDeck-only mode: chat execution always goes through src/gateway via
 // cursor-cli, openai-codex, gemini-cli) has been removed.
 const VALID_PROVIDERS = ['pilotdeck'];
+
+async function requireRealProjectFilesystem(req, res, next) {
+    try {
+        const projectRoot = await extractProjectDirectory(req.params.projectName);
+        if (isVirtualProjectPath(projectRoot, resolvePilotHome(process.env), process.env)) {
+            return res.status(403).json({
+                error: {
+                    code: 'PROJECT_PATH_FORBIDDEN',
+                    message: 'Project file operations are unavailable for General conversations.',
+                },
+            });
+        }
+        return next();
+    } catch (error) {
+        return res.status(404).json({
+            error: {
+                code: 'PROJECT_NOT_FOUND',
+                message: error instanceof Error ? error.message : 'Project not found',
+            },
+        });
+    }
+}
 
 // File-system watchers for the chat transcript root maintained by
 // PilotDeck. Provider-specific watchers (.pilotdeck) were dropped along with the four provider adapters.
@@ -132,15 +202,82 @@ const WATCHER_IGNORED_PATTERNS = [
 ];
 const WATCHER_DEBOUNCE_MS = 300;
 let projectsWatchers = [];
-let projectsWatcherDebounceTimer = null;
+let projectUpdateScheduler = null;
 const connectedClients = new Set();
-const alwaysOnHeartbeat = createAlwaysOnHeartbeatManager({
-    // Legacy four-provider session details have been removed; PilotDeck
-    // gateway sessions are tracked by `pilotdeck-bridge.js` instead.
-    getActivePilotDeckSessions: () => []
+const sessionActivityRegistry = createSessionActivityRegistry();
+function broadcastSessionActivity(frame, userId) {
+    const activity = sessionActivityRegistry.receive(userId, frame);
+    if (!activity) return;
+    const payload = JSON.stringify({type: 'session-activity', activity});
+    for (const client of connectedClients) {
+        if (client.readyState === WebSocket.OPEN && (client.__pilotdeckUserId ?? null) === userId) client.send(payload);
+    }
+}
+const sessionWatchRegistry = createSessionWatchRegistry();
+registerAlwaysOnNotificationForwarding(connectedClients, createBackgroundSessionForwarder({
+    // This installation is single-user (including authenticated OSS mode).
+    // Resolve its persisted owner, never the set of currently connected watchers.
+    getUserId: () => userDb.getFirstUser()?.id,
+    broadcastActivity: broadcastSessionActivity,
+    forwardToWatchers: broadcastToSessionWatchers,
+}));
+
+function normalizeSessionId(value) {
+    if (typeof value !== 'string') return null;
+    const trimmed = value.trim();
+    return trimmed ? trimmed : null;
+}
+
+function broadcastChatFrame(frame, originWs, userId) {
+    broadcastSessionActivity(frame, userId);
+    const payload = JSON.stringify(frame);
+    const delivered = new Set();
+    const frameSessionId = normalizeSessionId(frame?.sessionId);
+
+    if (frameSessionId) {
+        const watchers = sessionWatchRegistry.getWatchers(frameSessionId);
+        watchers.forEach((client) => {
+            if (client.readyState !== WebSocket.OPEN) return;
+            if ((client.__pilotdeckUserId ?? null) !== userId) return;
+            client.send(payload);
+            delivered.add(client);
+        });
+    }
+
+    if (originWs.readyState === WebSocket.OPEN && !delivered.has(originWs)) {
+        originWs.send(payload);
+        delivered.add(originWs);
+    }
+
+    // Reconnect fail-safe: if the origin websocket closed and no watcher
+    // received the frame yet, fan out to same-user sockets.
+    if (delivered.size === 0) {
+        connectedClients.forEach((client) => {
+            if (client.readyState !== WebSocket.OPEN) return;
+            if ((client.__pilotdeckUserId ?? null) !== userId) return;
+            client.send(payload);
+        });
+    }
+}
+
+function broadcastToSessionWatchers(sessionId, frame, userId, excludeWs = null) {
+    const normalizedSessionId = normalizeSessionId(sessionId);
+    if (!normalizedSessionId) return;
+    const payload = JSON.stringify(frame);
+    const watchers = sessionWatchRegistry.getWatchers(normalizedSessionId);
+    watchers.forEach((client) => {
+        if (client === excludeWs) return;
+        if (client.readyState !== WebSocket.OPEN) return;
+        // `undefined` denotes a gateway-originated event with no submitting
+        // user. Its recipient set is already constrained by the session watch.
+        if (userId !== undefined && (client.__pilotdeckUserId ?? null) !== userId) return;
+        client.send(payload);
+    });
+}
+
+registerSessionInputNotificationForwarding((sessionId, frame) => {
+    broadcastToSessionWatchers(sessionId, frame, undefined);
 });
-registerAlwaysOnNotificationForwarding(connectedClients);
-let isGetProjectsRunning = false; // Flag to prevent reentrant calls
 
 // Broadcast progress to all connected WebSocket clients
 function broadcastProgress(progress) {
@@ -164,6 +301,7 @@ function broadcastConfigReloaded(payload) {
             client.send(message);
         }
     });
+    runtimeCoordination.publishConfigurationState();
 }
 process.on('pilotdeck:config-broadcast', broadcastConfigReloaded);
 
@@ -171,10 +309,7 @@ process.on('pilotdeck:config-broadcast', broadcastConfigReloaded);
 async function setupProjectsWatcher() {
     const chokidar = (await import('chokidar')).default;
 
-    if (projectsWatcherDebounceTimer) {
-        clearTimeout(projectsWatcherDebounceTimer);
-        projectsWatcherDebounceTimer = null;
-    }
+    projectUpdateScheduler?.dispose();
 
     await Promise.all(
         projectsWatchers.map(async (watcher) => {
@@ -187,48 +322,31 @@ async function setupProjectsWatcher() {
     );
     projectsWatchers = [];
 
+    const scheduler = createProjectUpdateScheduler({
+        debounceMs: WATCHER_DEBOUNCE_MS,
+        scan: () => {
+            clearProjectDirectoryCache();
+            return getProjectsSnapshot(broadcastProgress);
+        },
+        publish: (snapshot, { eventType, filePath, provider, rootPath }) => {
+            const updateMessage = JSON.stringify({
+                type: 'projects_updated',
+                projects: snapshot.projects,
+                projectListRevision: snapshot.revision,
+                timestamp: new Date().toISOString(),
+                changeType: eventType,
+                changedFile: path.relative(rootPath, filePath),
+                watchProvider: provider,
+            });
+            connectedClients.forEach(client => {
+                if (client.readyState === WebSocket.OPEN) client.send(updateMessage);
+            });
+        },
+        onError: (error) => console.error('[ERROR] Error handling project changes:', error),
+    });
+    projectUpdateScheduler = scheduler;
     const debouncedUpdate = (eventType, filePath, provider, rootPath) => {
-        if (projectsWatcherDebounceTimer) {
-            clearTimeout(projectsWatcherDebounceTimer);
-        }
-
-        projectsWatcherDebounceTimer = setTimeout(async () => {
-            // Prevent reentrant calls
-            if (isGetProjectsRunning) {
-                return;
-            }
-
-            try {
-                isGetProjectsRunning = true;
-
-                // Clear project directory cache when files change
-                clearProjectDirectoryCache();
-
-                // Get updated projects list
-                const updatedProjects = await getProjects(broadcastProgress);
-
-                // Notify all connected clients about the project changes
-                const updateMessage = JSON.stringify({
-                    type: 'projects_updated',
-                    projects: updatedProjects,
-                    timestamp: new Date().toISOString(),
-                    changeType: eventType,
-                    changedFile: path.relative(rootPath, filePath),
-                    watchProvider: provider
-                });
-
-                connectedClients.forEach(client => {
-                    if (client.readyState === WebSocket.OPEN) {
-                        client.send(updateMessage);
-                    }
-                });
-
-            } catch (error) {
-                console.error('[ERROR] Error handling project changes:', error);
-            } finally {
-                isGetProjectsRunning = false;
-            }
-        }, WATCHER_DEBOUNCE_MS);
+        scheduler.schedule({ eventType, filePath, provider, rootPath });
     };
 
     for (const { provider, rootPath } of PROVIDER_WATCH_PATHS) {
@@ -276,10 +394,15 @@ async function setupProjectsWatcher() {
 
 
 const app = express();
+app.locals.restartInstanceInfo = {
+    instanceId: serverInstanceId,
+    startedAt: serverStartedAt,
+    pid: serverPid
+};
 const server = http.createServer(app);
 
-const ptySessionsMap = new Map();
-const PTY_SESSION_TIMEOUT = 30 * 60 * 1000;
+const terminalSessions = new TerminalSessionRegistry();
+const terminalPty = createNodeTerminalPtyPort(pty);
 const SHELL_URL_PARSE_BUFFER_LIMIT = 32768;
 const ANSI_ESCAPE_SEQUENCE_REGEX = /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))/g;
 const TRAILING_URL_PUNCTUATION_REGEX = /[)\]}>.,;:!?]+$/;
@@ -401,10 +524,14 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // Public health check endpoint (no authentication required)
 app.get('/health', (req, res) => {
+    const instanceInfo = req.app.locals.restartInstanceInfo || {};
     res.json({
         status: 'ok',
         timestamp: new Date().toISOString(),
-        installMode
+        installMode,
+        instanceId: instanceInfo.instanceId,
+        startedAt: instanceInfo.startedAt,
+        pid: instanceInfo.pid
     });
 });
 
@@ -413,6 +540,49 @@ app.use('/api', validateApiKey);
 
 // Authentication routes (public)
 app.use('/api/auth', authRoutes);
+
+// Gateway-owned project file discovery. Keep this before the generic project
+// router so `/files` cannot be consumed as a project name.
+app.get('/api/projects/files', authenticateToken, async (req, res) => {
+    try {
+        const gateway = await getPilotDeckGateway();
+        const serverInfo = await gateway.describeServer();
+        if (!serverInfo.capabilities?.includes('project_files_list')) {
+            return res.status(501).json({
+                error: { code: 'CAPABILITY_UNAVAILABLE', message: 'project_files_list is unavailable.' },
+            });
+        }
+        const result = await gateway.projectFilesList({
+            projectKey: typeof req.query.projectKey === 'string' ? req.query.projectKey : '',
+            query: typeof req.query.query === 'string' ? req.query.query : undefined,
+            cursor: typeof req.query.cursor === 'string' ? req.query.cursor : undefined,
+            limit: req.query.limit === undefined ? undefined : Number(req.query.limit),
+            includeDirs: req.query.includeDirs === undefined
+                ? undefined
+                : String(req.query.includeDirs) !== 'false',
+        });
+        return res.json(result);
+    } catch (error) {
+        const code = typeof error?.code === 'string' ? error.code : 'gateway_request_failed';
+        const statuses = {
+            PROJECT_NOT_FOUND: 404,
+            PROJECT_PATH_FORBIDDEN: 403,
+            INVALID_CURSOR: 400,
+            INVALID_LIMIT: 400,
+            INVALID_QUERY: 400,
+            FILE_INDEX_LIMIT: 422,
+            CAPABILITY_UNAVAILABLE: 501,
+        };
+        return res.status(statuses[code] || 500).json({
+            error: {
+                code,
+                message: error instanceof Error ? error.message : String(error),
+                ...(error?.details ? { details: error.details } : {}),
+                ...(req.id ? { requestId: req.id } : {}),
+            },
+        });
+    }
+});
 
 // Projects API Routes (protected)
 app.use('/api/projects', authenticateToken, projectsRoutes);
@@ -436,15 +606,21 @@ app.use('/api/mcp-utils', authenticateToken, mcpUtilsRoutes);
 app.use('/api/commands', authenticateToken, commandsRoutes);
 
 // Skills API Routes (protected) — list/edit/install skills surfaced in the
-// top-right Skills tab. Backed by ~/.pilotdeck/skills/ and project-level
-// .pilotdeck/skills/ via PilotDeck plugin runtime.
+// top-right Skills tab. Backed by bundled skills, ~/.pilotdeck/skills/, and
+// project-level .pilotdeck/skills/ via PilotDeck plugin runtime.
 app.use('/api/skills', authenticateToken, skillsRoutes);
+app.use('/api/uploads', authenticateToken, uploadsRoutes);
+app.use('/api/models', authenticateToken, modelsRoutes);
 
 // Settings API Routes (protected)
 app.use('/api/settings', authenticateToken, settingsRoutes);
 
 // PilotDeck unified YAML config routes (protected)
 app.use('/api/config', authenticateToken, configRoutes);
+
+// Versioned onboarding API. It remains behind the global /api API-key gate
+// and the same JWT middleware as the rest of the local UI server.
+app.use('/api/v1', authenticateToken, onboardingRoutes);
 
 // Gateway IM channel setup routes (protected)
 app.use('/api/gateway', authenticateToken, gatewayRoutes);
@@ -456,7 +632,13 @@ app.use('/api/user', authenticateToken, userRoutes);
 app.use('/api/plugins', authenticateToken, pluginsRoutes);
 
 // Unified session messages route (protected) — PilotDeck-only.
+const sessionModelHandlers = createSessionModelHandlers();
+app.get('/api/sessions/model', authenticateToken, sessionModelHandlers.get);
+app.put('/api/sessions/model', authenticateToken, sessionModelHandlers.set);
+app.delete('/api/sessions/model', authenticateToken, sessionModelHandlers.clear);
 app.use('/api/sessions', authenticateToken, messagesRoutes);
+app.use('/api/sop', authenticateToken, sopRoutes);
+app.use('/api/modules', authenticateToken, createModuleRuntimeRouter({ getHostCapabilities: getPilotDeckHostCapabilities }));
 
 // Agent API Routes (uses API key authentication)
 app.use('/api/agent', agentRoutes);
@@ -528,6 +710,45 @@ app.get('/api/always-on/cron-jobs', authenticateToken, async (_req, res) => {
         res.status(500).json({ error: error?.message || 'always-on-cron-jobs failed' });
     }
 });
+
+app.post('/api/always-on/cron-jobs', authenticateToken, async (req, res) => {
+    try {
+        const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+        const projectKey = typeof req.body?.projectKey === 'string' ? req.body.projectKey : '';
+        const schedule = req.body?.schedule;
+        const timezone = typeof req.body?.timezone === 'string' && req.body.timezone.trim()
+            ? req.body.timezone.trim()
+            : undefined;
+
+        if (!message) {
+            res.status(400).json({ error: 'Cron message is required.' });
+            return;
+        }
+        if (!projectKey) {
+            res.status(400).json({ error: 'Cron projectKey is required.' });
+            return;
+        }
+        if (!schedule || typeof schedule !== 'object') {
+            res.status(400).json({ error: 'Cron schedule is required.' });
+            return;
+        }
+
+        const gateway = await getPilotDeckGateway();
+        const result = await gateway.cronCreate({
+            message,
+            projectKey,
+            schedule,
+            timezone,
+            channelKey: 'web',
+        });
+        res.json(result);
+    } catch (error) {
+        console.error('[always-on-cron-create] failed:', error);
+        res.status(500).json({ error: error?.message || 'cron create failed' });
+    }
+});
+
+app.patch('/api/always-on/cron-jobs/:taskId', authenticateToken, createCronUpdateHandler({ getGateway: getPilotDeckGateway }));
 
 app.post('/api/always-on/cron-jobs/:taskId/run-now', authenticateToken, async (req, res) => {
     try {
@@ -682,9 +903,18 @@ app.use(express.static(path.join(__dirname, '../dist'), {
 
 app.get('/api/projects', authenticateToken, async (req, res) => {
     try {
-        const projects = await getProjects(broadcastProgress);
-        res.json(projects);
+        const snapshot = await getProjectsSnapshot(broadcastProgress);
+        res.setHeader('X-Projects-Revision', String(snapshot.revision));
+        res.json(snapshot.projects);
     } catch (error) {
+        if (isGatewayUnavailableError(error)) {
+            return res.status(503).json({
+                error: {
+                    code: 'gateway_unavailable',
+                    message: 'PilotDeck Gateway is restarting. Retry shortly.',
+                },
+            });
+        }
         res.status(500).json({ error: error.message });
     }
 });
@@ -696,6 +926,14 @@ app.get('/api/projects/:projectName/sessions', authenticateToken, async (req, re
         applyCustomSessionNames(result.sessions, 'pilotdeck');
         res.json(result);
     } catch (error) {
+        if (isGatewayUnavailableError(error)) {
+            return res.status(503).json({
+                error: {
+                    code: 'gateway_unavailable',
+                    message: 'PilotDeck Gateway is restarting. Retry shortly.',
+                },
+            });
+        }
         res.status(500).json({ error: error.message });
     }
 });
@@ -722,6 +960,11 @@ app.delete('/api/projects/:projectName/sessions/:sessionId', authenticateToken, 
             relativeTranscriptPath: req.query.relativeTranscriptPath || null,
         });
         sessionNamesDb.deleteName(sessionId, 'pilotdeck');
+        const userId = req.user?.id ?? req.user?.userId ?? null;
+        const payload = JSON.stringify({ type: 'session-deleted', projectName, sessionId });
+        connectedClients.forEach((client) => {
+            if (client.readyState === WebSocket.OPEN && (client.__pilotdeckUserId ?? null) === userId) client.send(payload);
+        });
         console.log(`[API] Session ${sessionId} deleted successfully`);
         res.json({ success: true });
     } catch (error) {
@@ -830,28 +1073,105 @@ app.get('/api/search/conversations', authenticateToken, async (req, res) => {
     }
 });
 
+const normalizeWindowsDriveRoot = (inputPath) => {
+    if (process.platform !== 'win32' || typeof inputPath !== 'string') {
+        return inputPath;
+    }
+
+    const trimmedPath = inputPath.trim();
+    return /^[A-Za-z]:$/.test(trimmedPath) ? `${trimmedPath}\\` : inputPath;
+};
+
 const expandWorkspacePath = (inputPath) => {
     if (!inputPath) return inputPath;
-    if (inputPath === '~') {
+    const normalizedInput = normalizeWindowsDriveRoot(inputPath);
+    if (normalizedInput === '~') {
         return WORKSPACES_ROOT;
     }
-    if (inputPath.startsWith('~/') || inputPath.startsWith('~\\')) {
-        return path.join(WORKSPACES_ROOT, inputPath.slice(2));
+    if (normalizedInput.startsWith('~/') || normalizedInput.startsWith('~\\')) {
+        return path.join(WORKSPACES_ROOT, normalizedInput.slice(2));
     }
-    return inputPath;
+    return normalizedInput;
+};
+
+const isWindowsDriveBrowserRoot = (inputPath) => {
+    if (process.platform !== 'win32' || typeof inputPath !== 'string') {
+        return false;
+    }
+
+    const trimmedPath = inputPath.trim();
+    return trimmedPath === '/' || trimmedPath === '\\';
+};
+
+const getWindowsDriveSuggestions = async () => {
+    if (process.platform !== 'win32') {
+        return [];
+    }
+
+    const driveLetters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
+    const driveChecks = driveLetters.map(async (letter) => {
+        const drivePath = `${letter}:\\`;
+        try {
+            const stats = await fsPromises.stat(drivePath);
+            if (!stats.isDirectory()) {
+                return null;
+            }
+            return {
+                path: drivePath,
+                name: drivePath,
+                type: 'drive',
+            };
+        } catch (error) {
+            return null;
+        }
+    });
+
+    const drives = await Promise.all(driveChecks);
+    return drives.filter(Boolean);
 };
 
 function resolvePathInProject(projectRoot, targetPath = '') {
     const resolved = path.isAbsolute(targetPath)
         ? path.resolve(targetPath)
         : path.resolve(projectRoot, targetPath);
-    const normalizedRoot = path.resolve(projectRoot);
-
-    if (resolved !== normalizedRoot && !resolved.startsWith(normalizedRoot + path.sep)) {
+    if (!isPathInsideOrEqual(projectRoot, resolved)) {
         return { valid: false, error: 'Path must be under project root' };
     }
 
     return { valid: true, resolved };
+}
+
+function createRouteRateLimiter({
+    windowMs,
+    maxRequests,
+    keyPrefix,
+    message = 'Too many requests',
+}) {
+    const buckets = new Map();
+
+    return (req, res, next) => {
+        const now = Date.now();
+        const identity = req.user?.id || req.ip || 'anonymous';
+        const key = `${keyPrefix}:${identity}`;
+        const bucket = buckets.get(key);
+
+        if (!bucket || now >= bucket.resetAt) {
+            buckets.set(key, { count: 1, resetAt: now + windowMs });
+            return next();
+        }
+
+        bucket.count += 1;
+        if (bucket.count <= maxRequests) {
+            return next();
+        }
+
+        const retryAfterSeconds = Math.max(1, Math.ceil((bucket.resetAt - now) / 1000));
+        res.setHeader('Retry-After', String(retryAfterSeconds));
+        return res.status(429).json({
+            error: message,
+            code: 'RATE_LIMITED',
+        });
+    };
 }
 
 function setPreviewContentType(res, filePath) {
@@ -861,6 +1181,146 @@ function setPreviewContentType(res, filePath) {
         : '';
     res.setHeader('Content-Type', `${mimeType}${charset}`);
 }
+
+function parseRangeHeader(rangeHeader, fileSize) {
+    if (!rangeHeader) return null;
+    const match = /^bytes=(\d*)-(\d*)$/.exec(String(rangeHeader).trim());
+    if (!match) return { invalid: true };
+
+    const [, startPart, endPart] = match;
+    if (!startPart && !endPart) return { invalid: true };
+
+    let start;
+    let end;
+
+    if (!startPart) {
+        const suffixLength = Number.parseInt(endPart, 10);
+        if (!Number.isFinite(suffixLength) || suffixLength <= 0) {
+            return { invalid: true };
+        }
+        start = Math.max(0, fileSize - suffixLength);
+        end = fileSize - 1;
+    } else {
+        start = Number.parseInt(startPart, 10);
+        end = endPart ? Number.parseInt(endPart, 10) : fileSize - 1;
+    }
+
+    if (
+        !Number.isFinite(start)
+        || !Number.isFinite(end)
+        || start < 0
+        || end < start
+        || start >= fileSize
+    ) {
+        return { invalid: true };
+    }
+
+    return {
+        start,
+        end: Math.min(end, fileSize - 1),
+    };
+}
+
+async function sha256File(filePath) {
+    return new Promise((resolve, reject) => {
+        const hash = crypto.createHash('sha256');
+        const stream = fs.createReadStream(filePath);
+        stream.on('data', (chunk) => hash.update(chunk));
+        stream.on('error', reject);
+        stream.on('end', () => resolve(hash.digest('hex')));
+    });
+}
+
+async function streamFileWithRange(req, res, filePath, options = {}) {
+    const stats = await fsPromises.stat(filePath);
+    const fileSize = stats.size;
+    const mimeType = options.mimeType || mime.lookup(filePath) || 'application/octet-stream';
+
+    res.setHeader('Content-Type', mimeType);
+    res.setHeader('Accept-Ranges', 'bytes');
+    if (options.cacheControl) {
+        res.setHeader('Cache-Control', options.cacheControl);
+    }
+    if (options.pragma) {
+        res.setHeader('Pragma', options.pragma);
+    }
+    if (options.downloadFilename) {
+        res.setHeader('Content-Disposition', contentDispositionAttachment(options.downloadFilename));
+    }
+
+    if (fileSize === 0) {
+        res.setHeader('Content-Length', '0');
+        res.status(200).end();
+        return;
+    }
+
+    const range = parseRangeHeader(req.headers.range, fileSize);
+    if (range?.invalid) {
+        res.status(416);
+        res.setHeader('Content-Range', `bytes */${fileSize}`);
+        res.end();
+        return;
+    }
+
+    const streamOptions = range ? { start: range.start, end: range.end } : undefined;
+    if (range) {
+        res.status(206);
+        res.setHeader('Content-Range', `bytes ${range.start}-${range.end}/${fileSize}`);
+        res.setHeader('Content-Length', String(range.end - range.start + 1));
+    } else {
+        res.setHeader('Content-Length', String(fileSize));
+    }
+
+    if (req.method === 'HEAD') {
+        res.end();
+        return;
+    }
+
+    const fileStream = fs.createReadStream(filePath, streamOptions);
+    fileStream.pipe(res);
+    fileStream.on('error', (error) => {
+        console.error('Error streaming file:', error);
+        if (!res.headersSent) {
+            res.status(500).json({ error: 'Error reading file' });
+        } else {
+            res.destroy(error);
+        }
+    });
+}
+
+const OFFICE_PDF_PREVIEW_EXTENSIONS = new Set([
+    'doc', 'docx', 'wps',
+    'xls', 'xlsx', 'et',
+    'ppt', 'pptx', 'dps',
+    'odt', 'ods', 'odp',
+]);
+
+const getFileExtension = (filePath) => path.extname(filePath).slice(1).toLowerCase();
+
+const officePreviewStatusRateLimiter = createRouteRateLimiter({
+    windowMs: 60 * 1000,
+    maxRequests: 60,
+    keyPrefix: 'office-preview-status',
+    message: 'Too many Office preview status requests',
+});
+
+const officePreviewPdfRateLimiter = createRouteRateLimiter({
+    windowMs: 60 * 1000,
+    maxRequests: 30,
+    keyPrefix: 'office-preview-pdf',
+    message: 'Too many Office preview conversion requests',
+});
+
+const nativeFolderPickerRateLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    limit: 10,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: {
+        error: 'Too many native folder picker requests',
+        code: 'RATE_LIMITED',
+    },
+});
 
 async function addDirectoryToZip(zip, directoryPath, rootPath) {
     const entries = await fsPromises.readdir(directoryPath, { withFileTypes: true });
@@ -906,6 +1366,16 @@ app.get('/api/browse-filesystem', authenticateToken, async (req, res) => {
         console.log('[API] WORKSPACES_ROOT is:', WORKSPACES_ROOT);
         // Default to home directory if no path provided
         const defaultRoot = WORKSPACES_ROOT;
+
+        if (isWindowsDriveBrowserRoot(dirPath)) {
+            const suggestions = await getWindowsDriveSuggestions();
+            return res.json({
+                path: '/',
+                suggestions,
+                rootsPath: '/',
+            });
+        }
+
         let targetPath = dirPath ? expandWorkspacePath(dirPath) : defaultRoot;
 
         // Resolve and normalize the path
@@ -930,24 +1400,7 @@ app.get('/api/browse-filesystem', authenticateToken, async (req, res) => {
             return res.status(404).json({ error: 'Directory not accessible' });
         }
 
-        // Use existing getFileTree function with shallow depth (only direct children)
-        const fileTree = await getFileTree(resolvedPath, 1, 0, false); // maxDepth=1, showHidden=false
-
-        // Filter only directories and format for suggestions
-        const directories = fileTree
-            .filter(item => item.type === 'directory')
-            .map(item => ({
-                path: item.path,
-                name: item.name,
-                type: 'directory'
-            }))
-            .sort((a, b) => {
-                const aHidden = a.name.startsWith('.');
-                const bHidden = b.name.startsWith('.');
-                if (aHidden && !bHidden) return 1;
-                if (!aHidden && bHidden) return -1;
-                return a.name.localeCompare(b.name);
-            });
+        const directories = await browseDirectories(resolvedPath, req.query.showHidden === 'true');
 
         // Add common directories if browsing home directory
         const suggestions = [];
@@ -969,12 +1422,31 @@ app.get('/api/browse-filesystem', authenticateToken, async (req, res) => {
 
         res.json({
             path: resolvedPath,
-            suggestions: suggestions
+            suggestions: suggestions,
+            ...(process.platform === 'win32' ? { rootsPath: '/' } : {}),
         });
 
     } catch (error) {
         console.error('Error browsing filesystem:', error);
         res.status(500).json({ error: 'Failed to browse filesystem' });
+    }
+});
+
+app.post('/api/browse-filesystem/native-folder', nativeFolderPickerRateLimiter, authenticateToken, async (req, res) => {
+    req.setTimeout(0);
+    res.setTimeout(0);
+
+    try {
+        const pickedPath = await pickNativeFolder();
+        if (!pickedPath) {
+            return res.json({ cancelled: true });
+        }
+        return res.json({ path: pickedPath });
+    } catch (error) {
+        console.error('Error opening native folder dialog:', error);
+        res.status(500).json({
+            error: error instanceof Error ? error.message : 'Failed to open native folder dialog',
+        });
     }
 });
 
@@ -1019,7 +1491,7 @@ app.post('/api/create-folder', authenticateToken, async (req, res) => {
 });
 
 // Read file content endpoint
-app.get('/api/projects/:projectName/file', authenticateToken, async (req, res) => {
+app.get('/api/projects/:projectName/file', authenticateToken, requireRealProjectFilesystem, async (req, res) => {
     try {
         const { projectName } = req.params;
         const { filePath } = req.query;
@@ -1039,8 +1511,7 @@ app.get('/api/projects/:projectName/file', authenticateToken, async (req, res) =
         const resolved = path.isAbsolute(filePath)
             ? path.resolve(filePath)
             : path.resolve(projectRoot, filePath);
-        const normalizedRoot = path.resolve(projectRoot) + path.sep;
-        if (!resolved.startsWith(normalizedRoot)) {
+        if (!isPathInsideOrEqual(projectRoot, resolved)) {
             return res.status(403).json({ error: 'Path must be under project root' });
         }
 
@@ -1059,11 +1530,10 @@ app.get('/api/projects/:projectName/file', authenticateToken, async (req, res) =
 });
 
 // Serve raw file bytes for previews and downloads.
-app.get('/api/projects/:projectName/files/content', authenticateToken, async (req, res) => {
+app.get('/api/projects/:projectName/files/content', authenticateToken, requireRealProjectFilesystem, async (req, res) => {
     try {
         const { projectName } = req.params;
         const { path: filePath } = req.query;
-
 
         // Security: ensure the requested path is inside the project root
         if (!filePath) {
@@ -1075,41 +1545,24 @@ app.get('/api/projects/:projectName/files/content', authenticateToken, async (re
             return res.status(404).json({ error: 'Project not found' });
         }
 
-        // Match the text reader endpoint so callers can pass either project-relative
-        // or absolute paths without changing how the bytes are served.
-        const resolved = path.isAbsolute(filePath)
-            ? path.resolve(filePath)
-            : path.resolve(projectRoot, filePath);
-        const normalizedRoot = path.resolve(projectRoot) + path.sep;
-        if (!resolved.startsWith(normalizedRoot)) {
-            return res.status(403).json({ error: 'Path must be under project root' });
+        const resolvedResult = resolvePathInProject(projectRoot, filePath);
+        if (!resolvedResult.valid) {
+            return res.status(403).json({ error: resolvedResult.error });
         }
 
-        // Check if file exists
-        try {
-            await fsPromises.access(resolved);
-        } catch (error) {
+        const resolved = resolvedResult.resolved;
+        const stats = await fsPromises.stat(resolved).catch(() => null);
+        if (!stats?.isFile()) {
             return res.status(404).json({ error: 'File not found' });
         }
 
-        // Get file extension and set appropriate content type
         const mimeType = mime.lookup(resolved) || 'application/octet-stream';
-        res.setHeader('Content-Type', mimeType);
-
-        if (req.query.download) {
-            const basename = path.basename(resolved);
-            res.setHeader('Content-Disposition', contentDispositionAttachment(basename));
+        if (req.method === 'HEAD' && (req.query.sha256 === '1' || req.query.sha256 === 'true')) {
+            res.setHeader('X-PilotDeck-Content-SHA256', await sha256File(resolved));
         }
-
-        // Stream the file
-        const fileStream = fs.createReadStream(resolved);
-        fileStream.pipe(res);
-
-        fileStream.on('error', (error) => {
-            console.error('Error streaming file:', error);
-            if (!res.headersSent) {
-                res.status(500).json({ error: 'Error reading file' });
-            }
+        await streamFileWithRange(req, res, resolved, {
+            mimeType,
+            downloadFilename: req.query.download ? path.basename(resolved) : null,
         });
 
     } catch (error) {
@@ -1120,9 +1573,245 @@ app.get('/api/projects/:projectName/files/content', authenticateToken, async (re
     }
 });
 
+app.get('/api/office-preview/status', authenticateToken, officePreviewStatusRateLimiter, async (req, res) => {
+    try {
+        const forceRefresh = req.query.refresh === '1' || req.query.refresh === 'true';
+        const configuredPreview = getConfiguredOfficePreviewSettings();
+        const [libreOffice, candidates] = await Promise.all([
+            getLibreOfficeStatus({ forceRefresh }),
+            getLibreOfficeCandidateStatuses({ forceRefresh }),
+        ]);
+        res.json({
+            service: configuredPreview.service,
+            configuredBinaryPath: configuredPreview.binaryPath,
+            libreOffice: {
+                ...libreOffice,
+                candidates,
+            },
+            supportedServices: [
+                OFFICE_PREVIEW_SERVICE_BUILTIN,
+                OFFICE_PREVIEW_SERVICE_LIBREOFFICE,
+            ],
+        });
+    } catch (error) {
+        console.error('Error reading Office preview status:', error);
+        res.status(500).json({
+            error: 'Failed to read Office preview status',
+            code: 'OFFICE_PREVIEW_STATUS_FAILED',
+        });
+    }
+});
+
+// Convert Office files to PDF for lightweight read-only preview.
+// This is an optional fallback for legacy Office/PPT formats; it only works
+// when LibreOffice/soffice is available on the host.
+app.get('/api/projects/:projectName/files/preview/pdf', authenticateToken, requireRealProjectFilesystem, officePreviewPdfRateLimiter, async (req, res) => {
+    try {
+        const { projectName } = req.params;
+        const { path: filePath } = req.query;
+        const force = req.query.force === '1' || req.query.force === 'true';
+
+        if (!filePath) {
+            return res.status(400).json({ error: 'Invalid file path' });
+        }
+
+        const projectRoot = await extractProjectDirectory(projectName).catch(() => null);
+        if (!projectRoot) {
+            return res.status(404).json({ error: 'Project not found' });
+        }
+
+        const resolvedResult = resolvePathInProject(projectRoot, filePath);
+        if (!resolvedResult.valid) {
+            return res.status(403).json({ error: resolvedResult.error });
+        }
+
+        const resolved = resolvedResult.resolved;
+        const extension = getFileExtension(resolved);
+        if (!OFFICE_PDF_PREVIEW_EXTENSIONS.has(extension)) {
+            return res.status(400).json({ error: 'Unsupported Office preview format' });
+        }
+
+        const stats = await fsPromises.stat(resolved).catch(() => null);
+        if (!stats?.isFile()) {
+            return res.status(404).json({ error: 'File not found' });
+        }
+
+        const officePreviewService = getConfiguredOfficePreviewService();
+        if (officePreviewService !== OFFICE_PREVIEW_SERVICE_LIBREOFFICE) {
+            return res.status(409).json({
+                error: 'LibreOffice preview service is not selected',
+                code: 'LIBREOFFICE_PREVIEW_NOT_SELECTED',
+            });
+        }
+
+        const pdfPath = await convertOfficeDocumentToPdf(resolved, { force, projectRoot });
+        await streamFileWithRange(req, res, pdfPath, {
+            mimeType: 'application/pdf',
+            cacheControl: 'no-store, no-cache, must-revalidate',
+            pragma: 'no-cache',
+        });
+    } catch (error) {
+        console.error('Error generating Office PDF preview:', error);
+        if (!res.headersSent) {
+            res.status(error.statusCode || 500).json({
+                error: error.code === 'LIBREOFFICE_NOT_FOUND'
+                    ? 'LibreOffice executable not found'
+                    : error.code === 'OFFICE_PREVIEW_DISABLED'
+                        ? 'Office preview service is disabled'
+                        : 'Failed to generate Office PDF preview',
+                code: error.code || 'OFFICE_PREVIEW_FAILED',
+            });
+        }
+    }
+});
+
+// Preserve workbook semantics for spreadsheet previews. The manifest exposes
+// visible worksheet tabs, while each worksheet is rendered as its own PDF so
+// multi-page sheets remain grouped under one tab in the UI.
+app.get('/api/projects/:projectName/files/preview/spreadsheet/manifest', authenticateToken, requireRealProjectFilesystem, officePreviewPdfRateLimiter, async (req, res) => {
+    try {
+        const { projectName } = req.params;
+        const { path: filePath } = req.query;
+        const force = req.query.force === '1' || req.query.force === 'true';
+
+        if (!filePath) {
+            return res.status(400).json({ error: 'Invalid file path' });
+        }
+
+        const projectRoot = await extractProjectDirectory(projectName).catch(() => null);
+        if (!projectRoot) {
+            return res.status(404).json({ error: 'Project not found' });
+        }
+        const resolvedResult = resolvePathInProject(projectRoot, filePath);
+        if (!resolvedResult.valid) {
+            return res.status(403).json({ error: resolvedResult.error });
+        }
+        const extension = getFileExtension(resolvedResult.resolved);
+        if (!SPREADSHEET_PREVIEW_EXTENSIONS.has(extension)) {
+            return res.status(400).json({ error: 'Unsupported spreadsheet preview format' });
+        }
+        if (
+            extension !== 'xlsx'
+            && getConfiguredOfficePreviewService() !== OFFICE_PREVIEW_SERVICE_LIBREOFFICE
+        ) {
+            return res.status(409).json({
+                error: 'Legacy spreadsheet preview requires LibreOffice',
+                code: 'LIBREOFFICE_PREVIEW_NOT_SELECTED',
+            });
+        }
+        const manifest = await getSpreadsheetPreviewManifest(resolvedResult.resolved, { force });
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+        return res.json(manifest);
+    } catch (error) {
+        console.error('Error reading spreadsheet preview manifest:', error);
+        return res.status(error.statusCode || 500).json({
+            error: error.message || 'Failed to read spreadsheet preview manifest',
+            code: error.code || 'SPREADSHEET_PREVIEW_MANIFEST_FAILED',
+        });
+    }
+});
+
+app.get('/api/projects/:projectName/files/preview/spreadsheet/data', authenticateToken, requireRealProjectFilesystem, officePreviewPdfRateLimiter, async (req, res) => {
+    try {
+        const { projectName } = req.params;
+        const { path: filePath } = req.query;
+        const force = req.query.force === '1' || req.query.force === 'true';
+
+        if (!filePath) {
+            return res.status(400).json({ error: 'Invalid file path' });
+        }
+
+        const projectRoot = await extractProjectDirectory(projectName).catch(() => null);
+        if (!projectRoot) {
+            return res.status(404).json({ error: 'Project not found' });
+        }
+        const resolvedResult = resolvePathInProject(projectRoot, filePath);
+        if (!resolvedResult.valid) {
+            return res.status(403).json({ error: resolvedResult.error });
+        }
+        const extension = getFileExtension(resolvedResult.resolved);
+        if (!SPREADSHEET_PREVIEW_EXTENSIONS.has(extension)) {
+            return res.status(400).json({ error: 'Unsupported spreadsheet preview format' });
+        }
+        if (
+            extension !== 'xlsx'
+            && getConfiguredOfficePreviewService() !== OFFICE_PREVIEW_SERVICE_LIBREOFFICE
+        ) {
+            return res.status(409).json({
+                error: 'Legacy spreadsheet preview requires LibreOffice',
+                code: 'LIBREOFFICE_PREVIEW_NOT_SELECTED',
+            });
+        }
+
+        const preview = await getSpreadsheetInteractivePreview(
+            resolvedResult.resolved,
+            { force },
+        );
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+        return res.json(preview);
+    } catch (error) {
+        console.error('Error generating interactive spreadsheet preview:', error);
+        return res.status(error.statusCode || 500).json({
+            error: error.message || 'Failed to generate interactive spreadsheet preview',
+            code: error.code || 'SPREADSHEET_INTERACTIVE_PREVIEW_FAILED',
+        });
+    }
+});
+
+app.get('/api/projects/:projectName/files/preview/spreadsheet/sheet', authenticateToken, requireRealProjectFilesystem, officePreviewPdfRateLimiter, async (req, res) => {
+    try {
+        const { projectName } = req.params;
+        const { path: filePath, sheet: sheetIndex } = req.query;
+        const force = req.query.force === '1' || req.query.force === 'true';
+
+        if (!filePath || sheetIndex === undefined) {
+            return res.status(400).json({ error: 'File path and worksheet index are required' });
+        }
+
+        const projectRoot = await extractProjectDirectory(projectName).catch(() => null);
+        if (!projectRoot) {
+            return res.status(404).json({ error: 'Project not found' });
+        }
+        const resolvedResult = resolvePathInProject(projectRoot, filePath);
+        if (!resolvedResult.valid) {
+            return res.status(403).json({ error: resolvedResult.error });
+        }
+        const extension = getFileExtension(resolvedResult.resolved);
+        if (!SPREADSHEET_PREVIEW_EXTENSIONS.has(extension)) {
+            return res.status(400).json({ error: 'Unsupported spreadsheet preview format' });
+        }
+        const officePreviewService = getConfiguredOfficePreviewService();
+        if (officePreviewService !== OFFICE_PREVIEW_SERVICE_LIBREOFFICE) {
+            return res.status(409).json({
+                error: 'LibreOffice preview service is not selected',
+                code: 'LIBREOFFICE_PREVIEW_NOT_SELECTED',
+            });
+        }
+
+        const pdfPath = await getSpreadsheetSheetPreviewPdf(
+            resolvedResult.resolved,
+            Number(sheetIndex),
+            { force },
+        );
+        await streamFileWithRange(req, res, pdfPath, {
+            mimeType: 'application/pdf',
+            cacheControl: 'no-store, no-cache, must-revalidate',
+            pragma: 'no-cache',
+        });
+    } catch (error) {
+        console.error('Error generating worksheet PDF preview:', error);
+        if (!res.headersSent) {
+            res.status(error.statusCode || 500).json({
+                error: error.message || 'Failed to generate worksheet preview',
+                code: error.code || 'SPREADSHEET_SHEET_PREVIEW_FAILED',
+            });
+        }
+    }
+});
+
 // Serve project files through a stable project-root URL so generated HTML can
 // load sibling CSS, JS and image assets with normal relative paths.
-app.get('/api/projects/:projectName/preview/*', authenticateToken, async (req, res) => {
+app.get('/api/projects/:projectName/preview/*', authenticateToken, requireRealProjectFilesystem, async (req, res) => {
     try {
         const { projectName } = req.params;
         const relativeFilePath = req.params[0] || 'index.html';
@@ -1158,7 +1847,7 @@ app.get('/api/projects/:projectName/preview/*', authenticateToken, async (req, r
 });
 
 // Download the complete project as a zip archive.
-app.get('/api/projects/:projectName/download', authenticateToken, async (req, res) => {
+app.get('/api/projects/:projectName/download', authenticateToken, requireRealProjectFilesystem, async (req, res) => {
     try {
         const { projectName } = req.params;
         const projectRoot = await extractProjectDirectory(projectName).catch(() => null);
@@ -1201,7 +1890,7 @@ app.get('/api/projects/:projectName/download', authenticateToken, async (req, re
 });
 
 // Save file content endpoint
-app.put('/api/projects/:projectName/file', authenticateToken, async (req, res) => {
+app.put('/api/projects/:projectName/file', authenticateToken, requireRealProjectFilesystem, async (req, res) => {
     try {
         const { projectName } = req.params;
         const { filePath, content } = req.body;
@@ -1225,8 +1914,7 @@ app.put('/api/projects/:projectName/file', authenticateToken, async (req, res) =
         const resolved = path.isAbsolute(filePath)
             ? path.resolve(filePath)
             : path.resolve(projectRoot, filePath);
-        const normalizedRoot = path.resolve(projectRoot) + path.sep;
-        if (!resolved.startsWith(normalizedRoot)) {
+        if (!isPathInsideOrEqual(projectRoot, resolved)) {
             return res.status(403).json({ error: 'Path must be under project root' });
         }
 
@@ -1250,7 +1938,7 @@ app.put('/api/projects/:projectName/file', authenticateToken, async (req, res) =
     }
 });
 
-app.get('/api/projects/:projectName/files', authenticateToken, async (req, res) => {
+app.get('/api/projects/:projectName/files', authenticateToken, requireRealProjectFilesystem, async (req, res) => {
     try {
 
         // Using fsPromises from import
@@ -1294,8 +1982,7 @@ function validatePathInProject(projectRoot, targetPath) {
     const resolved = path.isAbsolute(targetPath)
         ? path.resolve(targetPath)
         : path.resolve(projectRoot, targetPath);
-    const normalizedRoot = path.resolve(projectRoot) + path.sep;
-    if (!resolved.startsWith(normalizedRoot)) {
+    if (!isPathInsideOrEqual(projectRoot, resolved)) {
         return { valid: false, error: 'Path must be under project root' };
     }
     return { valid: true, resolved };
@@ -1328,7 +2015,7 @@ function validateFilename(name) {
 }
 
 // POST /api/projects/:projectName/files/create - Create new file or directory
-app.post('/api/projects/:projectName/files/create', authenticateToken, async (req, res) => {
+app.post('/api/projects/:projectName/files/create', authenticateToken, requireRealProjectFilesystem, async (req, res) => {
     try {
         const { projectName } = req.params;
         const { path: parentPath, type, name } = req.body;
@@ -1405,7 +2092,7 @@ app.post('/api/projects/:projectName/files/create', authenticateToken, async (re
 });
 
 // PUT /api/projects/:projectName/files/rename - Rename file or directory
-app.put('/api/projects/:projectName/files/rename', authenticateToken, async (req, res) => {
+app.put('/api/projects/:projectName/files/rename', authenticateToken, requireRealProjectFilesystem, async (req, res) => {
     try {
         const { projectName } = req.params;
         const { oldPath, newName } = req.body;
@@ -1482,7 +2169,7 @@ app.put('/api/projects/:projectName/files/rename', authenticateToken, async (req
 });
 
 // DELETE /api/projects/:projectName/files - Delete file or directory
-app.delete('/api/projects/:projectName/files', authenticateToken, async (req, res) => {
+app.delete('/api/projects/:projectName/files', authenticateToken, requireRealProjectFilesystem, async (req, res) => {
     try {
         const { projectName } = req.params;
         const { path: targetPath, type } = req.body;
@@ -1708,7 +2395,7 @@ const uploadFilesHandler = async (req, res) => {
     });
 };
 
-app.post('/api/projects/:projectName/files/upload', authenticateToken, uploadFilesHandler);
+app.post('/api/projects/:projectName/files/upload', authenticateToken, requireRealProjectFilesystem, uploadFilesHandler);
 
 /**
  * Proxy an authenticated client WebSocket to a plugin's internal WS server.
@@ -1791,6 +2478,7 @@ class WebSocketWriter {
     }
 
     send(data) {
+        broadcastSessionActivity(data, this.userId);
         const message = JSON.stringify(data);
         if (this.ws.readyState === 1) { // WebSocket.OPEN
             this.ws.send(message);
@@ -1834,18 +2522,38 @@ function handleChatConnection(ws, request) {
 
     // Wrap WebSocket with writer for consistent interface with SSEStreamWriter
     const writer = new WebSocketWriter(ws, userId);
+    const streamWriter = {
+        send: (data) => broadcastChatFrame(data, ws, userId),
+    };
 
     ws.on('message', async (message) => {
         try {
             const data = JSON.parse(message);
 
             if (data.type === 'ping') return;
+            if (data.type === 'get-session-activity') {
+                writer.send({type: 'session-activity-snapshot', activities: sessionActivityRegistry.snapshot(userId)});
+                return;
+            }
+            const requestSessionId = normalizeSessionId(data.sessionId);
 
-            if (data.type === 'always-on-presence') {
-                await alwaysOnHeartbeat.handlePresence(ws, data);
-            } else if (data.type === 'always-on-presence-clear') {
-                await alwaysOnHeartbeat.clearPresence(ws);
-            } else if (
+            if (data.type === 'watch-session') {
+                if (requestSessionId) {
+                    sessionWatchRegistry.watch(requestSessionId, ws);
+                    const queueState = await getInputQueueStateViaGateway(requestSessionId, data.options || {});
+                    if (queueState) writer.send(queueState);
+                }
+                return;
+            }
+
+            if (data.type === 'unwatch-session') {
+                if (requestSessionId) {
+                    sessionWatchRegistry.unwatch(requestSessionId, ws);
+                }
+                return;
+            }
+
+            if (
                 data.type === 'pilotdeck-command' ||
                 // Deprecated: legacy per-provider frame types kept for back-compat.
                 data.type === 'claude-command' ||
@@ -1856,11 +2564,130 @@ function handleChatConnection(ws, request) {
                 console.log('[DEBUG] User message:', data.command || '[Continue/Resume]');
                 console.log('📁 Project:', data.options?.projectPath || data.options?.cwd || 'Unknown');
                 console.log('🔄 Session:', data.options?.sessionId ? 'Resume' : 'New');
+                const commandSessionId = normalizeSessionId(data.options?.sessionId || data.options?.sessionKey);
+                if (commandSessionId) {
+                    sessionWatchRegistry.watch(commandSessionId, ws);
+                    const userVisibleInput = typeof data.options?.userVisibleInput === 'string'
+                        ? data.options.userVisibleInput.trim()
+                        : '';
+                    if (userVisibleInput) {
+                        const nowIso = new Date().toISOString();
+                        const provider = data.options?.providerHint || 'pilotdeck';
+                        const [optimisticUserFrame, optimisticStatusFrame] = createOptimisticUserFrames({
+                            sessionId: commandSessionId,
+                            provider,
+                            userVisibleInput,
+                            options: data.options,
+                            timestamp: nowIso,
+                        });
+                        // The submitting tab already rendered its optimistic user row.
+                        // Push only to sibling watchers so they mirror instantly.
+                        broadcastToSessionWatchers(commandSessionId, optimisticUserFrame, userId, ws);
+                        broadcastToSessionWatchers(commandSessionId, optimisticStatusFrame, userId, ws);
+                    }
+                }
                 const providerHint = data.options?.providerHint || data.type.replace('-command', '');
-                await runChatViaGateway(data.command, data.options, writer, providerHint);
+                await runChatViaGateway(data.command, data.options, streamWriter, providerHint);
+            } else if (data.type === 'get-input-queue') {
+                const queueState = await getInputQueueStateViaGateway(requestSessionId, data.options || {});
+                if (queueState) writer.send(queueState);
+            } else if (data.type === 'queue-input') {
+                const result = await enqueueInputViaGateway(
+                    requestSessionId,
+                    data.item,
+                    streamWriter,
+                    data.provider || 'pilotdeck',
+                );
+                writer.send({
+                    type: 'input-queue-operation-result',
+                    operation: 'enqueue',
+                    requestId: data.requestId,
+                    sessionId: requestSessionId,
+                    ...result,
+                });
+            } else if (data.type === 'delete-queued-input') {
+                const result = await deleteQueuedInputViaGateway(requestSessionId, data.itemId, streamWriter);
+                if (result.ok) {
+                    // A submitting tab can retain sidebar activity after navigating
+                    // away (and unwatching). Notify every socket for this user.
+                    const payload = JSON.stringify({
+                        type: 'session-input-removed', sessionId: requestSessionId, itemId: data.itemId,
+                    });
+                    connectedClients.forEach((client) => {
+                        if (client.readyState === WebSocket.OPEN && (client.__pilotdeckUserId ?? null) === userId) {
+                            client.send(payload);
+                        }
+                    });
+                }
+                writer.send({
+                    type: 'input-queue-operation-result',
+                    operation: 'delete',
+                    requestId: data.requestId,
+                    sessionId: requestSessionId,
+                    ...result,
+                });
+            } else if (data.type === 'move-queued-input') {
+                const result = moveQueuedInputToFrontViaGateway(requestSessionId, data.itemId, streamWriter);
+                writer.send({
+                    type: 'input-queue-operation-result',
+                    operation: 'move',
+                    requestId: data.requestId,
+                    sessionId: requestSessionId,
+                    ...result,
+                });
+            } else if (data.type === 'steer-queued-input') {
+                const result = await steerQueuedInputViaGateway(
+                    requestSessionId,
+                    data.itemId,
+                    streamWriter,
+                    data.provider || 'pilotdeck',
+                );
+                writer.send({
+                    type: 'input-queue-operation-result',
+                    operation: 'steer',
+                    requestId: data.requestId,
+                    sessionId: requestSessionId,
+                    ...result,
+                });
+            } else if (data.type === 'resume-input-queue') {
+                const result = await resumeInputQueueViaGateway(
+                    requestSessionId,
+                    streamWriter,
+                    data.provider || 'pilotdeck',
+                );
+                writer.send({
+                    type: 'input-queue-operation-result',
+                    operation: 'resume',
+                    requestId: data.requestId,
+                    sessionId: requestSessionId,
+                    ...result,
+                });
+            } else if (data.type === 'regenerate-last-message') {
+                const sessionId = normalizeSessionId(data.sessionId || data.options?.sessionId);
+                const requestId = typeof data.requestId === 'string' ? data.requestId : null;
+                const expectedTurnId = typeof data.expectedTurnId === 'string'
+                    ? data.expectedTurnId.trim()
+                    : '';
+                const provider = data.options?.providerHint || 'pilotdeck';
+                if (sessionId) {
+                    sessionWatchRegistry.watch(sessionId, ws);
+                }
+                await regenerateLastMessageTransaction({
+                    data,
+                    sessionId,
+                    requestId,
+                    expectedTurnId,
+                    provider,
+                    writer,
+                    streamWriter,
+                    replaceLastTurn: replaceLastTurnViaGateway,
+                    finalizeLastTurnReplacement: finalizeLastTurnReplacementViaGateway,
+                    runChat: runChatViaGateway,
+                });
             } else if (data.type === 'abort-session') {
                 console.log('[DEBUG] Abort session request:', data.sessionId);
                 const provider = data.provider || 'pilotdeck';
+                pauseInputQueueViaGateway(data.sessionId, streamWriter, 'user_stopped');
                 const success = await abortViaGateway(data.sessionId, provider);
                 writer.send(createNormalizedMessage({ kind: 'complete', exitCode: success ? 0 : 1, aborted: true, success, sessionId: data.sessionId, provider }));
             } else if (data.type === 'permission-response') {
@@ -1873,25 +2700,72 @@ function handleChatConnection(ws, request) {
                             reason: data.message,
                         },
                     );
+                    const resolvedSessionId = normalizeSessionId(data.sessionId);
+                    if (resolvedSessionId) {
+                        broadcastToSessionWatchers(
+                            resolvedSessionId,
+                            createNormalizedMessage({
+                                kind: 'permission_cancelled',
+                                requestId: data.requestId,
+                                sessionId: resolvedSessionId,
+                                provider: data.provider || 'pilotdeck',
+                            }),
+                            userId,
+                        );
+                    }
                 }
             } else if (data.type === 'session-permission-grant') {
-                await grantSessionPermissionViaGateway(data.sessionId, data.entry);
+                const result = await grantSessionPermissionViaGateway(data.sessionId, data.entry);
+                ws.send(JSON.stringify({
+                    type: 'session-permission-grant-result',
+                    requestId: typeof data.requestId === 'string' ? data.requestId : null,
+                    sessionId: data.sessionId,
+                    entry: data.entry,
+                    granted: result.granted === true,
+                    ...(typeof result.entry === 'string' ? { grantedEntry: result.entry } : {}),
+                }));
             } else if (data.type === 'elicitation-response') {
                 if (data.requestId) {
                     await elicitationRespondViaGateway(data.requestId, data.answer);
+                    const resolvedSessionId = normalizeSessionId(data.sessionId);
+                    if (resolvedSessionId) {
+                        broadcastToSessionWatchers(
+                            resolvedSessionId,
+                            createNormalizedMessage({
+                                kind: 'permission_cancelled',
+                                requestId: data.requestId,
+                                sessionId: resolvedSessionId,
+                                provider: data.provider || 'pilotdeck',
+                            }),
+                            userId,
+                        );
+                    }
                 }
             } else if (data.type === 'check-session-status') {
                 const sessionId = data.sessionId;
-                const isProcessing = isSessionActiveViaGateway(sessionId);
-                const activeTurnMessages = isProcessing
-                    ? await getActiveTurnSnapshotFramesViaGateway(sessionId, data.provider || 'pilotdeck')
-                    : [];
+                if (normalizeSessionId(sessionId)) {
+                    sessionWatchRegistry.watch(sessionId, ws);
+                }
+                const includeActiveTurnMessages = data.includeActiveTurnMessages !== false;
+                const activity = await getSessionActivityViaGateway(
+                    sessionId,
+                    data.provider || 'pilotdeck',
+                    includeActiveTurnMessages,
+                    streamWriter,
+                );
                 writer.send({
                     type: 'session-status',
                     sessionId,
                     provider: data.provider || 'pilotdeck',
-                    isProcessing,
-                    activeTurnMessages,
+                    isProcessing: activity.isProcessing,
+                    activeRunId: activity.activeRunId,
+                    expectedActiveRunId: typeof data.expectedActiveRunId === 'string' && data.expectedActiveRunId.trim()
+                        ? data.expectedActiveRunId.trim()
+                        : null,
+                    statusRequestId: Number.isSafeInteger(data.statusRequestId)
+                        ? data.statusRequestId
+                        : null,
+                    activeTurnMessages: includeActiveTurnMessages ? activity.activeTurnMessages : [],
                     tokenBudget: getSessionTokenBudget(sessionId),
                 });
             } else if (data.type === 'get-pending-permissions') {
@@ -1927,7 +2801,7 @@ function handleChatConnection(ws, request) {
         cleanedUp = true;
         // Remove from connected clients
         connectedClients.delete(ws);
-        void alwaysOnHeartbeat.clearPresence(ws);
+        sessionWatchRegistry.removeClient(ws);
     };
 
     ws.on('close', (code, reason) => {
@@ -1945,8 +2819,15 @@ function handleShellConnection(ws) {
     console.log('🐚 Shell client connected');
     let shellProcess = null;
     let ptySessionKey = null;
+    let boundTerminal = null;
     let urlDetectionBuffer = '';
     const announcedAuthUrls = new Set();
+    const detachBoundTerminal = () => {
+        const binding = boundTerminal;
+        boundTerminal = null;
+        if (!binding) return null;
+        return terminalSessions.detach(binding.key, binding.pty, ws);
+    };
 
     ws.on('message', async (message) => {
         try {
@@ -1977,38 +2858,39 @@ function handleShellConnection(ws) {
 
                 // Kill any existing login session before starting fresh
                 if (isLoginCommand) {
-                    const oldSession = ptySessionsMap.get(ptySessionKey);
+                    const oldSession = terminalSessions.get(ptySessionKey);
                     if (oldSession) {
                         console.log('🧹 Cleaning up existing login session:', ptySessionKey);
-                        if (oldSession.timeoutId) clearTimeout(oldSession.timeoutId);
-                        if (oldSession.pty && oldSession.pty.kill) oldSession.pty.kill();
-                        ptySessionsMap.delete(ptySessionKey);
+                        terminalSessions.replace(ptySessionKey);
                     }
                 }
 
-                const existingSession = isLoginCommand ? null : ptySessionsMap.get(ptySessionKey);
+                const existingSession = isLoginCommand ? null : terminalSessions.get(ptySessionKey);
                 if (existingSession) {
                     console.log('♻️  Reconnecting to existing PTY session:', ptySessionKey);
                     shellProcess = existingSession.pty;
-
-                    clearTimeout(existingSession.timeoutId);
+                    detachBoundTerminal();
+                    const reconnected = terminalSessions.reconnect(ptySessionKey, shellProcess, ws);
+                    if (!reconnected) {
+                        shellProcess = null;
+                        return;
+                    }
+                    boundTerminal = { key: ptySessionKey, pty: shellProcess };
 
                     ws.send(JSON.stringify({
                         type: 'output',
                         data: `\x1b[36m[Reconnected to existing session]\x1b[0m\r\n`
                     }));
 
-                    if (existingSession.buffer && existingSession.buffer.length > 0) {
-                        console.log(`📜 Sending ${existingSession.buffer.length} buffered messages`);
-                        existingSession.buffer.forEach(bufferedData => {
+                    if (reconnected.buffer.length > 0) {
+                        console.log(`📜 Sending ${reconnected.buffer.length} buffered messages`);
+                        reconnected.buffer.forEach(bufferedData => {
                             ws.send(JSON.stringify({
                                 type: 'output',
                                 data: bufferedData
                             }));
                         });
                     }
-
-                    existingSession.ws = ws;
 
                     return;
                 }
@@ -2056,6 +2938,9 @@ function handleShellConnection(ws) {
                         return;
                     }
 
+                    // Prefer Git Bash on Windows so agent commands can use POSIX shell syntax.
+                    const shellConfig = getDefaultPtyShell();
+
                     // Build shell command — use cwd for project path (never interpolate into shell string)
                     let shellCommand;
                     if (isPlainShell) {
@@ -2070,12 +2955,9 @@ function handleShellConnection(ws) {
                     } else if (provider === 'codex') {
                         // Use codex command; attempt to resume and fall back to a new session when the resume fails.
                         if (hasSession && sessionId) {
-                            if (os.platform() === 'win32') {
-                                // PowerShell syntax for fallback
-                                shellCommand = `codex resume "${sessionId}"; if ($LASTEXITCODE -ne 0) { codex }`;
-                            } else {
-                                shellCommand = `codex resume "${sessionId}" || codex`;
-                            }
+                            shellCommand = shellConfig.kind === 'powershell'
+                                ? `codex resume "${sessionId}"; if ($LASTEXITCODE -ne 0) { codex }`
+                                : `codex resume "${sessionId}" || codex`;
                         } else {
                             shellCommand = 'codex';
                         }
@@ -2108,22 +2990,18 @@ function handleShellConnection(ws) {
                     } else if (provider === 'pilotdeck') {
                         const command = initialCommand || 'pilotdeck';
                         if (hasSession && sessionId) {
-                            if (os.platform() === 'win32') {
-                                shellCommand = `pilotdeck --resume "${sessionId}"; if ($LASTEXITCODE -ne 0) { pilotdeck }`;
-                            } else {
-                                shellCommand = `pilotdeck --resume "${sessionId}" || pilotdeck`;
-                            }
+                            shellCommand = shellConfig.kind === 'powershell'
+                                ? `pilotdeck --resume "${sessionId}"; if ($LASTEXITCODE -ne 0) { pilotdeck }`
+                                : `pilotdeck --resume "${sessionId}" || pilotdeck`;
                         } else {
                             shellCommand = command;
                         }
                     } else {
                         const command = initialCommand || 'claude';
                         if (hasSession && sessionId) {
-                            if (os.platform() === 'win32') {
-                                shellCommand = `claude --resume "${sessionId}"; if ($LASTEXITCODE -ne 0) { claude }`;
-                            } else {
-                                shellCommand = `claude --resume "${sessionId}" || claude`;
-                            }
+                            shellCommand = shellConfig.kind === 'powershell'
+                                ? `claude --resume "${sessionId}"; if ($LASTEXITCODE -ne 0) { claude }`
+                                : `claude --resume "${sessionId}" || claude`;
                         } else {
                             shellCommand = command;
                         }
@@ -2131,16 +3009,17 @@ function handleShellConnection(ws) {
 
                     console.log('🔧 Executing shell command:', shellCommand);
 
-                    // Use appropriate shell based on platform
-                    const shell = os.platform() === 'win32' ? 'powershell.exe' : 'bash';
-                    const shellArgs = os.platform() === 'win32' ? ['-Command', shellCommand] : ['-c', shellCommand];
+                    const shell = shellConfig.shell;
+                    const shellArgs = shellConfig.args(shellCommand);
 
                     // Use terminal dimensions from client if provided, otherwise use defaults
                     const termCols = data.cols || 80;
                     const termRows = data.rows || 24;
                     console.log('📐 Using terminal dimensions:', termCols, 'x', termRows);
 
-                    shellProcess = pty.spawn(shell, shellArgs, {
+                    const spawnedPty = terminalPty.spawn({
+                        shell,
+                        args: shellArgs,
                         name: 'xterm-256color',
                         cols: termCols,
                         rows: termRows,
@@ -2152,29 +3031,29 @@ function handleShellConnection(ws) {
                             FORCE_COLOR: '3'
                         }
                     });
+                    shellProcess = spawnedPty;
+                    const spawnedSessionKey = ptySessionKey;
 
-                    console.log('🟢 Shell process started with PTY, PID:', shellProcess.pid);
+                    console.log('🟢 Shell process started with PTY, PID:', spawnedPty.pid);
 
-                    ptySessionsMap.set(ptySessionKey, {
-                        pty: shellProcess,
+                    detachBoundTerminal();
+                    const registeredSession = terminalSessions.register(spawnedSessionKey, {
+                        pty: spawnedPty,
                         ws: ws,
-                        buffer: [],
-                        timeoutId: null,
                         projectPath,
                         sessionId
                     });
+                    if (!registeredSession) {
+                        shellProcess = null;
+                        ws.send(JSON.stringify({ type: 'error', message: 'Terminal server is shutting down' }));
+                        return;
+                    }
+                    boundTerminal = { key: spawnedSessionKey, pty: spawnedPty };
 
                     // Handle data output
-                    shellProcess.onData((data) => {
-                        const session = ptySessionsMap.get(ptySessionKey);
+                    spawnedPty.onData((data) => {
+                        const session = terminalSessions.appendOutput(spawnedSessionKey, spawnedPty, data);
                         if (!session) return;
-
-                        if (session.buffer.length < 5000) {
-                            session.buffer.push(data);
-                        } else {
-                            session.buffer.shift();
-                            session.buffer.push(data);
-                        }
 
                         if (session.ws && session.ws.readyState === WebSocket.OPEN) {
                             let outputData = data;
@@ -2230,20 +3109,19 @@ function handleShellConnection(ws) {
                     });
 
                     // Handle process exit
-                    shellProcess.onExit((exitCode) => {
+                    spawnedPty.onExit((exitCode) => {
                         console.log('🔚 Shell process exited with code:', exitCode.exitCode, 'signal:', exitCode.signal);
-                        const session = ptySessionsMap.get(ptySessionKey);
+                        const session = terminalSessions.complete(spawnedSessionKey, spawnedPty);
                         if (session && session.ws && session.ws.readyState === WebSocket.OPEN) {
                             session.ws.send(JSON.stringify({
                                 type: 'output',
                                 data: `\r\n\x1b[33mProcess exited with code ${exitCode.exitCode}${exitCode.signal ? ` (${exitCode.signal})` : ''}\x1b[0m\r\n`
                             }));
                         }
-                        if (session && session.timeoutId) {
-                            clearTimeout(session.timeoutId);
+                        if (boundTerminal?.key === spawnedSessionKey && boundTerminal.pty === spawnedPty) {
+                            boundTerminal = null;
                         }
-                        ptySessionsMap.delete(ptySessionKey);
-                        shellProcess = null;
+                        if (shellProcess === spawnedPty) shellProcess = null;
                     });
 
                 } catch (spawnError) {
@@ -2256,9 +3134,11 @@ function handleShellConnection(ws) {
 
             } else if (data.type === 'input') {
                 // Send input to shell process
-                if (shellProcess && shellProcess.write) {
+                if (boundTerminal) {
                     try {
-                        shellProcess.write(data.data);
+                        if (!terminalSessions.write(boundTerminal.key, boundTerminal.pty, ws, data.data)) {
+                            console.warn('No active shell process to send input to');
+                        }
                     } catch (error) {
                         console.error('Error writing to shell:', error);
                     }
@@ -2267,9 +3147,11 @@ function handleShellConnection(ws) {
                 }
             } else if (data.type === 'resize') {
                 // Handle terminal resize
-                if (shellProcess && shellProcess.resize) {
+                if (boundTerminal) {
                     console.log('Terminal resize requested:', data.cols, 'x', data.rows);
-                    shellProcess.resize(data.cols, data.rows);
+                    if (!terminalSessions.resize(boundTerminal.key, boundTerminal.pty, ws, data.cols, data.rows)) {
+                        console.warn('No active shell process to resize');
+                    }
                 }
             }
         } catch (error) {
@@ -2286,20 +3168,9 @@ function handleShellConnection(ws) {
     ws.on('close', () => {
         console.log('🔌 Shell client disconnected');
 
-        if (ptySessionKey) {
-            const session = ptySessionsMap.get(ptySessionKey);
-            if (session) {
-                console.log('⏳ PTY session kept alive, will timeout in 30 minutes:', ptySessionKey);
-                session.ws = null;
-
-                session.timeoutId = setTimeout(() => {
-                    console.log('⏰ PTY session timeout, killing process:', ptySessionKey);
-                    if (session.pty && session.pty.kill) {
-                        session.pty.kill();
-                    }
-                    ptySessionsMap.delete(ptySessionKey);
-                }, PTY_SESSION_TIMEOUT);
-            }
+        const detached = detachBoundTerminal();
+        if (detached) {
+            console.log('⏳ PTY session kept alive, will timeout in 30 minutes:', detached.key);
         }
     });
 
@@ -2371,8 +3242,8 @@ async function moveUploadedAttachment(file, attachmentDir, index) {
 }
 
 // Mixed chat attachment upload endpoint. Images are returned as data URLs for
-// multimodal input and previews; other files are staged under the project so
-// the gateway can resolve them by path.
+// multimodal input/previews and are also staged under the project so the agent
+// can operate on the same bytes by path; other files are staged by path only.
 app.post('/api/projects/:projectName/upload-attachments', authenticateToken, async (req, res) => {
     let multerUpload;
     try {
@@ -2431,14 +3302,14 @@ app.post('/api/projects/:projectName/upload-attachments', authenticateToken, asy
 
             for (const [index, file] of req.files.entries()) {
                 if (CHAT_ATTACHMENT_IMAGE_MIMES.has(file.mimetype)) {
-                    const originalName = normalizeUploadedFilename(file.originalname);
                     const buffer = await fsPromises.readFile(file.path);
-                    await fsPromises.unlink(file.path).catch(() => { });
+                    const storedFile = await moveUploadedAttachment(file, attachmentDir, index);
                     images.push({
-                        name: originalName,
+                        name: storedFile.name,
                         data: `data:${file.mimetype};base64,${buffer.toString('base64')}`,
-                        size: file.size,
-                        mimeType: file.mimetype,
+                        path: storedFile.path,
+                        size: storedFile.size,
+                        mimeType: storedFile.mimeType,
                     });
                     continue;
                 }
@@ -2446,7 +3317,7 @@ app.post('/api/projects/:projectName/upload-attachments', authenticateToken, asy
                 files.push(await moveUploadedAttachment(file, attachmentDir, index));
             }
 
-            if (files.length === 0 && attachmentDir) {
+            if (files.length === 0 && images.length === 0 && attachmentDir) {
                 await fsPromises.rm(attachmentDir, { recursive: true, force: true }).catch(() => { });
             }
 
@@ -2738,6 +3609,18 @@ app.get('/api/projects/:projectName/sessions/:sessionId/token-usage', authentica
     }
 });
 
+// API requests must never fall through to the SPA shell. Returning index.html
+// with HTTP 200 hides missing/stale backend routes and makes JSON clients show
+// an empty result instead of a useful error.
+app.use('/api', (req, res) => {
+    res.status(404).json({
+        error: {
+            code: 'API_ROUTE_NOT_FOUND',
+            message: `API route not found: ${req.method} ${req.originalUrl}`,
+        },
+    });
+});
+
 // Serve React app for all other routes (excluding static files)
 app.get('*', (req, res) => {
     // Skip requests for actual static asset extensions only
@@ -2787,6 +3670,9 @@ async function getFileTree(dirPath, maxDepth = 3, currentDepth = 0, showHidden =
             if (entry.name === 'node_modules' ||
                 entry.name === 'dist' ||
                 entry.name === 'build' ||
+                entry.name.startsWith('.pilotdeck') ||
+                entry.name === '.tmp' ||
+                /^\.pilotdeck_build\.(?:c|m)?js$/i.test(entry.name) ||
                 entry.name === '.git' ||
                 entry.name === '.svn' ||
                 entry.name === '.hg') continue;
@@ -2942,6 +3828,7 @@ async function startServer() {
                 // that self-reference SERVER_PORT (e.g. routes/taskmaster.js) hit
                 // the right port after a fallback.
                 process.env.SERVER_PORT = String(boundPort);
+                runtimeCoordination.publishConfigurationState();
                 {
                     const appInstallPath = path.join(__dirname, '..');
 
@@ -2962,10 +3849,14 @@ async function startServer() {
                         || process.env.PILOTDECK_SKIP_BROWSER_OPEN === '1';
                     if (!skipAutoOpen) {
                         const serverUrl = `http://${DISPLAY_HOST === '0.0.0.0' ? 'localhost' : DISPLAY_HOST}:${boundPort}`;
-                        const openCmd = process.platform === 'darwin' ? 'open'
-                                      : process.platform === 'win32' ? 'start'
-                                      : 'xdg-open';
-                        exec(`${openCmd} "${serverUrl}"`, () => {});
+                        const { command, args } = getOpenUrlSpawnCommand(serverUrl);
+                        const opener = spawn(command, args, {
+                            stdio: 'ignore',
+                            detached: process.platform !== 'win32',
+                            windowsHide: process.platform === 'win32',
+                        });
+                        opener.on('error', () => {});
+                        opener.unref();
                     }
 
                     // Start watching the projects folder for changes
@@ -2999,6 +3890,7 @@ async function startServer() {
 
             shutdownPromise = (async () => {
                 try {
+                    terminalSessions.dispose();
                     stopMemoryScheduler();
                     closeMemoryServices();
                     stopPilotDeckConfigWatcher();

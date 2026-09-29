@@ -1,3 +1,5 @@
+import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 import { useCallback, useState } from 'react';
 import type { FormEvent } from 'react';
 import { useAuth } from '../context/AuthContext';
@@ -24,21 +26,21 @@ const initialState: SetupFormState = {
  * @returns An error message string if validation fails, or `null` when the
  *   form is valid.
  */
-function validateSetupForm(formState: SetupFormState): string | null {
+function validateSetupForm(formState: SetupFormState, t: TFunction): string | null {
   if (!formState.username.trim() || !formState.password || !formState.confirmPassword) {
-    return 'Please fill in all fields.';
+    return t('common:uiText.requiredFields');
   }
 
   if (formState.username.trim().length < 3) {
-    return 'Username must be at least 3 characters long.';
+    return t('common:uiText.usernameLength');
   }
 
   if (formState.password.length < 6) {
-    return 'Password must be at least 6 characters long.';
+    return t('common:uiText.passwordLength');
   }
 
   if (formState.password !== formState.confirmPassword) {
-    return 'Passwords do not match.';
+    return t('common:uiText.passwordMismatch');
   }
 
   return null;
@@ -51,6 +53,7 @@ function validateSetupForm(formState: SetupFormState): string | null {
  * credentials after submission.
  */
 export default function SetupForm() {
+  const { t } = useTranslation('common');
   const { register } = useAuth();
 
   const [formState, setFormState] = useState<SetupFormState>(initialState);
@@ -66,7 +69,7 @@ export default function SetupForm() {
       event.preventDefault();
       setErrorMessage('');
 
-      const validationError = validateSetupForm(formState);
+      const validationError = validateSetupForm(formState, t);
       if (validationError) {
         setErrorMessage(validationError);
         return;
@@ -79,14 +82,14 @@ export default function SetupForm() {
       }
       setIsSubmitting(false);
     },
-    [formState, register],
+    [formState, register, t],
   );
 
   return (
     <AuthScreenLayout
-      title="Welcome to PilotDeck"
-      description="Set up your account to get started"
-      footerText="This is a single-user system. Only one account can be created."
+      title={t('common:uiText.welcome')}
+      description={t('common:uiText.setupDescription')}
+      footerText={t('common:uiText.singleUser')}
       logo={
         <div className="flex items-center justify-center gap-2">
           <img
@@ -108,10 +111,10 @@ export default function SetupForm() {
         <AuthInputField
           id="username"
           name="username"
-          label="Username"
+          label={t('common:uiText.username')}
           value={formState.username}
           onChange={(value) => updateField('username', value)}
-          placeholder="Enter your username"
+          placeholder={t('common:uiText.enterUsername')}
           isDisabled={isSubmitting}
           autoComplete="username"
         />
@@ -119,10 +122,10 @@ export default function SetupForm() {
         <AuthInputField
           id="password"
           name="password"
-          label="Password"
+          label={t('common:uiText.password')}
           value={formState.password}
           onChange={(value) => updateField('password', value)}
-          placeholder="Enter your password"
+          placeholder={t('common:uiText.enterPassword')}
           isDisabled={isSubmitting}
           type="password"
           autoComplete="new-password"
@@ -131,10 +134,10 @@ export default function SetupForm() {
         <AuthInputField
           id="confirmPassword"
           name="confirmPassword"
-          label="Confirm Password"
+          label={t('common:uiText.confirmPassword')}
           value={formState.confirmPassword}
           onChange={(value) => updateField('confirmPassword', value)}
-          placeholder="Confirm your password"
+          placeholder={t('common:uiText.confirmPasswordPlaceholder')}
           isDisabled={isSubmitting}
           type="password"
           autoComplete="new-password"
@@ -147,7 +150,7 @@ export default function SetupForm() {
           disabled={isSubmitting}
           className="w-full rounded-md bg-blue-600 px-4 py-2 font-medium text-white transition-colors duration-200 hover:bg-blue-700 disabled:bg-blue-400"
         >
-          {isSubmitting ? 'Setting up...' : 'Create Account'}
+          {isSubmitting ? t('common:uiText.settingUp') : t('common:uiText.createAccount')}
         </button>
       </form>
     </AuthScreenLayout>

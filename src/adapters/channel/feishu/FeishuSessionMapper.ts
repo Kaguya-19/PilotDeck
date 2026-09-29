@@ -69,6 +69,10 @@ export class FeishuSessionMapper {
     return this.state.projectByChatId[chatId];
   }
 
+  getSession(chatId: string): string {
+    return this.currentSessionKey(chatId);
+  }
+
   private currentSessionKey(chatId: string): string {
     return this.state.activeByChatId[chatId] ?? `feishu:chat=${chatId}:general`;
   }

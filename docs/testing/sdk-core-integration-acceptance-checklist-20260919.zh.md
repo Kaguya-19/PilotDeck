@@ -1,0 +1,91 @@
+# SDK/Core Integration 验收清单（2026-09-19）
+
+本文是本轮 SDK/core integration 的增量验收清单。原始要求来自用户 goal；产品行为以固定 `origin/main` 为基准，架构边界以 `Kaguya-19/refactor/core_agent_loop_0831` 为基准。历史报告只在当前实现、测试入口和 comparator 仍匹配时复用。
+
+## 固定证据
+
+| 项目 | 固定值 / 来源 |
+| --- | --- |
+| 当前分支起点 | `b15d2080ed06f0330485c96f8add48b14b3b721d` |
+| 本轮实现提交 | `836d81eb739073e4ae2cb2e72d82c3565258f7a0`；本轮补齐 SDK startup 初始化 deadline/transport teardown 与 client 生命周期回归，并更新 host-owned 边界证据 |
+| 产品行为基线 | `origin/main=cd52c9af812a84c27a9dd1b7ccf246f48540045f` |
+| 架构基线 | `Kaguya-19/refactor/core_agent_loop_0831=e55b0a82d07ee3951e5812c34103400dfa6043f7` |
+| 运行环境 | Node `v22.23.1`，Python `3.12.2` |
+| 主要报告 | `docs/testing/sdk-core-integration-final-20260920.zh.md`、`docs/testing/sdk-core-merge-regression-20260918.zh.md`、`docs/pilotdeck-agent-loop-parity-results.zh.md` |
+| production raw trace | `/tmp/pilotdeck-parity-sdk-core-final-20260920/` |
+
+## 行为验收
+
+| 原始要求 | 实现 / owner | 验证入口与当前证据 | 状态 / 未完成工作 |
+| --- | --- | --- | --- |
+| Session admission、submit、abort、timeout、close、shutdown、dirty recreate、reload | Gateway session admission/fence 与 Session owner；AgentLoop 只消费 turn ports | `tests/gateway/*`、`tests/session/*`、production scenarios `deadline`/`cancel`/`checkpoint_resume`；parity summary 无 failure | 已关闭；未发现未解释差异 |
+| SDK config、MCP、seedReadState、flag settings 与 turn/maintenance 并发 | SDK client 将控制操作交给 Gateway；控制 admission 与 turn reservation 由 Gateway 维护 | `packages/sdk/test/transport.test.ts`、`tests/sdk/*`、`tests/agent/loop/seed-read-state.spec.ts`；SDK `129/129`，含 top-level/client startup defaults/initialize timeout/未 open close lifecycle | 已关闭 |
+| current/base permission mode 在入口、失败、重建、退出一致 | Permission registry/Gateway session 持有 mode；plan override 不覆盖 base mode | permission/plan focused tests、`plan_mode_host_policy`、`plan_mode_bypass_host_policy`、root `1721 passed` | 已关闭 |
+| model prepare、materialize、stream、retry、fallback、pre-route/routed/recovery compaction | Model ports 与 host preparation owner；sidecar 只传 preparation reference/canonical request | `tests/agent/modules/llm-model-port.spec.ts`、AgentLoop compaction tests、`sidecar_full_request_compaction_budget`、`sidecar_projected_request_compaction_budget` | 已关闭 |
+| request controls、完整 prompt/tools/cache/output cap、budget、usage、错误分类 | Canonical request 与 ModelBudgetPort；错误分类留在 provider/module terminal | root AgentLoop/model tests、预算 scenarios、strict comparator budget tests | 已关闭；预算漂移归一化现要求 host accounting 的 request-linked evidence |
+| persistence callback failure、durable-before-visible、operation terminal、replay/reconnect | Session/EventStore 与 operation ledger owner；callback failure fail-closed | compaction/replay/fork/deferred failure `21/21`、sidecar raw traces、reconnect/terminal tests | 已关闭 |
+| tools、subagent、live steer、interaction、resource lease、teardown | Tool/interaction/subagent/lease owner 留在 host；sidecar 只消费 capability ports | production sidecar scenarios `sidecar_live_steer`、elicitation、subagent、progress；root tool/subagent/teardown tests | 已关闭 |
+| Gateway、SDK、Web replay/bridge、session history、plugin 组合入口 | Gateway 是 session/durable truth；SDK/Web 只消费公开 projection/bridge；plugin snapshot 在 host composition 冻结 | root Web/session/plugin tests、`tests/web/compact-replay.spec.ts`、`tests/web/fork-session-projection.spec.ts`、SDK MCP/package tests | 已关闭 |
+
+本表的“已关闭”只表示列出的适用行为已验证，不表示整个 SDK 无缺口：`PilotDeckQuery.accountInfo()` 当前是文档明确的 `unsupported_capability` stub，Gateway 没有 account/login contract；因此 SDK “完整功能正确”不成立，该缺口保留而未伪装成 PASS。
+
+## 架构验收
+
+| 约束 | 当前检查 | 证据 / 状态 |
+| --- | --- | --- |
+| AgentLoop 只消费窄 ports | 调用路径：`AgentLoop` -> `AgentTurnCapabilities` -> `AgentTurnContextPort`/`ModelInvokerPort`/`ToolPort`；native adapter 在 loop 外组合 Router，sidecar factory 在 transport 外组合 host ports | `src/agent/loop/AgentLoop.ts`、`src/agent/loop/AgentTurnCapabilities.ts`、`src/agent/loop/nativeAgentTurnCapabilitiesAdapter.ts`；无 Router/Gateway/SessionRuntime/Plugin aggregate/AgentRuntimeDependencies import，已关闭 |
+| sidecar 只通过 canonical protocol、capability manifest、可序列化状态交互 | `createSidecarAgentTurnCapabilities` 只接收显式 ports；stdio client/server 负责 handshake、manifest、dispatch、operation identity | `src/agent/modules/protocol.ts`、`src/agent/modules/transport/*`、raw trace 的 `transport_selected`/`handshake_completed`/`module_call_received`，已关闭 |
+| state/dispose owner 不迁移、不重复 | Session/transcript/permission/preparation/lease/dispose 仍由 host/module owner；sidecar 无 mailbox、Router、Session truth | `src/agent/modules/transport/agentLoopSidecarClient.ts` 注释与 composition、root owner tests、production proof，已关闭 |
+| Module Protocol 版本不变 | `MODULE_PROTOCOL_VERSION = "2.0"` | `src/agent/modules/protocol.ts`、module protocol focused tests，已关闭 |
+
+Host-owned 边界复核补充：Workflow generic core 只依赖 caller-owned event store/adapter/run handle，已通过 caller-owned composition/dispose 测试；Goal/Plan-Todo 只通过 session projection/transcript ports 持有 durable truth；Cron/Always-On 只接收窄 `*AgentGatewayPort`，scheduler、storage、lease 和 active-run dispose 留在各自 runtime。正式 Node 22 dist focused batch `38/38`（含 stdio sidecar Goal composition）通过。Cron/Always-On 的 host automation/read-side 耦合是明确产品边界，不等同于 AgentLoop 解耦失败；将其迁入 sidecar 需要单独产品决策。
+
+SDK lifecycle 补充：`readyState=0` 的未 open WebSocket 在 top-level/client startup timeout 或 `client.close()` 后都会立即 typed settle、关闭 socket 并清理 wait-for-open timer；Node 22 SDK `129/129` 已覆盖该回归。
+
+## Comparator 可信度门槛
+
+| 门槛 | 精确证据 | 状态 |
+| --- | --- | --- |
+| 合法扩展通过 | `test_baseline_contract_allows_declared_request_drift_with_valid_breakdown`；evidence 绑定完整 provider-visible request 与 `TokenAccountingRuntime/o200k_base/v1` | 已关闭 |
+| 只改变目标语义的错误失败 | request control、tool schema、runtime-context 顺序、late model request 测试断言具体 path | 已关闭 |
+| 新增 breakdown 校验确实必要 | 禁用 `_baseline_budget_validation_differences` 后，`test_baseline_contract_rejects_inconsistent_budget_breakdown` 预期失败，唯一目标为 `trace.contextBudget.current[0].breakdown.total_consistency` | 已关闭 |
+| 负向测试不只断言任意差异 | changed/missing/duplicate budget 与 synchronized budget bias 测试断言 `contextBudget.used`、`displayUsed`、`breakdown.total` 等具体 path | 已关闭 |
+| 原始 request 不变、预算及明细同步篡改可检出 | `test_baseline_contract_rejects_synchronized_budget_bias_for_unchanged_request`：raw request 相同，`used` 与 breakdown 同步伪造，仍逐值失败 | 已关闭 |
+| 合法 request composition drift 不隐藏预算语义 | 只有 current budget 带 host-produced request evidence、contract 标识、原始 request、breakdown 和 usage 一致绑定时才比较共同 decision fields；缺失 evidence、50→80 自洽伪造、`displayUsed/budgetUsed=9999` 均逐路径失败 | 已关闭 |
+
+## 完整验证证据
+
+- `pnpm build`（Node 22.23.1）：PASS。
+- `pnpm test`（Node 22.23.1）：`1721` passed、`0` failed、`2` skipped，退出码 0。最终日志：`/tmp/pilotdeck-root-test-sdk-core-final-20260920.log`。
+- `pnpm --filter @pilotdeck/sdk test`：`129/129`。
+- focused production module/Gateway/SDK seed suites：`135/135`。
+- comparator unit suite：`53/53`；新增 runner gate 负向回归；production evidence helper `2/2`，覆盖 evidence 生成前的预算篡改与 evidence 字段形状。
+- production raw trace 重跑：53 scenarios、native/sidecar、baseline native/sidecar；`blocked=0`、`failed=0`、`oracleFailures=0`。输出：`/tmp/pilotdeck-parity-sdk-core-final-20260920/summary.json`。
+- 受本次独立验收影响的 raw trace 已重新执行：`checkpoint_resume`、`write_snapshot_resume` 均 native/sidecar 对拍通过，`failed=[]`、`blocked=[]`、`oracleFailures=[]`。输出：`/tmp/pilotdeck-parity-budget-independent-20260920-checkpoint-final2/summary.json`、`/tmp/pilotdeck-parity-budget-independent-20260920-write-final2/summary.json`。
+- 共享 adapter 适用性重评：`sidecar_continuable_followup_cold`、`sidecar_continuable_followup_live`、`sidecar_durable_compaction` 均无 FAIL/BLOCKED/oracle failure；前两项因 main 缺少 continuable lifecycle、后一项因 main 无 durable compaction provider，均保留 `notApplicable`。嵌套请求或 synthetic compaction snapshot 无唯一 provider-visible request 时不生成 evidence，不宣称已独立计量。报告：`/tmp/pilotdeck-parity-budget-independent-20260920-sidecar_continuable_followup_cold-final/summary.json`、`/tmp/pilotdeck-parity-budget-independent-20260920-sidecar_continuable_followup_live-final/summary.json`、`/tmp/pilotdeck-parity-budget-independent-20260920-sidecar_durable_compaction-final/summary.json`。
+- `git diff --check`：PASS；本轮最终 commit 与远端分支 ref 在 push 后核对一致。
+
+## 明确不适用 / 未覆盖
+
+以下不是当前 PilotDeck-only production matrix 的 PASS，不得被报告为已覆盖：真实外部 provider 行为、StaffDeck Harness/TaskFrame/SOP lease/fencing、remote/queued deployment、Desktop 原生视觉检查，以及需要独立外部服务的 deployment E2E。main 缺少对应能力的 19 个 baseline 场景已逐项记录为 `notApplicable`，不计入 PASS：
+
+`plan_mode_host_policy`、`plan_mode_bypass_host_policy`、`sidecar_budget_limit`、`sidecar_elicitation`、`sidecar_elicitation_execution`、`sidecar_sdk_tool_progress`、`sidecar_durable_compaction`、`sidecar_full_request_compaction_budget`、`sidecar_projected_request_compaction_budget`、`sidecar_seed_read_state`、`sidecar_empty_system_prompt`、`sidecar_additional_working_directories`、`sidecar_continuable_followup_live`、`sidecar_continuable_followup_cold`、`sidecar_parent_close_after_admission`、`sidecar_one_shot_subagent_success`、`sidecar_one_shot_subagent_failure`、`sidecar_one_shot_parent_abort_after_admission`、`sidecar_one_shot_parent_close_after_admission`。
+
+## 阻断清单
+
+以下账本覆盖原始 goal 优先指出的九类问题；每项都保留触发条件、影响、证据、根因状态、owner、下一步和关闭条件。`已关闭` 不等于删除历史问题，后续 merge 仍需复用对应回归。
+
+| 状态 | 触发条件 / 影响 | 根因状态与 owner | 证据 | 下一步 / 关闭条件 |
+| --- | --- | --- | --- | --- |
+| 已关闭 | production sidecar recovery compaction 在 model prepare 后 replacement；可能丢失 preparation identity 或使用错误生命周期 | 已证实：preparation reference 属于 host model adapter，不能写入 frozen canonical request；owner 为 model adapter / host dispatcher | `materialize_prepared_request` focused tests、full/projected compaction budget、raw sidecar module proof | 无新增动作；关闭条件是 preparation reference 生命周期与 native/sidecar raw trace 持续一致 |
+| 已关闭 | `closeSession` 返回后 pending creation/admission 继续 submit；可能产生旧 session turn/副作用 | 已证实：admission reservation/fence 需要由 Gateway/Session owner 统一 settlement；owner 为 Gateway admission | sdk-controls、creation/close、production parent-close traces | 无新增动作；关闭条件是 close 后旧 admission 不能提交或产生副作用 |
+| 已关闭 | SDK control busy 检查后新 turn 进入，再被 close 清除；可能丢控制操作或 turn | 已证实：control 与 turn admission 必须共享 session reservation；owner 为 Gateway control admission | SDK config/MCP/seed/flag concurrency tests、root suite | 无新增动作；关闭条件是 barrier 交错下 control/turn/close 因果稳定 |
+| 已关闭 | seed/MCP/config rebuild 或 plan entry/exit 丢 current/base permission mode；permission RPC 进入 plan 时丢 base mode | 已证实：live mode 属于 Gateway session permission registry，wire override 不是第二 owner；owner 为 permission registry | permission roundtrip、dirty recreate、plan-mode parity、sidecar permission tests | 无新增动作；关闭条件是所有入口/失败/重建/退出保留 mode |
+| 已关闭 | admission 异常退出泄漏 reservation/fence；后续 turn 可能永久 busy 或绕过 fence | 已证实：异常路径缺少统一 unwind；owner 为 admission actor/Gateway finally cleanup | pending creation/config/attachment/model-selection tests、root suite | 无新增动作；关闭条件是异常、取消、close、dispose 均释放 reservation/fence |
+| 已关闭 | sidecar error-only terminal 丢原始 provider/module error 分类；用户只能看到泛化失败 | 已证实：terminal projection 必须保留 source code/retryability；owner 为 operation terminal host owner | llm failure tests、tool/permission error parity、sidecar terminal tests | 无新增动作；关闭条件是 error-only、result_unknown、failed/cancelled 分类可重放 |
+| 已关闭 | comparator/gate 可能对声明扩展无条件放行，或 evidence 只复制 budget 自报值 | runner gate 移除 budget path 后缀白名单；adapter 以共有 `TokenBudgetManager`/o200k request breakdown 独立生成 evidence，并以 `observedFields` 校验 evidence 生成时的字段形状；预算生成前 `50→80`、真实 trace `budgetUsed=9999` 均被拒绝；无法唯一关联的 nested/synthetic budget 不生成 evidence | runner 负向反例、`53/53` comparator、evidence `2/2`、五个受影响 production traces；`blocked/failed/oracle=0` | 新字段或 normalization 变更仍需复用同一负向门槛 |
+| 已关闭 | runtime-context 在 block/message 间重排或残余内容漏检；可能改变 provider-visible prompt 顺序 | 已证实：request-only projection 需要跨容器顺序和未知残余校验；owner 为 Context runtime/comparator contract | runtime-context positive/negative tests、default-factory tests、raw request re-evaluation | 无新增动作；关闭条件是重复标签、未知残余、非文本 block、顺序错误持续失败 |
+| 已关闭 | lifecycle actor 分离后 close/abort 与后续 model request 或副作用缺少因果约束 | 已证实：settlement boundary 必须阻止 late model request；owner 为 operation ledger/Gateway fence | close/abort late-request test、partial-order checks、sidecar reconnect/replay traces | 无新增动作；关闭条件是 admission、durable commit、close/abort、terminal、副作用的必要 happens-before 保持 |
+| 已关闭 | project taskBudget retention 很短时，并发调度可能让冲突 retention 请求在到期后重新配置并进入 model | ledger 原先直接使用 `Date.now()`，绕过 Gateway 注入时钟；现统一使用 `ProjectRuntimeRegistry.options.now`，测试用可控时钟在冲突前不推进、重启前精确推进 | `tests/sdk/max-budget-e2e.spec.ts` retention 回归；Node 22 dist 单文件 `5/5`；TS 类型检查通过 | 后续 suite 保持该时钟注入契约 |
+
+本轮关键 blocker 已关闭：runner gate 与 production evidence 独立计量已补齐，真实 trace 的 `budgetUsed` 新增字段反例可检出；本轮重新生成的 raw trace 无 FAIL/BLOCKED/oracle failure。SDK `accountInfo()` 的已知 unsupported gap 和 host-only 未做 sidecar 对拍的模块不是 PASS。外部 provider/deployment/StaffDeck/Desktop 范围属于明确未覆盖项；Frontend integration 按本 goal 明确排除。

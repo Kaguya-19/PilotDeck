@@ -1,10 +1,11 @@
-import { stat } from "node:fs/promises";
 import type { PilotDeckToolDefinition } from "../protocol/types.js";
 import { PilotDeckToolRuntimeError } from "../protocol/errors.js";
 import { isNotebookPath } from "./filesystem/fileTypeSafety.js";
 import { resolvePilotDeckWorkspacePath } from "./filesystem/pathSafety.js";
+import { checkFilesystemWritePermission } from "./filesystem/writePermissions.js";
 import { readTextFile } from "./filesystem/readTextFile.js";
-import { writeTextFile } from "./filesystem/writeTextFile.js";
+import { createNodeFsPort } from "../execution-world/NodeFsPort.js";
+import type { FsPort } from "../execution-world/FsPort.js";
 import {
   ensureWriteSnapshotFresh,
   invalidateReadFileState,
@@ -12,6 +13,8 @@ import {
   validateWriteSnapshotFresh,
 } from "./filesystem/writeSnapshots.js";
 import { findActualString, normalizeEditInput } from "./filesystem/editNormalization.js";
+import { formatSyntaxDiagnostics } from "./filesystem/syntaxDiagnostics.js";
+import type { SubprocessPort } from "../execution-world/SubprocessPort.js";
 
 export type EditFileInput = {
   file_path: string;
@@ -20,12 +23,18 @@ export type EditFileInput = {
   replace_all?: boolean;
 };
 
-export function createEditFileTool(): PilotDeckToolDefinition<EditFileInput> {
+export type CreateEditFileToolOptions = {
+  fs?: FsPort;
+  subprocess?: Pick<SubprocessPort, "executeFile">;
+};
+
+export function createEditFileTool(options: CreateEditFileToolOptions = {}): PilotDeckToolDefinition<EditFileInput> {
+  const fs = options.fs ?? createNodeFsPort();
   return {
     name: "edit_file",
     aliases: ["Edit"],
     description:
-      "Edit a workspace text file by replacing an exact string match.\n\nUsage:\n- You must read the target file with read_file before editing it. This tool will reject the input if the file has not been read in this session.\n- old_string must exactly match the file content character-by-character, including indentation. Copy old_string directly from read_file output without adding or removing spaces.\n- Use this tool for targeted changes to an existing file.\n- old_string must appear in the target file.\n- If old_string is not unique, either provide a more specific old_string or set replace_all to update every occurrence.\n- Use replace_all when renaming or replacing repeated text across the same file.\n- If the file is outside the workspace or does not exist, the tool returns a controlled error.",
+      "Edit a workspace text file, or an outside-workspace text file after explicit host permission, by replacing an exact string match.\n\nUsage:\n- You may create a new file directly by setting old_string to an empty string.\n- You must read an existing target file with read_file before editing it. This tool will reject edits to existing files that have not been read in this session.\n- old_string must exactly match the file content character-by-character, including indentation. Copy old_string directly from read_file output without adding or removing spaces.\n- Use this tool for targeted changes to an existing file.\n- old_string must appear in the target file unless you are creating a new file with old_string: \"\".\n- If old_string is not unique, either provide a more specific old_string or set replace_all to update every occurrence.\n- Use replace_all when renaming or replacing repeated text across the same file.\n- Paths outside the workspace require explicit user permission before execution.",
     kind: "filesystem",
     inputSchema: {
       type: "object",
@@ -34,7 +43,7 @@ export function createEditFileTool(): PilotDeckToolDefinition<EditFileInput> {
       properties: {
         file_path: {
           type: "string",
-          description: "Relative or absolute path of the file to edit. The path must resolve inside the workspace.",
+          description: "Relative or absolute path of the file to edit. Paths outside the workspace require explicit user permission.",
         },
         old_string: {
           type: "string",
@@ -54,8 +63,13 @@ export function createEditFileTool(): PilotDeckToolDefinition<EditFileInput> {
     isReadOnly: () => false,
     isConcurrencySafe: () => false,
     isDestructive: () => false,
+    checkPermissions: async (input, context) =>
+      checkFilesystemWritePermission("edit_file", input.file_path, context),
     validateInput: async (input, context) => {
-      const resolved = resolvePilotDeckWorkspacePath(input.file_path, context, { forWrite: true });
+      const resolved = resolvePilotDeckWorkspacePath(input.file_path, context, {
+        forWrite: true,
+        allowOutsideWorkspace: true,
+      });
       if (!resolved.ok) {
         return {
           ok: false,
@@ -91,7 +105,7 @@ export function createEditFileTool(): PilotDeckToolDefinition<EditFileInput> {
 
       let freshness: { exists: boolean };
       try {
-        freshness = await validateWriteSnapshotFresh(context, resolved.absolutePath);
+        freshness = await validateWriteSnapshotFresh(context, resolved.absolutePath, fs);
       } catch (error) {
         const normalized = error instanceof PilotDeckToolRuntimeError ? error.message : String(error);
         if (
@@ -128,7 +142,7 @@ export function createEditFileTool(): PilotDeckToolDefinition<EditFileInput> {
         return { ok: true, input };
       }
 
-      const content = await readTextFile(resolved.absolutePath);
+      const content = await readTextFile(resolved.absolutePath, fs);
       if (content.length === 0) {
         return { ok: true, input };
       }
@@ -143,12 +157,15 @@ export function createEditFileTool(): PilotDeckToolDefinition<EditFileInput> {
       };
     },
     execute: async (input, context) => {
-      const resolved = resolvePilotDeckWorkspacePath(input.file_path, context, { forWrite: true });
+      const resolved = resolvePilotDeckWorkspacePath(input.file_path, context, {
+        forWrite: true,
+        allowOutsideWorkspace: context.currentPermissionDecision?.type === "allow",
+      });
       if (!resolved.ok) {
         throw new PilotDeckToolRuntimeError(resolved.error.code, resolved.error.message, resolved.error.details);
       }
 
-      const freshness = await ensureWriteSnapshotFresh(context, resolved.absolutePath);
+      const freshness = await ensureWriteSnapshotFresh(context, resolved.absolutePath, fs);
       if (context.fileHistory) {
         await context.fileHistory.trackEdit(
           resolved.absolutePath,
@@ -190,10 +207,16 @@ export function createEditFileTool(): PilotDeckToolDefinition<EditFileInput> {
           : content.replace(actualOldString, normalizedNew);
       }
 
-      const action = await writeTextFile(resolved.absolutePath, nextContent, { allowOverwrite: true });
-      const fileStat = await stat(resolved.absolutePath);
+      const write = await fs.writeText(resolved.absolutePath, nextContent, {
+        allowOverwrite: true,
+        workspaceRoot: resolved.root,
+      });
+      await context.fileHistory?.markEditCommitted?.(
+        resolved.absolutePath,
+        context.messageId ?? context.turnId,
+      );
       invalidateReadFileState(context, resolved.absolutePath);
-      recordWriteSnapshot(context, resolved.absolutePath, nextContent, Math.floor(fileStat.mtimeMs));
+      recordWriteSnapshot(context, resolved.absolutePath, nextContent, write.mtimeMs);
 
       const update = {
         absolutePath: resolved.absolutePath,
@@ -206,19 +229,24 @@ export function createEditFileTool(): PilotDeckToolDefinition<EditFileInput> {
       await context.fileUpdateNotifier?.didSave?.(update);
 
       const replacements = input.old_string === "" ? 0 : input.replace_all ? occurrences : 1;
+      const successText =
+        `${write.action === "created" ? "Created" : "Updated"} ${resolved.relativePath}${replacements > 0 ? ` (${replacements} replacement).` : "."}`;
+      const syntaxDiagnostics = await formatSyntaxDiagnostics(resolved.relativePath, nextContent, {
+        subprocess: options.subprocess,
+      });
       return {
         content: [{
           type: "text",
-          text: `${action === "created" ? "Created" : "Updated"} ${resolved.relativePath}${replacements > 0 ? ` (${replacements} replacement).` : "."}`,
+          text: syntaxDiagnostics ? `${successText}\n\n${syntaxDiagnostics}` : successText,
         }],
         data: {
           filePath: resolved.relativePath,
           replacements,
-          changed: action === "created" || nextContent !== content,
+          changed: write.action === "created" || nextContent !== content,
         },
         metadata: {
           bytesWritten: Buffer.byteLength(nextContent, "utf8"),
-          mtimeMs: Math.floor(fileStat.mtimeMs),
+          mtimeMs: write.mtimeMs,
         },
       };
     },

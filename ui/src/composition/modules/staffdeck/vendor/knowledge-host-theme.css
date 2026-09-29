@@ -1,0 +1,28 @@
+/* The formal Knowledge renderer has fixed light card surfaces. Bind the
+   foreground to those surfaces instead of inheriting PilotDeck's dark shell.
+   Keep these tokens local: the workspace and other module owners retain their
+   chosen theme. Dialogs remain inside the mounted Knowledge Host boundary. */
+.pilotdeck-knowledge-host section.bg-white,
+.pilotdeck-formal-surface[data-slot],
+.pilotdeck-business-dialog[data-slot='dialog-content'] {
+  --foreground: #18181a;
+  --muted-foreground: #5b6273;
+  --popover-foreground: #18181a;
+  --popover: #fff;
+  --accent: #f6f6f6;
+  --accent-foreground: #18181a;
+  --background: #fff;
+  --input: #e3e7f1;
+  color: #18181a;
+  background-color: #fff;
+}
+
+.pilotdeck-knowledge-host section.bg-white input,
+.pilotdeck-knowledge-host section.bg-white textarea,
+.pilotdeck-knowledge-host section.bg-white select,
+.pilotdeck-business-dialog input,
+.pilotdeck-business-dialog textarea,
+.pilotdeck-business-dialog select {
+  color: #18181a;
+  background-color: #fff;
+}

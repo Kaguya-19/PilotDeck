@@ -1,0 +1,51 @@
+{
+  "profile_ref": "8a03e8818594aa189f308a21dfe784c97fdf2fac",
+  "portable_ref": "2f1dcd28405976390f423ba3c9b4869a17e86766",
+  "scope": "focused protocol; fixture identity; no business/model invocation",
+  "profile_tests": "2/2 passed",
+  "initial_environment_limit": "missing inherited proxy preload; NODE_OPTIONS cleared only in child processes",
+  "cli_path_limit": "macOS /var symlink did not match import.meta.url CLI guard; subsequent invocation uses canonical /private path",
+  "actual_manifest": {
+    "status": "ok",
+    "protocolVersion": "2.0",
+    "moduleId": "sop.runtime",
+    "contract": "sop.lifecycle/v2",
+    "operations": [
+      "prepare",
+      "submit"
+    ],
+    "descriptorVersion": "1.0",
+    "implementationId": "staffdeck.portable-sop",
+    "implementationVersion": "0.1.0",
+    "transport": "sop-http-v2",
+    "capabilities": [
+      "handoff",
+      "external_wait"
+    ],
+    "state": {
+      "ownership": "host",
+      "schema": "sop.lifecycle/v2",
+      "scope": "session"
+    },
+    "requires": {
+      "hostCapabilities": [
+        "sop.host-resume/v1"
+      ]
+    }
+  },
+  "verified_cli": {
+    "exit": 0,
+    "output_written": true,
+    "portable_endpoint_preserved": true,
+    "discovery_separate": true
+  },
+  "same_process_protocol": {
+    "prepare": 200,
+    "submit": 200,
+    "request_ids": [
+      "prepare",
+      "submit"
+    ]
+  },
+  "owned_process_stopped": true
+}

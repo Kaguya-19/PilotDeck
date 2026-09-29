@@ -30,6 +30,7 @@ export function createAlwaysOnWorkspaceTool(
       "Prepare an isolated workspace for the current Always-On plan execution. " +
       "Use `auto` to let the runtime pick the best strategy, or specify `git-worktree` / `snapshot-copy` explicitly.",
     kind: "session",
+    requiredRuntimeCapabilities: ["always_on_run_context"],
     inputSchema: {
       type: "object",
       required: ["strategy"],
@@ -64,6 +65,7 @@ export function createAlwaysOnWorkspaceTool(
         prepared = await ctx.workspaceRegistry.prepare({
           projectRoot: ctx.projectKey,
           runId: ctx.runId,
+          planTitle: ctx.planTitle,
         });
       } else {
         const provider = ctx.workspaceRegistry.findById(input.strategy);
@@ -76,6 +78,7 @@ export function createAlwaysOnWorkspaceTool(
         const handle = await provider.prepare({
           projectRoot: ctx.projectKey,
           runId: ctx.runId,
+          planTitle: ctx.planTitle,
         });
         prepared = { handle, provider };
       }

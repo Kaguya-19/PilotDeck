@@ -9,6 +9,8 @@ export type GitVersionInfo = {
   newCommits: string[];
   currentCommit: string;
   remoteHead: string;
+  checkUnavailable: boolean;
+  message?: string;
 };
 
 export function useGitVersion() {
@@ -27,11 +29,13 @@ export function useGitVersion() {
       setInfo({
         commitSha: data.localHead,
         branch: data.currentBranch,
-        hasUpdate: data.hasUpdate,
+        hasUpdate: Boolean(data.hasUpdate),
         behindCount: data.behindCount ?? 0,
         newCommits: data.newCommits ?? [],
         currentCommit: data.currentCommit ?? '',
         remoteHead: data.remoteHead ?? '',
+        checkUnavailable: Boolean(data.checkUnavailable),
+        message: data.message,
       });
       setError(null);
     } catch (e) {
@@ -90,15 +94,12 @@ export function useGitVersion() {
     }
   }, []);
 
-  const triggerRestart = useCallback(async () => {
-    try {
-      await authenticatedFetch('/api/update/restart', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-      });
-    } catch {
-      // Expected — server will die
-    }
+  const triggerRestart = useCallback(async (options: { signal?: AbortSignal } = {}) => {
+    return authenticatedFetch('/api/update/restart', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: options.signal,
+    });
   }, []);
 
   return { info, loading, error, fetchVersion, triggerUpdate, triggerRestart };

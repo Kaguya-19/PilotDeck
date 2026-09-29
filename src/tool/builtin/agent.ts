@@ -3,6 +3,7 @@ import type { CanonicalModelRequest, CanonicalUsage } from "../../model/index.js
 import type { PermissionResult } from "../../permission/index.js";
 import { SUBAGENT_DEFINITIONS } from "../../agent/sub/builtinSubagentTypes.js";
 import { PilotDeckToolRuntimeError } from "../protocol/errors.js";
+import { DEFAULT_SUBAGENT_TIMEOUT_MS } from "../protocol/subagentTimeout.js";
 import type {
   PilotDeckSubagentForkApi,
   PilotDeckToolDefinition,
@@ -86,10 +87,14 @@ export type AgentToolOutput = {
   subagentType: string;
   description: string;
   text: string;
+  /** Present only for AgentDefinition.background launches. */
+  backgroundTaskId?: string;
   usage?: CanonicalUsage;
   turns?: number;
   durationMs?: number;
   parsed?: Record<string, string>;
+  subagentSessionId?: string;
+  transcriptRelativePath?: string;
 };
 
 export type CreateAgentToolOptions = {
@@ -103,26 +108,35 @@ export type CreateAgentToolOptions = {
   provider?: string;
   model_?: string;
   maxOutputTokens?: number;
-  temperature?: number;
+  /** Optional host identity source; production defaults to random UUIDs. */
+  uuid?: () => string;
+  /** Effective project/session cap used to describe nested delegation accurately. */
+  maxSubagentDepth?: number;
+  /** Current caller depth; used to describe the next child’s remaining depth. */
+  subagentDepth?: number;
 };
 
-const DEFAULT_MAX_OUTPUT_TOKENS = 4_096;
+const DEFAULT_MAX_OUTPUT_TOKENS = 65_536;
 const DEFAULT_PROVIDER_FALLBACK = "pilotdeck";
 const DEFAULT_MODEL_FALLBACK = "moonshotai/kimi-k2.6";
-const DEFAULT_SUBAGENT_TIMEOUT_MS = 60 * 60_000;
 const PUBLIC_SUBAGENT_TYPES = ["general-purpose", "explore", "plan"] as const;
+const BUILTIN_AGENT_TOOLS = new WeakSet<object>();
 
 export function createAgentTool(
   options: CreateAgentToolOptions = {},
 ): PilotDeckToolDefinition<AgentToolInput, AgentToolOutput> {
   const fallbackPresets = options.subagents ?? BUILTIN_SUBAGENTS;
-  const description = buildAgentToolDescription();
+  const description = buildAgentToolDescription(
+    options.maxSubagentDepth ?? 1,
+    options.subagentDepth ?? 0,
+  );
 
-  return {
+  const tool: PilotDeckToolDefinition<AgentToolInput, AgentToolOutput> = {
     name: "agent",
     aliases: ["Agent", "Task"],
     description,
     kind: "agent",
+    requiredRuntimeCapabilities: ["subagent_fork"],
     inputSchema: {
       type: "object",
       required: ["description", "prompt"],
@@ -169,7 +183,7 @@ export function createAgentTool(
       // Full fork path (C2): preferred when AgentLoop wired the fork API.
       if (context.subagent) {
         let requestedType = explicit ?? "general-purpose";
-        if (context.permissionContext?.mode === "plan" && requestedType === "general-purpose") {
+        if ((context.permissionContext?.mode === "plan" || context.runMode === "ask") && requestedType === "general-purpose") {
           requestedType = "explore";
         }
         return runFullFork({
@@ -178,10 +192,11 @@ export function createAgentTool(
           requestedType,
           directive,
           fork: context.subagent,
+          uuid: options.uuid ?? randomUUID,
         });
       }
       let requestedType = explicit ?? "general-purpose";
-      if (context.permissionContext?.mode === "plan" && requestedType === "general-purpose") {
+      if ((context.permissionContext?.mode === "plan" || context.runMode === "ask") && requestedType === "general-purpose") {
         requestedType = "explore";
       }
 
@@ -195,21 +210,54 @@ export function createAgentTool(
         provider: options.provider ?? DEFAULT_PROVIDER_FALLBACK,
         modelId: options.model_ ?? DEFAULT_MODEL_FALLBACK,
         maxOutputTokens: options.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
-        temperature: options.temperature ?? 0,
       });
     },
   };
+  BUILTIN_AGENT_TOOLS.add(tool);
+  return tool;
 }
 
-function buildAgentToolDescription(): string {
+/** True only for definitions produced by this module, never a same-named host tool. */
+export function isBuiltinAgentTool(tool: PilotDeckToolDefinition): boolean {
+  return BUILTIN_AGENT_TOOLS.has(tool);
+}
+
+/**
+ * Keeps a native agent's execution closure and schemas while adapting only
+ * its model-visible nested-delegation description for one registry scope.
+ */
+export function withBuiltinAgentToolDescription(
+  tool: PilotDeckToolDefinition,
+  options: Pick<CreateAgentToolOptions, "maxSubagentDepth" | "subagentDepth">,
+): PilotDeckToolDefinition | undefined {
+  if (!isBuiltinAgentTool(tool)) return undefined;
+  const described = {
+    ...tool,
+    description: buildAgentToolDescription(
+      options.maxSubagentDepth ?? 1,
+      options.subagentDepth ?? 0,
+    ),
+  };
+  BUILTIN_AGENT_TOOLS.add(described);
+  return described;
+}
+
+function buildAgentToolDescription(maxSubagentDepth: number, subagentDepth: number): string {
+  const childDepth = Math.max(0, subagentDepth) + 1;
+  const childCanDelegate = childDepth < maxSubagentDepth;
   const publicTypes = PUBLIC_SUBAGENT_TYPES
     .map((id) => {
       const definition = SUBAGENT_DEFINITIONS[id];
+      const summary = id === "general-purpose" && !childCanDelegate
+        ? "General-purpose subagent for complex research/synthesis tasks. Has broad parent-tool access except nested subagent launch."
+        : definition.description;
       const tools =
         definition.allowedTools[0] === "*"
-          ? "all parent tools except nested agent launch"
+          ? childCanDelegate
+            ? "all parent tools; nested delegation is available within the configured depth cap"
+            : "all parent tools except nested agent launch"
           : definition.allowedTools.join(", ");
-      return `- ${id}: ${definition.description} Tools: ${tools}.`;
+      return `- ${id}: ${summary} Tools: ${tools}.`;
     })
     .join("\n");
 
@@ -229,24 +277,19 @@ function buildAgentToolDescription(): string {
     "The subagent returns one structured report with these sections: `Scope`, `Result`, `Key files`, `Files changed`, and `Issues`.",
     "",
     "Runtime behavior:",
+    "- Multiple independent agent calls in one assistant message may run concurrently; batch sibling investigations when their scopes do not depend on each other.",
     "- Inside the AgentLoop, this runs a real forked subagent with its own scoped tool loop.",
     "- In stand-alone runtimes and some tests, it falls back to a single model call that preserves the same high-level subagent intent.",
   ].join("\n");
 }
 
-const PLAN_MODE_SUBAGENT_TYPES = ["explore", "plan"] as const;
+const ASK_MODE_SUBAGENT_TYPES = ["explore", "plan", "verify"] as const;
 
-/**
- * Returns replacement `description` and `inputSchema` for the `agent` tool
- * when the parent agent is in plan mode. The override removes
- * `general-purpose` from the advertised presets and changes the default to
- * `explore`, so the model is guided toward read-only subagent types only.
- */
-export function buildPlanModeAgentToolSchema(): {
+export function buildAskModeAgentToolSchema(): {
   description: string;
   inputSchema: Record<string, unknown>;
 } {
-  const typeLines = PLAN_MODE_SUBAGENT_TYPES
+  const typeLines = ASK_MODE_SUBAGENT_TYPES
     .map((id) => {
       const definition = SUBAGENT_DEFINITIONS[id];
       return `- ${id}: ${definition.description} Tools: ${definition.allowedTools.join(", ")}.`;
@@ -254,14 +297,14 @@ export function buildPlanModeAgentToolSchema(): {
     .join("\n");
 
   const description = [
-    "Launch a read-only subagent for investigation or planning.",
+    "Launch a read-only subagent for investigation, planning, or verification.",
     "",
-    "In plan mode, only read-only subagent types are available. The 'general-purpose' type is NOT available because it includes write tools that conflict with plan mode's read-only constraint.",
+    "In ask mode, subagents inherit ask mode and the same permission setting. Only read-only subagent types are available; 'general-purpose' is treated as 'explore'.",
     "",
     "Provide:",
     "- `description`: a short 3-5 word label for the task.",
-    "- `prompt`: the full directive for the subagent — include goal, context, and what good output looks like. The subagent can only read and search code, not modify files.",
-    "- `subagent_type` (optional): 'explore' (read-only with read_file/grep/glob/bash) or 'plan' (read-only with read_file/grep/glob). Defaults to 'explore'.",
+    "- `prompt`: the full directive for the subagent. Include goal, context, constraints, and what good output looks like. The subagent can only read and search; it cannot modify files.",
+    "- `subagent_type` (optional): 'explore', 'plan', or 'verify'. Defaults to 'explore'.",
     "",
     "Available subagent types:",
     typeLines,
@@ -281,12 +324,12 @@ export function buildPlanModeAgentToolSchema(): {
       prompt: {
         type: "string",
         description:
-          "Detailed directive for the subagent. Include the goal, relevant context, and what good output looks like. The subagent can only read and search code, not modify files or run write commands.",
+          "Detailed directive for the subagent. Include the goal, relevant context, constraints, and desired output. The subagent can only read and search; it cannot modify files.",
       },
       subagent_type: {
         type: "string",
         description:
-          "Subagent preset. In plan mode only 'explore' (read-only with read_file/grep/glob/bash) and 'plan' (read-only with read_file/grep/glob) are available. Defaults to 'explore'.",
+          "Subagent preset. In ask mode only 'explore', 'plan', and 'verify' are available. Defaults to 'explore'.",
       },
       subagentType: {
         type: "string",
@@ -299,10 +342,25 @@ export function buildPlanModeAgentToolSchema(): {
 }
 
 function normalizeRequestedSubagentType(value: string | undefined): string | undefined {
-  if (value === "general_purpose") {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  const normalized = trimmed.toLowerCase();
+  if (
+    normalized === "general-purpose" ||
+    normalized === "general_purpose" ||
+    normalized === "general purpose"
+  ) {
     return "general-purpose";
   }
-  return value;
+  if (normalized === "explore" || normalized === "explorer") {
+    return "explore";
+  }
+  if (normalized === "plan" || normalized === "verify") {
+    return normalized;
+  }
+  return trimmed;
 }
 
 async function runFullFork(args: {
@@ -311,8 +369,9 @@ async function runFullFork(args: {
   requestedType: string;
   directive: string;
   fork: PilotDeckSubagentForkApi;
+  uuid: () => string;
 }): Promise<PilotDeckToolExecutionOutput<AgentToolOutput>> {
-  const { input, context, requestedType, directive, fork } = args;
+  const { input, context, requestedType, directive, fork, uuid } = args;
 
   if (!fork.isAllowedDefinition(requestedType)) {
     const allowed = fork.listDefinitions().map((d) => d.id).join(", ");
@@ -329,7 +388,10 @@ async function runFullFork(args: {
       { errorCode: "subagent_depth_exceeded" },
     );
   }
-  const subagentId = randomUUID();
+  if (fork.isBackgroundDefinition?.(requestedType)) {
+    return runBackgroundFork({ input, context, requestedType, directive, fork, uuid });
+  }
+  const subagentId = uuid();
   const timeoutMs = context.subagentTimeoutMs ?? DEFAULT_SUBAGENT_TIMEOUT_MS;
   let report;
   try {
@@ -369,6 +431,8 @@ async function runFullFork(args: {
     turns: report.turns,
     durationMs: report.durationMs,
     parsed: report.parsed,
+    ...(report.subagentSessionId ? { subagentSessionId: report.subagentSessionId } : {}),
+    ...(report.transcriptRelativePath ? { transcriptRelativePath: report.transcriptRelativePath } : {}),
   };
   return {
     content: [
@@ -385,6 +449,66 @@ async function runFullFork(args: {
       forkMode: "full",
       turns: report.turns,
       durationMs: report.durationMs,
+      ...(report.subagentSessionId ? { subagentSessionId: report.subagentSessionId } : {}),
+      ...(report.transcriptRelativePath ? { transcriptRelativePath: report.transcriptRelativePath } : {}),
+    },
+  };
+}
+
+async function runBackgroundFork(args: {
+  input: AgentToolInput;
+  context: PilotDeckToolRuntimeContext;
+  requestedType: string;
+  directive: string;
+  fork: PilotDeckSubagentForkApi;
+  uuid: () => string;
+}): Promise<PilotDeckToolExecutionOutput<AgentToolOutput>> {
+  const { input, context, requestedType, directive, fork, uuid } = args;
+  if (!fork.launchBackground) {
+    throw new PilotDeckToolRuntimeError(
+      "unsupported_tool",
+      `Background subagent ${requestedType} requires a Gateway background-subagent launcher.`,
+    );
+  }
+  if (context.abortSignal?.aborted) {
+    throw new PilotDeckToolRuntimeError("tool_aborted", "agent subagent aborted before launch.");
+  }
+  const subagentId = uuid();
+  const timeoutMs = context.subagentTimeoutMs ?? DEFAULT_SUBAGENT_TIMEOUT_MS;
+  let launched: { taskId: string };
+  try {
+    launched = await fork.launchBackground({
+      definitionId: requestedType,
+      directive,
+      subagentId,
+      toolCallId: context.currentToolCallId,
+      timeoutMs,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new PilotDeckToolRuntimeError(
+      "tool_execution_failed",
+      `background agent subagent failed to launch: ${message}`,
+      { errorCode: "subagent_launch_failed" },
+    );
+  }
+  const output: AgentToolOutput = {
+    subagentType: requestedType,
+    description: input.description,
+    text: `Background subagent started as task ${launched.taskId}.`,
+    backgroundTaskId: launched.taskId,
+  };
+  return {
+    content: [
+      { type: "text", text: `[${requestedType}] ${input.description}\n\n${output.text}` },
+      { type: "json", value: output },
+    ],
+    data: output,
+    metadata: {
+      subagent: requestedType,
+      subagentId,
+      backgroundTaskId: launched.taskId,
+      forkMode: "background",
     },
   };
 }
@@ -399,7 +523,6 @@ async function runFallback(args: {
   provider: string;
   modelId: string;
   maxOutputTokens: number;
-  temperature: number;
 }): Promise<PilotDeckToolExecutionOutput<AgentToolOutput>> {
   const {
     input,
@@ -411,7 +534,6 @@ async function runFallback(args: {
     provider,
     modelId,
     maxOutputTokens,
-    temperature,
   } = args;
 
   const preset = presets[requestedType];
@@ -436,7 +558,6 @@ async function runFallback(args: {
     messages: [{ role: "user", content: [{ type: "text", text: directive }] }],
     systemPrompt: preset.systemPrompt,
     maxOutputTokens,
-    temperature,
     stream: true,
     metadata: { subagent: preset.type, description: input.description },
   };

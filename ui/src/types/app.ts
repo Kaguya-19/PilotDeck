@@ -1,7 +1,7 @@
 export type SessionProvider = 'claude' | 'cursor' | 'codex' | 'gemini' | 'pilotdeck';
 export type ProjectSessionKind = 'background_task';
 
-export type AppTab = 'home' | 'chat' | 'always-on' | 'files' | 'shell' | 'git' | 'tasks' | 'memory' | 'skills' | 'preview' | 'dashboard' | `plugin:${string}`;
+export type AppTab = 'home' | 'chat' | 'always-on' | 'cron' | 'files' | 'shell' | 'git' | 'tasks' | 'memory' | 'skills' | 'preview' | 'dashboard' | `plugin:${string}`;
 
 export type AlwaysOnSessionTarget =
   | {
@@ -64,6 +64,7 @@ export type DiscoveryPlanStatus =
   | 'queued'
   | 'running'
   | 'completed'
+  | 'completed_no_report'
   | 'failed'
   | 'archived';
 
@@ -115,12 +116,27 @@ export interface DiscoveryContextPlanItem {
 
 export type CronJobOverviewStatus = 'scheduled' | 'running' | 'completed' | 'failed';
 
+export type CronJobSchedule =
+  | {
+      type: 'once';
+      runAt: string;
+    }
+  | {
+      type: 'cron';
+      expression: string;
+      timezone?: string;
+    };
+
 export interface CronJobOverview {
   id: string;
   projectKey: string | null;
   cron: string;
+  schedule?: CronJobSchedule;
+  timezone?: string | null;
+  revision?: number;
   prompt: string;
   createdAt: string;
+  nextRunAt?: string;
   recurring: boolean;
   manualOnly: boolean;
   status: CronJobOverviewStatus;
@@ -131,7 +147,7 @@ export interface CronJobsOverviewResponse {
   jobs: CronJobOverview[];
 }
 
-export type AlwaysOnSubTab = 'dashboard' | 'plans-cron';
+export type AlwaysOnSubTab = 'dashboard' | 'plans';
 
 export interface DiscoveryContextCronItem {
   id: string;
@@ -209,6 +225,12 @@ export function isBackgroundTaskSession(
   );
 }
 
+export function isReadOnlySession(
+  session: ProjectSession | null | undefined,
+): boolean {
+  return session?.isReadOnly === true || isBackgroundTaskSession(session);
+}
+
 export function getSessionRequestParams(
   session: ProjectSession | null | undefined,
 ): SessionRequestParams {
@@ -236,23 +258,24 @@ export interface ProjectTaskmasterInfo {
   [key: string]: unknown;
 }
 
-export interface ProjectAlwaysOnInfo {
-  discovery?: {
-    triggerEnabled?: boolean;
-    [key: string]: unknown;
-  };
-  [key: string]: unknown;
-}
-
 export interface Project {
   name: string;
   displayName: string;
   fullPath: string;
   path?: string;
+  /** Present on a successful registration to reject older list snapshots. */
+  projectListRevision?: number;
+  kind?: 'project' | 'general';
+  workspaceCwd?: string;
+  capabilities?: {
+    files?: boolean;
+    explore?: boolean;
+    projectFileMentions?: boolean;
+    [key: string]: unknown;
+  };
   sessions?: ProjectSession[];
   sessionMeta?: ProjectSessionMeta;
   taskmaster?: ProjectTaskmasterInfo;
-  alwaysOn?: ProjectAlwaysOnInfo;
   [key: string]: unknown;
 }
 
@@ -268,6 +291,7 @@ export interface LoadingProgress {
 export interface ProjectsUpdatedMessage {
   type: 'projects_updated';
   projects: Project[];
+  projectListRevision?: number;
   changedFile?: string;
   [key: string]: unknown;
 }

@@ -5,19 +5,19 @@
  *
  * Behaviour parity with the legacy upstream plugin manifest schema:
  *   - `command` ⇒ stdio transport (`args`/`env`/`cwd` optional).
- *   - `url` (or `httpUrl`) ⇒ streamable_http transport.
+ *   - `url` (or `httpUrl`) ⇒ streamable_http transport unless an explicit
+ *     `transport: "sse"` selects the legacy SSE client.
  *   - Anything else is silently dropped — we do **not** throw at startup so
  *     a single misconfigured plugin entry can't take down the gateway.
  */
 
-import { homedir } from "node:os";
+import { expandMcpString } from "../config/expandPlaceholders.js";
 import type { PilotDeckMcpServerSpec } from "../protocol/types.js";
 
-function expandHome(s: string): string {
-  if (s.startsWith("~/")) return homedir() + s.slice(1);
-  if (s.startsWith("~\\")) return homedir() + s.slice(1);
-  if (s === "~") return homedir();
-  return s;
+function expandStringRecord(rec: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(rec).map(([k, v]) => [k, expandMcpString(v)]),
+  );
 }
 
 export type ParsePluginMcpServersResult = {
@@ -39,27 +39,33 @@ export function parsePluginMcpServers(
       continue;
     }
     const v = value as Record<string, unknown>;
-    if (typeof v.command === "string" && v.command.length > 0) {
+    const command = typeof v.command === "string" ? expandMcpString(v.command) : undefined;
+    if (command && command.length > 0) {
       servers.push({
         id,
         transport: "stdio",
-        command: v.command,
+        command,
         args: Array.isArray(v.args)
-          ? (v.args.filter((a): a is string => typeof a === "string").map(expandHome))
+          ? (v.args.filter((a): a is string => typeof a === "string").map(expandMcpString))
           : undefined,
-        env: isStringRecord(v.env) ? (v.env as Record<string, string>) : undefined,
-        cwd: typeof v.cwd === "string" ? v.cwd : undefined,
+        env: isStringRecord(v.env) ? expandStringRecord(v.env as Record<string, string>) : undefined,
+        cwd: typeof v.cwd === "string" ? expandMcpString(v.cwd) : undefined,
+        callTimeoutMs: positiveFiniteNumber(v.callTimeoutMs),
         perSession: v.perSession === true ? true : undefined,
       });
       continue;
     }
-    const url = typeof v.url === "string" ? v.url : typeof v.httpUrl === "string" ? v.httpUrl : undefined;
+    const url = typeof v.url === "string"
+      ? expandMcpString(v.url)
+      : typeof v.httpUrl === "string"
+        ? expandMcpString(v.httpUrl)
+        : undefined;
     if (url) {
       servers.push({
         id,
-        transport: "streamable_http",
-        url,
-        headers: isStringRecord(v.headers) ? (v.headers as Record<string, string>) : undefined,
+        transport: v.transport === "sse" ? "sse" : "streamable_http",
+        url: expandMcpString(url),
+        headers: isStringRecord(v.headers) ? expandStringRecord(v.headers as Record<string, string>) : undefined,
       });
       continue;
     }
@@ -74,4 +80,8 @@ function isStringRecord(v: unknown): boolean {
     if (typeof value !== "string") return false;
   }
   return true;
+}
+
+function positiveFiniteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
 }

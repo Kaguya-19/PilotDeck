@@ -1,0 +1,27 @@
+{
+  "scope": "focused native config consumer, not startup admission or business acceptance",
+  "production_guard_ref": "54224923fe05ead1e77f204fa179dcdd9a9d0c7c",
+  "sd_model_contract_ref": "23d9319d2a813dd8b5d2e68b2165da253fd893ce",
+  "native_consumer": "ui/server/load-env.js in separate Node processes",
+  "runtime": "Node v22.23.1, process-local NODE_OPTIONS reset, existing tsx loader",
+  "focused_counts": {"native_consumer": 4, "startup": 9, "profile": 2, "passed": 15, "failed": 0},
+  "cases": [
+    "default PILOT_HOME/auth.db matches admission and receipt",
+    "second state/auth.db rejected before receipt; native config independently derives home/auth.db",
+    "explicit bootstrap profile database matches native config",
+    "inherited profile cannot redirect bootstrap database"
+  ],
+  "database_connection": false,
+  "database_move_or_copy": false,
+  "registration_or_key_change": false,
+  "model_or_business_call": false,
+  "old_raw_or_runtime6_7_modified": false,
+  "remaining_not_run": [
+    "enabled PD/Gateway runtime readiness",
+    "authenticated describe",
+    "unique live default catalog",
+    "real model stream",
+    "fixed SD domain DI response",
+    "deployed selected Port"
+  ]
+}

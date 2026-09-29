@@ -14,6 +14,11 @@ export type CanonicalModelErrorCode =
   | "context_overflow"
   | "image_too_large"
   | "payload_too_large"
+  | "dns_error"
+  | "connection_reset"
+  | "connection_refused"
+  | "tls_error"
+  | "proxy_error"
   | "unknown";
 
 export type SettingsFix = {
@@ -23,9 +28,23 @@ export type SettingsFix = {
   url?: string;
 };
 
+/**
+ * Safe metadata about a stream that ended before the provider completed its
+ * response. Tool argument text is deliberately never retained here.
+ */
+export type StreamInterruption = {
+  phase: "empty" | "text" | "reasoning" | "tool_call";
+  activeToolCalls?: Array<{
+    id: string;
+    name: string;
+    argumentChars: number;
+  }>;
+};
+
 export type CanonicalModelError = {
   provider: string;
-  protocol: "anthropic" | "openai";
+  model?: string;
+  protocol: "anthropic" | "openai" | "openai-responses" | "google";
   code: CanonicalModelErrorCode | (string & {});
   status?: number;
   message: string;
@@ -41,6 +60,14 @@ export type CanonicalModelError = {
   userHint?: string;
   /** Structured settings fix info — config path, CLI command, or URL the user can act on. */
   settingsFix?: SettingsFix;
+  /** Provider-reported lower context window parsed from an overflow error. */
+  maxContextTokens?: number;
+  /** Provider-reported output cap parsed from a max_tokens error. */
+  maxOutputTokens?: number;
+  /** Provider-reported output space available for this prompt. */
+  availableOutputTokens?: number;
+  /** Streaming response ended before its completion sentinel. */
+  streamInterruption?: StreamInterruption;
 };
 
 /**
@@ -86,13 +113,17 @@ export const PROMPT_TOO_LONG_ANTHROPIC_PATTERN = /prompt is too long/i;
 export const PROMPT_TOO_LONG_OPENAI_PATTERN = /input length and max_tokens exceed context limit/i;
 export const REQUEST_TOO_LARGE_PATTERN = /request too large/i;
 export const MAX_OUTPUT_REACHED_PATTERN = /max(?:imum)? (?:output|completion) tokens? (?:exceeded|reached)/i;
-export const MULTIMODAL_PROCESSOR_PATTERN = /failed to apply.*processor/i;
+export const MULTIMODAL_PROCESSOR_PATTERN =
+  /failed to apply.*processor|failed to load image|cannot identify image file|image decoding failed|invalid image|is not an? multimodal model|does not support (?:image|vision)(?: input)?|(?:image|vision) input (?:is )?not supported/i;
 
 export const CONTEXT_OVERFLOW_PATTERN =
   /context length|context size|maximum context|too many tokens|context window|prompt exceeds max length|maximum number of tokens|exceeds the max_model_len|max_model_len|input is too long|maximum model length|context length exceeded|slot context|n_ctx_slot|超过最大长度|上下文长度|input tokens? exceed|exceeds the maximum number of input tokens/i;
 
 export const BILLING_PATTERN =
-  /insufficient credits|insufficient_quota|insufficient balance|credit balance|credits have been exhausted|top up your credits|payment required|billing hard limit|exceeded your current quota|account is deactivated|plan does not include/i;
+  /insufficient credits|insufficient_quota|insufficient balance|credit balance|credits have been exhausted|quota_exhausted|quota exhausted|quota has been exhausted|top up your credits|payment required|billing hard limit|exceeded your current quota|account is deactivated|plan does not include/i;
+
+export const INVALID_API_KEY_PATTERN =
+  /invalid_api_key|invalid api key|incorrect api key|api key is invalid/i;
 
 export const MODEL_NOT_FOUND_PATTERN =
   /is not a valid model|invalid model|model not found|model_not_found|does not exist|no such model|unknown model|unsupported model/i;
@@ -110,7 +141,7 @@ export const USAGE_LIMIT_PATTERN =
   /usage limit|quota|limit exceeded|key limit exceeded/i;
 
 export const NETWORK_TIMEOUT_PATTERN =
-  /fetch failed|terminated|socket hang up|ETIMEDOUT|ECONNRESET|ECONNREFUSED|network error|request timeout|client disconnected/i;
+  /fetch failed|terminated|socket hang up|ETIMEDOUT|ECONNRESET|ECONNREFUSED|network error|request timeout|stream idle timeout|no data received|client disconnected/i;
 
 export class ModelConfigError extends Error {
   readonly name = "ModelConfigError";

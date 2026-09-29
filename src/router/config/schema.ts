@@ -1,5 +1,10 @@
 import type { ModelConfig } from "../../model/index.js";
 import type { RouterScenarioType } from "../protocol/decision.js";
+import type { RouterModelPricingMap, RouterPricingUnit } from "../utils/modelPricing.js";
+
+export type { RouterPricingUnit } from "../utils/modelPricing.js";
+
+export const ROUTER_PRICING_UNITS: readonly RouterPricingUnit[] = ["$/百万 Token", "¥/百万 Token"];
 
 export type RouterModelRef = {
   /** Original "provider/model" string. */
@@ -14,6 +19,8 @@ export type RouterScenariosConfig = {
 
 export type RouterTierConfig = {
   model: RouterModelRef;
+  /** Human-readable tier name shown in settings. */
+  label?: string;
   description?: string;
 };
 
@@ -31,13 +38,15 @@ export type RouterTokenSaverConfig = {
     policy: RouterTokenSaverSubagentPolicy;
   };
   judgeTimeoutMs: number;
+  /**
+   * Preserve the session's current model when its cache-read input cost is
+   * cheaper than switching models and re-prefilling the full prompt.
+   */
+  cacheAwareSwitching?: { enabled: boolean; minSavingsRatio: number };
 };
 
 export type RouterAutoOrchestrateConfig = {
   enabled: boolean;
-  mainAgentModel?: RouterModelRef;
-  /** Force subagents spawned during orchestration to use this model instead of the tier-resolved one. */
-  subagentModel?: RouterModelRef;
   skillExtensionId?: string;
   /** Inline orchestration prompt injected when skillExtensionId is absent. */
   orchestrationPrompt?: string;
@@ -50,24 +59,34 @@ export type RouterAutoOrchestrateConfig = {
   subagentMaxTokens?: number;
 };
 
-export const DEFAULT_SUBAGENT_MAX_TOKENS = 48000;
-
 export type RouterStatsConfig = {
   enabled: boolean;
-  modelPricing?: Record<string, { input?: number; output?: number; cacheRead?: number }>;
+  modelPricing?: RouterModelPricingMap;
   /** Override the default ~/.pilotdeck/router/stats.json path (useful for tests). */
   filePath?: string;
+  /** Optional positive millisecond window for durable Router usage records. */
+  retentionMs?: number;
   /** Provider/model ref used as the "no-router" baseline for savedCost calculation. */
   baselineModel?: { provider: string; model: string };
 };
 
-export type RouterFallbackConfig = Partial<Record<RouterScenarioType, RouterModelRef[]>>;
+export type RouterFallbackConfig = Partial<Record<RouterScenarioType, RouterModelRef[]>> & {
+  /** LiteLLM-compatible max fallback model groups to try after the primary model. Default 5. */
+  maxFallbacks?: number;
+};
+
+export const LITELLM_ROUTER_MAX_FALLBACKS = 5;
 
 export type RouterCustomRouterConfig = {
   extensionId: string;
 };
 
 export type RouterConfig = {
+  /**
+   * Master switch for all router behavior. When false, router-specific
+   * model refs are ignored and requests pass through to agent.model.
+   */
+  enabled?: boolean;
   /**
    * Resolved scenario→model map.
    *
@@ -161,6 +180,17 @@ string. Therefore:
 - Ask the sub-agent to echo back key facts in its final reply (file paths, byte counts,
   section headings) so you can verify without re-reading.
 
+## Optional parallel delegation
+
+Parallelism is useful but not mandatory. When two or more sub-tasks are independent
+siblings — for example inspecting separate files/modules, checking several artifacts,
+researching unrelated APIs, or comparing alternatives — you may launch multiple
+\`agent\` calls in the same assistant reply so they can run concurrently. Keep steps
+serial when one sub-task depends on another sub-agent's output, writes could conflict,
+ordering matters, or user approval is needed between steps. If you parallelize, give
+each sub-agent a distinct scope and self-contained prompt, then synthesize all sibling
+reports yourself before deciding the next step.
+
 ## Workflow
 
 1. **Check for relevant skills first.** If the system prompt contains \`<available-skills>\`,
@@ -168,10 +198,11 @@ string. Therefore:
    in the name — they contain ready-to-use sub-agent prompt templates. Use these
    templates **verbatim** instead of writing your own prompts from scratch.
 2. **Plan in 1-4 atomic steps.** Prefer FEWER, larger steps — each \`agent\` call has
-   overhead. One capable sub-agent doing five things beats five sub-agents doing one
-   thing each.
-3. **Spawn the first execution sub-agent in the SAME reply as your plan.** A plan-only
-   reply with no tool call wastes a turn.
+   overhead. One capable sub-agent doing cohesive work beats five sub-agents doing one
+   tiny thing each. Split into sibling sub-agents only when their scopes are independent.
+3. **Spawn execution sub-agent(s) in the SAME reply as your plan.** A plan-only
+   reply with no tool call wastes a turn. If independent sibling steps are ready, batch
+   those \`agent\` calls together; otherwise start only the first dependent step.
 4. **Inspect** the sub-agent's returned report. Decide: accept / re-spawn with stricter
    instructions / move to the next step.
 5. **Final reply**: short summary pointing to deliverable file paths.

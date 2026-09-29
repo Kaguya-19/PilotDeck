@@ -1,7 +1,13 @@
+import { createFrameBatcher } from '../../../utils/frameBatcher';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { MouseEvent as ReactMouseEvent } from 'react';
 import type { Project } from '../../../types/app';
-import type { CodeEditorDiffInfo, CodeEditorFile } from '../types/types';
+import {
+  canonicalizeWorkspaceFilePath,
+  getWorkspaceFileIdentity,
+  isWorkspacePathAtOrBelow,
+} from '../../../utils/workspaceFileMention';
+import type { CodeEditorDiffInfo, CodeEditorFile, CodeEditorTab } from '../types/types';
 
 type UseEditorSidebarOptions = {
   selectedProject: Project | null;
@@ -9,44 +15,312 @@ type UseEditorSidebarOptions = {
   initialWidth?: number;
 };
 
+const buildEditorFile = (
+  filePath: string,
+  projectName: string | undefined,
+  workspaceRoot: string,
+  diffInfo: CodeEditorDiffInfo | null = null,
+): CodeEditorFile => {
+  const normalizedPath = canonicalizeWorkspaceFilePath(filePath, workspaceRoot);
+  const fileName = normalizedPath.split('/').pop() || filePath;
+  return {
+    name: fileName,
+    path: normalizedPath,
+    projectName,
+    diffInfo,
+  };
+};
+
+const currentFile = (tab: CodeEditorTab | undefined): CodeEditorFile | null => (
+  tab?.fileStack.at(-1) ?? null
+);
+
+const findTabByFileIdentity = (
+  tabs: CodeEditorTab[],
+  fileIdentity: string,
+  workspaceRoot: string,
+): CodeEditorTab | undefined => (
+  tabs.find((tab) => {
+    const file = currentFile(tab);
+    return file
+      ? getWorkspaceFileIdentity(file.path, workspaceRoot) === fileIdentity
+      : false;
+  })
+  ?? tabs.find((tab) => {
+    if (tab.dirty) return false;
+    const rootFile = tab.fileStack[0];
+    return rootFile
+      ? getWorkspaceFileIdentity(rootFile.path, workspaceRoot) === fileIdentity
+      : false;
+  })
+);
+
+const shouldResetTabForFile = (
+  tab: CodeEditorTab,
+  nextFile: CodeEditorFile,
+): boolean => {
+  const rootFile = tab.fileStack[0];
+  return !tab.dirty && (
+    currentFile(tab)?.path !== nextFile.path
+    || Boolean(rootFile?.diffInfo) !== Boolean(nextFile.diffInfo)
+    || (nextFile.diffInfo !== null && rootFile?.diffInfo !== nextFile.diffInfo)
+  );
+};
+
+type EditorTabsState = {
+  tabs: CodeEditorTab[];
+  activeTabId: string | null;
+};
+
 export const useEditorSidebar = ({
   selectedProject,
   isMobile,
   initialWidth = 600,
 }: UseEditorSidebarOptions) => {
-  const [editingFile, setEditingFile] = useState<CodeEditorFile | null>(null);
+  const [tabsState, setTabsState] = useState<EditorTabsState>({
+    tabs: [],
+    activeTabId: null,
+  });
+  const nextTabIdRef = useRef(0);
   const [editorWidth, setEditorWidth] = useState(initialWidth);
   const [editorExpanded, setEditorExpanded] = useState(false);
   const [isResizing, setIsResizing] = useState(false);
   const [hasManualWidth, setHasManualWidth] = useState(false);
   const resizeHandleRef = useRef<HTMLDivElement | null>(null);
 
+  const activeEditorTab = tabsState.tabs.find((tab) => tab.id === tabsState.activeTabId) ?? null;
+  const editingFile = currentFile(activeEditorTab ?? undefined);
+  const canGoBack = (activeEditorTab?.fileStack.length ?? 0) > 1;
+  const parentFile = canGoBack ? activeEditorTab?.fileStack.at(-2) ?? null : null;
+  const workspaceRoot = selectedProject?.fullPath || selectedProject?.path || '';
+
   const handleFileOpen = useCallback(
     (filePath: string, diffInfo: CodeEditorDiffInfo | null = null) => {
-      const normalizedPath = filePath.replace(/\\/g, '/');
-      const fileName = normalizedPath.split('/').pop() || filePath;
+      const nextFile = buildEditorFile(filePath, selectedProject?.name, workspaceRoot, diffInfo);
+      const nextFileIdentity = getWorkspaceFileIdentity(nextFile.path, workspaceRoot);
+      setTabsState((previous) => {
+        const existing = findTabByFileIdentity(
+          previous.tabs,
+          nextFileIdentity,
+          workspaceRoot,
+        );
+        if (existing) {
+          const shouldResetView = shouldResetTabForFile(existing, nextFile);
+          return {
+            tabs: shouldResetView
+              ? previous.tabs.map((tab) => (
+                tab.id === existing.id ? { ...tab, fileStack: [nextFile], dirty: false } : tab
+              ))
+              : previous.tabs,
+            activeTabId: existing.id,
+          };
+        }
 
-      setEditingFile({
-        name: fileName,
-        path: filePath,
-        projectName: selectedProject?.name,
-        diffInfo,
+        const nextTab: CodeEditorTab = {
+          id: `editor-tab-${nextTabIdRef.current++}`,
+          fileStack: [nextFile],
+          dirty: false,
+        };
+        return {
+          tabs: [...previous.tabs, nextTab],
+          activeTabId: nextTab.id,
+        };
       });
     },
-    [selectedProject?.name],
+    [selectedProject?.name, workspaceRoot],
   );
 
-  const handleCloseEditor = useCallback(() => {
-    setEditingFile(null);
-    setEditorExpanded(false);
+  // Push onto the stack when following a markdown cross-reference inside preview.
+  const handlePreviewFileOpen = useCallback(
+    (filePath: string) => {
+      const nextFile = buildEditorFile(filePath, selectedProject?.name, workspaceRoot);
+      const nextFileIdentity = getWorkspaceFileIdentity(nextFile.path, workspaceRoot);
+      setTabsState((previous) => {
+        const existing = findTabByFileIdentity(
+          previous.tabs,
+          nextFileIdentity,
+          workspaceRoot,
+        );
+        if (existing) {
+          const shouldResetView = shouldResetTabForFile(existing, nextFile);
+          return {
+            tabs: shouldResetView
+              ? previous.tabs.map((tab) => (
+                tab.id === existing.id ? { ...tab, fileStack: [nextFile], dirty: false } : tab
+              ))
+              : previous.tabs,
+            activeTabId: existing.id,
+          };
+        }
+
+        if (!previous.activeTabId) return previous;
+        const activeTab = previous.tabs.find((tab) => tab.id === previous.activeTabId);
+        if (activeTab?.dirty) {
+          const nextTab: CodeEditorTab = {
+            id: `editor-tab-${nextTabIdRef.current++}`,
+            fileStack: [nextFile],
+            dirty: false,
+          };
+          return {
+            tabs: [...previous.tabs, nextTab],
+            activeTabId: nextTab.id,
+          };
+        }
+
+        return {
+          ...previous,
+          tabs: previous.tabs.map((tab) => {
+            if (tab.id !== previous.activeTabId) return tab;
+            const activeFile = currentFile(tab);
+            if (activeFile?.path === nextFile.path) return tab;
+            return {
+              ...tab,
+              fileStack: [...tab.fileStack, nextFile],
+              dirty: false,
+            };
+          }),
+        };
+      });
+    },
+    [selectedProject?.name, workspaceRoot],
+  );
+
+  const handleFileGoBack = useCallback(() => {
+    setTabsState((previous) => {
+      if (!previous.activeTabId) return previous;
+      return {
+        ...previous,
+        tabs: previous.tabs.map((tab) => (
+          tab.id === previous.activeTabId && tab.fileStack.length > 1
+            ? { ...tab, fileStack: tab.fileStack.slice(0, -1), dirty: false }
+            : tab
+        )),
+      };
+    });
   }, []);
 
-  // Close any open file tab when the user switches to a different project so
+  const handleTabSelect = useCallback((tabId: string) => {
+    setTabsState((previous) => (
+      previous.tabs.some((tab) => tab.id === tabId)
+        ? { ...previous, activeTabId: tabId }
+        : previous
+    ));
+  }, []);
+
+  const handleTabClose = useCallback((tabId: string) => {
+    setTabsState((previous) => {
+      const closingIndex = previous.tabs.findIndex((tab) => tab.id === tabId);
+      if (closingIndex === -1) return previous;
+
+      const tabs = previous.tabs.filter((tab) => tab.id !== tabId);
+      if (previous.activeTabId !== tabId) {
+        return { ...previous, tabs };
+      }
+
+      const nextActiveTab = tabs[closingIndex] ?? tabs[closingIndex - 1] ?? null;
+      return {
+        tabs,
+        activeTabId: nextActiveTab?.id ?? null,
+      };
+    });
+  }, []);
+
+  const handleTabsClose = useCallback((tabIds: string[]) => {
+    const closingTabIds = new Set(tabIds);
+    if (closingTabIds.size === 0) return;
+
+    setTabsState((previous) => {
+      const activeIndex = previous.tabs.findIndex((tab) => tab.id === previous.activeTabId);
+      const tabs = previous.tabs.filter((tab) => !closingTabIds.has(tab.id));
+      if (tabs.length === previous.tabs.length) return previous;
+      if (!previous.activeTabId || !closingTabIds.has(previous.activeTabId)) {
+        return { ...previous, tabs };
+      }
+
+      const nextActiveTab = previous.tabs
+        .slice(activeIndex + 1)
+        .find((tab) => !closingTabIds.has(tab.id))
+        ?? previous.tabs
+          .slice(0, activeIndex)
+          .reverse()
+          .find((tab) => !closingTabIds.has(tab.id))
+        ?? null;
+
+      return {
+        tabs,
+        activeTabId: nextActiveTab?.id ?? null,
+      };
+    });
+  }, []);
+
+  const handleTabDirtyChange = useCallback((tabId: string, dirty: boolean) => {
+    setTabsState((previous) => {
+      const tab = previous.tabs.find((candidate) => candidate.id === tabId);
+      if (!tab || tab.dirty === dirty) return previous;
+      return {
+        ...previous,
+        tabs: previous.tabs.map((candidate) => (
+          candidate.id === tabId ? { ...candidate, dirty } : candidate
+        )),
+      };
+    });
+  }, []);
+
+  const handleFileRename = useCallback((oldPath: string, newPath: string) => {
+    const normalizedOldPath = canonicalizeWorkspaceFilePath(oldPath, workspaceRoot);
+    const normalizedNewPath = canonicalizeWorkspaceFilePath(newPath, workspaceRoot);
+    setTabsState((previous) => ({
+      ...previous,
+      tabs: previous.tabs.map((tab) => ({
+        ...tab,
+        fileStack: tab.fileStack.map((file) => {
+          if (!isWorkspacePathAtOrBelow(file.path, normalizedOldPath, workspaceRoot)) return file;
+          const path = `${normalizedNewPath}${file.path.slice(normalizedOldPath.length)}`;
+          const preserveDirtyBuffer = tab.dirty && currentFile(tab)?.path === file.path;
+          return {
+            ...file,
+            path,
+            name: path.split('/').pop() || file.name,
+            renamedFromPath: preserveDirtyBuffer ? file.path : undefined,
+          };
+        }),
+      })),
+    }));
+  }, [workspaceRoot]);
+
+  const handleFileDelete = useCallback((deletedPath: string) => {
+    const normalizedDeletedPath = canonicalizeWorkspaceFilePath(deletedPath, workspaceRoot);
+    setTabsState((previous) => {
+      const tabs = previous.tabs.flatMap((tab) => {
+        const rootFile = tab.fileStack[0];
+        if (
+          !rootFile
+          || isWorkspacePathAtOrBelow(rootFile.path, normalizedDeletedPath, workspaceRoot)
+        ) return [];
+        const fileStack = tab.fileStack.filter(
+          (file) => !isWorkspacePathAtOrBelow(
+            file.path,
+            normalizedDeletedPath,
+            workspaceRoot,
+          ),
+        );
+        return [{ ...tab, fileStack, dirty: false }];
+      });
+
+      const activeStillExists = tabs.some((tab) => tab.id === previous.activeTabId);
+      return {
+        tabs,
+        activeTabId: activeStillExists ? previous.activeTabId : tabs.at(-1)?.id ?? null,
+      };
+    });
+  }, [workspaceRoot]);
+
+  // Close all open file tabs when the user switches to a different project so
   // we don't carry a Project A file across into Project B's view. Switching
   // sessions within the same project keeps the editor open because
   // `selectedProject?.name` stays the same.
   useEffect(() => {
-    setEditingFile(null);
+    setTabsState({ tabs: [], activeTabId: null });
     setEditorExpanded(false);
   }, [selectedProject?.name]);
 
@@ -69,7 +343,7 @@ export const useEditorSidebar = ({
   );
 
   useEffect(() => {
-    const handleMouseMove = (event: globalThis.MouseEvent) => {
+    const moveBatch = createFrameBatcher((event: globalThis.MouseEvent) => {
       if (!isResizing) {
         return;
       }
@@ -91,9 +365,11 @@ export const useEditorSidebar = ({
       if (newWidth >= minWidth && newWidth <= maxWidth) {
         setEditorWidth(newWidth);
       }
-    };
+    });
+    const handleMouseMove = moveBatch.schedule;
 
     const handleMouseUp = () => {
+      moveBatch.flush();
       setIsResizing(false);
     };
 
@@ -105,6 +381,7 @@ export const useEditorSidebar = ({
     }
 
     return () => {
+      moveBatch.cancel();
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
       document.body.style.cursor = '';
@@ -113,13 +390,25 @@ export const useEditorSidebar = ({
   }, [isResizing]);
 
   return {
+    editorTabs: tabsState.tabs,
+    activeEditorTabId: tabsState.activeTabId,
+    activeFilePath: editingFile?.path ?? null,
     editingFile,
+    canGoBack,
+    parentFile,
     editorWidth,
     editorExpanded,
     hasManualWidth,
     resizeHandleRef,
     handleFileOpen,
-    handleCloseEditor,
+    handlePreviewFileOpen,
+    handleFileGoBack,
+    handleTabSelect,
+    handleTabClose,
+    handleTabsClose,
+    handleTabDirtyChange,
+    handleFileRename,
+    handleFileDelete,
     handleToggleEditorExpand,
     handleResizeStart,
   };

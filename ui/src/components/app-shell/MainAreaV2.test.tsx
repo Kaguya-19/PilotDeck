@@ -1,0 +1,295 @@
+// @vitest-environment jsdom
+import { useState } from 'react';
+import type { ComponentProps } from 'react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { AppTab, Project, ProjectSession } from '../../types/app';
+import MainAreaV2 from './MainAreaV2';
+
+vi.mock('../main-content/view/MainContent', async () => {
+  const React = await import('react');
+  const { useRegisterChatHistorySearchControls } = await import(
+    '../chat-v2/ChatHistorySearchController'
+  );
+
+  function RegisteredSearchMock({ activeTab }: { activeTab: AppTab }) {
+    const [isOpen, setIsOpen] = React.useState(false);
+    const [query, setQuery] = React.useState('');
+    const [activeMatchIndex, setActiveMatchIndex] = React.useState(0);
+    const inputRef = React.useRef<HTMLInputElement | null>(null);
+    const openSearch = React.useCallback(() => setIsOpen(true), []);
+    const closeSearch = React.useCallback(() => {
+      setIsOpen(false);
+      setQuery('');
+    }, []);
+    const matches = query ? [{}, {}] : [];
+    useRegisterChatHistorySearchControls({
+      isOpen,
+      openSearch,
+      closeSearch,
+      query,
+      setQuery,
+      matches,
+      activeMatchIndex,
+      goToPrevious: () => setActiveMatchIndex((index) => Math.max(0, index - 1)),
+      goToNext: () => setActiveMatchIndex((index) => Math.min(matches.length - 1, index + 1)),
+      inputRef,
+    });
+
+    return (
+      <div
+        data-testid="main-content"
+        data-active-tab={activeTab}
+        data-search-open={isOpen ? 'true' : 'false'}
+        data-search-query={query}
+        data-search-index={activeMatchIndex}
+      >
+        <button type="button" onClick={openSearch}>Open registered chat search</button>
+      </div>
+    );
+  }
+
+  return {
+    default: ({
+      activeTab,
+      selectedSession,
+    }: {
+      activeTab: AppTab;
+      selectedSession: ProjectSession | null;
+    }) => selectedSession
+      ? <RegisteredSearchMock activeTab={activeTab} />
+      : <div data-testid="main-content" data-active-tab={activeTab} />,
+  };
+});
+
+vi.mock('../../utils/api', () => ({
+  api: {
+    alwaysOnDashboardEvents: vi.fn(async () => new Response(JSON.stringify({ events: [] }))),
+  },
+}));
+
+const project: Project = {
+  name: 'pilotdeck',
+  displayName: 'PilotDeck',
+  fullPath: '/workspace/PilotDeck',
+};
+
+function Harness({
+  initialTab = 'chat',
+  withSession = false,
+  selectedProject = project,
+  modulePage,
+}: {
+  initialTab?: AppTab;
+  withSession?: boolean;
+  selectedProject?: Project;
+  modulePage?: ComponentProps<typeof MainAreaV2>['modulePage'];
+}) {
+  const [activeTab, setActiveTab] = useState<AppTab>(initialTab);
+  const props = {
+    projects: [project],
+    selectedProject,
+    selectedSession: withSession ? { id: 'session-1', title: 'Searchable chat' } : null,
+    activeTab,
+    setActiveTab,
+    modulePage,
+  } as unknown as ComponentProps<typeof MainAreaV2>;
+
+  return <MainAreaV2 {...props} />;
+}
+
+afterEach(() => {
+  cleanup();
+  localStorage.clear();
+  vi.restoreAllMocks();
+});
+
+describe('MainAreaV2 dashboard switcher', () => {
+  it('keeps General on chat and hides project-scoped Files and Explore tools', async () => {
+    const generalProject: Project = {
+      name: 'general',
+      displayName: 'general',
+      kind: 'general',
+      fullPath: '/state/pilot-home',
+      workspaceCwd: '/workspaces/general',
+      capabilities: { files: false, explore: false, projectFileMentions: false },
+    };
+
+    render(<Harness initialTab="files" selectedProject={generalProject} />);
+
+    expect(screen.queryByRole('button', { name: 'tabs.files' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Open dashboards menu' })).toBeNull();
+    await waitFor(() => {
+      expect(screen.getByTestId('main-content').getAttribute('data-active-tab')).toBe('chat');
+    });
+  });
+
+  it('renames the selected session inline after double-clicking the header title', () => {
+    render(<Harness withSession />);
+
+    fireEvent.doubleClick(screen.getByTitle('Searchable chat'));
+    const input = screen.getByRole('textbox', { name: 'Rename Session' });
+    expect((input as HTMLInputElement).value).toBe('Searchable chat');
+    expect(document.activeElement).toBe(input);
+
+    fireEvent.change(input, { target: { value: 'Renamed conversation' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+
+    expect(screen.getByTitle('Renamed conversation').textContent).toBe('Renamed conversation');
+    expect(JSON.parse(localStorage.getItem('pilotdeck:customSessionTitles') || '{}')).toEqual({
+      'session-1': 'Renamed conversation',
+    });
+  });
+
+  it('cancels an inline session rename when Escape is pressed', () => {
+    render(<Harness withSession />);
+
+    fireEvent.doubleClick(screen.getByTitle('Searchable chat'));
+    const input = screen.getByRole('textbox', { name: 'Rename Session' });
+    fireEvent.change(input, { target: { value: 'Discarded title' } });
+    fireEvent.keyDown(input, { key: 'Escape' });
+
+    expect(screen.getByTitle('Searchable chat').textContent).toBe('Searchable chat');
+    expect(localStorage.getItem('pilotdeck:customSessionTitles')).toBeNull();
+  });
+
+  it('places an available chat search button before Files and keeps its state in sync', async () => {
+    render(<Harness initialTab="files" withSession />);
+
+    const tools = screen.getByLabelText('common:uiText.tools');
+    const searchButton = within(tools).getByRole('button', { name: 'Search current conversation' });
+    const filesButton = within(tools).getByRole('button', { name: 'tabs.files' });
+    const toolButtons = within(tools).getAllByRole('button');
+
+    expect(toolButtons[0]).toBe(searchButton);
+    expect(toolButtons[1]).toBe(filesButton);
+    expect(searchButton.getAttribute('aria-pressed')).toBe('false');
+
+    fireEvent.click(searchButton);
+    expect(screen.getByTestId('main-content').getAttribute('data-active-tab')).toBe('chat');
+    expect(screen.getByTestId('main-content').getAttribute('data-search-open')).toBe('true');
+    expect(searchButton.getAttribute('aria-pressed')).toBe('true');
+    expect(searchButton.className).toContain('bg-blue-100');
+    expect(searchButton.className).toContain('text-blue-700');
+    expect(searchButton.className).not.toContain('shadow');
+
+    const headerSearch = within(screen.getByRole('banner')).getByRole('search');
+    expect(headerSearch.className).not.toContain('absolute');
+    expect(headerSearch.className).not.toContain('shadow');
+    expect(within(headerSearch).getAllByRole('button')).toHaveLength(2);
+    expect(screen.getByTitle('Searchable chat').textContent).toBe('Searchable chat');
+    fireEvent.click(searchButton);
+    await waitFor(() => expect(searchButton.getAttribute('aria-pressed')).toBe('false'));
+
+    fireEvent.click(searchButton);
+    fireEvent.click(filesButton);
+    expect(screen.getByTestId('main-content').getAttribute('data-active-tab')).toBe('files');
+    expect(screen.getByTestId('main-content').getAttribute('data-search-open')).toBe('false');
+    expect(searchButton.getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('disables chat search while no conversation is mounted', () => {
+    render(<Harness />);
+
+    expect(
+      (screen.getByRole('button', { name: 'Search current conversation' }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+  });
+
+  it('does not leave Files when an embedded chat search opens', () => {
+    render(<Harness initialTab="files" withSession />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open registered chat search' }));
+
+    expect(screen.getByTestId('main-content').getAttribute('data-active-tab')).toBe('files');
+    expect(screen.getByTestId('main-content').getAttribute('data-search-open')).toBe('true');
+  });
+
+  it('preserves Chinese IME composition through the header search controller', async () => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1_000);
+    render(<Harness withSession />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Search current conversation' }));
+    const input = screen.getByRole('searchbox') as HTMLInputElement;
+
+    fireEvent.compositionStart(input);
+    fireEvent.change(input, { target: { value: 'wos' } });
+    expect(input.value).toBe('wos');
+    expect(screen.getByTestId('main-content').getAttribute('data-search-query')).toBe('');
+
+    fireEvent.change(input, { target: { value: '我是' } });
+    fireEvent.compositionEnd(input);
+
+    await waitFor(() => {
+      expect(input.value).toBe('我是');
+      expect(screen.getByTestId('main-content').getAttribute('data-search-query')).toBe('我是');
+    });
+
+    fireEvent.keyDown(input, { key: 'Enter', keyCode: 13, which: 13 });
+    expect(screen.getByTestId('main-content').getAttribute('data-search-index')).toBe('0');
+
+    now.mockReturnValue(1_200);
+    fireEvent.keyDown(input, { key: 'Enter', keyCode: 13, which: 13 });
+    expect(screen.getByTestId('main-content').getAttribute('data-search-index')).toBe('1');
+  });
+
+  it('keeps chat implicit and toggles the Files workbench from its button', () => {
+    render(<Harness />);
+
+    expect(screen.queryByText('tabs.chat')).toBeNull();
+    const filesButton = screen.getByRole('button', { name: 'tabs.files' });
+    expect(filesButton.getAttribute('aria-pressed')).toBe('false');
+    expect(filesButton.className).toContain('file-entry');
+
+    fireEvent.click(filesButton);
+    expect(screen.getByTestId('main-content').getAttribute('data-active-tab')).toBe('files');
+    expect(filesButton.getAttribute('aria-pressed')).toBe('true');
+    expect(filesButton.className).toContain('file-entry');
+    expect(filesButton.className).toContain('font-medium');
+
+    fireEvent.click(filesButton);
+    expect(screen.getByTestId('main-content').getAttribute('data-active-tab')).toBe('chat');
+    expect(filesButton.getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('keeps the overflow menu available while a dashboard panel is open', async () => {
+    render(<Harness />);
+
+    const overflowButton = screen.getByRole('button', { name: 'Open dashboards menu' });
+    expect(overflowButton.textContent).toContain('Explore');
+    fireEvent.click(overflowButton);
+    const menu = screen.getByRole('menu', { name: 'Dashboards' });
+    expect(menu.className).toContain('z-[90]');
+    expect(menu.className).toContain('w-32');
+    expect(screen.queryByRole('menuitem', { name: 'tabs.cron' })).toBeNull();
+    expect(screen.queryByRole('menuitem', { name: 'tabs.skills' })).toBeNull();
+    expect(screen.queryByRole('menuitem', { name: 'tabs.memory' })).toBeNull();
+    fireEvent.click(screen.getByRole('menuitem', { name: 'tabs.dashboard' }));
+    expect(screen.getByTestId('main-content').getAttribute('data-active-tab')).toBe('dashboard');
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Open dashboards menu' })).toBeTruthy();
+    });
+  });
+
+  it('replaces the workspace header with only the scheduled tasks title', async () => {
+    render(<Harness withSession modulePage={{ id: 'scheduled-tasks', path: '/cron', label: 'Scheduled Tasks', component: () => <div data-testid="cron-page" /> }} />);
+
+    expect(await screen.findByRole('heading', { name: 'Scheduled Tasks' })).toBeTruthy();
+    expect(screen.getByTestId('cron-page')).toBeTruthy();
+    expect(screen.queryByTitle('Searchable chat')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Search current conversation' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'tabs.files' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Open dashboards menu' })).toBeNull();
+  });
+
+  it('replaces the workspace header with only the skills title', async () => {
+    render(<Harness withSession modulePage={{ id: 'skills', path: '/skills', label: 'Skills', component: () => <div data-testid="skills-page" /> }} />);
+
+    expect(await screen.findByRole('heading', { name: 'Skills' })).toBeTruthy();
+    expect(screen.getByTestId('skills-page')).toBeTruthy();
+    expect(screen.queryByTitle('Searchable chat')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Search current conversation' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'tabs.files' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Open dashboards menu' })).toBeNull();
+  });
+});

@@ -1,25 +1,35 @@
+import type { TimelinePosition } from "./timeline.js";
+import type { ModelThinkingSettings } from "../thinking/settings.js";
 import type { ModelCapabilities } from "./capabilities.js";
 import type { CanonicalModelError } from "./errors.js";
 import type { MultimodalConstraints } from "./multimodal.js";
 
-export type ModelProtocol = "anthropic" | "openai";
+export type ModelProtocol = "anthropic" | "openai" | "openai-responses" | "google";
 
 export type CanonicalRole = "user" | "assistant";
 
 export type CanonicalTextBlock = {
+  timeline?: TimelinePosition;
   type: "text";
   text: string;
+  /** UI stream/history identity; never a provider request field. */
+  blockId?: string;
 };
 
 export type CanonicalThinkingBlock = {
+  timeline?: TimelinePosition;
   type: "thinking";
   text: string;
+  /** UI stream/history identity; never a provider request field. */
+  blockId?: string;
   /**
    * Provider-supplied signature accompanying the thinking block (Anthropic
    * extended-thinking signature_delta). Required for prompt-cache validity
    * when the message is replayed; preserved verbatim.
    */
   signature?: string;
+  /** Provider-native reasoning_content that should be replayed when present. */
+  reasoningContent?: string;
 };
 
 export type CanonicalImageBlock = {
@@ -45,10 +55,12 @@ export type CanonicalAudioBlock = {
   source: "base64" | "url";
   data: string;
   mimeType: string;
+  bytes?: number;
   durationSeconds?: number;
 };
 
 export type CanonicalToolCall = {
+  timeline?: TimelinePosition;
   id: string;
   name: string;
   input: unknown;
@@ -81,8 +93,12 @@ export type CanonicalToolResultContentBlock =
 export type CanonicalToolResultReferenceBlock = {
   type: "tool_result_reference";
   toolCallId: string;
+  /** Mirrors CanonicalToolResultBlock.isError when a large error result is persisted. */
+  isError?: boolean;
   /** Absolute path to the persisted file. */
   path: string;
+  /** Workspace-relative path that can be read with read_file when available. */
+  readFilePath?: string;
   /** Original size in bytes / characters of the full result. */
   originalBytes: number;
   /** Truncated preview (UTF-8 text) sent inline alongside the reference. */
@@ -95,9 +111,27 @@ export type CanonicalToolResultReferenceBlock = {
   reason?: string;
 };
 
+export type CanonicalMediaReferenceBlock = {
+  type: "media_reference";
+  /** Originating tool call when known. Older transcripts may omit this. */
+  toolCallId?: string;
+  /** Absolute path to the persisted media body. */
+  path: string;
+  /** Original binary size when known, otherwise persisted payload bytes. */
+  originalBytes: number;
+  /** Human-readable placeholder shown to the model/UI. */
+  preview: string;
+  hasMore: boolean;
+  mimeType: string;
+  mediaType: "image" | "pdf" | "audio";
+  pages?: number;
+  detail?: "auto" | "low" | "high";
+  reason?: string;
+};
+
 export type CanonicalToolResult = CanonicalToolResultBlock;
 
-export type CanonicalContentBlock =
+export type CanonicalContentBlock = { timeline?: TimelinePosition } & (
   | CanonicalTextBlock
   | CanonicalThinkingBlock
   | CanonicalImageBlock
@@ -105,12 +139,33 @@ export type CanonicalContentBlock =
   | CanonicalAudioBlock
   | CanonicalToolCallBlock
   | CanonicalToolResultBlock
-  | CanonicalToolResultReferenceBlock;
+  | CanonicalToolResultReferenceBlock
+  | CanonicalMediaReferenceBlock);
 
 export type CanonicalMessageMetadata = {
+  /** Durable backend implementation id that owns this module-originated message. */
+  moduleId?: string;
+  /** Actual model that generated this assistant message. */
+  model?: string;
   /** True for messages injected by the system (e.g. JSON self-correct prompts). */
   synthetic?: boolean;
+  /** Synthetic prompt that should be consumed by the next assistant response only. */
+  transient?: boolean;
+  /** Stable id used by the agent loop to expire transient synthetic prompts. */
+  transientId?: string;
+  /** Originating tool call for projected supplemental result messages. */
+  toolCallId?: string;
+  /** Message replaces compacted history and is omitted from the visible transcript. */
+  compactReplacement?: boolean;
+  /** Compaction id of the effective replacement snapshot persisted in the transcript. */
+  compactSnapshotId?: string;
   purpose?: string;
+  /** Stable queued-input id for a user message injected during an active turn. */
+  queueItemId?: string;
+  forkCarryover?: {
+    sourceSessionId: string;
+    sourceTurnId?: string;
+  };
 };
 
 export type CanonicalMessage = {
@@ -135,8 +190,12 @@ export type CanonicalToolChoice =
     };
 
 export type CanonicalThinkingConfig = {
+  mode?: "default" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   enabled: boolean;
+  /** @deprecated Prefer a named thinking mode; retained for SDK compatibility. */
   budgetTokens?: number;
+  preserve?: boolean;
+  splitReasoning?: boolean;
 };
 
 /**
@@ -167,6 +226,17 @@ export type CanonicalOutputSchema = {
   strict?: boolean;
 };
 
+/** Internal provider-boundary prompt-cache layout; never persisted. */
+export type CachePlan = {
+  provider?: string;
+  model?: string;
+  system: boolean;
+  tools: boolean;
+  messages: number[];
+  fingerprint: string;
+  generation: number;
+};
+
 export type CanonicalModelRequest = {
   model: string;
   provider: string;
@@ -175,7 +245,9 @@ export type CanonicalModelRequest = {
   tools?: CanonicalToolSchema[];
   toolChoice?: CanonicalToolChoice;
   maxOutputTokens?: number;
+  /** @deprecated Retained at the canonical boundary; provider adapters may ignore it. */
   temperature?: number;
+  speed?: number;
   thinking?: CanonicalThinkingConfig;
   stream?: boolean;
   metadata?: Record<string, unknown>;
@@ -183,10 +255,13 @@ export type CanonicalModelRequest = {
   outputSchema?: CanonicalOutputSchema;
   /**
    * A4: indices into `messages` whose final content block should be marked
-   * `cache_control: { type: "ephemeral" }` when lowered to Anthropic. Other
-   * providers ignore this. Set by `CachedMicroCompactionEngine`.
+   * `cache_control: { type: "ephemeral", ttl: "5m" }` when lowered to
+   * Anthropic. Other providers ignore this. The default context layout marks
+   * the final three non-system messages for the `system + recent3` strategy.
    */
   cacheBreakpoints?: number[];
+  /** Internal prompt-cache layout computed by the context runtime. */
+  cachePlan?: CachePlan;
 };
 
 export type CanonicalUsage = {
@@ -213,11 +288,13 @@ export type CanonicalModelEvent =
       provider: string;
       model: string;
       providerBaseUrl?: string;
+      /** Opaque digest of the exact request dispatched to the provider. */
+      requestFingerprint?: string;
       metadata?: Record<string, unknown>;
     }
   | { type: "message_start"; role: "assistant"; raw?: unknown }
   | { type: "text_delta"; text: string; raw?: unknown }
-  | { type: "thinking_delta"; text: string; signature?: string; raw?: unknown }
+  | { type: "thinking_delta"; text: string; signature?: string; reasoningContent?: string; raw?: unknown }
   | { type: "tool_call_start"; id: string; name: string; raw?: unknown }
   | { type: "tool_call_delta"; id: string; delta: string; raw?: unknown }
   | { type: "tool_call_end"; toolCall: CanonicalToolCall; wasRepaired?: boolean; raw?: unknown }
@@ -234,6 +311,7 @@ export type CanonicalModelResponse = {
 };
 
 export type ModelDefinition = {
+  thinking?: ModelThinkingSettings;
   id: string;
   displayName?: string;
   capabilities: ModelCapabilities;
@@ -246,23 +324,45 @@ export type ProviderRetryConfig = {
   requestMaxRetries?: number;
   /** Max retries for dropped SSE streams. Default 2. */
   streamMaxRetries?: number;
-  /** Idle timeout (ms) for streaming responses before treating as lost. Default 300000 (5 min). */
+  /** First-token / idle timeout (ms) for streaming responses. Defaults to 600000ms when omitted. */
   streamIdleTimeoutMs?: number;
-  /** Base delay (ms) for exponential backoff. Default 1000. */
+  /** Maximum streaming duration (ms). Default disabled. */
+  maxStreamingDurationMs?: number;
+  /** Repeated non-empty text chunk limit before treating a stream as looping. Default 100. */
+  repeatedChunkLimit?: number;
+  /** Base delay (ms) for retry backoff. Default 500. */
   baseDelayMs?: number;
-  /** Max delay cap (ms) for backoff. Default 30000. */
+  /** Max delay cap (ms) for backoff. Default 8000. */
   maxDelayMs?: number;
+  /** Jitter multiplier for retry backoff. Default 0.75. */
+  jitter?: number;
 };
+
+export type SpeedMapping = "openai_service_tier" | "anthropic_speed";
+
+/**
+ * Non-secret provenance for a resolved provider API key. This is deliberately
+ * limited to a source category: it never retains an API key value or an
+ * environment-variable name.
+ */
+export type ProviderCredentialSource = "environment" | "literal" | "provider_default";
 
 export type ProviderConfig = {
   id: string;
   protocol: ModelProtocol;
   url: string;
   apiKey: string;
+  /**
+   * Host-local credential provenance used by Gateway policy. Optional so
+   * programmatic ModelConfig callers keep their existing contract.
+   */
+  credentialSource?: ProviderCredentialSource;
   timeoutMs?: number;
   headers: Record<string, string>;
   /** Arbitrary fields merged into every request body (e.g. OpenRouter provider preferences). */
   extraBody?: Record<string, unknown>;
+  /** Explicit native mapping for the normalized model speed preference. */
+  speedMapping?: SpeedMapping;
   retry?: ProviderRetryConfig;
   models: Record<string, ModelDefinition>;
 };

@@ -2,6 +2,19 @@ export { createTelemetryCollector } from "./collector.js";
 export { hashTelemetryId, resolveTelemetryRuntimeContext } from "./context.js";
 export { TelemetrySender } from "./sender.js";
 export {
+  TelemetryObserverRegistry,
+  createObservingTelemetryClient,
+  type TelemetryObservation,
+  type TelemetryObserver,
+  type TelemetryObserverFailure,
+  type TelemetryObserverRegistration,
+  type TelemetryObserverRegistrationOptions,
+  type TelemetryObserverRegistrationState,
+  type TelemetryObserverRegistryOptions,
+  type TelemetryObserverRegistryState,
+  type TelemetryObserverReplacement,
+} from "./TelemetryObserverRegistry.js";
+export {
   ANALYTICS_SCHEMA_VERSION,
   type AnalyticsEvent,
   type AnalyticsEventEnvelope,

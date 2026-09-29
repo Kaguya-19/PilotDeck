@@ -17,8 +17,11 @@
  * PilotDeck path conventions (~/.pilotdeck/, .pilotdeck/).
  */
 
-import { readFile, readdir } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import {
+  createNodeInstructionStoragePort,
+  type InstructionStoragePort,
+} from "./InstructionStoragePort.js";
 
 export type InstructionScope =
   | "managed"
@@ -38,6 +41,7 @@ export class InstructionDiscovery {
     private readonly projectRoot: string,
     private readonly cwd: string,
     private readonly pilotHome: string,
+    private readonly storage: InstructionStoragePort = createNodeInstructionStoragePort(),
   ) {}
 
   async discover(): Promise<InstructionLayer[]> {
@@ -100,7 +104,7 @@ export class InstructionDiscovery {
     if (seen.has(resolved)) return;
     seen.add(resolved);
     try {
-      const content = await readFile(resolved, "utf-8");
+      const content = await this.storage.readText(resolved);
       const trimmed = content.trim();
       if (trimmed.length > 0) {
         layers.push({ scope, path: resolved, content: trimmed });
@@ -117,9 +121,9 @@ export class InstructionDiscovery {
     dirPath: string,
   ): Promise<void> {
     try {
-      const entries = await readdir(dirPath, { withFileTypes: true });
+      const entries = await this.storage.readDirectory(dirPath);
       const mdFiles = entries
-        .filter(e => e.isFile() && e.name.endsWith(".md") && e.name !== "SKILL.md")
+        .filter(e => e.kind === "file" && e.name.endsWith(".md") && e.name !== "SKILL.md")
         .map(e => e.name)
         .sort();
       for (const file of mdFiles) {

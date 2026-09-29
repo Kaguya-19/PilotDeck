@@ -1,6 +1,6 @@
 import type { GatewayEvent, GatewayServerInfo } from "./types.js";
 
-export type GatewayWsClientName = "cli" | "tui" | "web" | "feishu" | "test";
+export type GatewayWsClientName = "cli" | "tui" | "web" | "feishu" | "sdk" | "test";
 
 export type WsHelloFrame = {
   type: "hello";
@@ -15,30 +15,80 @@ export type WsHelloOk = {
   protocolVersion: string;
   serverVersion: string;
   serverInfo: GatewayServerInfo;
+  interactionBinding?: import("../../interaction/index.js").InteractionConnectionBinding;
 };
 
 export type WsGatewayMethod =
   | "submit_turn"
+  | "steer_turn"
+  | "cancel_steer"
   | "abort_turn"
   | "list_sessions"
   | "resume_session"
+  | "sop_status"
+  | "sop_resume"
   | "new_session"
   | "close_session"
+  | "delete_session"
+  | "export_session_transcript"
+  | "restore_session_transcript"
+  | "rename_session"
+  | "tag_session"
+  | "close_project_sessions"
+  | "record_agent_status_message"
   | "describe_server"
+  | "project_files_list"
+  | "commands_list"
+  | "model_catalog_list"
+  | "session_model_get"
+  | "session_model_set"
+  | "session_model_clear"
   | "active_turn_snapshot"
+  | "mcp_server_status"
+  | "project_file_read"
+  | "set_mcp_servers"
+  | "mcp_server_reconnect"
+  | "mcp_server_toggle"
+  | "set_mcp_permission_mode_override"
+  | "set_permission_mode"
+  | "apply_flag_settings"
+  | "update_settings"
+  | "resolve_settings"
+  | "set_session_thinking"
+  | "output_styles_list"
+  | "set_output_style"
+  | "reload_output_styles"
+  | "usage_snapshot"
+  | "model_usage_snapshot"
+  | "rewind_files"
+  | "background_task_stop"
+  | "background_tasks"
+  | "hook_async_result"
+  | "seed_read_state"
+  | "supported_agents"
+  | "reconnect_interaction"
   | "cron_create"
   | "cron_list"
+  | "cron_update"
   | "cron_delete"
   | "cron_stop"
   | "cron_run_now"
   | "elicitation_respond"
+  | "user_dialog_list"
+  | "user_dialog_claim"
+  | "user_dialog_release"
+  | "user_dialog_respond"
   | "permission_decide"
   | "grant_session_permission"
   | "read_session_messages"
   | "read_subagent_messages"
+  | "fork_session"
+  | "replace_last_turn"
+  | "finalize_last_turn_replacement"
   | "list_projects"
   | "describe_project"
   | "reload_config"
+  | "prepare_weixin_login"
   | "reload_extensions"
   | "skill_list"
   | "skill_read"
@@ -49,6 +99,7 @@ export type WsGatewayMethod =
   | "skill_validate"
   | "skill_scan"
   | "always_on_apply"
+  | "always_on_abort"
   | "always_on_rerun_plan";
 
 export type WsRequestFrame = {
@@ -69,7 +120,7 @@ export type WsResponseFrame =
       type: "response";
       id: string;
       ok: false;
-      error: { code: string; message: string };
+      error: { code: string; message: string; validation?: unknown; details?: unknown };
     };
 
 export type WsEventFrame = {

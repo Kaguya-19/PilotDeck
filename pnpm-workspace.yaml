@@ -1,15 +1,29 @@
 packages:
+  - 'apps/desktop'
   - 'ui'
+  - 'packages/sdk'
+
+allowBuilds:
+  '@google/genai': true
+  bcrypt: true
+  better-sqlite3: true
+  electron-winstaller: true
+  esbuild: true
+  node-pty: true
+  protobufjs: true
+  sharp: true
+  unrs-resolver: true
 
 # Native/build-time packages that are allowed to run lifecycle scripts during
 # pnpm install. Keeping this at the workspace root makes Docker/CI installs
 # deterministic and prevents ERR_PNPM_IGNORED_BUILDS failures.
 onlyBuiltDependencies:
+  - '@google/genai'
   - bcrypt
   - better-sqlite3
+  - electron-winstaller
   - esbuild
   - node-pty
   - protobufjs
   - sharp
-  - sqlite3
   - unrs-resolver

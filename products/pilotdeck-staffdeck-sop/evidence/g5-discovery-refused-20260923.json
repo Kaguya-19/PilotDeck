@@ -1,0 +1,19 @@
+{
+  "status": "failed",
+  "mode": "real-provider-natural-entry",
+  "permissionMode": "default",
+  "discovery": {
+    "endpoint": "http://127.0.0.1:16225/api/v1",
+    "agentId": "agent_tenant_demo_overall",
+    "timeoutMs": 1000,
+    "requestPath": "/api/v1/agents/agent_tenant_demo_overall/sops:route",
+    "outcome": "error",
+    "error": "fetch failed",
+    "elapsedMs": 3
+  },
+  "pilotdeckProjection": {
+    "eventErrorCode": "agent_invalid_state",
+    "stateAdvanced": false
+  },
+  "credentials": "redacted"
+}

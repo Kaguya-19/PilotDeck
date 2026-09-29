@@ -1,20 +1,34 @@
 import { randomUUID } from "node:crypto";
-import { createAgentSession, type AgentSession, type CreateAgentSessionOptions } from "../agent/index.js";
-import type { SessionInfo } from "../session/index.js";
-import { listProjectSessions } from "../session/index.js";
+import { createAgentSessionWithStorageAsync, type CreateAgentSessionOptions } from "../agent/index.js";
+import {
+  createProjectSessionCatalog,
+  type SessionCatalogPort,
+} from "../session/index.js";
+import type { ProjectSessionPersistenceProvider } from "../session/storage/ProjectSessionStorageProvider.js";
 import { InProcessGateway } from "./client/InProcessGateway.js";
-import { SessionRouter, type GatewaySessionFactory, type SessionRouterOptions } from "./SessionRouter.js";
+import { createGatewaySessionCatalogConsumer } from "./GatewaySessionCatalog.js";
+import {
+  SessionRouter,
+  type GatewaySessionFactory,
+  type GatewaySessionSetup,
+  type SessionRouterOptions,
+} from "./SessionRouter.js";
 import type { Gateway, GatewayCronController, GatewayServerInfo } from "./protocol/types.js";
 
 export type GatewayProjectStorageOptions = {
   projectRoot: string;
   pilotHome: string;
+  /** Optional application-selected project-session persistence/cache provider. */
+  storageProvider?: ProjectSessionPersistenceProvider;
 };
 
 export type CreateGatewayOptions = {
   session?: {
     create?: GatewaySessionFactory;
+    setup?: GatewaySessionSetup;
     list?: SessionRouterOptions["listSessions"];
+    /** Read-only durable-session catalog used by the default list consumer. */
+    catalog?: SessionCatalogPort;
   };
   agent?: Omit<CreateAgentSessionOptions, "sessionId" | "projectStorage">;
   projectStorage?: GatewayProjectStorageOptions;
@@ -32,6 +46,7 @@ export function createGateway(options: CreateGatewayOptions): Gateway {
   const listSessions = options.session?.list ?? createDefaultSessionLister(options);
   const router = new SessionRouter({
     createSession,
+    setupSession: options.session?.setup,
     listSessions,
     idleSessionTimeoutMs: options.idleSessionTimeoutMs,
     now,
@@ -55,11 +70,12 @@ function createDefaultSessionFactory(options: CreateGatewayOptions): GatewaySess
       throw new Error("createGateway requires either session.create or agent options.");
     }
 
-    return createAgentSession({
+    const { handle } = await createAgentSessionWithStorageAsync({
       ...options.agent,
       sessionId: sessionKey,
       projectStorage: options.projectStorage,
     });
+    return handle;
   };
 }
 
@@ -68,23 +84,13 @@ function createDefaultSessionLister(options: CreateGatewayOptions): SessionRoute
     return async () => ({ sessions: [] });
   }
 
-  return async ({ limit, cursor }) => {
-    const offset = cursor ? Number.parseInt(cursor, 10) : 0;
-    const sessions = await listProjectSessions({
-      ...options.projectStorage!,
-      limit,
-      offset: Number.isFinite(offset) ? offset : 0,
-    });
-    const nextOffset = (Number.isFinite(offset) ? offset : 0) + sessions.length;
-    return {
-      sessions: sessions.map(toGatewaySessionInfo),
-      nextCursor: limit && sessions.length === limit ? String(nextOffset) : undefined,
-    };
-  };
-}
-
-function toGatewaySessionInfo(session: SessionInfo): SessionInfo {
-  return session;
+  const catalog = options.session?.catalog ?? createProjectSessionCatalog({
+    storageProvider: options.projectStorage.storageProvider,
+  });
+  return createGatewaySessionCatalogConsumer({
+    catalog,
+    resolveStorage: () => options.projectStorage!,
+  });
 }
 
 export type { Gateway, GatewayServerInfo };

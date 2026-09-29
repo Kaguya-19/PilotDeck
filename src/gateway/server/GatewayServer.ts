@@ -8,6 +8,9 @@ import { GatewayWsConnection } from "./GatewayWsConnection.js";
 import { ensureGatewayAuthToken } from "./authToken.js";
 import { serveStaticAsset } from "./staticAssets.js";
 import { handleWebApiRequest } from "../../adapters/web/httpRouter.js";
+import { handlePublicHostHttpRequest, type PublicHostProviderResolver } from "../../composition/publicHostHttpTransport.js";
+import { handlePublicApprovalHttpRequest } from "../../composition/publicApprovalHttpTransport.js";
+import type { PublicApprovalBridge } from "../../composition/publicApprovalBridge.js";
 
 export type GatewayServerOptions = {
   gateway: Gateway;
@@ -22,6 +25,8 @@ export type GatewayServerOptions = {
    * project root. If unset, the projectKey is used verbatim as the root.
    */
   resolveProject?: (projectKey: string) => string;
+  publicHostCapabilities?: PublicHostProviderResolver;
+  publicApprovals?: PublicApprovalBridge;
 };
 
 export type GatewayServer = {
@@ -75,6 +80,8 @@ async function handleHttpRequest(
   token: string,
 ): Promise<void> {
   const url = new URL(request.url ?? "/", "http://127.0.0.1");
+  if (await handlePublicApprovalHttpRequest(request, response, { token, bridge: options.publicApprovals })) return;
+  if (await handlePublicHostHttpRequest(request, response, { token, resolve: options.publicHostCapabilities })) return;
   if (url.pathname === "/health") {
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify({ ok: true }));

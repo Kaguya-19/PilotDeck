@@ -14,9 +14,22 @@ export type RouterMutationsLog = {
   systemPromptSlim?: { from: number; to: number; preservedKeywords: string[] };
   toolsStripped?: { before: number; after: number; mode?: "allowlist" | "blocklist"; patterns: string[] };
   orchestrationPromptInjected?: { tier: string; chars: number };
+  orchestrationActivated?: { tier: string; continued: boolean };
   asyncAgentLaunchedRewritten?: boolean;
   subagentTagStripped?: boolean;
-  subagentModelOverride?: boolean;
+  mediaCapabilityRerouted?: {
+    required: import("../../model/protocol/multimodal.js").InputModality[];
+    from: string;
+    to: string;
+  };
+  cacheAwareSwitch?: {
+    action: "kept_sticky" | "switched";
+    from: string;
+    to: string;
+    cachedCost: number;
+    prefillCost: number;
+    estimatedInputTokens: number;
+  };
 };
 
 export type RouterRequestPatch = Pick<
@@ -57,12 +70,16 @@ export type RouterDecisionInput = {
   request: import("../../model/protocol/canonical.js").CanonicalModelRequest;
   sessionId: string;
   isMainAgent: boolean;
+  /** Cancels a pending router judge request when the enclosing turn stops. */
+  abortSignal?: AbortSignal;
   metadata?: {
     lastUsage?: RouterDecisionInputUsageHint;
     explicitProvider?: string;
     explicitModel?: string;
     /** Tier from the previous turn; fed to the judge for context-aware classification. */
     previousTier?: string;
+    previousProvider?: string;
+    previousModel?: string;
   };
 };
 
@@ -71,4 +88,19 @@ export type RouterExecuteContext = {
   turnId: string;
   projectPath?: string;
   abortSignal?: AbortSignal;
+  /**
+   * Optional Gateway-resolved, session-scoped fallback candidates. These
+   * supplement the project router only for this execution and are tried only
+   * before the primary attempt emits user-visible content.
+   */
+  fallbackModels?: ReadonlyArray<{ provider: string; model: string }>;
+  /**
+   * Optional Gateway-resolved SDK policy for this execution. It is evaluated
+   * in addition to the Router's host-wide policy and cannot select a model
+   * that was not otherwise routable.
+   */
+  managedModelPolicy?: {
+    allow: readonly string[];
+    deny: readonly string[];
+  };
 };

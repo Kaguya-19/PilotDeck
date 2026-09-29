@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
 import type { Gateway, GatewayChannelKey } from "../../../gateway/index.js";
+import type { CronResultDelivery } from "../../../cron/index.js";
 import type { ChannelAdapter, ChannelHandle, ChannelLogger, ChannelStartDeps } from "../protocol/ChannelAdapter.js";
+import { deliverChatCronResult } from "../protocol/ImCronDelivery.js";
 import { ImElicitationHelper } from "../protocol/ImElicitationHelper.js";
+import { ImPermissionHelper } from "../protocol/ImPermissionHelper.js";
 import { DingTalkSessionMapper } from "./DingTalkSessionMapper.js";
 import { renderDingTalkEvent } from "./dingtalk-render.js";
 
@@ -36,6 +39,7 @@ export class DingTalkChannel implements ChannelAdapter {
   private client: any = null;
   private activeChats = new Set<string>();
   private readonly elicitation = new ImElicitationHelper();
+  private readonly permissions = new ImPermissionHelper();
   private sessionWebhooks = new Map<string, string>();
   private seenIds = new Set<string>();
 
@@ -92,6 +96,10 @@ export class DingTalkChannel implements ChannelAdapter {
     };
   }
 
+  async deliverCronResult(delivery: CronResultDelivery): Promise<boolean> {
+    return deliverChatCronResult(delivery, this.channelKey, (chatId, text) => this.sendReply(chatId, text));
+  }
+
   private async onDownstream(msg: any): Promise<void> {
     const topic = String(msg?.headers?.topic ?? "");
     if (topic && DingStream && topic !== DingStream.TOPIC_ROBOT) return;
@@ -130,6 +138,33 @@ export class DingTalkChannel implements ChannelAdapter {
         if (confirmation) await this.sendReply(chatId, confirmation);
       } catch (e) {
         this.logger?.error?.(`dingtalk: elicitation answer error: ${e}`);
+      }
+      return;
+    }
+
+    if (this.permissions.hasPending(chatId) && this.gateway) {
+      let answerToken: number | undefined;
+      try {
+        const answer = await this.permissions.answerWithState(chatId, text.trim(), this.gateway);
+        answerToken = answer?.answerToken;
+        if (answer?.text) {
+          const confirmationDelivered = await this.sendReply(chatId, answer.text);
+          if (!confirmationDelivered) {
+            this.permissions.releaseAnswer(chatId, answer.answerToken);
+            return;
+          }
+          if (!answer.canAdvance && !answer.retryPrompt) return;
+          const nextPrompt = this.permissions.takeNextPrompt(chatId, answer.answerToken);
+          if (nextPrompt) {
+            const nextPromptRequestId = this.permissions.getPromptRequestId(chatId, answer.answerToken);
+
+            const delivered = await this.sendReply(chatId, nextPrompt);
+            this.permissions.confirmNextPrompt(chatId, delivered, nextPromptRequestId, answer.answerToken);
+          }
+        }
+      } catch (e) {
+        if (answerToken !== undefined) this.permissions.releaseAnswer(chatId, answerToken);
+        this.logger?.error?.(`dingtalk: permission answer error: ${e}`);
       }
       return;
     }
@@ -195,6 +230,11 @@ export class DingTalkChannel implements ChannelAdapter {
           await this.sendReply(chatId, questionText);
           continue;
         }
+        if (event.type === "permission_request") {
+          const questionText = this.permissions.capture(chatId, sessionKey, event);
+          if (questionText) this.permissions.confirmInitialPrompt(chatId, await this.sendReply(chatId, questionText), event.requestId);
+          continue;
+        }
         const fragment = renderDingTalkEvent(event);
         if (fragment != null) replyText += fragment;
       }
@@ -204,21 +244,22 @@ export class DingTalkChannel implements ChannelAdapter {
     }
 
     this.elicitation.clear(chatId);
+    this.permissions.clearAfterTurn(chatId);
     const finalText = replyText.trim();
     if (finalText) {
       await this.sendReply(chatId, finalText);
     }
   }
 
-  private async sendReply(chatId: string, text: string): Promise<void> {
+  private async sendReply(chatId: string, text: string): Promise<boolean> {
     const sessionWebhook = this.sessionWebhooks.get(chatId);
     if (!sessionWebhook) {
       this.logger?.warn?.(`dingtalk: no sessionWebhook for chat ${chatId}, cannot send`);
-      return;
+      return false;
     }
     if (!WEBHOOK_RE.test(sessionWebhook)) {
       this.logger?.warn?.(`dingtalk: sessionWebhook for ${chatId} failed origin check`);
-      return;
+      return false;
     }
 
     const payload = {
@@ -238,9 +279,12 @@ export class DingTalkChannel implements ChannelAdapter {
       if (!res.ok) {
         const body = await res.text();
         this.logger?.error?.(`dingtalk: sendReply HTTP ${res.status}: ${body.slice(0, 200)}`);
+        return false;
       }
+      return true;
     } catch (e) {
       this.logger?.error?.(`dingtalk: sendReply failed: ${e}`);
+      return false;
     }
   }
 }

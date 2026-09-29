@@ -1,0 +1,9 @@
+# Browser Knowledge model selection: adapter consumption
+
+Consumed public SDK clean PD `35bbd45aafaecdc1500bc08df8ef785fdc4fe39a` and its `browser-knowledge-model-selection-delivery-20260928.md` in the adapter-owned worktree. This increment changes only `knowledge-host-adapter.tsx`, its focused test, and this delivery. It retains auto-upload `ccc4be6a` and prior Knowledge query evidence `f858ddb2`.
+
+For the formal page's single-KB `POST /api/enterprise/knowledge/search`, `planKnowledgePublic` now moves the original `body.model_config_id` value to outer `selectedPdModelId`, removes only `model_config_id` and `knowledge_base_ids` from the search body, and keeps the selected KB ID, query, mode, depth and other filters. An empty string and a stale ID are passed unchanged so the public SDK can reject them before an SD business request; the adapter does not choose another ID or turn the PD catalog ID into an SD model ID. The mounted context still supplies the selected fixed-target scope and request signal. `callPublicHost` returns the original successful body, including original evidence/citations and the SDK's additional `host_model_selection`; non-2xx and abort behavior remain unchanged.
+
+The integration-owned root must supply `hostModelCatalog({signal})` to the SDK gateway from the same authenticated PD host catalog Port/profile/principal used by the browser, using the fixed public contract. A missing callback, invalid/default-mismatched/unavailable selection and SD model field all fail in the SDK before SD dispatch. This adapter commit does not install that callback or claim a live retrieval/model run.
+
+Focused verification: `knowledge-host-adapter.test.tsx` 15/15 PASS under Node 22.23.1; UI `tsc --noEmit -p tsconfig.json` PASS; `git diff --check` PASS. The initial global Node 24/pnpm 11 command stopped at dependency checking before tests; rerun used the existing worktree binaries and changed no dependencies. No business run or gate PASS.

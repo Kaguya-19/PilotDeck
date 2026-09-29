@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type {
   AnalyticsEvent,
@@ -166,11 +166,15 @@ export class TelemetrySender {
 
   private persistQueue(): void {
     try {
+      if (this.queue.length === 0) {
+        rmSync(this.config.queueFilePath, { force: true });
+        return;
+      }
       mkdirSync(dirname(this.config.queueFilePath), { recursive: true });
       const lines = this.queue.map((item) => JSON.stringify(item));
       writeFileSync(
         this.config.queueFilePath,
-        lines.length > 0 ? `${lines.join("\n")}\n` : "",
+        `${lines.join("\n")}\n`,
         "utf8",
       );
     } catch {

@@ -27,16 +27,19 @@ const SLASH_COMMAND_RE = /^\/(?<name>[A-Za-z0-9_:-]+)(?<sep>\s+|$)/;
  * Phase 4 input processor (review decision §3.2 — three-layer slash command):
  *  - adapter pre-parses `/foo` token; passes raw input here
  *  - this processor checks `extension.listCommands()` for a match
- *  - if matched: produces a user message with the command body + arg as text
- *    (still triggers a model call so plugin command bodies get summarized /
- *    executed by the agent loop)
+ *  - if matched: produces a bounded, delimited command body + argument
+ *    message (still triggers a model call so plugin command bodies get
+ *    summarized / executed by the agent loop)
  *  - if unmatched: passes through as plain text and flags an `unknown_command`
  *    diagnostic
  *
- * The extension owner has not yet finished plugin command body extraction, so
- * we only attach `name` / `argument`; the loop forwards the original text to
- * the model verbatim until the contribution view is wired (Phase 6).
+ * The resolver is session-scoped. It must be constructed from the same frozen
+ * extension snapshot as the session's tools and prompts, so reload cannot
+ * change an existing session's command semantics.
  */
+export const MAX_PLUGIN_COMMAND_BODY_CHARS = 32_000;
+export const MAX_PLUGIN_COMMAND_ARGUMENT_CHARS = 8_000;
+
 export class InputProcessor {
   private readonly extension: ExtensionResolver;
 
@@ -81,15 +84,18 @@ export class InputProcessor {
       };
     }
 
-    const text = argument
-      ? `Run plugin command "/${commandName}" with argument: ${argument}`
-      : `Run plugin command "/${commandName}".`;
+    const rendered = renderPluginCommand(commandName, command, argument);
     return {
-      messages: [{ role: "user", content: [{ type: "text", text }] }],
+      messages: [{ role: "user", content: [{ type: "text", text: rendered.text }] }],
       shouldCallModel: !input.isMeta,
-      diagnostics: [],
+      diagnostics: rendered.diagnostics,
       command: { name: commandName, argument: argument || undefined, source: "extension" },
     };
+  }
+
+  /** Implements the Agent input-admission Definition without owning its turn. */
+  accept(input: ContextInputBlock): ContextInputResult {
+    return this.process(input);
   }
 
   private findCommand(name: string): ContributedCommand | undefined {
@@ -99,4 +105,72 @@ export class InputProcessor {
 
 function cloneBlocks(blocks: CanonicalContentBlock[]): CanonicalContentBlock[] {
   return blocks.map((block) => ({ ...block }));
+}
+
+function renderPluginCommand(
+  commandName: string,
+  command: ContributedCommand,
+  argument: string,
+): { text: string; diagnostics: ContextInputResult["diagnostics"] } {
+  const body = command.content?.trim() ?? "";
+  if (body.length === 0) {
+    return {
+      text: argument
+        ? `Run plugin command "/${commandName}" with argument: ${argument}`
+        : `Run plugin command "/${commandName}".`,
+      diagnostics: [],
+    };
+  }
+
+  const diagnostics: ContextInputResult["diagnostics"] = [];
+  const boundedBody = truncateCommandSection(body, MAX_PLUGIN_COMMAND_BODY_CHARS);
+  if (boundedBody.truncated) {
+    diagnostics.push({
+      code: "plugin_command_body_truncated",
+      severity: "warning",
+      message: `Plugin command /${commandName} body exceeded ${MAX_PLUGIN_COMMAND_BODY_CHARS} characters and was truncated.`,
+    });
+  }
+  const boundedArgument = truncateCommandSection(argument, MAX_PLUGIN_COMMAND_ARGUMENT_CHARS);
+  if (boundedArgument.truncated) {
+    diagnostics.push({
+      code: "plugin_command_argument_truncated",
+      severity: "warning",
+      message: `Plugin command /${commandName} argument exceeded ${MAX_PLUGIN_COMMAND_ARGUMENT_CHARS} characters and was truncated.`,
+    });
+  }
+
+  const forbidden = `${boundedBody.value}\n${boundedArgument.value}`;
+  const bodySection = formatDelimitedCommandSection("command-body", boundedBody.value, forbidden);
+  const argumentSection = boundedArgument.value.length > 0
+    ? `\n${formatDelimitedCommandSection("command-argument", boundedArgument.value, forbidden)}`
+    : "";
+  return {
+    text: [
+      `<plugin-command name="/${commandName}">`,
+      bodySection,
+      argumentSection,
+      "</plugin-command>",
+    ].join("\n"),
+    diagnostics,
+  };
+}
+
+function truncateCommandSection(value: string, limit: number): { value: string; truncated: boolean } {
+  if (value.length <= limit) return { value, truncated: false };
+  const marker = "\n[truncated by PilotDeck command admission]";
+  return {
+    value: `${value.slice(0, Math.max(0, limit - marker.length))}${marker}`,
+    truncated: true,
+  };
+}
+
+function formatDelimitedCommandSection(name: string, value: string, forbidden: string): string {
+  let suffix = 0;
+  let delimiter = `<<<PILOTDECK_${name.replaceAll("-", "_").toUpperCase()}_${suffix}>>>`;
+  while (forbidden.includes(delimiter)) {
+    suffix += 1;
+    delimiter = `<<<PILOTDECK_${name.replaceAll("-", "_").toUpperCase()}_${suffix}>>>`;
+  }
+  return [`<${name}>`, delimiter, value, delimiter, `</${name}>`].join("\n");
 }

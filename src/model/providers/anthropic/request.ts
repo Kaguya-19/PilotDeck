@@ -6,7 +6,12 @@ import type {
   CanonicalToolChoice,
   CanonicalToolSchema,
   ModelDefinition,
+  ProviderConfig,
 } from "../../protocol/canonical.js";
+import { resolveThinkingPlan, throwIfUnsupportedThinkingPlan } from "../../thinking/registry.js";
+import { messageContent } from "../../protocol/clone.js";
+import { formatToolResultReferenceText } from "../toolResultReferenceText.js";
+import { hasSpeedMapping, mapSpeedToAnthropicSpeed } from "../../request/speedMapping.js";
 
 export type AnthropicRequestBody = {
   model: string;
@@ -15,10 +20,12 @@ export type AnthropicRequestBody = {
   system?: string | unknown[];
   tools?: AnthropicTool[];
   tool_choice?: Record<string, unknown>;
-  temperature?: number;
+  speed?: "fast";
   thinking?: {
-    type: "enabled";
-    budget_tokens?: number;
+    type: "disabled" | "adaptive";
+  };
+  output_config?: {
+    effort?: string;
   };
   stream?: boolean;
   metadata?: Record<string, unknown>;
@@ -33,8 +40,14 @@ type AnthropicTool = {
   name: string;
   description?: string;
   input_schema: Record<string, unknown>;
+  cache_control?: { type: "ephemeral"; ttl: "5m" };
 };
 
+const ANTHROPIC_PROMPT_CACHE_TTL = "5m" as const;
+
+function createPromptCacheControl(): { type: "ephemeral"; ttl: "5m" } {
+  return { type: "ephemeral", ttl: ANTHROPIC_PROMPT_CACHE_TTL };
+}
 /**
  * Reserved tool name for Anthropic structured-output enforcement.
  * Exported so `extractStructuredOutput` and tests can recognize it.
@@ -44,7 +57,10 @@ export const ANTHROPIC_STRUCTURED_OUTPUT_TOOL_NAME = "__output__";
 export function buildAnthropicRequest(
   request: CanonicalModelRequest,
   model: ModelDefinition,
+  provider?: ProviderConfig,
 ): AnthropicRequestBody {
+  const thinkingPlan = resolveThinkingPlan(request.thinking, provider ?? { id: "anthropic", protocol: "anthropic", url: "", apiKey: "", headers: {}, models: {} }, model);
+  throwIfUnsupportedThinkingPlan(thinkingPlan, request);
   // A3: lower outputSchema → forced hidden tool. This goes BEFORE the
   // user-supplied tools so the dispatch order is stable, but Anthropic
   // does not actually care about ordering. We force `tool_choice` to point
@@ -62,14 +78,23 @@ export function buildAnthropicRequest(
   }
 
   const tools: AnthropicTool[] = outputTool ? [outputTool, ...baseTools] : baseTools;
+  const cacheTools = request.cachePlan?.tools === true && tools.length > 0;
+  if (cacheTools) {
+    const lastTool = tools[tools.length - 1];
+    if (lastTool) {
+      tools[tools.length - 1] = { ...lastTool, cache_control: createPromptCacheControl() };
+    }
+  }
 
-  // Anthropic allows at most 4 cache_control blocks per request.
-  // Reserve 1 for the system prompt; keep the 3 most recent message breakpoints.
-  const MAX_MESSAGE_BREAKPOINTS = 3;
-  const trimmedBreakpoints = request.cacheBreakpoints
-    ? request.cacheBreakpoints.length > MAX_MESSAGE_BREAKPOINTS
-      ? request.cacheBreakpoints.slice(-MAX_MESSAGE_BREAKPOINTS)
-      : request.cacheBreakpoints
+  // Anthropic allows at most 4 cache_control blocks per request. The default
+  // PilotDeck layout uses system + recent3; an explicit tools marker consumes
+  // one slot and therefore trims message breakpoints to two.
+  const MAX_MESSAGE_BREAKPOINTS = cacheTools ? 2 : 3;
+  const requestedBreakpoints = request.cachePlan?.messages ?? request.cacheBreakpoints;
+  const trimmedBreakpoints = requestedBreakpoints
+    ? requestedBreakpoints.length > MAX_MESSAGE_BREAKPOINTS
+      ? requestedBreakpoints.slice(-MAX_MESSAGE_BREAKPOINTS)
+      : requestedBreakpoints
     : null;
   const cacheBreakpoints = trimmedBreakpoints
     ? new Set(trimmedBreakpoints)
@@ -82,17 +107,21 @@ export function buildAnthropicRequest(
       toAnthropicMessage(message, cacheBreakpoints?.has(index) ?? false),
     ),
     system: request.systemPrompt
-      ? cacheBreakpoints
-        ? [{ type: "text", text: request.systemPrompt, cache_control: { type: "ephemeral" } }]
+      ? (request.cachePlan?.system === true
+        || (request.cachePlan === undefined && request.cacheBreakpoints !== undefined))
+        ? [{ type: "text", text: request.systemPrompt, cache_control: createPromptCacheControl() }]
         : request.systemPrompt
       : undefined,
     tools: tools.length > 0 ? tools : undefined,
     tool_choice: toolChoice,
-    temperature: request.temperature,
-    thinking:
-      request.thinking?.enabled && model.capabilities.supportsThinking
-        ? { type: "enabled", budget_tokens: request.thinking.budgetTokens }
-        : undefined,
+    speed: request.speed !== undefined && model.capabilities.supportsSpeed === true
+      && hasSpeedMapping(provider?.speedMapping, "anthropic_speed")
+      ? mapSpeedToAnthropicSpeed(request.speed)
+      : undefined,
+    thinking: thinkingPlan.thinkingType ? { type: thinkingPlan.thinkingType } : undefined,
+    output_config: thinkingPlan.useAnthropicOutputEffort && thinkingPlan.effort
+      ? { effort: thinkingPlan.effort }
+      : undefined,
     stream: request.stream,
     metadata: toAnthropicMetadata(request.metadata),
   };
@@ -114,19 +143,22 @@ function toAnthropicMessage(
   message: CanonicalMessage,
   markCacheBreakpoint: boolean,
 ): AnthropicMessage {
-  const content = message.content.map(toAnthropicContentBlock);
+  const content = messageContent(message).map(toAnthropicContentBlock);
 
-  // A4: attach `cache_control: { type: "ephemeral" }` to the LAST content
-  // block of this message. Anthropic anchors the cache breakpoint at this
-  // block, so the prefix up to and including it is cached. Caller
-  // (`CachedMicroCompactionEngine`) chooses which messages to mark.
+  // A4: attach `cache_control: { type: "ephemeral", ttl: "5m" }` to the
+  // last cacheable content block. Anthropic thinking blocks cannot carry a
+  // cache marker, so a thinking-only message is left unmarked.
   if (markCacheBreakpoint && content.length > 0) {
-    const last = content[content.length - 1];
-    if (last && typeof last === "object") {
-      content[content.length - 1] = {
-        ...(last as Record<string, unknown>),
-        cache_control: { type: "ephemeral" },
+    for (let index = content.length - 1; index >= 0; index--) {
+      const candidate = content[index];
+      if (!candidate || typeof candidate !== "object" || (candidate as { type?: string }).type === "thinking") {
+        continue;
+      }
+      content[index] = {
+        ...(candidate as Record<string, unknown>),
+        cache_control: createPromptCacheControl(),
       };
+      break;
     }
   }
 
@@ -140,8 +172,16 @@ function toAnthropicContentBlock(block: CanonicalContentBlock): unknown {
   switch (block.type) {
     case "text":
       return { type: "text", text: block.text };
-    case "thinking":
-      return { type: "thinking", thinking: block.text };
+    case "thinking": {
+      const thinking: { type: "thinking"; thinking: string; signature?: string } = {
+        type: "thinking",
+        thinking: block.text,
+      };
+      if (block.signature) {
+        thinking.signature = block.signature;
+      }
+      return thinking;
+    }
     case "image":
       return block.source === "url"
         ? { type: "image", source: { type: "url", url: block.data } }
@@ -176,12 +216,12 @@ function toAnthropicContentBlock(block: CanonicalContentBlock): unknown {
         tool_use_id: block.toolCallId,
         content: [{
           type: "text",
-          text: block.preview + (block.hasMore
-            ? `\n\n[Truncated: original ${block.originalBytes} bytes, file: ${block.path}]`
-            : ""),
+          text: formatToolResultReferenceText(block),
         }],
-        is_error: false,
+        is_error: block.isError,
       };
+    case "media_reference":
+      return { type: "text", text: block.preview };
   }
 }
 

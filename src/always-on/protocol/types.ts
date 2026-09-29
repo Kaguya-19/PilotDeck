@@ -57,6 +57,7 @@ export type DiscoveryPlanStatus =
   | "ready"
   | "executing"
   | "completed"
+  | "completed_no_report"
   | "failed"
   | "archived";
 
@@ -134,7 +135,6 @@ export type DiscoveryRunHistoryEvent = {
 };
 
 export type GateBlockReason =
-  | "disabled"
   | "project_disabled"
   | "project_missing"
   | "dormant_no_signal"

@@ -1,6 +1,9 @@
 export {
+  DEFAULT_PERMISSION_MODE,
+  PERMISSION_MODES,
   createDefaultPermissionContext,
   emptyPermissionRuleSet,
+  isPermissionMode,
   type PermissionContext,
   type PermissionDecision,
   type PermissionDecisionReason,
@@ -15,6 +18,8 @@ export {
 } from "./protocol/types.js";
 export { matchPermissionRule } from "./policy/matchPermissionRule.js";
 export { PermissionRuntime } from "./decision/PermissionRuntime.js";
+export type { PermissionDecisionPort } from "./PermissionDecisionPort.js";
+export type { InteractionOutcome, InteractionDeadline, InteractionRequestKind } from "../interaction/index.js";
 export {
   DEFAULT_PERMISSION_SETTINGS,
   getPermissionSettingsPath,

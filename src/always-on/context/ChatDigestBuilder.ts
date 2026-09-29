@@ -1,7 +1,5 @@
-import { join } from "node:path";
-import { getPilotProjectChatDir } from "../../pilot/paths.js";
-import { listProjectSessions, type SessionInfo } from "../../session/storage/SessionList.js";
-import { readSessionLite } from "../../session/storage/SessionLiteReader.js";
+import type { SessionCatalogPort } from "../../session/catalog/SessionCatalogPort.js";
+import type { SessionTranscriptReaderPort } from "../../session/history/SessionTranscriptReaderPort.js";
 
 export type ChatSessionDigest = {
   sessionId: string;
@@ -21,6 +19,10 @@ export type ChatDigest = {
 export type BuildChatDigestOptions = {
   projectRoot: string;
   pilotHome: string;
+  /** Application-selected read-only catalog of durable sessions. */
+  sessionCatalog: SessionCatalogPort;
+  /** Application-selected durable transcript reader. */
+  sessionTranscriptReader: SessionTranscriptReaderPort;
   maxSessions?: number;
   maxPromptsPerSession?: number;
   maxPromptLength?: number;
@@ -47,7 +49,7 @@ export async function buildChatDigest(
   const maxLen = options.maxPromptLength ?? DEFAULT_MAX_PROMPT_LENGTH;
   const now = (options.now ?? (() => new Date()))();
 
-  const allSessions = await listProjectSessions({
+  const allSessions = await options.sessionCatalog.list({
     projectRoot: options.projectRoot,
     pilotHome: options.pilotHome,
     includeInternal: false,
@@ -56,16 +58,18 @@ export async function buildChatDigest(
     (s) => !DIGEST_EXCLUDED_PREFIXES.some((p) => s.sessionId.startsWith(p)),
   );
 
-  const chatDir = getPilotProjectChatDir(options.projectRoot, options.pilotHome);
   const digests: ChatSessionDigest[] = [];
   const aliasMap = new Map<string, string>();
   let aliasCounter = 0;
 
   for (const session of sessions.slice(0, maxSessions)) {
-    const lite = await readSessionLite(join(chatDir, `${session.sessionId}.jsonl`));
-    if (!lite) continue;
-
-    const prompts = extractAllUserPrompts(`${lite.head}\n${lite.tail}`, maxPrompts, maxLen);
+    const { prompts } = await options.sessionTranscriptReader.readUserPromptDigest({
+      projectRoot: options.projectRoot,
+      pilotHome: options.pilotHome,
+      sessionId: session.sessionId,
+      maxPrompts,
+      maxPromptLength: maxLen,
+    });
     if (prompts.length === 0) continue;
 
     aliasCounter += 1;
@@ -77,7 +81,7 @@ export async function buildChatDigest(
       alias,
       title: session.summary,
       lastModified: new Date(session.lastModified).toISOString(),
-      userPrompts: prompts,
+      userPrompts: [...prompts],
     });
   }
 
@@ -86,48 +90,4 @@ export async function buildChatDigest(
     sessions: digests,
     aliasMap,
   };
-}
-
-/**
- * Extract user prompt texts from JSONL head+tail content.
- *
- * Each accepted_input entry has the shape:
- * ```
- * { "type": "accepted_input", "messages": [{ "content": [{ "type": "text", "text": "..." }] }] }
- * ```
- *
- * We deduplicate by text identity (head and tail may overlap for small files).
- */
-export function extractAllUserPrompts(
-  source: string,
-  maxPrompts: number,
-  maxLength: number,
-): string[] {
-  const seen = new Set<string>();
-  const prompts: string[] = [];
-
-  for (const line of source.split(/\r?\n/)) {
-    if (!line.includes('"type":"accepted_input"')) continue;
-    try {
-      const entry = JSON.parse(line) as {
-        messages?: Array<{ content?: Array<{ type?: string; text?: string }> }>;
-      };
-      const texts = entry.messages
-        ?.flatMap((m) => m.content ?? [])
-        .filter((b): b is { type: string; text: string } => b.type === "text" && typeof b.text === "string")
-        .map((b) => b.text.trim())
-        .filter((t) => t.length > 0) ?? [];
-
-      for (const text of texts) {
-        if (seen.has(text)) continue;
-        seen.add(text);
-        prompts.push(text.length > maxLength ? `${text.slice(0, maxLength)}...` : text);
-        if (prompts.length >= maxPrompts) return prompts;
-      }
-    } catch {
-      // malformed line — skip
-    }
-  }
-
-  return prompts;
 }

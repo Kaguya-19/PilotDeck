@@ -1,0 +1,383 @@
+sops:
+  - id: project_delivery_plan
+    skill_id: project_delivery_plan
+    version: 1.0.0
+    name: 项目推进计划整理
+    business_domain: 项目与交付管理
+    description: 将项目目标和当前状态整理为里程碑、风险与行动清单。
+    content:
+      skill_id: project_delivery_plan
+      name: 项目推进计划整理（G5 复核）
+      version: 1.1.0
+      business_domain: 项目与交付管理
+      description: 将项目目标和当前状态整理为里程碑、风险与行动清单，并保留完整流程结构。
+      capability_scope: general
+      step_timeout_seconds: 120
+      trigger_intents:
+        - 梳理项目计划
+        - 跟踪项目风险
+        - 准备项目周报
+      user_utterance_examples:
+        - 帮我拆一下项目里程碑
+        - 这个项目有哪些风险
+        - 把当前进度整理成行动清单
+      goal:
+        - 明确项目目标和验收条件
+        - 形成里程碑与责任人清单
+        - 暴露风险、依赖和待决策事项
+      required_info:
+        - project_goal
+        - current_stage
+        - known_blockers
+      slot_filling_policy:
+        description: 每轮提取全部已出现信息并跳过已满足项。
+        enabled: true
+        extract_scope: all_skill_expected_user_info
+        multi_slot_per_turn: true
+        skip_satisfied_steps: true
+        target_info:
+          - current_stage
+          - known_blockers
+          - project_goal
+      response_rules:
+        - 每个行动项应尽量包含责任人和时间点。
+        - 范围、资源和日期变化必须明确影响与决策需求。
+      nodes:
+        - node_id: collect_status
+          type: collect_info
+          name: 收集项目状态
+          instruction: 提取项目目标、当前阶段、已有里程碑、责任人和阻塞项。用户已提供的信息不得重复追问。
+          optional: false
+          condition: default
+          expected_user_info:
+            - project_goal
+            - current_stage
+            - known_blockers
+          allowed_actions:
+            - extract_slots
+          knowledge_scope: {}
+          capability_refs:
+            general_skill_ids: []
+            tool_ids: []
+            knowledge_base_ids: []
+            required_general_skill_ids: []
+            required_tool_ids: []
+            required_knowledge_base_ids: []
+          retry_policy:
+            max_retries: 3
+            strategy: ask_missing
+          metadata:
+            phase: discovery
+        - node_id: build_plan
+          type: response
+          name: 生成推进计划
+          instruction: 依据项目状态输出目标与范围、里程碑表、行动项、风险与依赖、待决策事项。
+          optional: false
+          condition: slots_complete
+          expected_user_info: []
+          allowed_actions:
+            - answer_user
+          knowledge_scope:
+            resource_types:
+              - knowledge_base
+          capability_refs:
+            general_skill_ids:
+              - project_planning
+            tool_ids: []
+            knowledge_base_ids:
+              - project_delivery_context
+            required_general_skill_ids:
+              - project_planning
+            required_tool_ids: []
+            required_knowledge_base_ids:
+              - project_delivery_context
+          retry_policy:
+            max_retries: 2
+            strategy: retry_same_step
+          metadata:
+            phase: planning
+        - node_id: confirm_scope
+          type: handoff
+          name: 确认范围变更
+          instruction: 范围、资源或日期发生变化时，请负责人确认影响与后续安排。
+          optional: true
+          condition: scope_changed
+          expected_user_info: []
+          allowed_actions:
+            - handoff_human
+            - answer_user
+          knowledge_scope: {}
+          capability_refs:
+            general_skill_ids:
+              - project_planning
+            tool_ids: []
+            knowledge_base_ids: []
+            required_general_skill_ids:
+              - project_planning
+            required_tool_ids: []
+            required_knowledge_base_ids: []
+          retry_policy:
+            max_retries: 1
+            strategy: ask_missing
+          metadata:
+            phase: approval
+            optional: true
+          assignee_user_id: null
+          assignee_notify_channel: web
+        - node_id: finalize_plan
+          type: response
+          name: 输出最终行动清单
+          instruction: 汇总已确认的里程碑、责任人、风险、依赖和待决策事项，并明确下一步。
+          optional: false
+          condition: confirmation_received
+          expected_user_info: []
+          allowed_actions:
+            - answer_user
+          knowledge_scope: {}
+          capability_refs:
+            general_skill_ids:
+              - project_planning
+            tool_ids: []
+            knowledge_base_ids: []
+            required_general_skill_ids: []
+            required_tool_ids: []
+            required_knowledge_base_ids: []
+          retry_policy:
+            max_retries: 2
+            strategy: retry_same_step
+          metadata:
+            phase: completion
+      edges:
+        - source_node_id: collect_status
+          next_node_id: build_plan
+          condition: default
+          priority: 1
+          label: 项目信息完整
+        - source_node_id: build_plan
+          next_node_id: confirm_scope
+          condition: scope_changed
+          priority: 10
+          label: 需要负责人确认
+        - source_node_id: build_plan
+          next_node_id: finalize_plan
+          condition: no_scope_change
+          priority: 1
+          label: 无需额外确认
+        - source_node_id: confirm_scope
+          next_node_id: finalize_plan
+          condition: confirmation_received
+          priority: 1
+          label: 已完成确认
+      start_node_id: collect_status
+      terminal_node_ids:
+        - finalize_plan
+      interruption_policy:
+        allow_interrupt: "true"
+        description: 允许随时更新范围、里程碑、阻塞和负责人。
+        strategy: resume_from_last_state
+    validation_errors: []
+    status: published
+    call_count: 0
+    positive_feedback_count: 0
+    negative_feedback_count: 0
+    positive_rate: 0
+    negative_rate: 0
+    total_call_count: 0
+    total_positive_feedback_count: 0
+    total_negative_feedback_count: 0
+    total_positive_rate: 0
+    total_negative_rate: 0
+    recent_versions:
+      - 1.0.0
+    recent_call_count: 0
+    recent_positive_feedback_count: 0
+    recent_negative_feedback_count: 0
+    recent_positive_rate: 0
+    recent_negative_rate: 0
+    agent_id: agent_preset_project_001
+    branch_status: synced
+    branch_sync_state: synced
+    branch_base_version: 1.0.0
+    branch_head_version: 1.0.0
+    metadata:
+      created_by: admin
+      created_by_display_name: Administrator
+      created_by_user_id: admin
+      created_by_username: admin
+      creator_name: admin
+      owner_display_name: Administrator
+      owner_user_id: admin
+      owner_username: admin
+      gallery_published_by: admin
+      created_from_agent: true
+      owner_agent_id: agent_preset_project_001
+      scope: agent_private
+      visibility: agent_private
+    created_at: 2026-09-22T03:59:08.854910
+    updated_at: 2026-09-22T06:03:42.553639
+    draft_id: skill_preset_project_001
+    capability_scope: general
+    step_timeout_seconds: 120
+    trigger_intents:
+      - 梳理项目计划
+      - 跟踪项目风险
+      - 准备项目周报
+    user_utterance_examples:
+      - 帮我拆一下项目里程碑
+      - 这个项目有哪些风险
+      - 把当前进度整理成行动清单
+    goal:
+      - 明确项目目标和验收条件
+      - 形成里程碑与责任人清单
+      - 暴露风险、依赖和待决策事项
+    required_info:
+      - project_goal
+      - current_stage
+      - known_blockers
+    slot_filling_policy:
+      description: 每轮提取全部已出现信息并跳过已满足项。
+      enabled: true
+      extract_scope: all_skill_expected_user_info
+      multi_slot_per_turn: true
+      skip_satisfied_steps: true
+      target_info:
+        - current_stage
+        - known_blockers
+        - project_goal
+    response_rules:
+      - 每个行动项应尽量包含责任人和时间点。
+      - 范围、资源和日期变化必须明确影响与决策需求。
+    nodes:
+      - node_id: collect_status
+        type: collect_info
+        name: 收集项目状态
+        instruction: 提取项目目标、当前阶段、已有里程碑、责任人和阻塞项。用户已提供的信息不得重复追问。
+        optional: false
+        condition: default
+        expected_user_info:
+          - project_goal
+          - current_stage
+          - known_blockers
+        allowed_actions:
+          - extract_slots
+        knowledge_scope: {}
+        capability_refs:
+          general_skill_ids: []
+          tool_ids: []
+          knowledge_base_ids: []
+          required_general_skill_ids: []
+          required_tool_ids: []
+          required_knowledge_base_ids: []
+        retry_policy:
+          max_retries: 3
+          strategy: ask_missing
+        metadata:
+          phase: discovery
+      - node_id: build_plan
+        type: response
+        name: 生成推进计划
+        instruction: 依据项目状态输出目标与范围、里程碑表、行动项、风险与依赖、待决策事项。
+        optional: false
+        condition: slots_complete
+        expected_user_info: []
+        allowed_actions:
+          - answer_user
+        knowledge_scope:
+          resource_types:
+            - knowledge_base
+        capability_refs:
+          general_skill_ids:
+            - project_planning
+          tool_ids: []
+          knowledge_base_ids:
+            - project_delivery_context
+          required_general_skill_ids:
+            - project_planning
+          required_tool_ids: []
+          required_knowledge_base_ids:
+            - project_delivery_context
+        retry_policy:
+          max_retries: 2
+          strategy: retry_same_step
+        metadata:
+          phase: planning
+      - node_id: confirm_scope
+        type: handoff
+        name: 确认范围变更
+        instruction: 范围、资源或日期发生变化时，请负责人确认影响与后续安排。
+        optional: true
+        condition: scope_changed
+        expected_user_info: []
+        allowed_actions:
+          - handoff_human
+          - answer_user
+        knowledge_scope: {}
+        capability_refs:
+          general_skill_ids:
+            - project_planning
+          tool_ids: []
+          knowledge_base_ids: []
+          required_general_skill_ids:
+            - project_planning
+          required_tool_ids: []
+          required_knowledge_base_ids: []
+        retry_policy:
+          max_retries: 1
+          strategy: ask_missing
+        metadata:
+          phase: approval
+          optional: true
+        assignee_user_id: null
+        assignee_notify_channel: web
+      - node_id: finalize_plan
+        type: response
+        name: 输出最终行动清单
+        instruction: 汇总已确认的里程碑、责任人、风险、依赖和待决策事项，并明确下一步。
+        optional: false
+        condition: confirmation_received
+        expected_user_info: []
+        allowed_actions:
+          - answer_user
+        knowledge_scope: {}
+        capability_refs:
+          general_skill_ids:
+            - project_planning
+          tool_ids: []
+          knowledge_base_ids: []
+          required_general_skill_ids: []
+          required_tool_ids: []
+          required_knowledge_base_ids: []
+        retry_policy:
+          max_retries: 2
+          strategy: retry_same_step
+        metadata:
+          phase: completion
+    edges:
+      - source_node_id: collect_status
+        next_node_id: build_plan
+        condition: default
+        priority: 1
+        label: 项目信息完整
+      - source_node_id: build_plan
+        next_node_id: confirm_scope
+        condition: scope_changed
+        priority: 10
+        label: 需要负责人确认
+      - source_node_id: build_plan
+        next_node_id: finalize_plan
+        condition: no_scope_change
+        priority: 1
+        label: 无需额外确认
+      - source_node_id: confirm_scope
+        next_node_id: finalize_plan
+        condition: confirmation_received
+        priority: 1
+        label: 已完成确认
+    start_node_id: collect_status
+    terminal_node_ids:
+      - finalize_plan
+    interruption_policy:
+      allow_interrupt: "true"
+      description: 允许随时更新范围、里程碑、阻塞和负责人。
+      strategy: resume_from_last_state
+    tenant_id: tenant_demo

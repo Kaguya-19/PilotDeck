@@ -16,7 +16,11 @@ export type PilotDeckCustomRouter = {
 };
 
 export type CustomRouterRegistry = {
-  lookupRouter(extensionId: string): PilotDeckCustomRouter | undefined;
+  /**
+   * Session identity selects the extension generation retained by that
+   * session. Implementations without scoped providers may ignore it.
+   */
+  lookupRouter(extensionId: string, sessionId?: string): PilotDeckCustomRouter | undefined;
 };
 
 export const noopCustomRouterRegistry: CustomRouterRegistry = {

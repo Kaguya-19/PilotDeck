@@ -1,0 +1,59 @@
+sops:
+  - id: operator_approval
+    version: "1"
+    name: Operator approval
+    content:
+      start_node_id: approval
+      nodes:
+        - node_id: approval
+          type: handoff
+          instruction: Wait for an operator decision before completing this request.
+          capability_refs:
+            general_skill_ids: []
+            tool_ids: []
+            knowledge_base_ids: []
+            required_general_skill_ids: []
+            required_tool_ids: []
+            required_knowledge_base_ids: []
+      terminal_node_ids:
+        - approval
+      skill_id: operator_approval
+      name: Operator approval UI verified
+      description: Updated description from PilotDeck UI verification
+      version: 1.1.0
+    start_node_id: approval
+    nodes:
+      - node_id: approval
+        type: handoff
+        instruction: Wait for an operator decision before completing this request.
+    terminal_node_ids:
+      - approval
+    skill_id: operator_approval
+    business_domain: ""
+    status: draft
+    updated_at: 2026-09-21T16:07:28.292Z
+    call_count: 0
+    positive_rate: 0
+    negative_rate: 0
+    total_call_count: 0
+    total_positive_rate: 0
+    total_negative_rate: 0
+    branch_status: synced
+    trigger_intents: []
+    user_utterance_examples: []
+    goal: []
+    required_info: []
+    response_rules: []
+    tenant_id: tenant_demo
+  - id: operator_approval_alternate
+    version: "1"
+    name: Alternate operator approval
+    content:
+      start_node_id: alternate_approval
+      nodes:
+        - node_id: alternate_approval
+          type: handoff
+          instruction: Wait for the alternate operator approval before completing this
+            request.
+      terminal_node_ids:
+        - alternate_approval

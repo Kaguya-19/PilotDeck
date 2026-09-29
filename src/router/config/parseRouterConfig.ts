@@ -1,5 +1,10 @@
 import type { ModelConfig } from "../../model/index.js";
 import {
+  LITELLM_DEFAULT_MAX_RETRIES,
+  LITELLM_INITIAL_RETRY_DELAY_MS,
+  LITELLM_MAX_RETRY_DELAY_MS,
+} from "../../model/streaming/streamModel.js";
+import {
   DEFAULT_ALLOWED_TOOLS,
   DEFAULT_BLOCKED_TOOLS,
   DEFAULT_JUDGE_TIMEOUT_MS,
@@ -8,7 +13,9 @@ import {
   DEFAULT_TIER_RULES,
   DEFAULT_TRIGGER_TIERS,
   DEFAULT_ZERO_USAGE_MAX_ATTEMPTS,
+  LITELLM_ROUTER_MAX_FALLBACKS,
   resolveProviderRef,
+  ROUTER_PRICING_UNITS,
   type RouterAutoOrchestrateConfig,
   type RouterConfig,
   type RouterCustomRouterConfig,
@@ -17,6 +24,7 @@ import {
   type RouterScenariosConfig,
   type RouterStatsConfig,
   type RouterTokenSaverConfig,
+  type RouterPricingUnit,
 } from "./schema.js";
 import type { RouterScenarioType } from "../protocol/decision.js";
 
@@ -62,6 +70,27 @@ export function parseRouterConfig(
     return { diagnostics };
   }
 
+  let enabled = true;
+  if (raw.enabled !== undefined) {
+    if (typeof raw.enabled === "boolean") {
+      enabled = raw.enabled;
+    } else {
+      diagnostics.push({
+        code: "ROUTER_ENABLED_INVALID",
+        severity: "fatal",
+        path: "router.enabled",
+        message: "router.enabled must be a boolean.",
+      });
+    }
+  }
+
+  if (!enabled) {
+    return {
+      config: { enabled: false },
+      diagnostics,
+    };
+  }
+
   const scenarios = parseScenarios(raw.scenarios, modelConfig, diagnostics);
   // Don't early-return on `scenarios === undefined`: that's the legitimate
   // "user only filled in tokenSaver / fallback" case. `ensureRouterConfig`
@@ -71,6 +100,7 @@ export function parseRouterConfig(
 
   const fallback = parseFallback(raw.fallback, modelConfig, diagnostics);
   const zeroUsageRetry = parseZeroUsageRetry(raw.zeroUsageRetry, diagnostics);
+  const transientRetry = parseTransientRetry(raw.transientRetry, diagnostics);
   const tokenSaver = parseTokenSaver(raw.tokenSaver, modelConfig, diagnostics);
   const autoOrchestrate = parseAutoOrchestrate(raw.autoOrchestrate, modelConfig, tokenSaver, diagnostics);
   const stats = parseStats(raw.stats, modelConfig, diagnostics);
@@ -78,9 +108,11 @@ export function parseRouterConfig(
 
   return {
     config: {
+      enabled,
       ...(scenarios ? { scenarios } : {}),
       fallback,
       zeroUsageRetry,
+      transientRetry,
       tokenSaver,
       autoOrchestrate,
       stats,
@@ -142,6 +174,19 @@ function parseFallback(
 
   const fallback: RouterFallbackConfig = {};
   for (const [key, value] of Object.entries(raw)) {
+    if (key === "maxFallbacks") {
+      if (typeof value === "number" && Number.isInteger(value) && value >= 0) {
+        fallback.maxFallbacks = value;
+      } else {
+        diagnostics.push({
+          code: "ROUTER_FALLBACK_MAX_FALLBACKS_INVALID",
+          severity: "fatal",
+          path: "router.fallback.maxFallbacks",
+          message: "router.fallback.maxFallbacks must be a non-negative integer.",
+        });
+      }
+      continue;
+    }
     if (!SCENARIO_KEYS.includes(key as RouterScenarioType)) {
       diagnostics.push({
         code: "ROUTER_FALLBACK_UNKNOWN_SCENARIO",
@@ -172,7 +217,69 @@ function parseFallback(
       fallback[key as RouterScenarioType] = refs;
     }
   }
+  if (fallback.maxFallbacks === undefined) {
+    fallback.maxFallbacks = LITELLM_ROUTER_MAX_FALLBACKS;
+  }
   return Object.keys(fallback).length > 0 ? fallback : undefined;
+}
+
+function parseTransientRetry(
+  raw: unknown,
+  diagnostics: RouterConfigDiagnostic[],
+): RouterConfig["transientRetry"] {
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (!isRecord(raw)) {
+    diagnostics.push({
+      code: "ROUTER_TRANSIENT_RETRY_INVALID",
+      severity: "fatal",
+      path: "router.transientRetry",
+      message: "router.transientRetry must be an object.",
+    });
+    return undefined;
+  }
+
+  let enabled = true;
+  if (raw.enabled !== undefined) {
+    if (typeof raw.enabled === "boolean") {
+      enabled = raw.enabled;
+    } else {
+      diagnostics.push({
+        code: "ROUTER_TRANSIENT_RETRY_ENABLED_INVALID",
+        severity: "fatal",
+        path: "router.transientRetry.enabled",
+        message: "enabled must be a boolean.",
+      });
+    }
+  }
+
+  const readNonNegativeNumber = (key: string, fallback: number, integer = false): number => {
+    const value = raw[key];
+    if (value === undefined) {
+      return fallback;
+    }
+    if (
+      typeof value === "number"
+      && Number.isFinite(value)
+      && value >= 0
+      && (!integer || Number.isInteger(value))
+    ) {
+      return value;
+    }
+    diagnostics.push({
+      code: "ROUTER_TRANSIENT_RETRY_VALUE_INVALID",
+      severity: "fatal",
+      path: `router.transientRetry.${key}`,
+      message: `${key} must be a non-negative ${integer ? "integer" : "number"}.`,
+    });
+    return fallback;
+  };
+
+  const maxAttempts = readNonNegativeNumber("maxAttempts", LITELLM_DEFAULT_MAX_RETRIES, true);
+  const baseDelayMs = readNonNegativeNumber("baseDelayMs", LITELLM_INITIAL_RETRY_DELAY_MS);
+  const maxDelayMs = readNonNegativeNumber("maxDelayMs", LITELLM_MAX_RETRY_DELAY_MS);
+  return { enabled, maxAttempts, baseDelayMs, maxDelayMs };
 }
 
 function parseZeroUsageRetry(
@@ -230,7 +337,24 @@ function parseTokenSaver(
     return undefined;
   }
 
-  const enabled = typeof raw.enabled === "boolean" ? raw.enabled : true;
+  let enabled = true;
+  if (raw.enabled !== undefined) {
+    if (typeof raw.enabled === "boolean") {
+      enabled = raw.enabled;
+    } else {
+      diagnostics.push({
+        code: "ROUTER_TOKEN_SAVER_ENABLED_INVALID",
+        severity: "fatal",
+        path: "router.tokenSaver.enabled",
+        message: "tokenSaver.enabled must be a boolean.",
+      });
+    }
+  }
+  if (!enabled) {
+    // Disabled Token Saver does not require judge/tier settings. Runtime
+    // paths guard on `enabled` before reading those fields.
+    return { enabled } as RouterTokenSaverConfig;
+  }
   const judgeRef = consumeRef(raw.judge, "router.tokenSaver.judge", modelConfig, diagnostics);
   if (!judgeRef) {
     return undefined;
@@ -246,7 +370,7 @@ function parseTokenSaver(
     });
     return undefined;
   }
-  const tiers: Record<string, { model: RouterModelRef; description?: string }> = {};
+  const tiers: Record<string, { model: RouterModelRef; label?: string; description?: string }> = {};
   for (const [name, body] of Object.entries(tiersRaw)) {
     if (!isRecord(body)) {
       diagnostics.push({
@@ -263,6 +387,7 @@ function parseTokenSaver(
     }
     tiers[name] = {
       model: ref,
+      label: typeof body.label === "string" ? body.label : undefined,
       description: typeof body.description === "string"
         ? body.description
         : DEFAULT_TIER_DESCRIPTIONS[name],
@@ -343,6 +468,40 @@ function parseTokenSaver(
     }
   }
 
+  let cacheAwareSwitching: RouterTokenSaverConfig["cacheAwareSwitching"] = {
+    enabled: true,
+    minSavingsRatio: 0,
+  };
+  if (raw.cacheAwareSwitching !== undefined) {
+    if (!isRecord(raw.cacheAwareSwitching)) {
+      diagnostics.push({
+        code: "ROUTER_TOKEN_SAVER_CACHE_AWARE_SWITCHING_INVALID",
+        severity: "fatal",
+        path: "router.tokenSaver.cacheAwareSwitching",
+        message: "cacheAwareSwitching must be an object.",
+      });
+    } else {
+      const enabled = typeof raw.cacheAwareSwitching.enabled === "boolean"
+        ? raw.cacheAwareSwitching.enabled
+        : true;
+      const minSavingsRatioRaw = raw.cacheAwareSwitching.minSavingsRatio;
+      let minSavingsRatio = 0;
+      if (minSavingsRatioRaw !== undefined) {
+        if (typeof minSavingsRatioRaw === "number" && Number.isFinite(minSavingsRatioRaw) && minSavingsRatioRaw >= 0) {
+          minSavingsRatio = minSavingsRatioRaw;
+        } else {
+          diagnostics.push({
+            code: "ROUTER_TOKEN_SAVER_CACHE_AWARE_SWITCHING_MIN_SAVINGS_INVALID",
+            severity: "fatal",
+            path: "router.tokenSaver.cacheAwareSwitching.minSavingsRatio",
+            message: "cacheAwareSwitching.minSavingsRatio must be a non-negative number.",
+          });
+        }
+      }
+      cacheAwareSwitching = { enabled, minSavingsRatio };
+    }
+  }
+
   return {
     enabled,
     judge: judgeRef,
@@ -351,6 +510,7 @@ function parseTokenSaver(
     rules,
     subagent,
     judgeTimeoutMs,
+    cacheAwareSwitching,
   };
 }
 
@@ -373,23 +533,21 @@ function parseAutoOrchestrate(
     return undefined;
   }
   const enabled = typeof raw.enabled === "boolean" ? raw.enabled : true;
-  const mainAgentModel = optionalRef(
-    raw.mainAgentModel,
-    "router.autoOrchestrate.mainAgentModel",
-    modelConfig,
-    diagnostics,
-  );
-  const subagentModel = optionalRef(
-    raw.subagentModel,
-    "router.autoOrchestrate.subagentModel",
-    modelConfig,
-    diagnostics,
-  );
+  for (const deprecated of ["mainAgentModel", "subagentModel"] as const) {
+    if (raw[deprecated] !== undefined) {
+      diagnostics.push({
+        code: "ROUTER_AUTO_ORCHESTRATE_DEPRECATED_FIELD",
+        severity: "warning",
+        path: `router.autoOrchestrate.${deprecated}`,
+        message: `router.autoOrchestrate.${deprecated} is deprecated and ignored.`,
+      });
+    }
+  }
   let triggerTiers: string[] = [...DEFAULT_TRIGGER_TIERS];
   if (raw.triggerTiers !== undefined) {
     if (Array.isArray(raw.triggerTiers) && raw.triggerTiers.every((entry) => typeof entry === "string")) {
       triggerTiers = raw.triggerTiers as string[];
-      if (tokenSaver) {
+      if (tokenSaver?.enabled) {
         for (const tier of triggerTiers) {
           if (!tokenSaver.tiers[tier]) {
             diagnostics.push({
@@ -476,8 +634,6 @@ function parseAutoOrchestrate(
 
   return {
     enabled,
-    mainAgentModel,
-    subagentModel,
     triggerTiers,
     allowedTools,
     blockedTools,
@@ -505,7 +661,32 @@ function parseStats(
     });
     return undefined;
   }
-  const enabled = typeof raw.enabled === "boolean" ? raw.enabled : true;
+  let enabled = true;
+  if (raw.enabled !== undefined) {
+    if (typeof raw.enabled === "boolean") {
+      enabled = raw.enabled;
+    } else {
+      diagnostics.push({
+        code: "ROUTER_STATS_ENABLED_INVALID",
+        severity: "fatal",
+        path: "router.stats.enabled",
+        message: "router.stats.enabled must be a boolean.",
+      });
+    }
+  }
+  let retentionMs: number | undefined;
+  if (raw.retentionMs !== undefined) {
+    if (typeof raw.retentionMs === "number" && Number.isSafeInteger(raw.retentionMs) && raw.retentionMs > 0) {
+      retentionMs = raw.retentionMs;
+    } else {
+      diagnostics.push({
+        code: "ROUTER_STATS_RETENTION_INVALID",
+        severity: "fatal",
+        path: "router.stats.retentionMs",
+        message: "router.stats.retentionMs must be a positive safe integer in milliseconds.",
+      });
+    }
+  }
   let modelPricing: RouterStatsConfig["modelPricing"];
   if (raw.modelPricing !== undefined) {
     if (!isRecord(raw.modelPricing)) {
@@ -519,23 +700,43 @@ function parseStats(
       modelPricing = {};
       for (const [key, body] of Object.entries(raw.modelPricing)) {
         if (!isRecord(body)) {
+          diagnostics.push({
+            code: "ROUTER_STATS_PRICING_ENTRY_INVALID",
+            severity: "fatal",
+            path: `router.stats.modelPricing.${key}`,
+            message: "modelPricing entries must be objects.",
+          });
           continue;
         }
+        const ref = consumeRef(key, `router.stats.modelPricing.${key}`, modelConfig, diagnostics);
+        if (!ref) continue;
+        const input = pricingNumber(body.input, `router.stats.modelPricing.${key}.input`, diagnostics);
+        const output = pricingNumber(body.output, `router.stats.modelPricing.${key}.output`, diagnostics);
+        const cacheRead = pricingNumber(body.cacheRead, `router.stats.modelPricing.${key}.cacheRead`, diagnostics);
+        let unit: RouterPricingUnit | undefined;
+        if (body.unit !== undefined) {
+          if (typeof body.unit === "string" && (ROUTER_PRICING_UNITS as readonly string[]).includes(body.unit)) {
+            unit = body.unit as RouterPricingUnit;
+          } else {
+            diagnostics.push({
+              code: "ROUTER_STATS_PRICING_UNIT_INVALID",
+              severity: "fatal",
+              path: `router.stats.modelPricing.${key}.unit`,
+              message: "unit must be one of $/百万 Token or ¥/百万 Token.",
+            });
+          }
+        }
         modelPricing[key] = {
-          input: numberOrUndefined(body.input),
-          output: numberOrUndefined(body.output),
-          cacheRead: numberOrUndefined(body.cacheRead),
+          ...(input === undefined ? {} : { input }),
+          ...(output === undefined ? {} : { output }),
+          ...(cacheRead === undefined ? {} : { cacheRead }),
+          ...(unit === undefined ? {} : { unit }),
         };
       }
     }
   }
-  const baselineModel = optionalRef(
-    raw.baselineModel,
-    "router.stats.baselineModel",
-    modelConfig,
-    diagnostics,
-  );
-  return { enabled, modelPricing, baselineModel };
+  const baselineModel = optionalBaselineModel(raw.baselineModel, modelConfig, diagnostics);
+  return { enabled, modelPricing, baselineModel, ...(retentionMs !== undefined ? { retentionMs } : {}) };
 }
 
 function parseCustomRouter(
@@ -587,8 +788,38 @@ function optionalRef(
   return consumeRef(raw, path, modelConfig, diagnostics);
 }
 
-function numberOrUndefined(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+function optionalBaselineModel(
+  raw: unknown,
+  modelConfig: ModelConfig,
+  diagnostics: RouterConfigDiagnostic[],
+): RouterModelRef | undefined {
+  const path = "router.stats.baselineModel";
+  if (raw === undefined) return undefined;
+  if (isRecord(raw) && typeof raw.provider === "string" && typeof raw.model === "string") {
+    const provider = raw.provider.trim();
+    const model = raw.model.trim();
+    if (provider && model) return consumeRef(`${provider}/${model}`, path, modelConfig, diagnostics);
+  }
+  if (typeof raw === "string") return optionalRef(raw, path, modelConfig, diagnostics);
+  diagnostics.push({
+    code: "ROUTER_REF_INVALID",
+    severity: "fatal",
+    path,
+    message: `${path} must be an object with provider and model.`,
+  });
+  return undefined;
+}
+
+function pricingNumber(value: unknown, path: string, diagnostics: RouterConfigDiagnostic[]): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value === "number" && Number.isFinite(value) && value >= 0) return value;
+  diagnostics.push({
+    code: "ROUTER_STATS_PRICING_VALUE_INVALID",
+    severity: "fatal",
+    path,
+    message: "pricing values must be finite non-negative numbers.",
+  });
+  return undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

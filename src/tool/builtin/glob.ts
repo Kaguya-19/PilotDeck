@@ -1,7 +1,12 @@
+import path from "node:path";
 import type { PilotDeckToolDefinition } from "../protocol/types.js";
 import { PilotDeckToolRuntimeError } from "../protocol/errors.js";
 import { resolvePilotDeckWorkspacePath } from "./filesystem/pathSafety.js";
 import { ripgrepFiles } from "./filesystem/ripgrepFiles.js";
+import { createNodeFsPort } from "../execution-world/NodeFsPort.js";
+import type { FsPort } from "../execution-world/FsPort.js";
+import { createNodeSubprocessPort } from "../execution-world/SubprocessPort.js";
+import type { SubprocessPort } from "../execution-world/SubprocessPort.js";
 
 export type GlobInput = {
   pattern: string;
@@ -9,7 +14,49 @@ export type GlobInput = {
   limit?: number;
 };
 
-export function createGlobTool(): PilotDeckToolDefinition<GlobInput> {
+export type CreateGlobToolOptions = {
+  fs?: FsPort;
+  subprocess?: Pick<SubprocessPort, "executeFile">;
+};
+
+export function extractGlobBaseDirectory(pattern: string): {
+  baseDir: string;
+  relativePattern: string;
+} {
+  const match = pattern.match(/[*?[{]/);
+  if (!match || match.index === undefined) {
+    return {
+      baseDir: path.dirname(pattern),
+      relativePattern: path.basename(pattern),
+    };
+  }
+
+  const staticPrefix = pattern.slice(0, match.index);
+  const lastSepIndex = Math.max(
+    staticPrefix.lastIndexOf("/"),
+    staticPrefix.lastIndexOf(path.sep),
+  );
+
+  if (lastSepIndex === -1) {
+    return { baseDir: "", relativePattern: pattern };
+  }
+
+  let baseDir = staticPrefix.slice(0, lastSepIndex);
+  const relativePattern = pattern.slice(lastSepIndex + 1);
+
+  if (baseDir === "" && lastSepIndex === 0) {
+    baseDir = "/";
+  }
+  if (process.platform === "win32" && /^[A-Za-z]:$/.test(baseDir)) {
+    baseDir = `${baseDir}${path.sep}`;
+  }
+
+  return { baseDir, relativePattern };
+}
+
+export function createGlobTool(options: CreateGlobToolOptions = {}): PilotDeckToolDefinition<GlobInput> {
+  const fs = options.fs ?? createNodeFsPort();
+  const subprocess = options.subprocess ?? createNodeSubprocessPort();
   return {
     name: "glob",
     aliases: ["Glob"],
@@ -23,7 +70,9 @@ export function createGlobTool(): PilotDeckToolDefinition<GlobInput> {
       properties: {
         pattern: {
           type: "string",
-          description: "The glob pattern to match files against.",
+          description:
+            "The glob pattern to match files against. May be workspace-relative, path-relative, "
+            + "or an absolute glob that resolves inside the workspace.",
         },
         path: {
           type: "string",
@@ -41,23 +90,44 @@ export function createGlobTool(): PilotDeckToolDefinition<GlobInput> {
     isReadOnly: () => true,
     isConcurrencySafe: () => true,
     execute: async (input, context) => {
-      const resolved = resolvePilotDeckWorkspacePath(input.path ?? ".", context, { mustExist: true });
-      if (!resolved.ok) {
-        throw new PilotDeckToolRuntimeError(resolved.error.code, resolved.error.message, resolved.error.details);
+      let searchPath = input.path ?? ".";
+      let searchPattern = input.pattern;
+
+      if (path.isAbsolute(input.pattern)) {
+        const extracted = extractGlobBaseDirectory(input.pattern);
+        if (extracted.baseDir) {
+          searchPath = extracted.baseDir;
+          searchPattern = extracted.relativePattern;
+        }
+      }
+
+      const resolvedSearchPath = resolvePilotDeckWorkspacePath(
+        searchPath,
+        context,
+        { mustExist: true },
+      );
+      if (!resolvedSearchPath.ok) {
+        throw new PilotDeckToolRuntimeError(
+          resolvedSearchPath.error.code,
+          resolvedSearchPath.error.message,
+          resolvedSearchPath.error.details,
+        );
       }
 
       const result = await ripgrepFiles({
-        cwd: resolved.absolutePath,
-        pattern: input.pattern,
+        cwd: resolvedSearchPath.absolutePath,
+        pattern: searchPattern,
         limit: input.limit,
         env: context.env,
         signal: context.abortSignal,
+        fs,
+        subprocess,
       });
-      const workspacePrefix = resolved.relativePath === "." ? "" : `${resolved.relativePath}/`;
+      const workspacePrefix = resolvedSearchPath.relativePath === "." ? "" : `${resolvedSearchPath.relativePath}/`;
       const workspaceFiles = result.files.map((file) => `${workspacePrefix}${file}`);
 
       return {
-        content: [{ type: "text", text: workspaceFiles.join("\n") }],
+        content: [{ type: "text", text: formatGlobResult(workspaceFiles, result.count, result.truncated, input.limit) }],
         data: {
           files: workspaceFiles,
           count: result.count,
@@ -67,4 +137,13 @@ export function createGlobTool(): PilotDeckToolDefinition<GlobInput> {
       };
     },
   };
+}
+
+function formatGlobResult(files: string[], totalCount: number, truncated: boolean, limit: number | undefined): string {
+  const lines = files.length > 0 ? [...files] : ["[No files matched]"];
+  lines.push("", `[glob pagination] returned=${files.length} total=${totalCount} truncated=${truncated}${limit !== undefined ? ` limit=${limit}` : ""}`);
+  if (truncated) {
+    lines.push("More files are available. Narrow the pattern/path or call glob again with a higher limit if you need the full list.");
+  }
+  return lines.join("\n");
 }

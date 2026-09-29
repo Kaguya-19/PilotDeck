@@ -1,0 +1,291 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { parseModelConfig } from "../../../src/model/config/parseModelConfig.js";
+
+test("catalog provider resolves api key from default env var when apiKey is omitted", () => {
+  const config = parseModelConfig({
+    providers: {
+      openai: {
+        models: { "gpt-4o-mini": {} },
+      },
+    },
+  }, { env: { OPENAI_API_KEY: " sk-env " } });
+
+  assert.equal(config.providers.openai.apiKey, "sk-env");
+});
+
+test("catalog provider resolves api key from default env var when apiKey is blank", () => {
+  const config = parseModelConfig({
+    providers: {
+      google: {
+        apiKey: "  ",
+        models: { "gemini-2.0-flash": {} },
+      },
+    },
+  }, { env: { GEMINI_API_KEY: " gemini-env " } });
+
+  assert.equal(config.providers.google.apiKey, "gemini-env");
+});
+
+test("Google OpenAI compatibility keeps its official endpoint environment fallback", () => {
+  const config = parseModelConfig({
+    providers: {
+      google: {
+        protocol: "openai",
+        models: { "gemini-2.0-flash": {} },
+      },
+    },
+  }, { env: { GEMINI_API_KEY: "gemini-env" } });
+
+  assert.equal(
+    config.providers.google.url,
+    "https://generativelanguage.googleapis.com/v1beta/openai",
+  );
+  assert.equal(config.providers.google.apiKey, "gemini-env");
+});
+
+test("catalog environment credentials are not inferred for custom provider scopes", () => {
+  assert.throws(
+    () => parseModelConfig({
+      providers: {
+        openai: {
+          protocol: "openai",
+          url: "https://proxy.example/v1",
+          models: { "gpt-4o-mini": {} },
+        },
+      },
+    }, { env: { OPENAI_API_KEY: "catalog-secret" } }),
+    (error: unknown) => (error as { code?: string }).code === "missing_api_key",
+  );
+
+  assert.throws(
+    () => parseModelConfig({
+      providers: {
+        openai: {
+          protocol: "anthropic",
+          url: "https://api.openai.com/v1",
+          models: { "gpt-4o-mini": {} },
+        },
+      },
+    }, { env: { OPENAI_API_KEY: "catalog-secret" } }),
+    (error: unknown) => (error as { code?: string }).code === "missing_api_key",
+  );
+});
+
+test("an explicit environment reference remains valid for a custom endpoint", () => {
+  const config = parseModelConfig({
+    providers: {
+      openai: {
+        protocol: "openai",
+        url: "https://proxy.example/v1",
+        apiKey: "${PROXY_API_KEY}",
+        models: { "gpt-4o-mini": {} },
+      },
+    },
+  }, { env: { PROXY_API_KEY: "proxy-secret" } });
+
+  assert.equal(config.providers.openai.apiKey, "proxy-secret");
+});
+
+test("provider config retains non-secret credential provenance", () => {
+  const config = parseModelConfig({
+    providers: {
+      literal: {
+        protocol: "openai",
+        url: "https://literal.example/v1",
+        apiKey: "literal-key",
+        models: { test: {} },
+      },
+      environment: {
+        protocol: "openai",
+        url: "https://environment.example/v1",
+        apiKey: "${TEST_PROVIDER_API_KEY}",
+        models: { test: {} },
+      },
+      ollama: {
+        models: { llama3: {} },
+      },
+    },
+  }, { env: { TEST_PROVIDER_API_KEY: "environment-key" } });
+
+  assert.equal(config.providers.literal.credentialSource, "literal");
+  assert.equal(config.providers.environment.credentialSource, "environment");
+  assert.equal(config.providers.ollama.credentialSource, "provider_default");
+});
+
+test("unknown custom models default to text-only input", () => {
+  const config = parseModelConfig({
+    providers: {
+      custom: {
+        protocol: "openai",
+        url: "https://example.test/v1",
+        apiKey: "test-key",
+        models: { "text-model": {} },
+      },
+    },
+  });
+
+  assert.deepEqual(config.providers.custom.models["text-model"].multimodal.input, ["text"]);
+});
+
+test("custom models default to thinking support and opt into speed explicitly", () => {
+  const defaulted = parseModelConfig({
+    providers: {
+      custom: {
+        protocol: "openai",
+        url: "https://example.test/v1",
+        apiKey: "test-key",
+        models: { "default-model": {} },
+      },
+    },
+  });
+  assert.equal(defaulted.providers.custom.models["default-model"].capabilities.supportsThinking, true);
+  assert.equal(defaulted.providers.custom.models["default-model"].capabilities.supportsSpeed, undefined);
+
+  const configured = parseModelConfig({
+    providers: {
+      custom: {
+        protocol: "openai",
+        url: "https://example.test/v1",
+        apiKey: "test-key",
+        models: {
+          "speed-model": { capabilities: { supportsThinking: false, supportsSpeed: true } },
+        },
+      },
+    },
+  });
+  assert.equal(configured.providers.custom.models["speed-model"].capabilities.supportsThinking, false);
+  assert.equal(configured.providers.custom.models["speed-model"].capabilities.supportsSpeed, true);
+});
+
+test("official openai and anthropic catalog models default to supporting speed", () => {
+  const config = parseModelConfig({
+    providers: {
+      openai: { models: { "gpt-4o-mini": {} } },
+      anthropic: { models: { "claude-sonnet-4-5-20250929": {} } },
+    },
+  }, { env: { OPENAI_API_KEY: "k", ANTHROPIC_API_KEY: "k" } });
+
+  assert.equal(config.providers.openai.models["gpt-4o-mini"].capabilities.supportsSpeed, true);
+  assert.equal(config.providers.anthropic.models["claude-sonnet-4-5-20250929"].capabilities.supportsSpeed, true);
+});
+
+test("all protocol defaults enable thinking for undeclared models", () => {
+  for (const protocol of ["openai", "anthropic", "google"] as const) {
+    const config = parseModelConfig({
+      providers: {
+        [`custom-${protocol}`]: {
+          protocol,
+          url: "https://example.test/v1",
+          apiKey: "test-key",
+          models: { "undeclared-model": {} },
+        },
+      },
+    });
+    assert.equal(
+      config.providers[`custom-${protocol}`].models["undeclared-model"].capabilities.supportsThinking,
+      true,
+      protocol,
+    );
+  }
+});
+
+test("custom providers require an explicit protocol-compatible speed mapping", () => {
+  const config = parseModelConfig({
+    providers: {
+      custom: {
+        protocol: "openai",
+        url: "https://example.test/v1",
+        apiKey: "test-key",
+        speedMapping: "openai_service_tier",
+        models: { "speed-model": {} },
+      },
+    },
+  });
+  assert.equal(config.providers.custom.speedMapping, "openai_service_tier");
+
+  assert.throws(
+    () => parseModelConfig({
+      providers: {
+        custom: {
+          protocol: "openai",
+          url: "https://example.test/v1",
+          apiKey: "test-key",
+          speedMapping: "anthropic_speed",
+          models: { "speed-model": {} },
+        },
+      },
+    }),
+    (error: unknown) => (error as { code?: string }).code === "invalid_config_value",
+  );
+});
+
+test("custom providers do not infer image input from a cross-provider model name", () => {
+  const config = parseModelConfig({
+    providers: {
+      custom: {
+        protocol: "openai",
+        url: "https://example.test/v1",
+        apiKey: "test-key",
+        models: { "gpt-4o-mini": {} },
+      },
+    },
+  });
+
+  assert.deepEqual(config.providers.custom.models["gpt-4o-mini"].multimodal.input, ["text"]);
+});
+
+test("custom models use explicitly configured image input", () => {
+  const config = parseModelConfig({
+    providers: {
+      custom: {
+        protocol: "openai",
+        url: "https://example.test/v1",
+        apiKey: "test-key",
+        models: {
+          "vision-model": {
+            multimodal: { input: ["text", "image"] },
+          },
+        },
+      },
+    },
+  });
+
+  assert.deepEqual(
+    config.providers.custom.models["vision-model"].multimodal.input,
+    ["text", "image"],
+  );
+});
+
+test("catalog models keep their catalog image capability when no override is set", () => {
+  const config = parseModelConfig({
+    providers: {
+      openai: {
+        apiKey: "test-key",
+        models: { "gpt-4o-mini": {} },
+      },
+    },
+  });
+
+  assert.deepEqual(
+    config.providers.openai.models["gpt-4o-mini"].multimodal.input,
+    ["text", "image"],
+  );
+});
+
+test("catalog model aliases keep their declared provider image capability", () => {
+  const config = parseModelConfig({
+    providers: {
+      openai: {
+        apiKey: "test-key",
+        models: { "gpt-4o-2024-11-20": {} },
+      },
+    },
+  });
+
+  assert.deepEqual(
+    config.providers.openai.models["gpt-4o-2024-11-20"].multimodal.input,
+    ["text", "image"],
+  );
+});

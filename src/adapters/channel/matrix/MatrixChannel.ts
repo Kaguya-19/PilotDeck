@@ -1,9 +1,13 @@
 import { join } from "node:path";
+import { resolvePilotHome } from "../../../pilot/index.js";
 import type { Gateway, GatewayChannelKey } from "../../../gateway/index.js";
+import type { CronResultDelivery } from "../../../cron/index.js";
 import type { ChannelAdapter, ChannelHandle, ChannelLogger, ChannelStartDeps } from "../protocol/ChannelAdapter.js";
+import { deliverChatCronResult } from "../protocol/ImCronDelivery.js";
 import { MatrixSessionMapper } from "./MatrixSessionMapper.js";
 import { renderMatrixEvent } from "./matrix-render.js";
 import { ImElicitationHelper } from "../protocol/ImElicitationHelper.js";
+import { ImPermissionHelper } from "../protocol/ImPermissionHelper.js";
 
 let MatrixSdk: any;
 try {
@@ -20,6 +24,7 @@ export type MatrixChannelOptions = {
   homeserver?: string;
   userId?: string;
   storagePath?: string;
+  pilotHome?: string;
   mapper?: MatrixSessionMapper;
 };
 
@@ -38,13 +43,15 @@ export class MatrixChannel implements ChannelAdapter {
   private userId: string | null = null;
   private activeChats = new Set<string>();
   private readonly elicitation = new ImElicitationHelper();
+  private readonly permissions = new ImPermissionHelper();
 
   constructor(options: MatrixChannelOptions = {}) {
     this.mapper = options.mapper ?? new MatrixSessionMapper();
     this.accessToken = options.accessToken ?? process.env.MATRIX_ACCESS_TOKEN;
     this.homeserver = (options.homeserver ?? process.env.MATRIX_HOMESERVER ?? "").replace(/\/$/, "") || undefined;
     this.userIdOption = options.userId ?? process.env.MATRIX_USER_ID;
-    this.storagePath = options.storagePath ?? join(process.cwd(), ".matrix-bot-storage.json");
+    const pilotHome = options.pilotHome ?? resolvePilotHome(process.env);
+    this.storagePath = options.storagePath ?? join(pilotHome, "matrix-bot-storage.json");
   }
 
   async start(deps: ChannelStartDeps): Promise<ChannelHandle> {
@@ -109,6 +116,10 @@ export class MatrixChannel implements ChannelAdapter {
     };
   }
 
+  async deliverCronResult(delivery: CronResultDelivery): Promise<boolean> {
+    return deliverChatCronResult(delivery, this.channelKey, (chatId, text) => this.sendReply(chatId, text));
+  }
+
   private async handleRoomMessage(roomId: string, raw: any): Promise<void> {
     const sender = raw?.sender as string | undefined;
     if (!sender) return;
@@ -131,6 +142,33 @@ export class MatrixChannel implements ChannelAdapter {
         if (confirmation) await this.sendReply(roomId, confirmation);
       } catch (e) {
         this.logger?.error?.(`matrix: elicitation answer error: ${e}`);
+      }
+      return;
+    }
+
+    if (this.permissions.hasPending(roomId) && this.gateway) {
+      let answerToken: number | undefined;
+      try {
+        const answer = await this.permissions.answerWithState(roomId, text, this.gateway);
+        answerToken = answer?.answerToken;
+        if (answer?.text) {
+          const confirmationDelivered = await this.sendReply(roomId, answer.text);
+          if (!confirmationDelivered) {
+            this.permissions.releaseAnswer(roomId, answer.answerToken);
+            return;
+          }
+          if (!answer.canAdvance && !answer.retryPrompt) return;
+          const nextPrompt = this.permissions.takeNextPrompt(roomId, answer.answerToken);
+          if (nextPrompt) {
+            const nextPromptRequestId = this.permissions.getPromptRequestId(roomId, answer.answerToken);
+
+            const delivered = await this.sendReply(roomId, nextPrompt);
+            this.permissions.confirmNextPrompt(roomId, delivered, nextPromptRequestId, answer.answerToken);
+          }
+        }
+      } catch (e) {
+        if (answerToken !== undefined) this.permissions.releaseAnswer(roomId, answerToken);
+        this.logger?.error?.(`matrix: permission answer error: ${e}`);
       }
       return;
     }
@@ -170,6 +208,11 @@ export class MatrixChannel implements ChannelAdapter {
           await this.sendReply(roomId, questionText);
           continue;
         }
+        if (event.type === "permission_request") {
+          const questionText = this.permissions.capture(roomId, sessionKey, event);
+          if (questionText) this.permissions.confirmInitialPrompt(roomId, await this.sendReply(roomId, questionText), event.requestId);
+          continue;
+        }
         const fragment = renderMatrixEvent(event);
         if (fragment != null) replyText += fragment;
       }
@@ -179,6 +222,7 @@ export class MatrixChannel implements ChannelAdapter {
     }
 
     this.elicitation.clear(roomId);
+    this.permissions.clearAfterTurn(roomId);
 
     const finalText = replyText.trim();
     if (finalText) {
@@ -186,9 +230,10 @@ export class MatrixChannel implements ChannelAdapter {
     }
   }
 
-  private async sendReply(roomId: string, text: string): Promise<void> {
-    if (!this.client) return;
+  private async sendReply(roomId: string, text: string): Promise<boolean> {
+    if (!this.client) return false;
     const chunks = chunkText(text, MAX_MESSAGE_LENGTH);
+    let ok = true;
     for (const chunk of chunks) {
       try {
         await this.client.sendMessage(roomId, {
@@ -197,8 +242,10 @@ export class MatrixChannel implements ChannelAdapter {
         });
       } catch (e) {
         this.logger?.error?.(`matrix: sendMessage failed: ${e}`);
+        ok = false;
       }
     }
+    return ok;
   }
 }
 

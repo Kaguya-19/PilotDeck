@@ -8,11 +8,11 @@
  */
 
 /**
- * "user" lives in `~/.pilotdeck/skills/`, available to every project.
- * "project" lives in `<projectRoot>/.pilotdeck/skills/`, scoped to the
- * project the agent is running against.
+ * "builtin" is shipped with PilotDeck and is read-only. "user" lives in
+ * `~/.pilotdeck/skills/`, available to every project. "project" lives in
+ * `<projectRoot>/.pilotdeck/skills/`, scoped to the active project.
  */
-export type SkillScope = "user" | "project";
+export type SkillScope = "builtin" | "user" | "project";
 
 /**
  * Lightweight summary used by `list` / `create` / `write` responses.
@@ -31,8 +31,23 @@ export type SkillSummary = {
   /** Absolute path of the containing skill directory. */
   skillDir: string;
   scope: SkillScope;
+  /** Built-in skills are immutable; user/project skills remain editable. */
+  readonly: boolean;
+  /** Higher-priority scope currently shadowing this entry, when any. */
+  overriddenBy?: "user" | "project";
+  /** True when this entry shadows a bundled skill with the same slug. */
+  overridesBuiltin?: boolean;
   /** Last-modified time of SKILL.md in epoch ms, or null if unreadable. */
   mtime: number | null;
+};
+
+export type SkillSearchItem = SkillSummary & {
+  command: string;
+  matches?: Array<{
+    field: "name" | "description";
+    start: number;
+    end: number;
+  }>;
 };
 
 export type SkillsListInput = {
@@ -42,13 +57,20 @@ export type SkillsListInput = {
    * skills are returned.
    */
   projectKey?: string | null;
+  query?: string;
+  scope?: SkillScope | "plugin" | "all";
+  cursor?: string;
+  limit?: number;
 };
 
 export type SkillsListResult = {
+  builtin: SkillSummary[];
   user: SkillSummary[];
   project: SkillSummary[];
   /** Echoed back so the UI can confirm which project the list came from. */
   projectPath: string | null;
+  items: SkillSearchItem[];
+  nextCursor?: string;
 };
 
 export type SkillAddressInput = {
@@ -179,3 +201,19 @@ export type SkillScanResult = {
   parentPath: string;
   folders: SkillScanFolder[];
 };
+
+/**
+ * Gateway-facing skill management surface.  Native SkillManager and external
+ * contract adapters implement the same methods so callers do not need to
+ * know which owner is configured for the skills slot.
+ */
+export type SkillManagementPort = Readonly<{
+  list(input: SkillsListInput): Promise<SkillsListResult>;
+  read(input: SkillAddressInput): Promise<SkillReadResult>;
+  write(input: SkillWriteInput): Promise<SkillWriteResult>;
+  create(input: SkillCreateInput): Promise<SkillCreateResult>;
+  delete(input: SkillDeleteInput): Promise<SkillDeleteResult>;
+  import(input: SkillImportInput): Promise<SkillImportResult>;
+  validate(input: SkillValidateInput): Promise<SkillValidationResult>;
+  scan(input: SkillScanInput): Promise<SkillScanResult>;
+}>;

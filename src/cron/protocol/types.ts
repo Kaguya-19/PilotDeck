@@ -1,6 +1,6 @@
 import type { GatewayChannelKey, GatewayMode } from "../../gateway/index.js";
 
-export type CronSchedule =
+export type CronTaskSchedule =
   | {
       type: "once";
       runAt: string;
@@ -11,13 +11,23 @@ export type CronSchedule =
       timezone?: string;
     };
 
+export type CronCreateSchedule =
+  | CronTaskSchedule
+  | {
+      type: "delay";
+      amount: number;
+      unit: "second" | "minute" | "hour" | "day";
+    };
+
+export type CronSchedule = CronCreateSchedule;
+
 export type CronTaskStatus = "scheduled" | "running";
 
 export type CronTask = {
   schemaVersion: 1;
   taskId: string;
   message: string;
-  schedule: CronSchedule;
+  schedule: CronTaskSchedule;
   status: CronTaskStatus;
   sessionKey: string;
   channelKey: GatewayChannelKey;
@@ -28,8 +38,29 @@ export type CronTask = {
   updatedAt: string;
   nextRunAt?: string;
   lastRunId?: string;
+  revision?: number;
   scheduleComputationVersion?: 2;
+  originSessionKey?: string;
+  originChannelKey?: GatewayChannelKey;
 };
+
+export type CronResultDelivery = {
+  taskId: string;
+  runId: string;
+  sessionKey: string;
+  channelKey: GatewayChannelKey;
+  originSessionKey?: string;
+  originChannelKey?: GatewayChannelKey;
+  projectKey?: string;
+  outcome: CronRunOutcome;
+  text: string;
+  error?: {
+    code: string;
+    message: string;
+  };
+};
+
+export type CronResultDeliveryHandler = (delivery: CronResultDelivery) => Promise<void> | void;
 
 export type CronRunOutcome = "completed" | "failed" | "aborted" | "stopped";
 
@@ -50,7 +81,7 @@ export type CronRunRecord = {
 
 export type CronCreateInput = {
   message: string;
-  schedule: CronSchedule;
+  schedule: CronCreateSchedule;
   sessionKey?: string;
   channelKey?: GatewayChannelKey;
   projectKey?: string;
@@ -61,6 +92,25 @@ export type CronCreateInput = {
 export type CronCreateResult = {
   task: CronTask;
 };
+
+export type CronUpdateInput = {
+  taskId: string;
+  projectKey: string;
+  expectedRevision: number;
+  message: string;
+  schedule: CronTaskSchedule;
+  timezone?: string;
+};
+
+export type CronUpdateResult =
+  | {
+      updated: true;
+      task: CronTask;
+    }
+  | {
+      updated: false;
+      reason: "not_found" | "running" | "conflict";
+    };
 
 export type CronListInput = {
   projectKey?: string;

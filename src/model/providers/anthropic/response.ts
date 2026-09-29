@@ -1,6 +1,7 @@
 import type {
   CanonicalContentBlock,
   CanonicalModelResponse,
+  CanonicalThinkingBlock,
   CanonicalToolCallBlock,
 } from "../../protocol/canonical.js";
 import { normalizeAnthropicFinishReason } from "../../response/normalizeFinishReason.js";
@@ -26,8 +27,17 @@ function toCanonicalContentBlock(block: unknown): CanonicalContentBlock[] {
   switch (record.type) {
     case "text":
       return [{ type: "text", text: readString(record.text) ?? "" }];
-    case "thinking":
-      return [{ type: "thinking", text: readString(record.thinking) ?? readString(record.text) ?? "" }];
+    case "thinking": {
+      const thinking: CanonicalThinkingBlock = {
+        type: "thinking",
+        text: readString(record.thinking) ?? readString(record.text) ?? "",
+      };
+      const signature = readString(record.signature);
+      if (signature) {
+        thinking.signature = signature;
+      }
+      return [thinking];
+    }
     case "tool_use":
       return [
         {

@@ -1,20 +1,31 @@
 import express from 'express';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
-import { join } from 'path';
+import { dirname, join } from 'path';
 import { homedir } from 'os';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { suppressNextWatchEvent } from '../services/pilotdeckConfigWatcher.js';
 import { reloadPilotDeckConfig } from '../services/pilotdeckConfigReloader.js';
-import { readPilotDeckConfigFile } from '../services/pilotdeckConfig.js';
+import {
+  readPilotDeckConfigFile,
+  serializePilotDeckConfigResponse,
+  withPilotDeckConfigWrite,
+} from '../services/pilotdeckConfig.js';
 import { getPilotDeckGateway } from '../pilotdeck-bridge.js';
 
 const router = express.Router();
 
-const PILOTDECK_YAML = join(homedir(), '.pilotdeck', 'pilotdeck.yaml');
-const WEIXIN_CREDS = join(homedir(), '.pilotdeck', 'weixin-credentials.json');
+const PILOT_HOME = process.env.PILOT_HOME || join(homedir(), '.pilotdeck');
+const PILOTDECK_YAML = process.env.PILOTDECK_CONFIG_PATH || join(PILOT_HOME, 'pilotdeck.yaml');
+const WEIXIN_CREDS = join(PILOT_HOME, 'weixin-credentials.json');
+const CHANNEL_RUNTIME_STATUS = join(PILOT_HOME, 'channels', 'runtime-status.json');
 
 const FEISHU_TOKEN_URL = 'https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal';
 const LARK_TOKEN_URL = 'https://open.larksuite.com/open-apis/auth/v3/tenant_access_token/internal';
+const WECOM_DEFAULT_WS_URL = 'wss://openws.work.weixin.qq.com';
+const WECOM_QR_GENERATE_URL = 'https://work.weixin.qq.com/ai/qc/generate';
+const WECOM_QR_QUERY_URL = 'https://work.weixin.qq.com/ai/qc/query_result';
+const WECOM_QR_CODE_PAGE = 'https://work.weixin.qq.com/ai/qc/gen?source=hermes&scode=';
+const WECOM_QR_TIMEOUT_MS = 300_000;
 
 const FEISHU_ACCOUNTS_URLS = {
   feishu: 'https://accounts.feishu.cn',
@@ -40,8 +51,28 @@ function loadYaml() {
   } catch { return {}; }
 }
 
+function loadChannelRuntimeStatus() {
+  try {
+    if (!existsSync(CHANNEL_RUNTIME_STATUS)) return {};
+    const parsed = JSON.parse(readFileSync(CHANNEL_RUNTIME_STATUS, 'utf-8'));
+    return parsed?.channels && typeof parsed.channels === 'object' ? parsed.channels : {};
+  } catch {
+    return {};
+  }
+}
+
+function loadWeixinCredentials() {
+  try {
+    if (!existsSync(WEIXIN_CREDS)) return null;
+    const raw = JSON.parse(readFileSync(WEIXIN_CREDS, 'utf-8'));
+    return raw.accountId ? { accountId: raw.accountId } : null;
+  } catch {
+    return null;
+  }
+}
+
 function saveYaml(config) {
-  mkdirSync(join(homedir(), '.pilotdeck'), { recursive: true });
+  mkdirSync(dirname(PILOTDECK_YAML), { recursive: true });
   suppressNextWatchEvent();
   writeFileSync(PILOTDECK_YAML, stringifyYaml(config, { lineWidth: 0 }), 'utf-8');
 }
@@ -51,23 +82,90 @@ function maskValue(value) {
   return `${value.slice(0, 4)}…${value.slice(-4)}`;
 }
 
+function normalizeAccessPolicy(value, fallback) {
+  return ['open', 'allowlist', 'disabled'].includes(value) ? value : fallback;
+}
+
+function normalizeList(value) {
+  if (Array.isArray(value)) return value.map((item) => String(item).trim()).filter(Boolean);
+  if (typeof value === 'string') return value.split(',').map((item) => item.trim()).filter(Boolean);
+  return [];
+}
+
+function writeWeComConfig(config, input) {
+  if (!config.adapters) config.adapters = {};
+  const previous = config.adapters.wecom ?? {};
+  const previousExtra = previous.extra ?? {};
+  const dmPolicy = normalizeAccessPolicy(input.dmPolicy, 'open');
+  const groupPolicy = normalizeAccessPolicy(input.groupPolicy, 'disabled');
+  const extra = {
+    secret: input.secret || previousExtra.secret || '',
+    websocket_url: input.websocketUrl || previousExtra.websocket_url || previousExtra.websocketUrl || WECOM_DEFAULT_WS_URL,
+    dm_policy: dmPolicy,
+    group_policy: groupPolicy,
+  };
+  const allowFrom = normalizeList(input.allowFrom ?? previousExtra.allow_from ?? previousExtra.allowFrom);
+  const groupAllowFrom = normalizeList(input.groupAllowFrom ?? previousExtra.group_allow_from ?? previousExtra.groupAllowFrom);
+  if (dmPolicy === 'allowlist') extra.allow_from = allowFrom;
+  if (groupPolicy === 'allowlist') extra.group_allow_from = groupAllowFrom;
+  config.adapters.wecom = {
+    enabled: true,
+    token: input.botId || previous.token || '',
+    extra,
+  };
+  return config;
+}
+
+async function mutateConfigAndReload(mutate) {
+  return withPilotDeckConfigWrite(async () => {
+    // The read belongs inside the shared critical section. Otherwise a channel
+    // save can overwrite a config edit that completed while the request was in
+    // flight (QR polling is the common real-world example).
+    const config = loadYaml();
+    if (mutate(config) === false) return false;
+
+    saveYaml(config);
+    const record = readPilotDeckConfigFile();
+    const reloadResult = await reloadPilotDeckConfig(record.config);
+    void notifyGatewayReload();
+
+    const freshRecord = readPilotDeckConfigFile();
+    const response = serializePilotDeckConfigResponse(freshRecord, reloadResult);
+    process.emit('pilotdeck:config-broadcast', {
+      source: 'gateway-save',
+      ...response,
+      timestamp: new Date().toISOString(),
+    });
+    return true;
+  });
+}
+
+async function fetchJson(url) {
+  const resp = await fetch(url, {
+    headers: { 'User-Agent': 'PilotDeck/1.0' },
+    signal: AbortSignal.timeout(15_000),
+  });
+  const text = await resp.text();
+  if (!resp.ok) {
+    throw new Error(`HTTP ${resp.status}: ${text.slice(0, 200)}`);
+  }
+  try { return JSON.parse(text); }
+  catch { throw new Error(`Non-JSON response from ${url}: ${text.slice(0, 200)}`); }
+}
+
 // ─── Status ──────────────────────────────────────────────────────────────────
 
 router.get('/status', (_req, res) => {
   try {
     const config = loadYaml();
     const feishu = config.adapters?.feishu ?? {};
+    const wecom = config.adapters?.wecom ?? {};
+    const wecomExtra = wecom.extra ?? {};
     const weixinEnabled = config.adapters?.weixin?.enabled === true;
+    const runtimeStatus = loadChannelRuntimeStatus();
+    const weixinRuntime = runtimeStatus.weixin ?? null;
 
-    let weixinCredentials = null;
-    try {
-      if (existsSync(WEIXIN_CREDS)) {
-        const raw = JSON.parse(readFileSync(WEIXIN_CREDS, 'utf-8'));
-        if (raw.accountId) {
-          weixinCredentials = { accountId: raw.accountId };
-        }
-      }
-    } catch { /* ignore */ }
+    const weixinCredentials = loadWeixinCredentials();
 
     res.json({
       feishu: {
@@ -81,6 +179,17 @@ router.get('/status', (_req, res) => {
         enabled: weixinEnabled,
         hasCredentials: !!weixinCredentials,
         accountId: weixinCredentials?.accountId || null,
+        runtime: weixinRuntime,
+      },
+      wecom: {
+        enabled: wecom.enabled === true,
+        botId: wecom.token ? maskValue(wecom.token) : '',
+        hasSecret: !!wecomExtra.secret,
+        websocketUrl: wecomExtra.websocket_url || wecomExtra.websocketUrl || WECOM_DEFAULT_WS_URL,
+        dmPolicy: wecomExtra.dm_policy || wecomExtra.dmPolicy || 'open',
+        groupPolicy: wecomExtra.group_policy || wecomExtra.groupPolicy || 'disabled',
+        allowFrom: normalizeList(wecomExtra.allow_from ?? wecomExtra.allowFrom),
+        groupAllowFrom: normalizeList(wecomExtra.group_allow_from ?? wecomExtra.groupAllowFrom),
       },
     });
   } catch (error) {
@@ -217,20 +326,18 @@ router.get('/feishu/qr-poll', async (req, res) => {
       const domain = state.domain;
 
       // Auto-save to config
-      const config = loadYaml();
-      if (!config.adapters) config.adapters = {};
-      config.adapters.feishu = {
-        enabled: true,
-        appId,
-        appSecret,
-        connectionMode: 'stream',
-        domainName: domain,
-      };
-      saveYaml(config);
-
-      const record = readPilotDeckConfigFile();
-      await reloadPilotDeckConfig(record.config);
-      void notifyGatewayReload();
+      await mutateConfigAndReload((config) => {
+        if (!config.adapters) config.adapters = {};
+        const previous = config.adapters.feishu ?? {};
+        config.adapters.feishu = {
+          ...previous,
+          enabled: true,
+          appId,
+          appSecret,
+          connectionMode: previous.connectionMode || 'stream',
+          domainName: domain,
+        };
+      });
 
       return res.json({
         ok: true,
@@ -266,20 +373,18 @@ router.post('/feishu/save', async (req, res) => {
   }
 
   try {
-    const config = loadYaml();
-    if (!config.adapters) config.adapters = {};
-    config.adapters.feishu = {
-      enabled: true,
-      appId,
-      appSecret,
-      connectionMode: connectionMode || 'stream',
-      domainName: domainName || 'feishu',
-    };
-    saveYaml(config);
-
-    const record = readPilotDeckConfigFile();
-    await reloadPilotDeckConfig(record.config);
-    void notifyGatewayReload();
+    await mutateConfigAndReload((config) => {
+      if (!config.adapters) config.adapters = {};
+      const previous = config.adapters.feishu ?? {};
+      config.adapters.feishu = {
+        ...previous,
+        enabled: true,
+        appId,
+        appSecret,
+        connectionMode: connectionMode || previous.connectionMode || 'stream',
+        domainName: domainName || previous.domainName || 'feishu',
+      };
+    });
 
     res.json({ ok: true, message: '飞书配置已保存，重启后生效' });
   } catch (error) {
@@ -289,15 +394,11 @@ router.post('/feishu/save', async (req, res) => {
 
 router.post('/feishu/disable', async (_req, res) => {
   try {
-    const config = loadYaml();
-    if (config.adapters?.feishu) {
-      config.adapters.feishu.enabled = false;
-    }
-    saveYaml(config);
-
-    const record = readPilotDeckConfigFile();
-    await reloadPilotDeckConfig(record.config);
-    void notifyGatewayReload();
+    await mutateConfigAndReload((config) => {
+      if (config.adapters?.feishu) {
+        config.adapters.feishu.enabled = false;
+      }
+    });
 
     res.json({ ok: true });
   } catch (error) {
@@ -307,99 +408,215 @@ router.post('/feishu/disable', async (_req, res) => {
 
 // ─── Weixin ──────────────────────────────────────────────────────────────────
 
-router.get('/weixin/qr', async (_req, res) => {
+router.post('/weixin/qr-begin', async (_req, res) => {
+  const requestedAt = new Date().toISOString();
   try {
-    const { loginWithQR } = await import('weixin-ilink');
-
-    let qrUrl = null;
-    let resolved = false;
-
-    const loginPromise = loginWithQR({
-      onQRCode: (url) => {
-        qrUrl = url;
-        if (!resolved) {
-          resolved = true;
-          res.json({ ok: true, qrUrl: url });
-        }
-      },
-      onStatusChange: () => {},
+    await mutateConfigAndReload((config) => {
+      if (!config.adapters) config.adapters = {};
+      const previous = config.adapters.weixin ?? {};
+      if (previous.enabled === true) return false;
+      config.adapters.weixin = { ...previous, enabled: true };
+      return true;
     });
 
-    // Store the login promise so /weixin/qr-poll can check it
-    _req.app.locals._weixinLoginPromise = loginPromise;
-    _req.app.locals._weixinLoginResolved = false;
-
-    loginPromise
-      .then((result) => {
-        _req.app.locals._weixinLoginResult = {
-          ok: true,
-          accountId: result.accountId,
-          baseUrl: result.baseUrl,
-          botToken: result.botToken,
-        };
-        _req.app.locals._weixinLoginResolved = true;
-
-        // Auto-save credentials
-        mkdirSync(join(homedir(), '.pilotdeck'), { recursive: true });
-        writeFileSync(WEIXIN_CREDS, JSON.stringify({
-          baseUrl: result.baseUrl,
-          botToken: result.botToken,
-          accountId: result.accountId,
-        }, null, 2), 'utf-8');
-
-        // Enable in config
-        const config = loadYaml();
-        if (!config.adapters) config.adapters = {};
-        config.adapters.weixin = { enabled: true };
-        saveYaml(config);
-      })
-      .catch((err) => {
-        _req.app.locals._weixinLoginResult = {
-          ok: false,
-          error: err.message || String(err),
-        };
-        _req.app.locals._weixinLoginResolved = true;
+    const gw = await getPilotDeckGateway();
+    if (!gw?.prepareWeixinLogin) {
+      return res.json({
+        ok: false,
+        requestedAt,
+        error: '当前 gateway 不支持准备微信扫码登录，请重启 PilotDeck 后重试',
       });
+    }
 
-    // Fallback: if QR URL wasn't ready in 15s
-    setTimeout(() => {
-      if (!resolved) {
-        resolved = true;
-        res.json({ ok: false, error: '获取二维码超时' });
-      }
-    }, 15_000);
+    const result = await gw.prepareWeixinLogin();
+    if (!result?.requested) {
+      return res.json({
+        ok: false,
+        requestedAt: result?.requestedAt || requestedAt,
+        error: '微信后台通道无法启动，请确认 PilotDeck gateway 正在运行',
+      });
+    }
+
+    res.json({ ok: true, requestedAt: result.requestedAt || requestedAt });
   } catch (error) {
-    res.json({ ok: false, error: error.message || 'weixin-ilink 模块加载失败' });
+    res.json({ ok: false, requestedAt, error: error.message || '请求微信后台通道准备二维码失败' });
+  }
+});
+
+router.get('/weixin/qr', (_req, res) => {
+  try {
+    const runtime = loadChannelRuntimeStatus().weixin;
+    if (runtime?.state === 'waiting_for_login' && runtime.qrUrl) {
+      return res.json({ ok: true, qrUrl: runtime.qrUrl, runtime });
+    }
+    return res.json({
+      ok: false,
+      error: '微信通道尚未生成二维码，请稍后刷新或重启通道',
+      runtime: runtime ?? null,
+    });
+  } catch (error) {
+    res.json({ ok: false, error: error.message || '读取微信通道运行时状态失败' });
   }
 });
 
 router.get('/weixin/qr-poll', (_req, res) => {
-  const resolved = _req.app.locals._weixinLoginResolved;
-  const result = _req.app.locals._weixinLoginResult;
+  const runtime = loadChannelRuntimeStatus().weixin;
+  const credentials = loadWeixinCredentials();
 
-  if (resolved && result) {
-    // Clear state
-    _req.app.locals._weixinLoginPromise = null;
-    _req.app.locals._weixinLoginResult = null;
-    _req.app.locals._weixinLoginResolved = false;
-    return res.json(result);
+  if (credentials || runtime?.state === 'connected') {
+    return res.json({ ok: true, accountId: credentials?.accountId ?? runtime?.accountId ?? null });
   }
 
-  res.json({ pending: true });
+  if (runtime?.state === 'failed' || runtime?.state === 'expired' || runtime?.state === 'stopped') {
+    return res.json({
+      ok: false,
+      error: runtime.error || runtime.message || '微信登录未完成',
+      runtime,
+    });
+  }
+
+  res.json({ pending: true, qrUrl: runtime?.qrUrl ?? null, runtime: runtime ?? null });
 });
 
 router.post('/weixin/disable', async (_req, res) => {
   try {
-    const config = loadYaml();
-    if (config.adapters?.weixin) {
-      config.adapters.weixin.enabled = false;
+    await mutateConfigAndReload((config) => {
+      if (config.adapters?.weixin) {
+        config.adapters.weixin.enabled = false;
+      }
+    });
+
+    res.json({ ok: true });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+// ─── WeCom (Enterprise WeChat AI Bot) ─────────────────────────────────────────
+
+router.post('/wecom/qr-begin', async (req, res) => {
+  try {
+    const raw = await fetchJson(`${WECOM_QR_GENERATE_URL}?source=hermes`);
+    const data = raw.data || {};
+    const scode = String(data.scode || '').trim();
+    const authUrl = String(data.auth_url || '').trim();
+    if (!scode || !authUrl) {
+      return res.json({ ok: false, error: 'WeCom did not return a QR code' });
     }
-    saveYaml(config);
 
-    const record = readPilotDeckConfigFile();
-    await reloadPilotDeckConfig(record.config);
-    void notifyGatewayReload();
+    req.app.locals._wecomQr = {
+      scode,
+      startedAt: Date.now(),
+      expireInMs: WECOM_QR_TIMEOUT_MS,
+    };
 
+    res.json({
+      ok: true,
+      qrUrl: authUrl,
+      fallbackUrl: `${WECOM_QR_CODE_PAGE}${encodeURIComponent(scode)}`,
+      expireIn: Math.floor(WECOM_QR_TIMEOUT_MS / 1000),
+    });
+  } catch (error) {
+    res.json({ ok: false, error: error.message });
+  }
+});
+
+router.get('/wecom/qr-poll', async (req, res) => {
+  const state = req.app.locals._wecomQr;
+  if (!state) {
+    return res.json({ ok: false, error: 'No WeCom QR session active' });
+  }
+
+  if (Date.now() - state.startedAt > state.expireInMs) {
+    req.app.locals._wecomQr = null;
+    return res.json({ ok: false, error: 'WeCom QR code expired' });
+  }
+
+  try {
+    const raw = await fetchJson(`${WECOM_QR_QUERY_URL}?scode=${encodeURIComponent(state.scode)}`);
+    const data = raw.data || {};
+    const status = String(data.status || '').toLowerCase();
+    if (status !== 'success') {
+      return res.json({ pending: true });
+    }
+
+    const botInfo = data.bot_info || {};
+    const botId = String(botInfo.botid || botInfo.bot_id || '').trim();
+    const secret = String(botInfo.secret || '').trim();
+    if (!botId || !secret) {
+      req.app.locals._wecomQr = null;
+      return res.json({ ok: false, error: 'WeCom QR scan did not return complete bot credentials' });
+    }
+
+    req.app.locals._wecomQr = null;
+    await mutateConfigAndReload((config) => {
+      writeWeComConfig(config, {
+        botId,
+        secret,
+        websocketUrl: WECOM_DEFAULT_WS_URL,
+        dmPolicy: 'open',
+        groupPolicy: 'disabled',
+      });
+    });
+
+    res.json({ ok: true, botId: maskValue(botId) });
+  } catch {
+    res.json({ pending: true });
+  }
+});
+
+router.post('/wecom/qr-cancel', (req, res) => {
+  req.app.locals._wecomQr = null;
+  res.json({ ok: true });
+});
+
+router.post('/wecom/save', async (req, res) => {
+  const {
+    botId,
+    secret,
+    websocketUrl,
+    dmPolicy,
+    groupPolicy,
+    allowFrom,
+    groupAllowFrom,
+  } = req.body || {};
+  const normalizedBotId = String(botId || '').trim();
+  const normalizedSecret = String(secret || '').trim();
+
+  try {
+    await mutateConfigAndReload((config) => {
+      const existingWeCom = config.adapters?.wecom ?? {};
+      const existingExtra = existingWeCom.extra ?? {};
+      const resolvedBotId = normalizedBotId || String(existingWeCom.token || '').trim();
+      const resolvedSecret = normalizedSecret || String(existingExtra.secret || '').trim();
+      if (!resolvedBotId || !resolvedSecret) {
+        const error = new Error('botId and secret are required');
+        error.statusCode = 400;
+        throw error;
+      }
+      writeWeComConfig(config, {
+        botId: resolvedBotId,
+        secret: resolvedSecret,
+        websocketUrl: String(websocketUrl || '').trim() || WECOM_DEFAULT_WS_URL,
+        dmPolicy,
+        groupPolicy,
+        allowFrom,
+        groupAllowFrom,
+      });
+    });
+    res.json({ ok: true, message: 'WeCom config saved' });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ ok: false, error: error.message });
+  }
+});
+
+router.post('/wecom/disable', async (_req, res) => {
+  try {
+    await mutateConfigAndReload((config) => {
+      if (config.adapters?.wecom) {
+        config.adapters.wecom.enabled = false;
+      }
+    });
     res.json({ ok: true });
   } catch (error) {
     res.status(500).json({ ok: false, error: error.message });

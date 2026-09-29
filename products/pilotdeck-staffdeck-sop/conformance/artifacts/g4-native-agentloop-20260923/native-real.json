@@ -1,0 +1,1324 @@
+{
+  "schemaVersion": 2,
+  "status": "PASS",
+  "mode": "real",
+  "model": "qwen3.6-flash-distill",
+  "startup": {
+    "scope": {
+      "tenantId": "tenant_demo",
+      "actorUserId": "admin",
+      "agentId": "agent_7d062081c03b4e16"
+    },
+    "modelPortRange": [
+      16100,
+      16129
+    ],
+    "modelPort": 16100,
+    "runtimeIsolation": true,
+    "nodeVersion": "v22.23.1"
+  },
+  "realProviderTurn": {
+    "reply": "根据知识库检索结果，当前发布决策的审批政策如下：\n\n**审批政策**：发布前需要获得所有者批准（Owner approval is required before release）[1]。\n\n**适用的所有者批准事实**：Native branch-only owner approval fact `7d062081c03b4e16` [1]。\n\n这意味着在发布之前，必须满足该特定的所有者批准条件才能进行发布操作。\n\n引用来源：[1] Release approval (ultrarag://knowledge/documents/kdoc_native_g4)",
+    "runtimeError": null,
+    "stepResult": {
+      "action": "advance",
+      "reply": "根据知识库检索结果，当前发布决策的审批政策如下：\n\n**审批政策**：发布前需要获得所有者批准（Owner approval is required before release）[1]。\n\n**适用的所有者批准事实**：Native branch-only owner approval fact `7d062081c03b4e16` [1]。\n\n这意味着在发布之前，必须满足该特定的所有者批准条件才能进行发布操作。\n\n引用来源：[1] Release approval (ultrarag://knowledge/documents/kdoc_native_g4)",
+      "slot_updates": {},
+      "tool_call": null,
+      "knowledge_query": null,
+      "knowledge_results": [
+        {
+          "selected_buckets": [
+            {
+              "id": "kbucket_native_g4",
+              "tenant_id": "tenant_demo",
+              "knowledge_base_id": "kb_native_g4",
+              "document_id": "kdoc_native_g4",
+              "bucket_key": "release-approval",
+              "title": "Release owner approval",
+              "summary": "Owner approval is required before release. Native branch-only owner approval fact 7d062081c03b4e16",
+              "token_estimate": 0,
+              "chunk_count": 0,
+              "status": "ready",
+              "metadata": {
+                "content": "Native branch-only owner approval fact 7d062081c03b4e16",
+                "bucket_type": "policy",
+                "quality": {},
+                "section_ids": []
+              },
+              "created_at": "2026-09-22T17:58:21.056708",
+              "updated_at": "2026-09-22T17:58:21.056713"
+            }
+          ],
+          "chunks": [
+            {
+              "id": "kchunk_native_g4",
+              "tenant_id": "tenant_demo",
+              "knowledge_base_id": "kb_native_g4",
+              "document_id": "kdoc_native_g4",
+              "bucket_id": "kbucket_native_g4",
+              "chunk_index": 0,
+              "content": "Owner approval is required before release. Native branch-only owner approval fact 7d062081c03b4e16.",
+              "summary": "Native branch-only owner approval fact 7d062081c03b4e16",
+              "source_ref": "ultrarag://knowledge/documents/kdoc_native_g4",
+              "metadata": {
+                "section_path": "Release approval"
+              },
+              "created_at": "2026-09-22T17:58:21.056949",
+              "updated_at": "2026-09-22T17:58:21.056969"
+            }
+          ],
+          "trace": [
+            {
+              "phase": "document_route",
+              "message": "正在选择知识文档",
+              "candidate_count": 1,
+              "mode": "chat"
+            },
+            {
+              "phase": "bucket_route",
+              "message": "正在选择内部索引",
+              "candidate_count": 1,
+              "selected_document_ids": [
+                "kdoc_native_g4"
+              ]
+            },
+            {
+              "phase": "section_expand",
+              "message": "正在展开章节",
+              "section_count": 0
+            },
+            {
+              "phase": "read_chunks",
+              "message": "读取引用来源",
+              "chunk_count": 1
+            },
+            {
+              "phase": "evidence_pack",
+              "message": "整理引用来源包",
+              "evidence_count": 1
+            }
+          ],
+          "route_trace": [
+            {
+              "phase": "document_route",
+              "message": "正在选择知识文档",
+              "candidate_count": 1,
+              "mode": "chat"
+            },
+            {
+              "phase": "bucket_route",
+              "message": "正在选择内部索引",
+              "candidate_count": 1,
+              "selected_document_ids": [
+                "kdoc_native_g4"
+              ]
+            },
+            {
+              "phase": "section_expand",
+              "message": "正在展开章节",
+              "section_count": 0
+            },
+            {
+              "phase": "read_chunks",
+              "message": "读取引用来源",
+              "chunk_count": 1
+            },
+            {
+              "phase": "evidence_pack",
+              "message": "整理引用来源包",
+              "evidence_count": 1
+            }
+          ],
+          "selected_documents": [
+            {
+              "id": "kdoc_native_g4",
+              "knowledge_base_id": "kb_native_g4",
+              "title": "Approval policy",
+              "filename": "approval-policy.md",
+              "file_type": "md",
+              "summary": "",
+              "outline": [],
+              "key_entities": [],
+              "section_count": null,
+              "chunk_count": 1,
+              "updated_at": "2026-09-22T17:58:21.056648"
+            }
+          ],
+          "selected_concepts": [],
+          "expanded_sections": [],
+          "okf_citations": [],
+          "evidence_pack": [
+            {
+              "chunk_id": "kchunk_native_g4",
+              "related_group_id": null,
+              "related_chunk_ids": [],
+              "related_chunk_index": null,
+              "document_id": "kdoc_native_g4",
+              "bucket_id": "kbucket_native_g4",
+              "source_path": "ultrarag://knowledge/documents/kdoc_native_g4",
+              "section_path": "Release approval",
+              "summary": "Native branch-only owner approval fact 7d062081c03b4e16",
+              "content": "Owner approval is required before release. Native branch-only owner approval fact 7d062081c03b4e16.",
+              "excerpt": "Owner approval is required before release. Native branch-only owner approval fact 7d062081c03b4e16.",
+              "relevance_score": 11.94,
+              "confidence_reason": "引用来源摘要、章节路径或正文与查询相关"
+            }
+          ],
+          "query": "release decision approval policy owner-approval fact before release"
+        }
+      ],
+      "next_step_id": null,
+      "is_step_completed": true,
+      "handoff": false,
+      "structured_result": "{\"approval_policy\": \"Owner approval is required before release\", \"owner_approval_fact\": \"7d062081c03b4e16\", \"fact_type\": \"Native branch-only owner approval fact\", \"source\": \"kdoc_native_g4\"}"
+    },
+    "invocations": [
+      {
+        "toolName": "knowledge:knowledge.search/v1",
+        "status": "completed",
+        "result": {
+          "success": true,
+          "data": {
+            "query": "release decision approval policy owner-approval fact before release",
+            "hit_count": 1,
+            "results": [
+              {
+                "label": "[1]",
+                "title": "",
+                "source": "ultrarag://knowledge/documents/kdoc_native_g4",
+                "excerpt": "Owner approval is required before release. Native branch-only owner approval fact 7d062081c03b4e16."
+              }
+            ],
+            "citations": [
+              {
+                "label": "[1]",
+                "title": "Release approval",
+                "source": "ultrarag://knowledge/documents/kdoc_native_g4"
+              }
+            ],
+            "instruction": "回答时用对应的 [N] 标注引用；没有命中的内容不要臆造。"
+          },
+          "error": null,
+          "citations": [
+            {
+              "id": "kref_1",
+              "label": "[1]",
+              "kind": "evidence",
+              "title": "Release approval",
+              "source_path": "ultrarag://knowledge/documents/kdoc_native_g4",
+              "content": "Owner approval is required before release. Native branch-only owner approval fact 7d062081c03b4e16.",
+              "excerpt": "Owner approval is required before release. Native branch-only owner approval fact 7d062081c03b4e16.",
+              "summary": "Native branch-only owner approval fact 7d062081c03b4e16",
+              "section_path": "Release approval",
+              "confidence_reason": "引用来源摘要、章节路径或正文与查询相关",
+              "document_id": "kdoc_native_g4",
+              "bucket_id": "kbucket_native_g4",
+              "chunk_id": "kchunk_native_g4",
+              "related_group_id": null,
+              "related_chunk_ids": [
+                "kchunk_native_g4"
+              ]
+            }
+          ],
+          "artifacts": []
+        }
+      }
+    ],
+    "modelResponses": [
+      {
+        "text": "{\n  \"decision\": \"start_new_task\",\n  \"confidence\": 0.95,\n  \"user_intent\": \"Query the current approval policy for a release decision and the specific owner-approval fact required.\",\n  \"reason\": \"User asks a factual question about release approval policy. Matches 'Native G4 Knowledge reference' SOP.\",\n  \"task_frames\": [\n    {\n      \"task_id\": \"\",\n      \"kind\": \"sop\",\n      \"decision\": \"start_new_task\",\n      \"target_skill_id\": \"native-g4-knowledge\",\n      \"requirements\": [\"Identify the current approval policy for a release decision and specify the applicable owner-approval fact before release.\"],\n      \"slot_hints\": {},\n      \"depends_on_task_ids\": [],\n      \"execution_target\": \"self\",\n      \"activation_condition\": {}\n    }\n  ],\n  \"task_updates\": []\n}",
+        "toolCalls": [],
+        "finishReason": "stop"
+      },
+      {
+        "text": "",
+        "toolCalls": [
+          {
+            "name": "mcp__staffdeck__knowledge_search",
+            "arguments": "{\"query\": \"release decision approval policy owner-approval fact before release\", \"knowledge_base_ids\": \n[\"kb_native_g4\"]\n\n, \"max_chunks\": 5}"
+          }
+        ],
+        "finishReason": "tool_calls"
+      },
+      {
+        "text": "{\n  \"selected_document_ids\": [\n    \"kdoc_native_g4\"\n  ]\n}",
+        "toolCalls": [],
+        "finishReason": "stop"
+      },
+      {
+        "text": "{\n  \"selected_bucket_ids\": [\"kbucket_native_g4\"]\n}",
+        "toolCalls": [],
+        "finishReason": "stop"
+      },
+      {
+        "text": "",
+        "toolCalls": [
+          {
+            "name": "mcp__staffdeck__submit_step_result",
+            "arguments": "{\"status\": \"completed\", \"reply_fragment\": \"根据知识库检索结果，当前发布决策的审批政策如下：\\n\\n**审批政策**：发布前需要获得所有者批准（Owner approval is required before release）[1]。\\n\\n**适用的所有者批准事实**：Native branch-only owner approval fact `7d062081c03b4e16` [1]。\\n\\n这意味着在发布之前，必须满足该特定的所有者批准条件才能进行发布操作。\\n\\n引用来源：[1] Release approval (ultrarag://knowledge/documents/kdoc_native_g4)\", \"task_summary\": \"通过 kb_native_g4 知识库检索获取了发布决策的审批政策和所有者批准事实信息\", \"structured_result\": \"{\\\"approval_policy\\\": \\\"Owner approval is required before release\\\", \\\"owner_approval_fact\\\": \\\"7d062081c03b4e16\\\", \\\"fact_type\\\": \\\"Native branch-only owner approval fact\\\", \\\"source\\\": \\\"kdoc_native_g4\\\"}\"}"
+          }
+        ],
+        "finishReason": "tool_calls"
+      },
+      {
+        "text": "已完成 Native G4 Knowledge reference 的 search 步骤。\n\n**检索结果总结：**\n\n根据 kb_native_g4 知识库的检索，当前发布决策的审批政策为：\n- **审批要求**：发布前必须获得所有者批准（Owner approval）[1]\n- **适用的所有者批准事实**：Native branch-only owner approval fact `7d062081c03b4e16` [1]\n\n这意味着在执行发布操作之前，系统会验证是否已满足该特定的所有者批准条件。\n\n引用来源：[1] Release approval (ultrarag://knowledge/documents/kdoc_native_g4)",
+        "toolCalls": [],
+        "finishReason": "stop"
+      }
+    ],
+    "modelToolSchemas": [
+      "mcp__staffdeck__capability_describe",
+      "mcp__staffdeck__capability_invoke",
+      "mcp__staffdeck__external_task_status",
+      "mcp__staffdeck__knowledge_search",
+      "mcp__staffdeck__sandbox_execute",
+      "mcp__staffdeck__submit_step_result"
+    ],
+    "toolResults": [
+      "{\"success\": true, \"data\": {\"query\": \"release decision approval policy owner-approval fact before release\", \"hit_count\": 1, \"results\": [{\"label\": \"[1]\", \"title\": \"\", \"source\": \"ultrarag://knowledge/documents/kdoc_native_g4\", \"excerpt\": \"Owner approval is required before release. Native branch-only owner approval fact 7d062081c03b4e16.\"}], \"citations\": [{\"label\": \"[1]\", \"title\": \"Release approval\", \"source\": \"ultrarag://knowledge/documents/kdoc_native_g4\"}], \"instruction\": \"回答时用对应的 [N] 标注引用；没有命中的内容不要臆造。\"}, \"citations\": [{\"id\": \"kref_1\", \"label\": \"[1]\", \"kind\": \"evidence\", \"title\": \"Release approval\", \"source_path\": \"ultrarag://knowledge/documents/kdoc_native_g4\", \"content\": \"Owner approval is required before release. Native branch-only owner approval fact 7d062081c03b4e16.\", \"excerpt\": \"Owner approval is required before release. Native branch-only owner approval fact 7d062081c03b4e16.\", \"summary\": \"Native branch-only owner approval fact 7d062081c03b4e16\", \"section_path\": \"Release approval\", \"confidence_reason\": \"引用来源摘要、章节路径或正文与查询相关\", \"document_id\": \"kdoc_native_g4\", \"bucket_id\": \"kbucket_native_g4\", \"chunk_id\": \"kchunk_native_g4\", \"related_group_id\": null, \"related_chunk_ids\": [\"kchunk_native_g4\"]}], \"receipt\": {\"invocation_id\": \"hcall_1_82cbc7e8\", \"status\": \"completed\", \"replayed_from\": null}}",
+      "{\"success\": true, \"data\": {\"query\": \"release decision approval policy owner-approval fact before release\", \"hit_count\": 1, \"results\": [{\"label\": \"[1]\", \"title\": \"\", \"source\": \"ultrarag://knowledge/documents/kdoc_native_g4\", \"excerpt\": \"Owner approval is required before release. Native branch-only owner approval fact 7d062081c03b4e16.\"}], \"citations\": [{\"label\": \"[1]\", \"title\": \"Release approval\", \"source\": \"ultrarag://knowledge/documents/kdoc_native_g4\"}], \"instruction\": \"回答时用对应的 [N] 标注引用；没有命中的内容不要臆造。\"}, \"citations\": [{\"id\": \"kref_1\", \"label\": \"[1]\", \"kind\": \"evidence\", \"title\": \"Release approval\", \"source_path\": \"ultrarag://knowledge/documents/kdoc_native_g4\", \"content\": \"Owner approval is required before release. Native branch-only owner approval fact 7d062081c03b4e16.\", \"excerpt\": \"Owner approval is required before release. Native branch-only owner approval fact 7d062081c03b4e16.\", \"summary\": \"Native branch-only owner approval fact 7d062081c03b4e16\", \"section_path\": \"Release approval\", \"confidence_reason\": \"引用来源摘要、章节路径或正文与查询相关\", \"document_id\": \"kdoc_native_g4\", \"bucket_id\": \"kbucket_native_g4\", \"chunk_id\": \"kchunk_native_g4\", \"related_group_id\": null, \"related_chunk_ids\": [\"kchunk_native_g4\"]}], \"receipt\": {\"invocation_id\": \"hcall_1_82cbc7e8\", \"status\": \"completed\", \"replayed_from\": null}}",
+      "{\"success\": true, \"data\": {\"accepted\": true, \"notice\": \"SOP 步骤结果已提交，请停止生成。\"}}"
+    ],
+    "modelRequests": 6,
+    "mode": "allowed",
+    "userMessage": "What is the current approval policy for a release decision, specifically what owner-approval fact applies before release?",
+    "routing": {
+      "kind": "normal_model_route",
+      "phases": [
+        "document_route",
+        "bucket_route",
+        "section_expand",
+        "read_chunks",
+        "evidence_pack"
+      ]
+    }
+  },
+  "realProviderUpdatedTurn": {
+    "reply": "After the policy update, the current owner approval fact for release is: **Owner approval is required before release** [1].\n\nThe native branch has updated the security review fact (7d062081c03b4e16) as part of this requirement [1].\n\n引用来源：[1] Release approval (approval-policy.md / Release approval / evidence 1)",
+    "runtimeError": null,
+    "stepResult": {
+      "action": "advance",
+      "reply": "After the policy update, the current owner approval fact for release is: **Owner approval is required before release** [1]. \n\nThe native branch has updated the security review fact (7d062081c03b4e16) as part of this requirement [1].\n\n引用来源：[1] Release approval (approval-policy.md / Release approval / evidence 1)",
+      "slot_updates": {},
+      "tool_call": null,
+      "knowledge_query": null,
+      "knowledge_results": [
+        {
+          "selected_buckets": [
+            {
+              "id": "kbucket_4482bdcd8e4344f6",
+              "tenant_id": "tenant_demo",
+              "knowledge_base_id": "kb_native_g4",
+              "document_id": "kdoc_native_g4",
+              "bucket_key": "release_approval",
+              "title": "Release approval",
+              "summary": "# Release approval Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.",
+              "token_estimate": 61,
+              "chunk_count": 1,
+              "status": "ready",
+              "metadata": {
+                "ingest_schema_version": 2,
+                "content": "# Release approval\n\nOwner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.",
+                "bucket_type": "structure",
+                "concept_type": "Topic",
+                "section_ids": [
+                  "sec_1"
+                ],
+                "section_paths": [
+                  "Release approval"
+                ],
+                "representative_chunk_ids": [
+                  "kchunk_d6b4b9f0ec6f4620"
+                ],
+                "applicable_query_types": [
+                  "answer",
+                  "policy_check"
+                ],
+                "quality": {
+                  "status": "ready",
+                  "warnings": [],
+                  "has_source_sections": true,
+                  "has_summary": true,
+                  "content_chars": 123
+                },
+                "document_card": {
+                  "title": "Approval policy",
+                  "summary": "# Release approval Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16."
+                },
+                "chunk_count": 1
+              },
+              "created_at": "2026-09-22T17:58:46.349232",
+              "updated_at": "2026-09-22T17:58:46.352577"
+            }
+          ],
+          "chunks": [
+            {
+              "id": "kchunk_d6b4b9f0ec6f4620",
+              "tenant_id": "tenant_demo",
+              "knowledge_base_id": "kb_native_g4",
+              "document_id": "kdoc_native_g4",
+              "bucket_id": "kbucket_4482bdcd8e4344f6",
+              "chunk_index": 0,
+              "content": "Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.",
+              "summary": "Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.",
+              "source_ref": "approval-policy.md / Release approval / evidence 1",
+              "metadata": {
+                "ingest_schema_version": 2,
+                "node_type": "evidence_chunk",
+                "related_group_id": null,
+                "related_chunk_index": 0,
+                "section_id": "sec_1",
+                "section_path": "Release approval",
+                "section_title": "Release approval",
+                "bucket_title": "Release approval",
+                "source_span": {
+                  "start_paragraph": 0,
+                  "end_paragraph": 1
+                },
+                "context_window": "# Release approval Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.",
+                "related_chunk_ids": [],
+                "related_chunk_count": 0,
+                "related_previous_chunk_id": null,
+                "related_next_chunk_id": null
+              },
+              "created_at": "2026-09-22T17:58:46.350713",
+              "updated_at": "2026-09-22T17:58:46.350719"
+            }
+          ],
+          "trace": [
+            {
+              "phase": "okf_concept_route",
+              "message": "正在选择 OKF Wiki 页面",
+              "candidate_count": 3,
+              "selected_count": 3
+            },
+            {
+              "phase": "document_route",
+              "message": "正在选择知识文档",
+              "candidate_count": 1,
+              "mode": "chat"
+            },
+            {
+              "phase": "bucket_route",
+              "message": "正在选择内部索引",
+              "candidate_count": 1,
+              "selected_document_ids": [
+                "kdoc_native_g4"
+              ]
+            },
+            {
+              "phase": "section_expand",
+              "message": "正在展开章节",
+              "section_count": 1
+            },
+            {
+              "phase": "read_chunks",
+              "message": "读取引用来源",
+              "chunk_count": 1
+            },
+            {
+              "phase": "evidence_pack",
+              "message": "整理引用来源包",
+              "evidence_count": 1
+            }
+          ],
+          "route_trace": [
+            {
+              "phase": "okf_concept_route",
+              "message": "正在选择 OKF Wiki 页面",
+              "candidate_count": 3,
+              "selected_count": 3
+            },
+            {
+              "phase": "document_route",
+              "message": "正在选择知识文档",
+              "candidate_count": 1,
+              "mode": "chat"
+            },
+            {
+              "phase": "bucket_route",
+              "message": "正在选择内部索引",
+              "candidate_count": 1,
+              "selected_document_ids": [
+                "kdoc_native_g4"
+              ]
+            },
+            {
+              "phase": "section_expand",
+              "message": "正在展开章节",
+              "section_count": 1
+            },
+            {
+              "phase": "read_chunks",
+              "message": "读取引用来源",
+              "chunk_count": 1
+            },
+            {
+              "phase": "evidence_pack",
+              "message": "整理引用来源包",
+              "evidence_count": 1
+            }
+          ],
+          "selected_documents": [
+            {
+              "id": "kdoc_native_g4",
+              "knowledge_base_id": "kb_native_g4",
+              "title": "Approval policy",
+              "filename": "approval-policy.md",
+              "file_type": "md",
+              "summary": "# Release approval Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.",
+              "outline": [
+                {
+                  "section_id": "sec_1",
+                  "title": "Release approval",
+                  "path": "Release approval",
+                  "level": 1,
+                  "summary": "# Release approval Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16."
+                }
+              ],
+              "key_entities": [
+                "Release",
+                "approval",
+                "Owner",
+                "required",
+                "before",
+                "release",
+                "Native",
+                "branch",
+                "updated",
+                "security",
+                "review",
+                "fact",
+                "d062081c03b4e16"
+              ],
+              "section_count": 1,
+              "chunk_count": 1,
+              "updated_at": "2026-09-22T17:58:46.377713"
+            }
+          ],
+          "selected_concepts": [
+            {
+              "id": "kconcept_d1fe770fa7574fce",
+              "concept_id": "sources/approval-policy/sections/sec-1",
+              "type": "Source Section",
+              "title": "Release approval",
+              "description": "# Release approval Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.",
+              "links": [
+                {
+                  "label": "Original document",
+                  "target": "ultrarag://knowledge/documents/kdoc_native_g4"
+                }
+              ],
+              "citations": [
+                {
+                  "index": 1,
+                  "label": "Original document",
+                  "target": "ultrarag://knowledge/documents/kdoc_native_g4"
+                }
+              ],
+              "source_refs": [
+                {
+                  "document_id": "kdoc_native_g4",
+                  "section_id": "sec_1",
+                  "section_path": "Release approval"
+                }
+              ],
+              "content": "# Summary\n\n# Release approval Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.\n\n# Content\n\n# Release approval\n\nOwner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.\n\n# Citations\n\n[1] [Original document](ultrarag://knowledge/documents/kdoc_native_g4)"
+            },
+            {
+              "id": "kconcept_70b42c62dfbc43e1",
+              "concept_id": "sources/approval-policy",
+              "type": "Source Document",
+              "title": "Approval policy",
+              "description": "# Release approval Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.",
+              "links": [
+                {
+                  "label": "Release approval",
+                  "target": "/sources/approval-policy/sections/sec-1.md"
+                },
+                {
+                  "label": "Release approval",
+                  "target": "/topics/release-approval.md"
+                },
+                {
+                  "label": "Original document",
+                  "target": "ultrarag://knowledge/documents/kdoc_native_g4"
+                }
+              ],
+              "citations": [
+                {
+                  "index": 1,
+                  "label": "Original document",
+                  "target": "ultrarag://knowledge/documents/kdoc_native_g4"
+                }
+              ],
+              "source_refs": [
+                {
+                  "document_id": "kdoc_native_g4",
+                  "filename": "approval-policy.md"
+                }
+              ],
+              "content": "# Summary\n\n# Release approval Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.\n\n# Outline\n\n- [Release approval](/sources/approval-policy/sections/sec-1.md) - # Release approval Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.\n\n# Knowledge Buckets\n\n- [Release approval](/topics/release-approval.md) - # Release approval Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.\n\n# Citations\n\n[1] [Original document](ultrarag://knowledge/documents/kdoc_native_g4)"
+            },
+            {
+              "id": "kconcept_3a4edbc4567f44d8",
+              "concept_id": "topics/release-approval",
+              "type": "Topic",
+              "title": "Release approval",
+              "description": "# Release approval Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.",
+              "links": [
+                {
+                  "label": "Release approval",
+                  "target": "/sources/approval-policy/sections/sec-1.md"
+                },
+                {
+                  "label": "Original document",
+                  "target": "ultrarag://knowledge/documents/kdoc_native_g4"
+                }
+              ],
+              "citations": [
+                {
+                  "index": 1,
+                  "label": "Original document",
+                  "target": "ultrarag://knowledge/documents/kdoc_native_g4"
+                }
+              ],
+              "source_refs": [
+                {
+                  "document_id": "kdoc_native_g4",
+                  "bucket_id": "kbucket_4482bdcd8e4344f6",
+                  "bucket_key": "release_approval"
+                }
+              ],
+              "content": "# Summary\n\n# Release approval Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.\n\n# Source Sections\n\n- [Release approval](/sources/approval-policy/sections/sec-1.md)\n\n# Notes\n\n# Release approval\n\nOwner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.\n\n# Citations\n\n[1] [Original document](ultrarag://knowledge/documents/kdoc_native_g4)"
+            }
+          ],
+          "expanded_sections": [
+            {
+              "document_id": "kdoc_native_g4",
+              "section_id": "sec_1",
+              "title": "Release approval",
+              "path": "Release approval",
+              "summary": "# Release approval Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.",
+              "level": 1,
+              "source_span": {
+                "start_paragraph": 0,
+                "end_paragraph": 1
+              },
+              "reason": "命中内部索引：Release approval"
+            }
+          ],
+          "okf_citations": [
+            {
+              "concept_id": "sources/approval-policy/sections/sec-1",
+              "title": "Release approval",
+              "label": "Original document",
+              "target": "ultrarag://knowledge/documents/kdoc_native_g4"
+            },
+            {
+              "concept_id": "sources/approval-policy",
+              "title": "Approval policy",
+              "label": "Original document",
+              "target": "ultrarag://knowledge/documents/kdoc_native_g4"
+            },
+            {
+              "concept_id": "topics/release-approval",
+              "title": "Release approval",
+              "label": "Original document",
+              "target": "ultrarag://knowledge/documents/kdoc_native_g4"
+            }
+          ],
+          "evidence_pack": [
+            {
+              "chunk_id": "kchunk_d6b4b9f0ec6f4620",
+              "related_group_id": null,
+              "related_chunk_ids": [],
+              "related_chunk_index": 0,
+              "document_id": "kdoc_native_g4",
+              "bucket_id": "kbucket_4482bdcd8e4344f6",
+              "source_path": "approval-policy.md / Release approval / evidence 1",
+              "section_path": "Release approval",
+              "summary": "Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.",
+              "content": "Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.",
+              "excerpt": "Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.",
+              "relevance_score": 18.86,
+              "confidence_reason": "引用来源摘要、章节路径或正文与查询相关"
+            }
+          ],
+          "query": "After the policy update, what is the current owner approval fact for release?"
+        }
+      ],
+      "next_step_id": null,
+      "is_step_completed": true,
+      "handoff": false,
+      "structured_result": "{\"approval_requirement\": \"Owner approval is required before release\", \"security_review_fact\": \"7d062081c03b4e16\", \"source\": \"approval-policy.md / Release approval / evidence 1\"}"
+    },
+    "invocations": [
+      {
+        "toolName": "knowledge:knowledge.search/v1",
+        "status": "completed",
+        "result": {
+          "success": true,
+          "data": {
+            "query": "After the policy update, what is the current owner approval fact for release?",
+            "hit_count": 1,
+            "results": [
+              {
+                "label": "[1]",
+                "title": "",
+                "source": "approval-policy.md / Release approval / evidence 1",
+                "excerpt": "Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16."
+              }
+            ],
+            "citations": [
+              {
+                "label": "[1]",
+                "title": "Release approval",
+                "source": "approval-policy.md / Release approval / evidence 1"
+              }
+            ],
+            "instruction": "回答时用对应的 [N] 标注引用；没有命中的内容不要臆造。"
+          },
+          "error": null,
+          "citations": [
+            {
+              "id": "kref_1",
+              "label": "[1]",
+              "kind": "evidence",
+              "title": "Release approval",
+              "source_path": "approval-policy.md / Release approval / evidence 1",
+              "content": "Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.",
+              "excerpt": "Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.",
+              "summary": "Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.",
+              "section_path": "Release approval",
+              "confidence_reason": "引用来源摘要、章节路径或正文与查询相关",
+              "document_id": "kdoc_native_g4",
+              "bucket_id": "kbucket_4482bdcd8e4344f6",
+              "chunk_id": "kchunk_d6b4b9f0ec6f4620",
+              "related_group_id": null,
+              "related_chunk_ids": [
+                "kchunk_d6b4b9f0ec6f4620"
+              ]
+            }
+          ],
+          "artifacts": []
+        }
+      }
+    ],
+    "modelResponses": [
+      {
+        "text": "{\n  \"memories\": [],\n  \"updated_summary\": \"\"\n}",
+        "toolCalls": [],
+        "finishReason": "stop"
+      },
+      {
+        "text": "{\"decision\":\"start_new_task\",\"confidence\":0.95,\"user_intent\":\"查询政策更新后关于 release 的当前 owner approval fact。\",\"reason\":\"用户询问特定政策细节，匹配可用知识参考 SOP 'native-g4-knowledge'。\",\"task_frames\":[{\"task_id\":\"\",\"kind\":\"sop\",\"decision\":\"start_new_task\",\"target_skill_id\":\"native-g4-knowledge\",\"target_step_id\":\"\",\"user_intent\":\"查询政策更新后关于 release 的当前 owner approval fact。\",\"requirements\":[\"查询政策更新后关于 release 的当前 owner approval fact。\"],\"slot_hints\":{},\"depends_on_task_ids\":[],\"execution_target\":\"self\",\"assignee_agent_id\":null,\"activation_condition\":{}}],\"task_updates\":[]}",
+        "toolCalls": [],
+        "finishReason": "stop"
+      },
+      {
+        "text": "",
+        "toolCalls": [
+          {
+            "name": "mcp__staffdeck__capability_describe",
+            "arguments": "{\"kind\": \"all\"}"
+          }
+        ],
+        "finishReason": "tool_calls"
+      },
+      {
+        "text": "",
+        "toolCalls": [
+          {
+            "name": "mcp__staffdeck__knowledge_search",
+            "arguments": "{\"query\": \"After the policy update, what is the current owner approval fact for release?\", \"knowledge_base_ids\": \n[\"kb_native_g4\"]\n\n, \"max_chunks\": 12}"
+          }
+        ],
+        "finishReason": "tool_calls"
+      },
+      {
+        "text": "{\n  \"selected_document_ids\": [\"kdoc_native_g4\"]\n}",
+        "toolCalls": [],
+        "finishReason": "stop"
+      },
+      {
+        "text": "{\n  \"selected_bucket_ids\": [\"kbucket_4482bdcd8e4344f6\"]\n}",
+        "toolCalls": [],
+        "finishReason": "stop"
+      },
+      {
+        "text": "",
+        "toolCalls": [
+          {
+            "name": "mcp__staffdeck__submit_step_result",
+            "arguments": "{\"status\": \"completed\", \"reply_fragment\": \"After the policy update, the current owner approval fact for release is: **Owner approval is required before release** [1]. \\n\\nThe native branch has updated the security review fact (7d062081c03b4e16) as part of this requirement [1].\\n\\n引用来源：[1] Release approval (approval-policy.md / Release approval / evidence 1)\", \"task_summary\": \"使用 kb_native_g4 知识库检索政策更新后关于 release 的 owner approval fact，找到相关证据并回复用户。\", \"structured_result\": \"{\\\"approval_requirement\\\": \\\"Owner approval is required before release\\\", \\\"security_review_fact\\\": \\\"7d062081c03b4e16\\\", \\\"source\\\": \\\"approval-policy.md / Release approval / evidence 1\\\"}\"}"
+          }
+        ],
+        "finishReason": "tool_calls"
+      },
+      {
+        "text": "After the policy update, the current owner approval fact for release is: **Owner approval is required before release** [1]. \n\nThe native branch has updated the security review fact (7d062081c03b4e16) as part of this requirement [1].\n\n引用来源：[1] Release approval (approval-policy.md / Release approval / evidence 1)",
+        "toolCalls": [],
+        "finishReason": "stop"
+      }
+    ],
+    "modelToolSchemas": [
+      "mcp__staffdeck__capability_describe",
+      "mcp__staffdeck__capability_invoke",
+      "mcp__staffdeck__external_task_status",
+      "mcp__staffdeck__knowledge_search",
+      "mcp__staffdeck__sandbox_execute",
+      "mcp__staffdeck__submit_step_result"
+    ],
+    "toolResults": [
+      "{\"success\": true, \"data\": {\"items\": [{\"kind\": \"knowledge_base\", \"id\": \"kb_native_g4\", \"name\": \"Native G4 approval policy\", \"scope\": \"sop_specific\", \"operation\": \"knowledge.search/v1\", \"description\": \"\", \"input_schema\": {}}], \"snapshot_id\": \"109470920e9de6e3bae26e9f29522f208176f5a6f98cc50933b6a321f2056e69\"}}",
+      "{\"success\": true, \"data\": {\"items\": [{\"kind\": \"knowledge_base\", \"id\": \"kb_native_g4\", \"name\": \"Native G4 approval policy\", \"scope\": \"sop_specific\", \"operation\": \"knowledge.search/v1\", \"description\": \"\", \"input_schema\": {}}], \"snapshot_id\": \"109470920e9de6e3bae26e9f29522f208176f5a6f98cc50933b6a321f2056e69\"}}",
+      "{\"success\": true, \"data\": {\"query\": \"After the policy update, what is the current owner approval fact for release?\", \"hit_count\": 1, \"results\": [{\"label\": \"[1]\", \"title\": \"\", \"source\": \"approval-policy.md / Release approval / evidence 1\", \"excerpt\": \"Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.\"}], \"citations\": [{\"label\": \"[1]\", \"title\": \"Release approval\", \"source\": \"approval-policy.md / Release approval / evidence 1\"}], \"instruction\": \"回答时用对应的 [N] 标注引用；没有命中的内容不要臆造。\"}, \"citations\": [{\"id\": \"kref_1\", \"label\": \"[1]\", \"kind\": \"evidence\", \"title\": \"Release approval\", \"source_path\": \"approval-policy.md / Release approval / evidence 1\", \"content\": \"Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.\", \"excerpt\": \"Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.\", \"summary\": \"Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.\", \"section_path\": \"Release approval\", \"confidence_reason\": \"引用来源摘要、章节路径或正文与查询相关\", \"document_id\": \"kdoc_native_g4\", \"bucket_id\": \"kbucket_4482bdcd8e4344f6\", \"chunk_id\": \"kchunk_d6b4b9f0ec6f4620\", \"related_group_id\": null, \"related_chunk_ids\": [\"kchunk_d6b4b9f0ec6f4620\"]}], \"receipt\": {\"invocation_id\": \"hcall_2_4676ddb3\", \"status\": \"completed\", \"replayed_from\": null}}",
+      "{\"success\": true, \"data\": {\"items\": [{\"kind\": \"knowledge_base\", \"id\": \"kb_native_g4\", \"name\": \"Native G4 approval policy\", \"scope\": \"sop_specific\", \"operation\": \"knowledge.search/v1\", \"description\": \"\", \"input_schema\": {}}], \"snapshot_id\": \"109470920e9de6e3bae26e9f29522f208176f5a6f98cc50933b6a321f2056e69\"}}",
+      "{\"success\": true, \"data\": {\"query\": \"After the policy update, what is the current owner approval fact for release?\", \"hit_count\": 1, \"results\": [{\"label\": \"[1]\", \"title\": \"\", \"source\": \"approval-policy.md / Release approval / evidence 1\", \"excerpt\": \"Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.\"}], \"citations\": [{\"label\": \"[1]\", \"title\": \"Release approval\", \"source\": \"approval-policy.md / Release approval / evidence 1\"}], \"instruction\": \"回答时用对应的 [N] 标注引用；没有命中的内容不要臆造。\"}, \"citations\": [{\"id\": \"kref_1\", \"label\": \"[1]\", \"kind\": \"evidence\", \"title\": \"Release approval\", \"source_path\": \"approval-policy.md / Release approval / evidence 1\", \"content\": \"Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.\", \"excerpt\": \"Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.\", \"summary\": \"Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.\", \"section_path\": \"Release approval\", \"confidence_reason\": \"引用来源摘要、章节路径或正文与查询相关\", \"document_id\": \"kdoc_native_g4\", \"bucket_id\": \"kbucket_4482bdcd8e4344f6\", \"chunk_id\": \"kchunk_d6b4b9f0ec6f4620\", \"related_group_id\": null, \"related_chunk_ids\": [\"kchunk_d6b4b9f0ec6f4620\"]}], \"receipt\": {\"invocation_id\": \"hcall_2_4676ddb3\", \"status\": \"completed\", \"replayed_from\": null}}",
+      "{\"success\": true, \"data\": {\"accepted\": true, \"notice\": \"SOP 步骤结果已提交，请停止生成。\"}}"
+    ],
+    "modelRequests": 7,
+    "mode": "allowed",
+    "userMessage": "After the policy update, what is the current owner approval fact for release?",
+    "routing": {
+      "kind": "normal_model_route",
+      "phases": [
+        "okf_concept_route",
+        "document_route",
+        "bucket_route",
+        "section_expand",
+        "read_chunks",
+        "evidence_pack"
+      ]
+    }
+  },
+  "routingComparison": {
+    "realPath": "normal_model_route",
+    "realUpdatedPath": "normal_model_route",
+    "mockPath": "lexical_fallback",
+    "normalModelSelectionRequired": true
+  },
+  "checks": {
+    "realProviderNativeTurn": {
+      "passed": true
+    },
+    "realProviderKnowledgeUpdateNewSession": {
+      "passed": true
+    }
+  },
+  "knowledgeUpdate": {
+    "documentId": "kdoc_native_g4",
+    "oldFact": "Native branch-only owner approval fact 7d062081c03b4e16",
+    "newFact": "Native branch updated security review fact 7d062081c03b4e16",
+    "newSessionUserMessage": "After the policy update, what is the current owner approval fact for release?",
+    "service": "KnowledgeService.replace_document_content",
+    "updatedTurn": {
+      "reply": "After the policy update, the current owner approval fact for release is: **Owner approval is required before release** [1].\n\nThe native branch has updated the security review fact (7d062081c03b4e16) as part of this requirement [1].\n\n引用来源：[1] Release approval (approval-policy.md / Release approval / evidence 1)",
+      "runtimeError": null,
+      "stepResult": {
+        "action": "advance",
+        "reply": "After the policy update, the current owner approval fact for release is: **Owner approval is required before release** [1]. \n\nThe native branch has updated the security review fact (7d062081c03b4e16) as part of this requirement [1].\n\n引用来源：[1] Release approval (approval-policy.md / Release approval / evidence 1)",
+        "slot_updates": {},
+        "tool_call": null,
+        "knowledge_query": null,
+        "knowledge_results": [
+          {
+            "selected_buckets": [
+              {
+                "id": "kbucket_4482bdcd8e4344f6",
+                "tenant_id": "tenant_demo",
+                "knowledge_base_id": "kb_native_g4",
+                "document_id": "kdoc_native_g4",
+                "bucket_key": "release_approval",
+                "title": "Release approval",
+                "summary": "# Release approval Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.",
+                "token_estimate": 61,
+                "chunk_count": 1,
+                "status": "ready",
+                "metadata": {
+                  "ingest_schema_version": 2,
+                  "content": "# Release approval\n\nOwner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.",
+                  "bucket_type": "structure",
+                  "concept_type": "Topic",
+                  "section_ids": [
+                    "sec_1"
+                  ],
+                  "section_paths": [
+                    "Release approval"
+                  ],
+                  "representative_chunk_ids": [
+                    "kchunk_d6b4b9f0ec6f4620"
+                  ],
+                  "applicable_query_types": [
+                    "answer",
+                    "policy_check"
+                  ],
+                  "quality": {
+                    "status": "ready",
+                    "warnings": [],
+                    "has_source_sections": true,
+                    "has_summary": true,
+                    "content_chars": 123
+                  },
+                  "document_card": {
+                    "title": "Approval policy",
+                    "summary": "# Release approval Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16."
+                  },
+                  "chunk_count": 1
+                },
+                "created_at": "2026-09-22T17:58:46.349232",
+                "updated_at": "2026-09-22T17:58:46.352577"
+              }
+            ],
+            "chunks": [
+              {
+                "id": "kchunk_d6b4b9f0ec6f4620",
+                "tenant_id": "tenant_demo",
+                "knowledge_base_id": "kb_native_g4",
+                "document_id": "kdoc_native_g4",
+                "bucket_id": "kbucket_4482bdcd8e4344f6",
+                "chunk_index": 0,
+                "content": "Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.",
+                "summary": "Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.",
+                "source_ref": "approval-policy.md / Release approval / evidence 1",
+                "metadata": {
+                  "ingest_schema_version": 2,
+                  "node_type": "evidence_chunk",
+                  "related_group_id": null,
+                  "related_chunk_index": 0,
+                  "section_id": "sec_1",
+                  "section_path": "Release approval",
+                  "section_title": "Release approval",
+                  "bucket_title": "Release approval",
+                  "source_span": {
+                    "start_paragraph": 0,
+                    "end_paragraph": 1
+                  },
+                  "context_window": "# Release approval Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.",
+                  "related_chunk_ids": [],
+                  "related_chunk_count": 0,
+                  "related_previous_chunk_id": null,
+                  "related_next_chunk_id": null
+                },
+                "created_at": "2026-09-22T17:58:46.350713",
+                "updated_at": "2026-09-22T17:58:46.350719"
+              }
+            ],
+            "trace": [
+              {
+                "phase": "okf_concept_route",
+                "message": "正在选择 OKF Wiki 页面",
+                "candidate_count": 3,
+                "selected_count": 3
+              },
+              {
+                "phase": "document_route",
+                "message": "正在选择知识文档",
+                "candidate_count": 1,
+                "mode": "chat"
+              },
+              {
+                "phase": "bucket_route",
+                "message": "正在选择内部索引",
+                "candidate_count": 1,
+                "selected_document_ids": [
+                  "kdoc_native_g4"
+                ]
+              },
+              {
+                "phase": "section_expand",
+                "message": "正在展开章节",
+                "section_count": 1
+              },
+              {
+                "phase": "read_chunks",
+                "message": "读取引用来源",
+                "chunk_count": 1
+              },
+              {
+                "phase": "evidence_pack",
+                "message": "整理引用来源包",
+                "evidence_count": 1
+              }
+            ],
+            "route_trace": [
+              {
+                "phase": "okf_concept_route",
+                "message": "正在选择 OKF Wiki 页面",
+                "candidate_count": 3,
+                "selected_count": 3
+              },
+              {
+                "phase": "document_route",
+                "message": "正在选择知识文档",
+                "candidate_count": 1,
+                "mode": "chat"
+              },
+              {
+                "phase": "bucket_route",
+                "message": "正在选择内部索引",
+                "candidate_count": 1,
+                "selected_document_ids": [
+                  "kdoc_native_g4"
+                ]
+              },
+              {
+                "phase": "section_expand",
+                "message": "正在展开章节",
+                "section_count": 1
+              },
+              {
+                "phase": "read_chunks",
+                "message": "读取引用来源",
+                "chunk_count": 1
+              },
+              {
+                "phase": "evidence_pack",
+                "message": "整理引用来源包",
+                "evidence_count": 1
+              }
+            ],
+            "selected_documents": [
+              {
+                "id": "kdoc_native_g4",
+                "knowledge_base_id": "kb_native_g4",
+                "title": "Approval policy",
+                "filename": "approval-policy.md",
+                "file_type": "md",
+                "summary": "# Release approval Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.",
+                "outline": [
+                  {
+                    "section_id": "sec_1",
+                    "title": "Release approval",
+                    "path": "Release approval",
+                    "level": 1,
+                    "summary": "# Release approval Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16."
+                  }
+                ],
+                "key_entities": [
+                  "Release",
+                  "approval",
+                  "Owner",
+                  "required",
+                  "before",
+                  "release",
+                  "Native",
+                  "branch",
+                  "updated",
+                  "security",
+                  "review",
+                  "fact",
+                  "d062081c03b4e16"
+                ],
+                "section_count": 1,
+                "chunk_count": 1,
+                "updated_at": "2026-09-22T17:58:46.377713"
+              }
+            ],
+            "selected_concepts": [
+              {
+                "id": "kconcept_d1fe770fa7574fce",
+                "concept_id": "sources/approval-policy/sections/sec-1",
+                "type": "Source Section",
+                "title": "Release approval",
+                "description": "# Release approval Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.",
+                "links": [
+                  {
+                    "label": "Original document",
+                    "target": "ultrarag://knowledge/documents/kdoc_native_g4"
+                  }
+                ],
+                "citations": [
+                  {
+                    "index": 1,
+                    "label": "Original document",
+                    "target": "ultrarag://knowledge/documents/kdoc_native_g4"
+                  }
+                ],
+                "source_refs": [
+                  {
+                    "document_id": "kdoc_native_g4",
+                    "section_id": "sec_1",
+                    "section_path": "Release approval"
+                  }
+                ],
+                "content": "# Summary\n\n# Release approval Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.\n\n# Content\n\n# Release approval\n\nOwner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.\n\n# Citations\n\n[1] [Original document](ultrarag://knowledge/documents/kdoc_native_g4)"
+              },
+              {
+                "id": "kconcept_70b42c62dfbc43e1",
+                "concept_id": "sources/approval-policy",
+                "type": "Source Document",
+                "title": "Approval policy",
+                "description": "# Release approval Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.",
+                "links": [
+                  {
+                    "label": "Release approval",
+                    "target": "/sources/approval-policy/sections/sec-1.md"
+                  },
+                  {
+                    "label": "Release approval",
+                    "target": "/topics/release-approval.md"
+                  },
+                  {
+                    "label": "Original document",
+                    "target": "ultrarag://knowledge/documents/kdoc_native_g4"
+                  }
+                ],
+                "citations": [
+                  {
+                    "index": 1,
+                    "label": "Original document",
+                    "target": "ultrarag://knowledge/documents/kdoc_native_g4"
+                  }
+                ],
+                "source_refs": [
+                  {
+                    "document_id": "kdoc_native_g4",
+                    "filename": "approval-policy.md"
+                  }
+                ],
+                "content": "# Summary\n\n# Release approval Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.\n\n# Outline\n\n- [Release approval](/sources/approval-policy/sections/sec-1.md) - # Release approval Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.\n\n# Knowledge Buckets\n\n- [Release approval](/topics/release-approval.md) - # Release approval Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.\n\n# Citations\n\n[1] [Original document](ultrarag://knowledge/documents/kdoc_native_g4)"
+              },
+              {
+                "id": "kconcept_3a4edbc4567f44d8",
+                "concept_id": "topics/release-approval",
+                "type": "Topic",
+                "title": "Release approval",
+                "description": "# Release approval Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.",
+                "links": [
+                  {
+                    "label": "Release approval",
+                    "target": "/sources/approval-policy/sections/sec-1.md"
+                  },
+                  {
+                    "label": "Original document",
+                    "target": "ultrarag://knowledge/documents/kdoc_native_g4"
+                  }
+                ],
+                "citations": [
+                  {
+                    "index": 1,
+                    "label": "Original document",
+                    "target": "ultrarag://knowledge/documents/kdoc_native_g4"
+                  }
+                ],
+                "source_refs": [
+                  {
+                    "document_id": "kdoc_native_g4",
+                    "bucket_id": "kbucket_4482bdcd8e4344f6",
+                    "bucket_key": "release_approval"
+                  }
+                ],
+                "content": "# Summary\n\n# Release approval Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.\n\n# Source Sections\n\n- [Release approval](/sources/approval-policy/sections/sec-1.md)\n\n# Notes\n\n# Release approval\n\nOwner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.\n\n# Citations\n\n[1] [Original document](ultrarag://knowledge/documents/kdoc_native_g4)"
+              }
+            ],
+            "expanded_sections": [
+              {
+                "document_id": "kdoc_native_g4",
+                "section_id": "sec_1",
+                "title": "Release approval",
+                "path": "Release approval",
+                "summary": "# Release approval Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.",
+                "level": 1,
+                "source_span": {
+                  "start_paragraph": 0,
+                  "end_paragraph": 1
+                },
+                "reason": "命中内部索引：Release approval"
+              }
+            ],
+            "okf_citations": [
+              {
+                "concept_id": "sources/approval-policy/sections/sec-1",
+                "title": "Release approval",
+                "label": "Original document",
+                "target": "ultrarag://knowledge/documents/kdoc_native_g4"
+              },
+              {
+                "concept_id": "sources/approval-policy",
+                "title": "Approval policy",
+                "label": "Original document",
+                "target": "ultrarag://knowledge/documents/kdoc_native_g4"
+              },
+              {
+                "concept_id": "topics/release-approval",
+                "title": "Release approval",
+                "label": "Original document",
+                "target": "ultrarag://knowledge/documents/kdoc_native_g4"
+              }
+            ],
+            "evidence_pack": [
+              {
+                "chunk_id": "kchunk_d6b4b9f0ec6f4620",
+                "related_group_id": null,
+                "related_chunk_ids": [],
+                "related_chunk_index": 0,
+                "document_id": "kdoc_native_g4",
+                "bucket_id": "kbucket_4482bdcd8e4344f6",
+                "source_path": "approval-policy.md / Release approval / evidence 1",
+                "section_path": "Release approval",
+                "summary": "Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.",
+                "content": "Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.",
+                "excerpt": "Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.",
+                "relevance_score": 18.86,
+                "confidence_reason": "引用来源摘要、章节路径或正文与查询相关"
+              }
+            ],
+            "query": "After the policy update, what is the current owner approval fact for release?"
+          }
+        ],
+        "next_step_id": null,
+        "is_step_completed": true,
+        "handoff": false,
+        "structured_result": "{\"approval_requirement\": \"Owner approval is required before release\", \"security_review_fact\": \"7d062081c03b4e16\", \"source\": \"approval-policy.md / Release approval / evidence 1\"}"
+      },
+      "invocations": [
+        {
+          "toolName": "knowledge:knowledge.search/v1",
+          "status": "completed",
+          "result": {
+            "success": true,
+            "data": {
+              "query": "After the policy update, what is the current owner approval fact for release?",
+              "hit_count": 1,
+              "results": [
+                {
+                  "label": "[1]",
+                  "title": "",
+                  "source": "approval-policy.md / Release approval / evidence 1",
+                  "excerpt": "Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16."
+                }
+              ],
+              "citations": [
+                {
+                  "label": "[1]",
+                  "title": "Release approval",
+                  "source": "approval-policy.md / Release approval / evidence 1"
+                }
+              ],
+              "instruction": "回答时用对应的 [N] 标注引用；没有命中的内容不要臆造。"
+            },
+            "error": null,
+            "citations": [
+              {
+                "id": "kref_1",
+                "label": "[1]",
+                "kind": "evidence",
+                "title": "Release approval",
+                "source_path": "approval-policy.md / Release approval / evidence 1",
+                "content": "Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.",
+                "excerpt": "Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.",
+                "summary": "Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.",
+                "section_path": "Release approval",
+                "confidence_reason": "引用来源摘要、章节路径或正文与查询相关",
+                "document_id": "kdoc_native_g4",
+                "bucket_id": "kbucket_4482bdcd8e4344f6",
+                "chunk_id": "kchunk_d6b4b9f0ec6f4620",
+                "related_group_id": null,
+                "related_chunk_ids": [
+                  "kchunk_d6b4b9f0ec6f4620"
+                ]
+              }
+            ],
+            "artifacts": []
+          }
+        }
+      ],
+      "modelResponses": [
+        {
+          "text": "{\n  \"memories\": [],\n  \"updated_summary\": \"\"\n}",
+          "toolCalls": [],
+          "finishReason": "stop"
+        },
+        {
+          "text": "{\"decision\":\"start_new_task\",\"confidence\":0.95,\"user_intent\":\"查询政策更新后关于 release 的当前 owner approval fact。\",\"reason\":\"用户询问特定政策细节，匹配可用知识参考 SOP 'native-g4-knowledge'。\",\"task_frames\":[{\"task_id\":\"\",\"kind\":\"sop\",\"decision\":\"start_new_task\",\"target_skill_id\":\"native-g4-knowledge\",\"target_step_id\":\"\",\"user_intent\":\"查询政策更新后关于 release 的当前 owner approval fact。\",\"requirements\":[\"查询政策更新后关于 release 的当前 owner approval fact。\"],\"slot_hints\":{},\"depends_on_task_ids\":[],\"execution_target\":\"self\",\"assignee_agent_id\":null,\"activation_condition\":{}}],\"task_updates\":[]}",
+          "toolCalls": [],
+          "finishReason": "stop"
+        },
+        {
+          "text": "",
+          "toolCalls": [
+            {
+              "name": "mcp__staffdeck__capability_describe",
+              "arguments": "{\"kind\": \"all\"}"
+            }
+          ],
+          "finishReason": "tool_calls"
+        },
+        {
+          "text": "",
+          "toolCalls": [
+            {
+              "name": "mcp__staffdeck__knowledge_search",
+              "arguments": "{\"query\": \"After the policy update, what is the current owner approval fact for release?\", \"knowledge_base_ids\": \n[\"kb_native_g4\"]\n\n, \"max_chunks\": 12}"
+            }
+          ],
+          "finishReason": "tool_calls"
+        },
+        {
+          "text": "{\n  \"selected_document_ids\": [\"kdoc_native_g4\"]\n}",
+          "toolCalls": [],
+          "finishReason": "stop"
+        },
+        {
+          "text": "{\n  \"selected_bucket_ids\": [\"kbucket_4482bdcd8e4344f6\"]\n}",
+          "toolCalls": [],
+          "finishReason": "stop"
+        },
+        {
+          "text": "",
+          "toolCalls": [
+            {
+              "name": "mcp__staffdeck__submit_step_result",
+              "arguments": "{\"status\": \"completed\", \"reply_fragment\": \"After the policy update, the current owner approval fact for release is: **Owner approval is required before release** [1]. \\n\\nThe native branch has updated the security review fact (7d062081c03b4e16) as part of this requirement [1].\\n\\n引用来源：[1] Release approval (approval-policy.md / Release approval / evidence 1)\", \"task_summary\": \"使用 kb_native_g4 知识库检索政策更新后关于 release 的 owner approval fact，找到相关证据并回复用户。\", \"structured_result\": \"{\\\"approval_requirement\\\": \\\"Owner approval is required before release\\\", \\\"security_review_fact\\\": \\\"7d062081c03b4e16\\\", \\\"source\\\": \\\"approval-policy.md / Release approval / evidence 1\\\"}\"}"
+            }
+          ],
+          "finishReason": "tool_calls"
+        },
+        {
+          "text": "After the policy update, the current owner approval fact for release is: **Owner approval is required before release** [1]. \n\nThe native branch has updated the security review fact (7d062081c03b4e16) as part of this requirement [1].\n\n引用来源：[1] Release approval (approval-policy.md / Release approval / evidence 1)",
+          "toolCalls": [],
+          "finishReason": "stop"
+        }
+      ],
+      "modelToolSchemas": [
+        "mcp__staffdeck__capability_describe",
+        "mcp__staffdeck__capability_invoke",
+        "mcp__staffdeck__external_task_status",
+        "mcp__staffdeck__knowledge_search",
+        "mcp__staffdeck__sandbox_execute",
+        "mcp__staffdeck__submit_step_result"
+      ],
+      "toolResults": [
+        "{\"success\": true, \"data\": {\"items\": [{\"kind\": \"knowledge_base\", \"id\": \"kb_native_g4\", \"name\": \"Native G4 approval policy\", \"scope\": \"sop_specific\", \"operation\": \"knowledge.search/v1\", \"description\": \"\", \"input_schema\": {}}], \"snapshot_id\": \"109470920e9de6e3bae26e9f29522f208176f5a6f98cc50933b6a321f2056e69\"}}",
+        "{\"success\": true, \"data\": {\"items\": [{\"kind\": \"knowledge_base\", \"id\": \"kb_native_g4\", \"name\": \"Native G4 approval policy\", \"scope\": \"sop_specific\", \"operation\": \"knowledge.search/v1\", \"description\": \"\", \"input_schema\": {}}], \"snapshot_id\": \"109470920e9de6e3bae26e9f29522f208176f5a6f98cc50933b6a321f2056e69\"}}",
+        "{\"success\": true, \"data\": {\"query\": \"After the policy update, what is the current owner approval fact for release?\", \"hit_count\": 1, \"results\": [{\"label\": \"[1]\", \"title\": \"\", \"source\": \"approval-policy.md / Release approval / evidence 1\", \"excerpt\": \"Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.\"}], \"citations\": [{\"label\": \"[1]\", \"title\": \"Release approval\", \"source\": \"approval-policy.md / Release approval / evidence 1\"}], \"instruction\": \"回答时用对应的 [N] 标注引用；没有命中的内容不要臆造。\"}, \"citations\": [{\"id\": \"kref_1\", \"label\": \"[1]\", \"kind\": \"evidence\", \"title\": \"Release approval\", \"source_path\": \"approval-policy.md / Release approval / evidence 1\", \"content\": \"Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.\", \"excerpt\": \"Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.\", \"summary\": \"Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.\", \"section_path\": \"Release approval\", \"confidence_reason\": \"引用来源摘要、章节路径或正文与查询相关\", \"document_id\": \"kdoc_native_g4\", \"bucket_id\": \"kbucket_4482bdcd8e4344f6\", \"chunk_id\": \"kchunk_d6b4b9f0ec6f4620\", \"related_group_id\": null, \"related_chunk_ids\": [\"kchunk_d6b4b9f0ec6f4620\"]}], \"receipt\": {\"invocation_id\": \"hcall_2_4676ddb3\", \"status\": \"completed\", \"replayed_from\": null}}",
+        "{\"success\": true, \"data\": {\"items\": [{\"kind\": \"knowledge_base\", \"id\": \"kb_native_g4\", \"name\": \"Native G4 approval policy\", \"scope\": \"sop_specific\", \"operation\": \"knowledge.search/v1\", \"description\": \"\", \"input_schema\": {}}], \"snapshot_id\": \"109470920e9de6e3bae26e9f29522f208176f5a6f98cc50933b6a321f2056e69\"}}",
+        "{\"success\": true, \"data\": {\"query\": \"After the policy update, what is the current owner approval fact for release?\", \"hit_count\": 1, \"results\": [{\"label\": \"[1]\", \"title\": \"\", \"source\": \"approval-policy.md / Release approval / evidence 1\", \"excerpt\": \"Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.\"}], \"citations\": [{\"label\": \"[1]\", \"title\": \"Release approval\", \"source\": \"approval-policy.md / Release approval / evidence 1\"}], \"instruction\": \"回答时用对应的 [N] 标注引用；没有命中的内容不要臆造。\"}, \"citations\": [{\"id\": \"kref_1\", \"label\": \"[1]\", \"kind\": \"evidence\", \"title\": \"Release approval\", \"source_path\": \"approval-policy.md / Release approval / evidence 1\", \"content\": \"Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.\", \"excerpt\": \"Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.\", \"summary\": \"Owner approval is required before release. Native branch updated security review fact 7d062081c03b4e16.\", \"section_path\": \"Release approval\", \"confidence_reason\": \"引用来源摘要、章节路径或正文与查询相关\", \"document_id\": \"kdoc_native_g4\", \"bucket_id\": \"kbucket_4482bdcd8e4344f6\", \"chunk_id\": \"kchunk_d6b4b9f0ec6f4620\", \"related_group_id\": null, \"related_chunk_ids\": [\"kchunk_d6b4b9f0ec6f4620\"]}], \"receipt\": {\"invocation_id\": \"hcall_2_4676ddb3\", \"status\": \"completed\", \"replayed_from\": null}}",
+        "{\"success\": true, \"data\": {\"accepted\": true, \"notice\": \"SOP 步骤结果已提交，请停止生成。\"}}"
+      ],
+      "modelRequests": 7,
+      "mode": "allowed",
+      "userMessage": "After the policy update, what is the current owner approval fact for release?",
+      "routing": {
+        "kind": "normal_model_route",
+        "phases": [
+          "okf_concept_route",
+          "document_route",
+          "bucket_route",
+          "section_expand",
+          "read_chunks",
+          "evidence_pack"
+        ]
+      }
+    }
+  },
+  "cleanup": {
+    "runtimeHomeOwned": true,
+    "dataDirOwned": true,
+    "temporaryDatabaseRemoved": true,
+    "performed": true
+  }
+}

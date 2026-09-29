@@ -9,15 +9,18 @@ import type {
   CanonicalUsage,
 } from "../protocol/canonical.js";
 import type { CanonicalModelError } from "../protocol/errors.js";
-import { extractTextToolCalls } from "./parseTextToolCalls.js";
 
 export type ModelMessageAssemblerState = {
+  responseId?: string;
   content: CanonicalContentBlock[];
   textBuffer: string;
+  model?: string;
   thinkingBuffer: string;
+  thinkingReasoningContentBuffer: string;
   thinkingSignature?: string;
   usage: CanonicalUsage;
   finishReason?: CanonicalFinishReason;
+  hasMessageEnd: boolean;
   error?: CanonicalModelError;
   toolCalls: CanonicalToolCall[];
   hasRepairedToolCalls?: boolean;
@@ -30,16 +33,25 @@ export type AssembledAssistantMessage = {
   toolCalls: CanonicalToolCall[];
   error?: CanonicalModelError;
   hasRepairedToolCalls?: boolean;
+  hasMessageEnd: boolean;
 };
 
-export function createModelMessageAssemblerState(): ModelMessageAssemblerState {
+export function createModelMessageAssemblerState(responseId?: string): ModelMessageAssemblerState {
   return {
+    ...(responseId ? { responseId } : {}),
     content: [],
     textBuffer: "",
     thinkingBuffer: "",
+    thinkingReasoningContentBuffer: "",
     usage: {},
+    hasMessageEnd: false,
     toolCalls: [],
   };
+}
+
+/** The next delta and its eventual persisted block must carry the same ID. */
+export function getModelStreamBlockId(state: ModelMessageAssemblerState, kind: 'text' | 'thinking'): string | undefined {
+  return state.responseId ? `${state.responseId}:${kind}:${state.content.filter(block => block.type === kind).length}` : undefined;
 }
 
 export function applyModelEventToAssembler(
@@ -48,15 +60,22 @@ export function applyModelEventToAssembler(
 ): void {
   switch (event.type) {
     case "request_started":
+      state.model = event.model;
+      return;
     case "message_start":
     case "tool_call_start":
     case "tool_call_delta":
       return;
     case "text_delta":
+      if (state.thinkingBuffer || state.thinkingReasoningContentBuffer || state.thinkingSignature !== undefined) flushTextBuffers(state);
       state.textBuffer += event.text;
       return;
     case "thinking_delta":
+      if (state.textBuffer) flushTextBuffers(state);
       state.thinkingBuffer += event.text;
+      if (event.reasoningContent !== undefined) {
+        state.thinkingReasoningContentBuffer += event.reasoningContent;
+      }
       if (event.signature !== undefined && event.signature.length > 0) {
         state.thinkingSignature = event.signature;
       }
@@ -75,6 +94,7 @@ export function applyModelEventToAssembler(
     case "message_end":
       flushTextBuffers(state);
       state.finishReason = event.finishReason;
+      state.hasMessageEnd = true;
       return;
     case "usage":
       state.usage = mergeUsage(state.usage, event.usage);
@@ -90,34 +110,18 @@ export function applyModelEventToAssembler(
 export function assembleAssistantMessage(state: ModelMessageAssemblerState): AssembledAssistantMessage {
   flushTextBuffers(state);
 
-  if (state.toolCalls.length === 0) {
-    const textIdx = state.content.findIndex(
-      (b): b is CanonicalTextBlock => b.type === "text" && hasTextToolCallMarker(b.text),
-    );
-    if (textIdx >= 0) {
-      const textBlock = state.content[textIdx] as CanonicalTextBlock;
-      const { toolCalls, remainingText } = extractTextToolCalls(textBlock.text);
-      if (toolCalls.length > 0) {
-        console.log(`[text-tool-call-fallback] Extracted ${toolCalls.length} tool call(s) from assistant text`);
-        if (remainingText.length > 0) {
-          (state.content[textIdx] as CanonicalTextBlock).text = remainingText;
-        } else {
-          state.content.splice(textIdx, 1);
-        }
-        for (const tc of toolCalls) {
-          state.content.push({ type: "tool_call", ...tc });
-          state.toolCalls.push(tc);
-        }
-      }
-    }
-  }
+  // Only structured provider events create tool calls. Text remains literal,
+  // including examples of tool syntax and incomplete tags.
+  normalizeToolCallIds(state);
 
   return {
     message: {
       role: "assistant",
       content: [...state.content],
+      ...(state.model ? { metadata: { model: state.model } } : {}),
     },
     finishReason: state.finishReason ?? (state.error ? "error" : "unknown"),
+    hasMessageEnd: state.hasMessageEnd,
     usage: hasUsage(state.usage) ? state.usage : undefined,
     toolCalls: [...state.toolCalls],
     error: state.error,
@@ -125,29 +129,55 @@ export function assembleAssistantMessage(state: ModelMessageAssemblerState): Ass
   };
 }
 
-const TEXT_TOOL_CALL_MARKERS = [
-  "<function=",
-  "<tool_call>",
-  "\uff5cDSML\uff5c",
-  "[TOOL_CALLS]",
-  "<|python_tag|>",
-];
+function normalizeToolCallIds(state: ModelMessageAssemblerState): void {
+  if (state.toolCalls.length === 0) return;
 
-function hasTextToolCallMarker(text: string): boolean {
-  return TEXT_TOOL_CALL_MARKERS.some((m) => text.includes(m));
+  const used = new Set<string>();
+  const normalizedToolCalls = state.toolCalls.map((toolCall, index) => {
+    const id = nextToolCallId(toolCall.id, index, used);
+    used.add(id);
+    return id === toolCall.id ? toolCall : { ...toolCall, id };
+  });
+
+  let toolCallIndex = 0;
+  state.content = state.content.map((block) => {
+    if (block.type !== "tool_call") return block;
+    const normalized = normalizedToolCalls[toolCallIndex++];
+    return normalized ? { ...block, id: normalized.id } : block;
+  });
+  state.toolCalls = normalizedToolCalls;
+}
+
+function nextToolCallId(rawId: string | undefined, index: number, used: Set<string>): string {
+  const base = rawId && rawId.trim().length > 0 ? rawId.trim() : `call_${index}`;
+  if (!used.has(base)) return base;
+
+  for (let suffix = 2; ; suffix += 1) {
+    const candidate = `${base}_${suffix}`;
+    if (!used.has(candidate)) return candidate;
+  }
 }
 
 function flushTextBuffers(state: ModelMessageAssemblerState): void {
-  if (state.thinkingBuffer.length > 0 || state.thinkingSignature !== undefined) {
+  if (
+    state.thinkingBuffer.length > 0 ||
+    state.thinkingReasoningContentBuffer.length > 0 ||
+    state.thinkingSignature !== undefined
+  ) {
     const block: CanonicalThinkingBlock = {
       type: "thinking",
       text: state.thinkingBuffer,
+      ...(state.responseId ? { blockId: getModelStreamBlockId(state, 'thinking') } : {}),
     };
+    if (state.thinkingReasoningContentBuffer.length > 0) {
+      block.reasoningContent = state.thinkingReasoningContentBuffer;
+    }
     if (state.thinkingSignature !== undefined) {
       block.signature = state.thinkingSignature;
     }
     state.content.push(block);
     state.thinkingBuffer = "";
+    state.thinkingReasoningContentBuffer = "";
     state.thinkingSignature = undefined;
   }
 
@@ -155,6 +185,7 @@ function flushTextBuffers(state: ModelMessageAssemblerState): void {
     state.content.push({
       type: "text",
       text: state.textBuffer,
+      ...(state.responseId ? { blockId: getModelStreamBlockId(state, 'text') } : {}),
     } satisfies CanonicalTextBlock);
     state.textBuffer = "";
   }
@@ -167,6 +198,7 @@ function mergeUsage(first: CanonicalUsage, second: CanonicalUsage): CanonicalUsa
     cacheReadTokens: add(first.cacheReadTokens, second.cacheReadTokens),
     cacheWriteTokens: add(first.cacheWriteTokens, second.cacheWriteTokens),
     totalTokens: add(first.totalTokens, second.totalTokens),
+    nativeCost: add(first.nativeCost, second.nativeCost),
   };
 }
 

@@ -147,6 +147,7 @@ function formatExistingPlansSection(plans?: ExistingPlanSummary[]): string[] {
 export type BuildWorkspacePromptInput = {
   projectRoot: string;
   runId: string;
+  planTitle: string;
   language?: string;
 };
 
@@ -156,10 +157,12 @@ export function buildWorkspacePrompt(input: BuildWorkspacePromptInput): string {
     "You are preparing an isolated workspace for an Always-On plan execution.",
     "",
     `Project root: ${input.projectRoot}`,
+    `Plan: "${input.planTitle}"`,
     "",
     "Available workspace strategies:",
     "  - `git-worktree`: Creates a git worktree on a new branch. Fast and space-efficient (hard-links).",
-    "    Requires a git repo with at least one commit and a clean working tree (no uncommitted changes).",
+    "    Requires a git repo with at least one commit. If the working tree is dirty, Always-On",
+    "    checkpoints all current changes before creating the worktree.",
     "  - `snapshot-copy`: Copies the project directory (CoW on APFS/btrfs). Works for any directory",
     "    but uses more disk space. Ignores .git, node_modules, dist by default.",
     "",

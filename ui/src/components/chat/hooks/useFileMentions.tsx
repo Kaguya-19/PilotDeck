@@ -1,70 +1,78 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Dispatch, KeyboardEvent, RefObject, SetStateAction } from 'react';
-import { api } from '../../../utils/api';
+import { authenticatedFetch } from '../../../utils/api';
+import { useTranslation } from 'react-i18next';
 import { isImeEnterEvent } from '../../../utils/ime';
-import { escapeRegExp } from '../utils/chatFormatting';
+import {
+  ADD_WORKSPACE_FILE_MENTION_EVENT,
+  isWorkspaceFileMentionRequest,
+} from '../../../utils/workspaceFileMention';
 import type { Project } from '../../../types/app';
 
-interface ProjectFileNode {
-  name: string;
-  type: 'file' | 'directory';
-  path?: string;
-  children?: ProjectFileNode[];
-}
-
 export interface MentionableFile {
+  id?: string;
   name: string;
   path: string;
   relativePath?: string;
+  kind?: 'file' | 'directory';
+  size?: number;
+  mtimeMs?: number;
+  matches?: Array<{ field: string; start: number; end: number }>;
 }
 
 interface UseFileMentionsOptions {
   selectedProject: Project | null;
+  enabled?: boolean;
+  mentionScopeKey: string | null;
   input: string;
   setInput: Dispatch<SetStateAction<string>>;
   textareaRef: RefObject<HTMLTextAreaElement>;
 }
 
-const flattenFileTree = (files: ProjectFileNode[], basePath = ''): MentionableFile[] => {
-  let flattened: MentionableFile[] = [];
-
-  files.forEach((file) => {
-    const fullPath = basePath ? `${basePath}/${file.name}` : file.name;
-    if (file.type === 'directory' && file.children) {
-      flattened = flattened.concat(flattenFileTree(file.children, fullPath));
-      return;
-    }
-
-    if (file.type === 'file') {
-      flattened.push({
-        name: file.name,
-        path: fullPath,
-        relativePath: file.path,
-      });
-    }
-  });
-
-  return flattened;
-};
-
-export function useFileMentions({ selectedProject, input, setInput, textareaRef }: UseFileMentionsOptions) {
-  const [fileList, setFileList] = useState<MentionableFile[]>([]);
-  const [fileMentions, setFileMentions] = useState<string[]>([]);
+export function useFileMentions({
+  selectedProject,
+  enabled = true,
+  mentionScopeKey,
+  input,
+  setInput,
+  textareaRef,
+}: UseFileMentionsOptions) {
+  const { t } = useTranslation('chat');
+  const [selectedFileMentions, setSelectedFileMentions] = useState<MentionableFile[]>([]);
   const [filteredFiles, setFilteredFiles] = useState<MentionableFile[]>([]);
   const [showFileDropdown, setShowFileDropdown] = useState(false);
   const [selectedFileIndex, setSelectedFileIndex] = useState(-1);
-  const [cursorPosition, setCursorPosition] = useState(0);
+  const [mentionQuery, setMentionQuery] = useState('');
+  const [nextCursor, setNextCursor] = useState<string | undefined>();
+  const [isLoadingFiles, setIsLoadingFiles] = useState(false);
+  const [fileListError, setFileListError] = useState<string | null>(null);
+  const [cursorPosition, setCursorPositionState] = useState(0);
   const [atSymbolPosition, setAtSymbolPosition] = useState(-1);
+  const hasCursorPositionRef = useRef(false);
+
+  const setCursorPosition = useCallback((position: number) => {
+    hasCursorPositionRef.current = true;
+    setCursorPositionState(position);
+  }, []);
 
   // Track the latest in-flight fetch so a refresh triggered by reopening
   // the @ dropdown can supersede the one kicked off on project switch.
   const inFlightFetchRef = useRef<AbortController | null>(null);
 
-  const fetchProjectFiles = useCallback(async () => {
-    const projectName = selectedProject?.name;
-    if (!projectName) {
-      setFileList([]);
+  const fetchProjectFiles = useCallback(async ({
+    query,
+    cursor,
+    append = false,
+  }: {
+    query: string;
+    cursor?: string;
+    append?: boolean;
+  }) => {
+    const projectKey = selectedProject?.fullPath || selectedProject?.path || '';
+    if (!enabled || !projectKey) {
       setFilteredFiles([]);
+      setNextCursor(undefined);
+      setFileListError(t('input.projectPathMissing', { defaultValue: 'The current project path is unavailable.' }));
       return;
     }
 
@@ -73,59 +81,116 @@ export function useFileMentions({ selectedProject, input, setInput, textareaRef 
     inFlightFetchRef.current = abortController;
 
     try {
-      const response = await api.getFiles(projectName, { signal: abortController.signal });
+      setIsLoadingFiles(true);
+      setFileListError(null);
+      const params = new URLSearchParams({
+        projectKey,
+        limit: '100',
+        includeDirs: 'true',
+      });
+      if (query.trim()) params.set('query', query.trim());
+      if (cursor) params.set('cursor', cursor);
+      const response = await authenticatedFetch(`/api/projects/files?${params}`, {
+        signal: abortController.signal,
+      });
+      const contentType = response.headers?.get?.('content-type') || '';
+      if (contentType && !contentType.toLowerCase().includes('application/json')) {
+        throw new Error(t('input.projectFilesNonJson', {
+          contentType,
+          defaultValue: `The project files service returned an invalid response (${contentType}). Restart the backend service.`,
+        }));
+      }
+      const page = await response.json().catch(() => ({}));
       if (!response.ok) {
-        return;
+        const code = page?.error?.code;
+        const message = page?.error?.message || t('input.projectFilesLoadFailedStatus', {
+          status: response.status,
+          defaultValue: `Failed to load project files (${response.status}).`,
+        });
+        throw new Error(code ? `${message} [${code}]` : message);
       }
-      const files = (await response.json()) as ProjectFileNode[];
-      if (abortController.signal.aborted) {
-        return;
-      }
-      setFileList(flattenFileTree(files));
+      const items: MentionableFile[] = (Array.isArray(page?.items) ? page.items : [])
+        .filter((item: Record<string, unknown>) => (
+          item.kind === 'file' || item.kind === 'directory'
+        ))
+        .map((item: Record<string, unknown>) => ({
+          id: typeof item.id === 'string' ? item.id : undefined,
+          name: String(item.name || ''),
+          path: String(item.relativePath || item.name || ''),
+          relativePath: String(item.relativePath || ''),
+          kind: item.kind as 'file' | 'directory',
+          size: typeof item.size === 'number' ? item.size : undefined,
+          mtimeMs: typeof item.mtimeMs === 'number' ? item.mtimeMs : undefined,
+          matches: Array.isArray(item.matches)
+            ? item.matches as Array<{ field: string; start: number; end: number }>
+            : undefined,
+        }));
+      setFilteredFiles((previous) => append ? [...previous, ...items] : items);
+      setNextCursor(typeof page?.nextCursor === 'string' ? page.nextCursor : undefined);
+      setSelectedFileIndex(-1);
     } catch (error) {
       // Ignore aborts from rapid project switches / refreshes.
       if ((error as { name?: string })?.name === 'AbortError') {
         return;
       }
       console.error('Error fetching files:', error);
+      if (!append) setFilteredFiles([]);
+      setFileListError(error instanceof Error
+        ? error.message
+        : t('input.projectFilesLoadFailed', { defaultValue: 'Failed to load project files.' }));
     } finally {
       if (inFlightFetchRef.current === abortController) {
         inFlightFetchRef.current = null;
       }
+      if (!abortController.signal.aborted) setIsLoadingFiles(false);
     }
-  }, [selectedProject?.name]);
+  }, [enabled, selectedProject?.fullPath, selectedProject?.path, t]);
 
-  // Initial fetch + reset on project change.
+  // Cursor and mention UI state belong to a single draft. A conversation
+  // switch can keep the same project mounted, so project identity alone is
+  // not enough to prevent insertion at a previous conversation's cursor.
   useEffect(() => {
-    setFileList([]);
+    setSelectedFileMentions([]);
     setFilteredFiles([]);
-    fetchProjectFiles();
-    return () => {
+    setShowFileDropdown(false);
+    setSelectedFileIndex(-1);
+    setMentionQuery('');
+    setNextCursor(undefined);
+    setFileListError(null);
+    setCursorPositionState(0);
+    setAtSymbolPosition(-1);
+    hasCursorPositionRef.current = false;
+    inFlightFetchRef.current?.abort();
+  }, [enabled, mentionScopeKey]);
+
+  // Query the gateway-backed project file index whenever the active @ query
+  // changes. Keeping this server-side preserves cursor/query signatures and
+  // allows the response's match ranges to stay authoritative.
+  useEffect(() => {
+    if (!enabled || !showFileDropdown) {
       inFlightFetchRef.current?.abort();
-    };
-  }, [fetchProjectFiles]);
-
-  // Refresh whenever the @ dropdown transitions from closed → open, so
-  // files created / renamed / deleted in the Files tab since the last
-  // project switch show up immediately. We intentionally do NOT refetch
-  // on every keystroke while the dropdown is already open — the snapshot
-  // taken on open is good enough for that session of typing.
-  const wasDropdownOpenRef = useRef(false);
-  useEffect(() => {
-    const wasOpen = wasDropdownOpenRef.current;
-    wasDropdownOpenRef.current = showFileDropdown;
-    if (!wasOpen && showFileDropdown) {
-      fetchProjectFiles();
+      return;
     }
-  }, [showFileDropdown, fetchProjectFiles]);
+    const timer = window.setTimeout(() => {
+      void fetchProjectFiles({ query: mentionQuery });
+    }, 120);
+    return () => window.clearTimeout(timer);
+  }, [enabled, fetchProjectFiles, mentionQuery, showFileDropdown]);
 
   useEffect(() => {
+    if (!enabled) {
+      setShowFileDropdown(false);
+      setAtSymbolPosition(-1);
+      setMentionQuery('');
+      return;
+    }
     const textBeforeCursor = input.slice(0, cursorPosition);
     const lastAtIndex = textBeforeCursor.lastIndexOf('@');
 
     if (lastAtIndex === -1) {
       setShowFileDropdown(false);
       setAtSymbolPosition(-1);
+      setMentionQuery('');
       return;
     }
 
@@ -133,74 +198,69 @@ export function useFileMentions({ selectedProject, input, setInput, textareaRef 
     if (textAfterAt.includes(' ')) {
       setShowFileDropdown(false);
       setAtSymbolPosition(-1);
+      setMentionQuery('');
       return;
     }
 
     setAtSymbolPosition(lastAtIndex);
     setShowFileDropdown(true);
-    setSelectedFileIndex(-1);
+    setMentionQuery(textAfterAt);
+  }, [enabled, input, cursorPosition]);
 
-    const matchingFiles = fileList
-      .filter(
-        (file) =>
-          file.name.toLowerCase().includes(textAfterAt.toLowerCase()) ||
-          file.path.toLowerCase().includes(textAfterAt.toLowerCase()),
-      )
-      .slice(0, 10);
-
-    setFilteredFiles(matchingFiles);
-  }, [input, cursorPosition, fileList]);
-
-  const activeFileMentions = useMemo(() => {
-    if (!input || fileMentions.length === 0) {
-      return [];
-    }
-    return fileMentions.filter((path) => input.includes(path));
-  }, [fileMentions, input]);
-
-  const sortedFileMentions = useMemo(() => {
-    if (activeFileMentions.length === 0) {
-      return [];
-    }
-    const uniqueMentions = Array.from(new Set(activeFileMentions));
-    return uniqueMentions.sort((mentionA, mentionB) => mentionB.length - mentionA.length);
-  }, [activeFileMentions]);
-
-  const fileMentionRegex = useMemo(() => {
-    if (sortedFileMentions.length === 0) {
-      return null;
-    }
-    const pattern = sortedFileMentions.map(escapeRegExp).join('|');
-    return new RegExp(`(${pattern})`, 'g');
-  }, [sortedFileMentions]);
-
-  const fileMentionSet = useMemo(() => new Set(sortedFileMentions), [sortedFileMentions]);
-
-  const renderInputWithMentions = useCallback(
-    (text: string) => {
-      if (!text) {
-        return '';
-      }
-      if (!fileMentionRegex) {
-        return text;
+  const focusMention = useCallback(
+    (position: number) => {
+      if (textareaRef.current && !textareaRef.current.matches(':focus')) {
+        textareaRef.current.focus();
       }
 
-      const parts = text.split(fileMentionRegex);
-      return parts.map((part, index) =>
-        fileMentionSet.has(part) ? (
-          <span
-            key={`mention-${index}`}
-            className="-ml-0.5 rounded-md bg-blue-200/70 box-decoration-clone px-0.5 text-transparent dark:bg-blue-300/40"
-          >
-            {part}
-          </span>
-        ) : (
-          <span key={`text-${index}`}>{part}</span>
-        ),
-      );
+      requestAnimationFrame(() => {
+        if (!textareaRef.current) return;
+        textareaRef.current.setSelectionRange(position, position);
+        if (!textareaRef.current.matches(':focus')) {
+          textareaRef.current.focus();
+        }
+      });
     },
-    [fileMentionRegex, fileMentionSet],
+    [textareaRef],
   );
+
+  const addExternalFileMention = useCallback(
+    (relativePath: string) => {
+      const insertionPosition = hasCursorPositionRef.current ? cursorPosition : input.length;
+      const normalizedPath = relativePath.replace(/\\/g, '/');
+      const name = normalizedPath.split('/').filter(Boolean).pop() || normalizedPath;
+      setSelectedFileMentions((previousMentions) =>
+        previousMentions.some((mention) => mention.path === normalizedPath)
+          ? previousMentions
+          : [...previousMentions, {
+              name,
+              path: normalizedPath,
+              relativePath: normalizedPath,
+              kind: 'file',
+            }],
+      );
+      setCursorPosition(insertionPosition);
+      focusMention(insertionPosition);
+    },
+    [cursorPosition, focusMention, input.length, setCursorPosition],
+  );
+
+  useEffect(() => {
+    const handleAddWorkspaceFileMention = (event: Event) => {
+      const detail = (event as CustomEvent).detail;
+      if (!enabled) return;
+      if (!isWorkspaceFileMentionRequest(detail)) return;
+      if (detail.projectName !== selectedProject?.name) return;
+      addExternalFileMention(detail.relativePath);
+    };
+
+    window.addEventListener(ADD_WORKSPACE_FILE_MENTION_EVENT, handleAddWorkspaceFileMention);
+    return () => {
+      window.removeEventListener(ADD_WORKSPACE_FILE_MENTION_EVENT, handleAddWorkspaceFileMention);
+    };
+  }, [addExternalFileMention, enabled, selectedProject?.name]);
+
+  const renderInputWithMentions = useCallback((text: string) => text, []);
 
   const selectFile = useCallback(
     (file: MentionableFile) => {
@@ -209,38 +269,32 @@ export function useFileMentions({ selectedProject, input, setInput, textareaRef 
       const spaceIndex = textAfterAtQuery.indexOf(' ');
       const textAfterQuery = spaceIndex !== -1 ? textAfterAtQuery.slice(spaceIndex) : '';
 
-      const newInput = `${textBeforeAt}${file.path} ${textAfterQuery}`;
-      const newCursorPosition = textBeforeAt.length + file.path.length + 1;
-
-      if (textareaRef.current && !textareaRef.current.matches(':focus')) {
-        textareaRef.current.focus();
-      }
+      const newInput = `${textBeforeAt}${textAfterQuery}`;
+      const newCursorPosition = textBeforeAt.length;
 
       setInput(newInput);
       setCursorPosition(newCursorPosition);
-      setFileMentions((previousMentions) =>
-        previousMentions.includes(file.path) ? previousMentions : [...previousMentions, file.path],
+      setSelectedFileMentions((previousMentions) =>
+        previousMentions.some((mention) => mention.path === file.path)
+          ? previousMentions
+          : [...previousMentions, file],
       );
 
       setShowFileDropdown(false);
       setAtSymbolPosition(-1);
-
-      if (!textareaRef.current) {
-        return;
-      }
-
-      requestAnimationFrame(() => {
-        if (!textareaRef.current) {
-          return;
-        }
-        textareaRef.current.setSelectionRange(newCursorPosition, newCursorPosition);
-        if (!textareaRef.current.matches(':focus')) {
-          textareaRef.current.focus();
-        }
-      });
+      focusMention(newCursorPosition);
     },
-    [input, atSymbolPosition, textareaRef, setInput],
+    [input, atSymbolPosition, focusMention, setCursorPosition, setInput],
   );
+
+  const removeFileMention = useCallback((path: string) => {
+    setSelectedFileMentions((mentions) => mentions.filter((mention) => mention.path !== path));
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  }, [textareaRef]);
+
+  const clearFileMentions = useCallback(() => {
+    setSelectedFileMentions([]);
+  }, []);
 
   const handleFileMentionsKeyDown = useCallback(
     (event: KeyboardEvent<HTMLTextAreaElement>): boolean => {
@@ -285,13 +339,35 @@ export function useFileMentions({ selectedProject, input, setInput, textareaRef 
 
       return false;
     },
-    [showFileDropdown, filteredFiles, selectedFileIndex, selectFile],
+    [
+      filteredFiles,
+      selectFile,
+      selectedFileIndex,
+      showFileDropdown,
+    ],
   );
+
+  const loadMoreFiles = useCallback(() => {
+    if (!nextCursor || isLoadingFiles) return;
+    void fetchProjectFiles({
+      query: mentionQuery,
+      cursor: nextCursor,
+      append: true,
+    });
+  }, [fetchProjectFiles, isLoadingFiles, mentionQuery, nextCursor]);
 
   return {
     showFileDropdown,
+    mentionQuery,
     filteredFiles,
     selectedFileIndex,
+    isLoadingFiles,
+    fileListError,
+    hasMoreFiles: Boolean(nextCursor),
+    loadMoreFiles,
+    selectedFileMentions,
+    removeFileMention,
+    clearFileMentions,
     renderInputWithMentions,
     selectFile,
     setCursorPosition,

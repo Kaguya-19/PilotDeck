@@ -1,11 +1,15 @@
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { spawn, exec, execFile } from 'child_process';
-import { promisify } from 'util';
-
-const execAsync = promisify(exec);
-const execFileAsync = promisify(execFile);
+import { spawn } from 'child_process';
+import { createWebUpdateRouter } from './webUpdate.js';
+import {
+  isSupervisorRestartEnabled,
+  normalizeUpdateRuntimeError,
+  requestSupervisorRestart,
+  RESTART_EXIT_CODE,
+  resolveRestartCommand,
+} from '../services/updateRuntime.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -13,281 +17,100 @@ const PROJECT_ROOT = path.resolve(__dirname, '..', '..', '..');
 
 const router = express.Router();
 
-let updateInProgress = false;
-let lastUpdateResult = null;
-
-function execInProject(cmd) {
-  return execAsync(cmd, { cwd: PROJECT_ROOT, maxBuffer: 10 * 1024 * 1024 });
-}
-
-function execGit(args) {
-  return execFileAsync('git', args, { cwd: PROJECT_ROOT, maxBuffer: 10 * 1024 * 1024 });
-}
-
-function parseUpstreamRef(value) {
-  const upstream = String(value || '').trim();
-  const slashIndex = upstream.indexOf('/');
-  if (slashIndex <= 0 || slashIndex >= upstream.length - 1) return null;
-  return {
-    remote: upstream.slice(0, slashIndex),
-    remoteBranch: upstream.slice(slashIndex + 1),
-    ref: upstream,
-  };
-}
-
-function unavailableUpdateCheck(res, {
-  currentBranch = 'unknown',
-  localHead = '',
-  currentCommit = '',
-  message,
-}) {
-  return res.json({
-    hasUpdate: false,
-    currentBranch,
-    localHead: localHead ? localHead.slice(0, 8) : 'unknown',
-    remoteHead: '',
-    behindCount: 0,
-    newCommits: [],
-    currentCommit,
-    checkUnavailable: true,
-    message,
-  });
-}
-
-/**
- * POST /api/update/check
- * Check if there are updates available (git fetch + compare HEAD)
- */
-router.post('/check', async (req, res) => {
-  try {
-    let currentBranch = 'unknown';
-    let localHead = '';
-    let currentCommit = '';
-
-    try {
-      const { stdout: branch } = await execGit(['branch', '--show-current']);
-      currentBranch = branch.trim() || 'HEAD';
-
-      const { stdout: head } = await execGit(['rev-parse', 'HEAD']);
-      localHead = head.trim();
-
-      const { stdout: commit } = await execGit(['log', '--oneline', '-1', 'HEAD']);
-      currentCommit = commit.trim();
-    } catch (error) {
-      return unavailableUpdateCheck(res, {
-        currentBranch,
-        localHead,
-        currentCommit,
-        message: `Git version check unavailable: ${error.message}`,
-      });
-    }
-
-    let upstream = null;
-    try {
-      const { stdout } = await execGit([
-        'rev-parse',
-        '--abbrev-ref',
-        '--symbolic-full-name',
-        '@{u}',
-      ]);
-      upstream = parseUpstreamRef(stdout);
-    } catch {
-      upstream = null;
-    }
-
-    if (!upstream && currentBranch !== 'HEAD' && currentBranch !== 'unknown') {
-      upstream = {
-        remote: 'origin',
-        remoteBranch: currentBranch,
-        ref: `origin/${currentBranch}`,
-      };
-    }
-
-    if (!upstream) {
-      return unavailableUpdateCheck(res, {
-        currentBranch,
-        localHead,
-        currentCommit,
-        message: 'No upstream branch is configured for update checks.',
-      });
-    }
-
-    try {
-      await execGit([
-        'fetch',
-        upstream.remote,
-        `${upstream.remoteBranch}:refs/remotes/${upstream.remote}/${upstream.remoteBranch}`,
-      ]);
-    } catch (error) {
-      return unavailableUpdateCheck(res, {
-        currentBranch,
-        localHead,
-        currentCommit,
-        message: `Unable to fetch ${upstream.ref}: ${error.message}`,
-      });
-    }
-
-    const { stdout: remoteHead } = await execGit(['rev-parse', upstream.ref]);
-
-    const local = localHead.trim();
-    const remote = remoteHead.trim();
-    const hasUpdate = local !== remote;
-
-    let behindCount = 0;
-    let newCommits = [];
-    if (hasUpdate) {
-      const { stdout: countOut } = await execGit([
-        'rev-list',
-        '--count',
-        `HEAD..${upstream.ref}`,
-      ]);
-      behindCount = parseInt(countOut.trim(), 10) || 0;
-
-      const { stdout: logOut } = await execGit([
-        'log',
-        '--oneline',
-        `HEAD..${upstream.ref}`,
-        '-10',
-      ]);
-      newCommits = logOut.trim().split('\n').filter(Boolean);
-    }
-
-    res.json({
-      hasUpdate,
-      currentBranch,
-      localHead: local.slice(0, 8),
-      remoteHead: remote.slice(0, 8),
-      behindCount,
-      newCommits,
-      currentCommit,
-      upstream: upstream.ref,
-    });
-  } catch (error) {
-    return unavailableUpdateCheck(res, {
-      message: `Failed to check for updates: ${error.message}`,
-    });
-  }
-});
-
-/**
- * POST /api/update/apply
- * Pull latest code, rebuild, and prepare for restart.
- * Streams progress via newline-delimited JSON.
- */
-router.post('/apply', async (req, res) => {
-  if (updateInProgress) {
-    return res.status(409).json({
-      error: 'Update already in progress',
-      message: 'An update is currently running. Please wait for it to complete.',
-    });
-  }
-
-  updateInProgress = true;
-  lastUpdateResult = null;
-
-  res.setHeader('Content-Type', 'application/x-ndjson');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('X-Accel-Buffering', 'no');
-
-  const sendProgress = (stage, message, status = 'running') => {
-    const line = JSON.stringify({ stage, message, status, timestamp: Date.now() });
-    res.write(line + '\n');
-  };
-
-  try {
-    const scriptPath = path.join(PROJECT_ROOT, 'scripts', 'update.sh');
-
-    sendProgress('start', 'Starting update process...');
-
-    const child = spawn('bash', [scriptPath], {
-      cwd: PROJECT_ROOT,
-      env: { ...process.env, FORCE_COLOR: '0' },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-
-    let exitCode = null;
-
-    child.stdout.on('data', (data) => {
-      for (const line of data.toString().split('\n').filter(Boolean)) {
-        sendProgress('progress', line);
-      }
-    });
-
-    child.stderr.on('data', (data) => {
-      for (const line of data.toString().split('\n').filter(Boolean)) {
-        sendProgress('progress', line, 'warning');
-      }
-    });
-
-    exitCode = await new Promise((resolve, reject) => {
-      child.on('close', (code) => resolve(code));
-      child.on('error', reject);
-    });
-
-    if (exitCode === 2) {
-      sendProgress('complete', 'Already up-to-date. No changes needed.', 'up-to-date');
-      lastUpdateResult = { success: true, alreadyUpToDate: true };
-    } else if (exitCode === 0) {
-      sendProgress('complete', 'Update successful! Restart required to apply changes.', 'success');
-      lastUpdateResult = { success: true, alreadyUpToDate: false, needsRestart: true };
-    } else {
-      throw new Error(`Update script exited with code ${exitCode}`);
-    }
-  } catch (error) {
-    sendProgress('error', `Update failed: ${error.message}`, 'error');
-    lastUpdateResult = { success: false, error: error.message };
-  } finally {
-    updateInProgress = false;
-    res.end();
-  }
-});
+router.use(createWebUpdateRouter());
 
 /**
  * POST /api/update/restart
- * Restart PilotDeck by spawning a fresh process, then exiting.
- * Works in both Docker (process manager respawns) and local dev (self-respawn).
+ * Restart PilotDeck. In supervised source runtimes the outer supervisor
+ * relaunches the full process group; direct server runs fall back to
+ * self-respawn.
  */
-router.post('/restart', async (req, res) => {
-  res.json({
-    message: 'Restart initiated.',
-    status: 'restarting',
-  });
+export function createRestartHandler({
+  env = process.env,
+  spawnImpl = spawn,
+  exit = process.exit,
+  setTimeoutImpl = setTimeout,
+  requestSupervisorRestartImpl = requestSupervisorRestart,
+  resolveRestartCommandImpl = resolveRestartCommand,
+  isSupervisorRestartEnabledImpl = isSupervisorRestartEnabled,
+  projectRoot = PROJECT_ROOT,
+  platform = process.platform,
+  getInstanceInfo = (req) => req.app?.locals?.restartInstanceInfo,
+  log = console.log,
+  error = console.error,
+} = {}) {
+  const createAcceptedBody = (req, restartMode) => {
+    const instanceInfo = getInstanceInfo(req) || {};
+    return {
+      status: 'accepted',
+      restartMode,
+      previousInstanceId: instanceInfo.instanceId ?? null,
+      previousStartedAt: instanceInfo.startedAt ?? null,
+      previousPid: instanceInfo.pid ?? null,
+    };
+  };
 
-  setTimeout(() => {
-    console.log('[update] Spawning replacement process and exiting...');
+  return async (req, res) => {
+    try {
+      log('[update] Preparing replacement process and exit...');
 
-    // Spawn `npm run dev` (or the same entry point) as a detached process
-    const isDocker = process.env.DOCKER === '1' || process.env.container === 'docker';
+      const isDocker = env.DOCKER === '1' || env.container === 'docker';
 
-    if (isDocker) {
-      // In Docker, just exit — the container restart policy handles respawn
-      process.exit(0);
+      if (isDocker) {
+        res.status(202).json(createAcceptedBody(req, 'docker'));
+        setTimeoutImpl(() => exit(0), 500);
+        return;
+      }
+
+      if (isSupervisorRestartEnabledImpl(env)) {
+        requestSupervisorRestartImpl({ env });
+        res.status(202).json(createAcceptedBody(req, 'supervisor'));
+        setTimeoutImpl(() => exit(RESTART_EXIT_CODE), 500);
+        return;
+      }
+
+      // Local: spawn a replacement process detached from this one.
+      const restartCommand = await resolveRestartCommandImpl({ projectRoot, env });
+      const child = spawnImpl(restartCommand.command, restartCommand.args, {
+        cwd: projectRoot,
+        detached: true,
+        stdio: 'ignore',
+        env: { ...env },
+        windowsHide: platform === 'win32',
+      });
+
+      await new Promise((resolve, reject) => {
+        let settled = false;
+        const settle = (callback, value) => {
+          if (settled) return;
+          settled = true;
+          callback(value);
+        };
+        child.once('spawn', () => settle(resolve));
+        child.once('error', (spawnError) => settle(reject, spawnError));
+      });
+
+      child.unref();
+
+      res.status(202).json(createAcceptedBody(req, 'direct'));
+      setTimeoutImpl(() => exit(0), 500);
+    } catch (caughtError) {
+      const message = normalizeUpdateRuntimeError(caughtError);
+      error(`[update] Restart failed: ${message}`);
+      res.status(500).json({
+        error: 'Failed to restart PilotDeck',
+        message,
+      });
     }
+  };
+}
 
-    // Local: spawn a new server process detached from this one
-    const projectRoot = path.resolve(PROJECT_ROOT, '..');
-    const child = spawn('bash', ['-c', `sleep 2 && cd "${projectRoot}" && npm run dev`], {
-      cwd: projectRoot,
-      detached: true,
-      stdio: 'ignore',
-      env: { ...process.env },
-    });
-    child.unref();
+router.post('/restart', createRestartHandler());
 
-    // Exit after giving the response time to flush
-    setTimeout(() => process.exit(0), 500);
-  }, 1000);
-});
-
-/**
- * GET /api/update/status
- * Return current update state.
- */
-router.get('/status', (req, res) => {
-  res.json({
-    updateInProgress,
-    lastUpdateResult,
-  });
-});
+export function createUpdateRouter(options = {}) {
+  const restartRouter = express.Router();
+  restartRouter.post('/restart', createRestartHandler(options));
+  return restartRouter;
+}
 
 export default router;

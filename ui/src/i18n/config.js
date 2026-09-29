@@ -27,6 +27,8 @@ import enChat from './locales/en/chat.json';
 import enCodeEditor from './locales/en/codeEditor.json';
 import enAlwaysOn from './locales/en/alwaysOn.json';
 import enRouting from './locales/en/routing.json';
+import enOnboarding from './locales/en/onboarding.json';
+import enStaffDeck from './locales/en/staffdeck.json';
 // eslint-disable-next-line import-x/order
 import enTasks from './locales/en/tasks.json';
 
@@ -37,8 +39,10 @@ import zhSidebar from './locales/zh-CN/sidebar.json';
 import zhChat from './locales/zh-CN/chat.json';
 import zhAlwaysOn from './locales/zh-CN/alwaysOn.json';
 import zhRouting from './locales/zh-CN/routing.json';
+import zhOnboarding from './locales/zh-CN/onboarding.json';
 // eslint-disable-next-line import-x/order
 import zhCodeEditor from './locales/zh-CN/codeEditor.json';
+import zhStaffDeck from './locales/zh-CN/staffdeck.json';
 
 import { languages } from './languages.js';
 
@@ -69,6 +73,8 @@ i18n
         tasks: enTasks,
         alwaysOn: enAlwaysOn,
         routing: enRouting,
+        onboarding: enOnboarding,
+        staffdeck: enStaffDeck,
       },
       'zh-CN': {
         common: zhCommon,
@@ -79,6 +85,8 @@ i18n
         codeEditor: zhCodeEditor,
         alwaysOn: zhAlwaysOn,
         routing: zhRouting,
+        onboarding: zhOnboarding,
+        staffdeck: zhStaffDeck,
       },
     },
 
@@ -86,7 +94,7 @@ i18n
     fallbackLng: 'en',
     debug: import.meta.env.DEV,
 
-    ns: ['common', 'settings', 'auth', 'sidebar', 'chat', 'codeEditor', 'tasks', 'alwaysOn', 'routing'],
+    ns: ['common', 'settings', 'auth', 'sidebar', 'chat', 'codeEditor', 'tasks', 'alwaysOn', 'routing', 'onboarding', 'staffdeck'],
     defaultNS: 'common',
     keySeparator: '.',
     nsSeparator: ':',

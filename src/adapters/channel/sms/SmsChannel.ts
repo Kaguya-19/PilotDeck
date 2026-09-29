@@ -1,10 +1,13 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Gateway, GatewayChannelKey } from "../../../gateway/index.js";
+import type { CronResultDelivery } from "../../../cron/index.js";
 import type { ChannelAdapter, ChannelHandle, ChannelLogger, ChannelStartDeps } from "../protocol/ChannelAdapter.js";
+import { deliverChatCronResult } from "../protocol/ImCronDelivery.js";
 import { SmsSessionMapper } from "./SmsSessionMapper.js";
 import { renderSmsEvent } from "./sms-render.js";
 import { ImElicitationHelper } from "../protocol/ImElicitationHelper.js";
+import { ImPermissionHelper } from "../protocol/ImPermissionHelper.js";
 
 let twilioFactory: any;
 try {
@@ -44,6 +47,7 @@ export class SmsChannel implements ChannelAdapter {
   private path = DEFAULT_PATH;
   private activeChats = new Set<string>();
   private readonly elicitation = new ImElicitationHelper();
+  private readonly permissions = new ImPermissionHelper();
 
   constructor(options: SmsChannelOptions = {}) {
     this.mapper = options.mapper ?? new SmsSessionMapper();
@@ -114,6 +118,10 @@ export class SmsChannel implements ChannelAdapter {
         this.client = null;
       },
     };
+  }
+
+  async deliverCronResult(delivery: CronResultDelivery): Promise<boolean> {
+    return deliverChatCronResult(delivery, this.channelKey, (chatId, text) => this.sendReply(chatId, text));
   }
 
   private async handleHttp(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -206,6 +214,33 @@ export class SmsChannel implements ChannelAdapter {
       return;
     }
 
+    if (this.permissions.hasPending(chatId) && this.gateway) {
+      let answerToken: number | undefined;
+      try {
+        const answer = await this.permissions.answerWithState(chatId, text, this.gateway);
+        answerToken = answer?.answerToken;
+        if (answer?.text) {
+          const confirmationDelivered = await this.sendReply(chatId, answer.text);
+          if (!confirmationDelivered) {
+            this.permissions.releaseAnswer(chatId, answer.answerToken);
+            return;
+          }
+          if (!answer.canAdvance && !answer.retryPrompt) return;
+          const nextPrompt = this.permissions.takeNextPrompt(chatId, answer.answerToken);
+          if (nextPrompt) {
+            const nextPromptRequestId = this.permissions.getPromptRequestId(chatId, answer.answerToken);
+
+            const delivered = await this.sendReply(chatId, nextPrompt);
+            this.permissions.confirmNextPrompt(chatId, delivered, nextPromptRequestId, answer.answerToken);
+          }
+        }
+      } catch (e) {
+        if (answerToken !== undefined) this.permissions.releaseAnswer(chatId, answerToken);
+        this.logger?.error?.(`sms: permission answer error: ${e}`);
+      }
+      return;
+    }
+
     if (this.activeChats.has(chatId)) {
       this.logger?.info?.(`sms: chat ${chatId} already active, skipping`);
       return;
@@ -241,6 +276,11 @@ export class SmsChannel implements ChannelAdapter {
           await this.sendReply(chatId, questionText);
           continue;
         }
+        if (event.type === "permission_request") {
+          const questionText = this.permissions.capture(chatId, sessionKey, event);
+          if (questionText) this.permissions.confirmInitialPrompt(chatId, await this.sendReply(chatId, questionText), event.requestId);
+          continue;
+        }
         const fragment = renderSmsEvent(event);
         if (fragment != null) replyText += fragment;
       }
@@ -250,6 +290,7 @@ export class SmsChannel implements ChannelAdapter {
     }
 
     this.elicitation.clear(chatId);
+    this.permissions.clearAfterTurn(chatId);
 
     const finalText = replyText.trim();
     if (finalText) {
@@ -257,16 +298,18 @@ export class SmsChannel implements ChannelAdapter {
     }
   }
 
-  private async sendReply(chatId: string, text: string): Promise<void> {
-    if (!this.client) return;
+  private async sendReply(chatId: string, text: string): Promise<boolean> {
+    if (!this.client) return false;
     try {
       await this.client.messages.create({
         body: text,
         from: this.fromNumber,
         to: chatId,
       });
+      return true;
     } catch (e) {
       this.logger?.error?.(`sms: sendMessage failed: ${e}`);
+      return false;
     }
   }
 }

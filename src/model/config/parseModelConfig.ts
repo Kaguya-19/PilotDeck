@@ -1,17 +1,15 @@
-import {
-  ANTHROPIC_DEFAULT_CAPABILITIES,
-  ANTHROPIC_DEFAULT_MULTIMODAL,
-} from "../providers/anthropic/defaults.js";
-import {
-  OPENAI_DEFAULT_CAPABILITIES,
-  OPENAI_DEFAULT_MULTIMODAL,
-} from "../providers/openai/defaults.js";
+import { sanitizeProviderBody } from "../request/sanitizeProviderBody.js";
+import { parseThinkingSettings } from "../thinking/settings.js";
+import { ANTHROPIC_DEFAULT_CAPABILITIES } from "../providers/anthropic/defaults.js";
+import { OPENAI_DEFAULT_CAPABILITIES } from "../providers/openai/defaults.js";
+import { GOOGLE_DEFAULT_CAPABILITIES } from "../providers/google/defaults.js";
 import type {
   ModelConfig,
   ModelDefinition,
   ModelProtocol,
   ProviderConfig,
   ProviderRetryConfig,
+  SpeedMapping,
 } from "../protocol/canonical.js";
 import { mergeCapabilities, type ModelCapabilities } from "../protocol/capabilities.js";
 import { ModelConfigError } from "../protocol/errors.js";
@@ -21,7 +19,15 @@ import {
   type MultimodalConstraints,
 } from "../protocol/multimodal.js";
 import { lookupCatalogModel, lookupCatalogProvider } from "../catalog/index.js";
-import { resolveApiKey, type CredentialEnv } from "./resolveCredentials.js";
+import {
+  resolveApiKey,
+  resolveApiKeySource,
+  type CredentialEnv,
+} from "./resolveCredentials.js";
+import {
+  resolveCatalogProviderApiKeyEnvVar,
+  resolveCatalogProviderDefaultUrl,
+} from "./providerCredentialScope.js";
 import {
   isModelProtocol,
   isRecord,
@@ -34,6 +40,7 @@ import {
 
 export type ParseModelConfigOptions = {
   env?: CredentialEnv;
+  onInvalidProvider?: (providerId: string, error: ModelConfigError) => void;
 };
 
 export function parseModelConfig(
@@ -50,7 +57,12 @@ export function parseModelConfig(
 
   const providers: Record<string, ProviderConfig> = {};
   for (const [providerId, rawProvider] of Object.entries(rawConfig.providers)) {
-    providers[providerId] = parseProvider(providerId, rawProvider, options.env);
+    try {
+      providers[providerId] = parseProvider(providerId, rawProvider, options.env);
+    } catch (error) {
+      if (!options.onInvalidProvider || !(error instanceof ModelConfigError)) throw error;
+      options.onInvalidProvider(providerId, error);
+    }
   }
 
   return {
@@ -77,7 +89,9 @@ function parseProvider(providerId: string, rawProvider: unknown, env?: Credentia
   }
 
   const trimmedUrl = typeof provider.url === "string" ? provider.url.trim() : "";
-  const rawUrl = trimmedUrl.length > 0 ? trimmedUrl : catalogProvider?.defaultUrl;
+  const rawUrl = trimmedUrl.length > 0
+    ? trimmedUrl
+    : resolveCatalogProviderDefaultUrl(providerId, protocol);
   if (!rawUrl) {
     throw new ModelConfigError("invalid_config_value", `Provider ${providerId} requires a url.`, { providerId });
   }
@@ -94,16 +108,64 @@ function parseProvider(providerId: string, rawProvider: unknown, env?: Credentia
     models[modelId] = parseModelDefinition(modelId, protocol, rawModel, providerId);
   }
 
+  const effectiveApiKeyEnvVar = resolveCatalogProviderApiKeyEnvVar(providerId, protocol, rawUrl);
+  const credential = resolveProviderCredential(providerId, provider.apiKey, env, effectiveApiKeyEnvVar);
+
   return {
     id: providerId,
     protocol,
     url: rawUrl,
-    apiKey: resolveApiKey(provider.apiKey, env),
+    apiKey: credential.apiKey,
+    credentialSource: credential.source,
     timeoutMs: readOptionalPositiveNumber(provider.timeoutMs, "timeoutMs"),
     headers: readStringRecord(provider.headers, "headers"),
-    extraBody: isRecord(provider.extraBody) ? (provider.extraBody as Record<string, unknown>) : undefined,
+    extraBody: isRecord(provider.extraBody) ? sanitizeProviderBody(provider.extraBody as Record<string, unknown>) : undefined,
+    speedMapping: parseSpeedMapping(provider.speedMapping, providerId, protocol, catalogProvider !== undefined),
     retry: parseRetryConfig(provider.retry),
     models,
+  };
+}
+
+function parseSpeedMapping(
+  raw: unknown,
+  providerId: string,
+  protocol: ModelProtocol,
+  isCatalogProvider: boolean,
+): SpeedMapping | undefined {
+  if (raw !== undefined) {
+    if (raw === "openai_service_tier" && (protocol === "openai" || protocol === "openai-responses")) return raw;
+    if (raw === "anthropic_speed" && protocol === "anthropic") return raw;
+    throw new ModelConfigError(
+      "invalid_config_value",
+      "speedMapping must match the provider protocol: openai_service_tier for OpenAI or anthropic_speed for Anthropic.",
+      { providerId },
+    );
+  }
+  if (!isCatalogProvider) return undefined;
+  if (providerId === "openai" && (protocol === "openai" || protocol === "openai-responses")) {
+    return "openai_service_tier";
+  }
+  if (providerId === "anthropic" && protocol === "anthropic") return "anthropic_speed";
+  return undefined;
+}
+
+function resolveProviderCredential(
+  providerId: string,
+  value: unknown,
+  env?: CredentialEnv,
+  catalogEnvVar?: string,
+): { apiKey: string; source: "environment" | "literal" | "provider_default" } {
+  if (providerId === "ollama" && value === undefined) {
+    return { apiKey: "ollama", source: "provider_default" };
+  }
+  const hasBlankString = typeof value === "string" && value.trim().length === 0;
+  const hasConfigValue = value !== undefined && value !== null && !hasBlankString;
+  const effectiveValue = hasConfigValue
+    ? value
+    : catalogEnvVar ? `\${${catalogEnvVar}}` : value;
+  return {
+    apiKey: resolveApiKey(effectiveValue, env),
+    source: resolveApiKeySource(effectiveValue),
   };
 }
 
@@ -113,7 +175,8 @@ function parseRetryConfig(raw: unknown): ProviderRetryConfig | undefined {
   const result: ProviderRetryConfig = {};
   const numFields = [
     "requestMaxRetries", "streamMaxRetries", "streamIdleTimeoutMs",
-    "baseDelayMs", "maxDelayMs",
+    "maxStreamingDurationMs", "repeatedChunkLimit",
+    "baseDelayMs", "maxDelayMs", "jitter",
   ] as const;
   for (const key of numFields) {
     const value = raw[key];
@@ -142,10 +205,26 @@ function parseModelDefinition(
   const catalogHit = lookupCatalogModel(providerId, modelId);
   const catalogModel = catalogHit.model;
 
-  const capabilities = parseCapabilities(protocol, model.capabilities, catalogModel?.capabilities);
-  const multimodal = parseMultimodal(protocol, model.multimodal, catalogModel?.multimodal);
+  const capabilities = parseCapabilities(
+    protocol,
+    model.capabilities,
+    catalogModel?.capabilities,
+    providerId,
+  );
+  // Cross-provider model-name matches are useful for token/capability hints,
+  // but they must not silently opt a custom model into image delivery. Aliases
+  // declared by the selected catalog provider are trusted like exact matches.
+  const catalogMultimodal = catalogHit.matchType === "exact" || catalogHit.matchType === "alias"
+    ? catalogModel?.multimodal
+    : undefined;
+  const multimodal = parseMultimodal(model.multimodal, catalogMultimodal);
+
+  let thinking;
+  try { thinking = parseThinkingSettings(model.thinking, protocol); }
+  catch (error) { throw new ModelConfigError("invalid_config_value", error instanceof Error ? error.message : String(error), { providerId, modelId }); }
 
   return {
+    thinking,
     id: modelId,
     displayName: typeof model.displayName === "string"
       ? model.displayName
@@ -160,13 +239,18 @@ function parseCapabilities(
   protocol: ModelProtocol,
   rawCapabilities: unknown,
   catalogCapabilities?: ModelCapabilities,
+  providerId?: string,
 ): ModelCapabilities {
   const protocolDefaults =
-    protocol === "anthropic" ? ANTHROPIC_DEFAULT_CAPABILITIES : OPENAI_DEFAULT_CAPABILITIES;
+    protocol === "anthropic"
+      ? ANTHROPIC_DEFAULT_CAPABILITIES
+      : protocol === "google"
+        ? GOOGLE_DEFAULT_CAPABILITIES
+        : OPENAI_DEFAULT_CAPABILITIES;
   const defaults = catalogCapabilities ?? protocolDefaults;
 
   if (rawCapabilities === undefined) {
-    return defaults;
+    return applyOfficialSpeedDefault(defaults, providerId);
   }
 
   if (!isRecord(rawCapabilities)) {
@@ -181,6 +265,7 @@ function parseCapabilities(
     "supportsStreaming",
     "supportsParallelToolCalls",
     "supportsThinking",
+    "supportsSpeed",
     "supportsJsonSchema",
     "supportsSystemPrompt",
     "supportsPromptCache",
@@ -206,17 +291,32 @@ function parseCapabilities(
     }
   }
 
-  return mergeCapabilities(defaults, overrides);
+  return applyOfficialSpeedDefault({
+    ...mergeCapabilities(defaults, overrides),
+    ...(capabilities.supportsThinking !== undefined
+      ? { supportsThinkingExplicit: capabilities.supportsThinking }
+      : {}),
+  } as ModelCapabilities, providerId, overrides.supportsSpeed);
+}
+
+function applyOfficialSpeedDefault(
+  capabilities: ModelCapabilities,
+  providerId: string | undefined,
+  explicitSpeed?: boolean,
+): ModelCapabilities {
+  if (explicitSpeed !== undefined) return capabilities;
+  if (providerId !== "openai" && providerId !== "anthropic") return capabilities;
+  return { ...capabilities, supportsSpeed: true };
 }
 
 function parseMultimodal(
-  protocol: ModelProtocol,
   rawMultimodal: unknown,
   catalogMultimodal?: MultimodalConstraints,
 ): MultimodalConstraints {
-  const protocolDefaults =
-    protocol === "anthropic" ? ANTHROPIC_DEFAULT_MULTIMODAL : OPENAI_DEFAULT_MULTIMODAL;
-  const defaults = catalogMultimodal ?? { ...DEFAULT_MULTIMODAL_CONSTRAINTS, ...protocolDefaults };
+  // Unknown/custom models are text-only until their model definition explicitly
+  // opts into additional modalities. Protocol compatibility alone does not imply
+  // that the upstream model accepts images.
+  const defaults = catalogMultimodal ?? DEFAULT_MULTIMODAL_CONSTRAINTS;
 
   if (rawMultimodal === undefined) {
     return defaults;
@@ -336,7 +436,8 @@ function parseImageDetail(value: unknown): MultimodalConstraints["imageDetail"] 
 
 function assertValidUrl(value: string, providerId: string): void {
   try {
-    new URL(value);
+    const url = new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("Unsupported URL scheme");
   } catch {
     throw new ModelConfigError("invalid_url", `Provider ${providerId} url is invalid.`, {
       providerId,

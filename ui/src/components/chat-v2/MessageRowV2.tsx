@@ -1,62 +1,87 @@
-import { memo, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Fragment, memo, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
-import { AlertTriangle, Check, ChevronRight, Copy, FileText, Loader2 } from 'lucide-react';
+import { AlertTriangle, Check, Copy, GitBranch, Loader2, Pencil } from 'lucide-react';
 import { copyTextToClipboard } from '../../utils/clipboard';
-import { useTypewriter } from './useTypewriter';
+import { isImeEnterEvent } from '../../utils/ime.js';
+import { cn } from '../../lib/utils.js';
 import type { Project, SessionProvider } from '../../types/app';
+import {
+  DOCUMENT_SELECTION_ATTACHMENT_KIND,
+  type DocumentSelectionReference,
+} from '../../types/documentSelection';
+import {
+  CONTENT_REFERENCE_ATTACHMENT_KIND,
+  normalizeContentReference,
+  type ContentReference,
+} from '../../types/contentReference';
+import { partitionContentReferences } from '../../types/assistantReplyReference';
 import type {
+  ChatAttachment,
   ChatMessage,
   PilotDeckPermissionSuggestion,
-  PermissionGrantResult,
+  SessionPermissionGrantResult,
+  SessionRuntimeState,
 } from '../chat/types/types';
 import MessageComponent from '../chat/view/subcomponents/MessageComponent';
 import ImageLightbox, { type LightboxImage } from '../chat/view/subcomponents/ImageLightbox';
 import { Markdown } from '../chat/view/subcomponents/Markdown';
 import { formatUsageLimitText } from '../chat/utils/chatFormatting';
 import { ProcessTrace } from './ProcessTrace';
-import { processSummaryToTrace, type ProcessAttachment } from './processGrouping';
+import { isSingleToolProcess, processSummaryToTrace, type ProcessAttachment } from './processGrouping';
 import SubagentCard from './SubagentCard';
+import { useTypewriter } from './useTypewriter';
+import { ThinkingBlock } from './ThinkingBlock';
+import { useUploadedAttachmentPreviews } from '../chat/hooks/useUploadedAttachmentPreviews';
+import DocumentReferenceChip from './DocumentReferenceChip';
+import ReplyQuoteChip from './ReplyQuoteChip';
+import { AgentFileArtifactGroup, UserAttachmentCards } from './MessageFileCards';
+import { getActiveAssembly } from '../../composition/runtime';
 
 type DiffLine = { type: string; content: string; lineNum: number };
 
-const MIME_FRIENDLY_LABELS: Record<string, string> = {
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'DOCX',
-  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'XLSX',
-  'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'PPTX',
-  'application/msword': 'DOC',
-  'application/vnd.ms-excel': 'XLS',
-  'application/vnd.ms-powerpoint': 'PPT',
-  'application/pdf': 'PDF',
-  'application/zip': 'ZIP',
-  'text/plain': 'TXT',
-  'text/csv': 'CSV',
-  'text/markdown': 'MD',
-  'application/json': 'JSON',
-};
+function formatMessageTime(timestamp: ChatMessage['timestamp']): {
+  dateTime: string;
+  label: string;
+  title: string;
+} | null {
+  const date = timestamp instanceof Date ? timestamp : new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return null;
 
-const getAttachmentTypeLabel = (name?: string, mimeType?: string): string => {
-  const ext = String(name || '').split('.').pop()?.toUpperCase();
-  if (ext && ext !== String(name || '').toUpperCase()) return ext;
-  if (mimeType) {
-    const friendly = MIME_FRIENDLY_LABELS[mimeType.toLowerCase()];
-    if (friendly) return friendly;
-    if (mimeType.includes('/')) {
-      const sub = mimeType.split('/').pop() || '';
-      if (sub.length <= 10 && !sub.includes('.')) return sub.toUpperCase();
-    }
-  }
-  return 'FILE';
-};
+  return {
+    dateTime: date.toISOString(),
+    label: new Intl.DateTimeFormat(undefined, {
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    }).format(date),
+    title: new Intl.DateTimeFormat(undefined, {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    }).format(date),
+  };
+}
 
-const getAttachmentAccent = (name?: string, mimeType?: string): string => {
-  const label = getAttachmentTypeLabel(name, mimeType).toLowerCase();
-  if (label === 'pdf') return 'bg-red-500 text-white';
-  if (label === 'doc' || label === 'docx') return 'bg-blue-500 text-white';
-  if (label === 'xls' || label === 'xlsx' || label === 'csv') return 'bg-emerald-500 text-white';
-  if (label === 'ppt' || label === 'pptx') return 'bg-orange-500 text-white';
-  return 'bg-neutral-500 text-white';
-};
+function attachmentToDocumentReference(attachment: ChatAttachment): ContentReference | null {
+  const structured = normalizeContentReference(attachment.contentReference);
+  if (structured) return structured;
+  if (attachment.kind !== DOCUMENT_SELECTION_ATTACHMENT_KIND || !attachment.selectedText) return null;
+  const filePath = attachment.filePath || attachment.path || '';
+  if (!filePath) return null;
+  return normalizeContentReference({
+    kind: DOCUMENT_SELECTION_ATTACHMENT_KIND,
+    id: `${filePath}-${attachment.createdAt || ''}-${attachment.occurrenceIndex ?? ''}`,
+    fileName: attachment.fileName || attachment.name,
+    filePath,
+    source: attachment.source === 'pdf' ? 'pdf' : 'office-pdf',
+    pageNumbers: Array.isArray(attachment.pageNumbers) ? attachment.pageNumbers : [],
+    selectedText: attachment.selectedText,
+    surroundingText: attachment.surroundingText,
+    occurrenceIndex: attachment.occurrenceIndex,
+    createdAt: attachment.createdAt || new Date(0).toISOString(),
+    truncated: attachment.truncated,
+  } satisfies DocumentSelectionReference);
+}
 
 type MessageRowV2Props = {
   message: ChatMessage;
@@ -71,17 +96,25 @@ type MessageRowV2Props = {
   onShowSettings?: () => void;
   onGrantSessionToolPermission?: (
     suggestion: PilotDeckPermissionSuggestion,
-  ) => PermissionGrantResult | null | undefined;
+  ) => SessionPermissionGrantResult | null | undefined;
   autoExpandTools?: boolean;
-  showRawParameters?: boolean;
   showThinking?: boolean;
   inlineThinking?: boolean;
   isProcessExpanded?: (processKey: string, defaultExpanded?: boolean) => boolean;
   onProcessExpandedChange?: (processKey: string, expanded: boolean) => void;
+  isToolSectionExpanded?: (sectionKey: string, defaultExpanded?: boolean) => boolean;
+  onToolSectionExpandedChange?: (sectionKey: string, expanded: boolean) => void;
   onOpenSubagentDetail?: (subagentId: string) => void;
   subagentActivityById?: Map<string, ChatMessage>;
   subagentThinkingById?: Map<string, string>;
   isSessionRunning?: boolean;
+  sessionRuntimeState?: SessionRuntimeState;
+  onFork?: (message: ChatMessage, carriedMessageCount: number) => void;
+  forkCarriedMessageCount?: number;
+  forkDisabled?: boolean;
+  showAssistantActions?: boolean;
+  canEdit?: boolean;
+  onRegenerate?: (message: ChatMessage, editedText: string) => Promise<void>;
 };
 
 // Fall back to the heavy legacy renderer for anything that isn't a vanilla
@@ -101,7 +134,6 @@ const shouldDelegate = (message: ChatMessage): boolean => {
 function MessageRowV2({
   message,
   prevMessage,
-  nextMessage,
   beforeProcessAttachments = [],
   afterProcessAttachments = [],
   provider,
@@ -111,39 +143,147 @@ function MessageRowV2({
   onShowSettings,
   onGrantSessionToolPermission,
   autoExpandTools,
-  showRawParameters,
   showThinking,
   inlineThinking,
   isProcessExpanded,
   onProcessExpandedChange,
+  isToolSectionExpanded,
+  onToolSectionExpandedChange,
   onOpenSubagentDetail,
   subagentActivityById,
   subagentThinkingById,
   isSessionRunning,
+  sessionRuntimeState,
+  onFork,
+  forkCarriedMessageCount = 0,
+  forkDisabled = false,
+  showAssistantActions,
+  canEdit = false,
+  onRegenerate,
 }: MessageRowV2Props) {
   const { t } = useTranslation('chat');
+  const isActiveModuleOwnership = (moduleId: string) => getActiveAssembly()?.selections.some((selection) => (
+    selection.frontend.id === moduleId || selection.binding.implementationId === moduleId
+  ));
+  const historyFallback = useMemo(() => {
+    const moduleId = typeof message.moduleId === 'string' ? message.moduleId : null;
+    if (!moduleId) return null;
+    const assembly = getActiveAssembly();
+    if (isActiveModuleOwnership(moduleId)) return null;
+    return assembly?.historyFallbacks.find((entry) => entry.moduleId === moduleId)?.contribution ?? null;
+  }, [message.moduleId]);
+  const removedModuleId = typeof message.moduleId === 'string'
+    && !isActiveModuleOwnership(message.moduleId)
+    ? message.moduleId
+    : null;
   const delegate = useMemo(() => shouldDelegate(message), [message]);
 
   const formattedContent = useMemo(
     () => formatUsageLimitText(String(message.content ?? '')),
     [message.content],
   );
-  const thinkingDisplayText = useTypewriter(formattedContent, !!message.isStreaming && !!message.isThinking, 4);
   const contentDisplayText = useTypewriter(formattedContent, !!message.isStreaming && !message.isThinking, 6);
-  const messageImages = useMemo(
-    () =>
-      Array.isArray(message.images)
-        ? message.images.filter((image) => image && typeof image.data === 'string')
-        : [],
-    [message.images],
+  const assistantArtifacts = useMemo(
+    () => (Array.isArray(message.artifacts) ? message.artifacts : []),
+    [message.artifacts],
   );
-  const messageAttachments = useMemo(
+  const rawMessageAttachments = useMemo(
     () =>
       Array.isArray(message.attachments)
         ? message.attachments.filter((attachment) => attachment && typeof attachment.name === 'string')
         : [],
     [message.attachments],
   );
+  const messageAttachments = useUploadedAttachmentPreviews(rawMessageAttachments);
+  const documentReferenceAttachments = useMemo(
+    () => messageAttachments
+      .map(attachmentToDocumentReference)
+      .filter((reference): reference is ContentReference => Boolean(reference)),
+    [messageAttachments],
+  );
+  const { fileReferences: fileDocumentReferences, replyQuotes: replyQuoteReferences } = useMemo(
+    () => partitionContentReferences(documentReferenceAttachments),
+    [documentReferenceAttachments],
+  );
+  const referenceImageNames = useMemo(
+    () => new Set(documentReferenceAttachments
+      .filter((reference) => reference.selectionMode === 'region')
+      .map((reference) => reference.image.name)),
+    [documentReferenceAttachments],
+  );
+  const uploadedImagePreviews = useMemo(
+    () => messageAttachments.filter((attachment) => (
+      typeof attachment.previewData === 'string' && attachment.previewData.startsWith('data:image/')
+    )),
+    [messageAttachments],
+  );
+  const messageImages = useMemo(
+    () =>
+      Array.isArray(message.images)
+        ? message.images.filter((image) => (
+          image
+          && typeof image.data === 'string'
+          && !referenceImageNames.has(image.name)
+        ))
+        : [],
+    [message.images, referenceImageNames],
+  );
+  // Canonical history supplies images after acceptance. Until then use the
+  // upload's display-only preview, retaining attachment identities for edits.
+  const visibleImages = useMemo(() => {
+    const remaining = [...uploadedImagePreviews];
+    const confirmed = messageImages.map((image) => {
+      const index = remaining.findIndex((attachment) => attachment.previewData === image.data);
+      if (index < 0) return image;
+      const [preview] = remaining.splice(index, 1);
+      return { ...image, name: image.name || preview.name };
+    });
+    return [...confirmed, ...remaining.map((attachment) => ({
+      data: attachment.previewData!, name: attachment.name, mimeType: attachment.mimeType,
+    }))];
+  }, [messageImages, uploadedImagePreviews]);
+  const fileAttachments = useMemo(
+    () => messageAttachments.filter((attachment) => (
+      attachment.kind !== DOCUMENT_SELECTION_ATTACHMENT_KIND
+      && attachment.kind !== CONTENT_REFERENCE_ATTACHMENT_KIND
+      && !uploadedImagePreviews.includes(attachment)
+    )),
+    [messageAttachments, uploadedImagePreviews],
+  );
+  const [userImageLightbox, setUserImageLightbox] = useState<number | null>(null);
+  const [isEditing, setIsEditing] = useState(false);
+  const [editDraft, setEditDraft] = useState('');
+  const [editError, setEditError] = useState<string | null>(null);
+  const [isEditSubmitting, setIsEditSubmitting] = useState(false);
+  const editTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  useEffect(() => {
+    if (!isEditing || !editTextareaRef.current) return;
+    const textarea = editTextareaRef.current;
+    textarea.style.height = '0px';
+    textarea.style.height = `${Math.min(Math.max(textarea.scrollHeight, 84), 360)}px`;
+  }, [editDraft, isEditing]);
+  const hasForkUnsupportedContent =
+    Boolean(message.forkUnsupportedContent) ||
+    visibleImages.length > 0 ||
+    messageAttachments.length > 0;
+
+  if (historyFallback) {
+    const Fallback = historyFallback.component;
+    return <Fallback sessionId={message.id} artifact={message} />;
+  }
+
+  // Module-specific renderers are intentionally not shipped when a module is
+  // disabled or replaced. Keep old sessions readable with a host-owned
+  // fallback instead of importing the removed implementation back into the
+  // build just to render history.
+  if (removedModuleId) {
+    return <section className="max-w-xl rounded border border-neutral-200 bg-neutral-50 p-3 text-sm dark:border-neutral-800 dark:bg-neutral-900" data-testid="removed-module-history-fallback">
+      <p className="font-medium text-neutral-800 dark:text-neutral-100">Historical content from unavailable module</p>
+      <p className="mt-1 text-xs text-neutral-500">{removedModuleId}</p>
+      {message.content ? <p className="mt-2 whitespace-pre-wrap">{String(message.content)}</p> : null}
+      {message.toolResult ? <pre className="mt-2 overflow-auto text-xs">{JSON.stringify(message.toolResult, null, 2)}</pre> : null}
+    </section>;
+  }
 
   if (message.isAgentActivitySummary) {
     return (
@@ -173,10 +313,11 @@ function MessageRowV2({
           onShowSettings={onShowSettings}
           onGrantSessionToolPermission={onGrantSessionToolPermission}
           autoExpandTools={autoExpandTools}
-          showRawParameters={showRawParameters}
           showThinking={showThinking}
           isProcessExpanded={isProcessExpanded}
           onProcessExpandedChange={onProcessExpandedChange}
+          isToolSectionExpanded={isToolSectionExpanded}
+          onToolSectionExpandedChange={onToolSectionExpandedChange}
           onOpenSubagentDetail={onOpenSubagentDetail}
           subagentActivityById={subagentActivityById}
         />
@@ -188,14 +329,12 @@ function MessageRowV2({
   );
 
   const withProcessRows = (content: ReactNode) => {
-    if (beforeProcessAttachments.length === 0 && afterProcessAttachments.length === 0) {
-      return content;
-    }
-
+    // Keep the body in the same React slot when completed process attachments
+    // appear, so thinking expansion and its nested scroll controller survive.
     return (
       <div className="flex min-w-0 flex-col gap-2">
         {beforeProcessAttachments.map(renderProcessAttachment)}
-        {content}
+        <Fragment key="body">{content}</Fragment>
         {afterProcessAttachments.map(renderProcessAttachment)}
       </div>
     );
@@ -206,13 +345,19 @@ function MessageRowV2({
     const liveActivity = subagentId ? subagentActivityById?.get(subagentId) : undefined;
     const thinkingContent = subagentId ? subagentThinkingById?.get(subagentId) : undefined;
     return withProcessRows(
-      <SubagentCard message={message} liveActivity={liveActivity} onOpenDetail={onOpenSubagentDetail} thinkingContent={thinkingContent} isSessionRunning={isSessionRunning} />,
+      <SubagentCard
+        message={message}
+        liveActivity={liveActivity}
+        onOpenDetail={onOpenSubagentDetail}
+        thinkingContent={thinkingContent}
+        sessionRuntimeState={sessionRuntimeState}
+      />,
     );
   }
 
   if (delegate) {
     return withProcessRows(
-      <div className="ui-v2-legacy-row">
+      <div className="ui-v2-legacy-row min-w-0 w-full">
         <MessageComponent
           message={message}
           prevMessage={prevMessage}
@@ -221,11 +366,13 @@ function MessageRowV2({
           onShowSettings={onShowSettings}
           onGrantSessionToolPermission={onGrantSessionToolPermission}
           autoExpandTools={autoExpandTools}
-          showRawParameters={showRawParameters}
           showThinking={showThinking}
+          isToolSectionExpanded={isToolSectionExpanded}
+          onToolSectionExpandedChange={onToolSectionExpandedChange}
           selectedProject={selectedProject ?? null}
           provider={provider}
           hideHeader
+          isSessionRunning={isSessionRunning}
         />
       </div>,
     );
@@ -233,52 +380,83 @@ function MessageRowV2({
 
   const isUser = message.type === 'user';
   const isError = message.type === 'error';
-  const [userImageLightbox, setUserImageLightbox] = useState<number | null>(null);
 
-  // User: right-aligned grey bubble.
+  // User: right-aligned bubble.
   if (isUser) {
-    const lightboxImages: LightboxImage[] = messageImages.map((image) => ({
+    const messageTime = formatMessageTime(message.timestamp);
+    const lightboxImages: LightboxImage[] = visibleImages.map((image) => ({
       data: image.data,
       name: image.name,
       mimeType: image.mimeType,
     }));
+    const submitEdit = async () => {
+      const editedText = editDraft.trim();
+      if (!onRegenerate || !editedText || isEditSubmitting) return;
+      setIsEditSubmitting(true);
+      setEditError(null);
+      try {
+        await onRegenerate(message, editedText);
+        setIsEditing(false);
+      } catch (error) {
+        setEditError(error instanceof Error ? error.message : String(error));
+      } finally {
+        setIsEditSubmitting(false);
+      }
+    };
+    const handleEditKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+      if (isImeEnterEvent(event)) return;
+
+      if (event.key === 'Escape' && !isEditSubmitting) {
+        event.preventDefault();
+        setIsEditing(false);
+        setEditError(null);
+        return;
+      }
+      if (event.key === 'Enter' && !event.shiftKey) {
+        event.preventDefault();
+        void submitEdit();
+      }
+    };
     return withProcessRows(
-      <div className="flex w-full justify-end">
-        <div className="min-w-0 max-w-[78%] overflow-hidden rounded-[22px] bg-neutral-100 px-4 py-2.5 text-[14px] leading-relaxed text-neutral-900 dark:bg-neutral-800 dark:text-neutral-100">
+      <div className="group/user-msg flex w-full flex-col items-end">
+        <div className={cn(
+          'min-w-0 max-w-[78%] overflow-hidden rounded-[22px] bg-neutral-100 px-4 py-2.5 text-[14px] leading-relaxed text-neutral-900 dark:bg-neutral-800 dark:text-neutral-100',
+          isEditing && 'w-full',
+        )}>
           {message.isStreaming && !formattedContent ? (
             <span className="inline-block h-4 w-2 animate-pulse bg-neutral-400 dark:bg-neutral-500" />
           ) : (
             <>
-              {messageAttachments.length > 0 ? (
-                <div className={formattedContent ? 'mb-2 grid grid-cols-1 gap-2' : 'grid grid-cols-1 gap-2'}>
-                  {messageAttachments.map((attachment, index) => (
-                    <div
-                      key={`${attachment.name || 'attachment'}-${index}`}
-                      className="flex min-w-0 items-center gap-3 rounded-2xl bg-white/85 p-2.5 pr-3 dark:bg-neutral-900/45"
-                    >
-                      <div
-                        className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ${getAttachmentAccent(
-                          attachment.name,
-                          attachment.mimeType,
-                        )}`}
-                      >
-                        <FileText className="h-5 w-5" strokeWidth={2} />
-                      </div>
-                      <div className="min-w-0 text-left">
-                        <div className="truncate text-[13px] font-semibold text-neutral-900 dark:text-neutral-100">
-                          {attachment.name}
-                        </div>
-                        <div className="mt-0.5 text-[11px] font-medium uppercase text-neutral-500 dark:text-neutral-400">
-                          {getAttachmentTypeLabel(attachment.name, attachment.mimeType)}
-                        </div>
-                      </div>
-                    </div>
+              {fileDocumentReferences.length > 0 || replyQuoteReferences.length > 0 ? (
+                <div className={formattedContent || fileAttachments.length > 0 ? 'mb-2 flex flex-wrap gap-2' : 'flex flex-wrap gap-2'}>
+                  {replyQuoteReferences.length > 0 ? (
+                    <ReplyQuoteChip quotes={replyQuoteReferences} />
+                  ) : null}
+                  {fileDocumentReferences.map((reference) => (
+                    <DocumentReferenceChip
+                      key={reference.id}
+                      reference={reference}
+                      summaryLength={100}
+                      className="bg-white/80 dark:bg-neutral-900/55"
+                      onOpen={onFileOpen
+                        ? () => onFileOpen(reference.source.relativePath)
+                        : undefined}
+                    />
                   ))}
                 </div>
               ) : null}
-              {messageImages.length > 0 ? (
+              {fileAttachments.length > 0 ? (
+                <div className={formattedContent ? 'mb-2' : undefined}>
+                  <UserAttachmentCards
+                    attachments={fileAttachments}
+                    project={selectedProject}
+                    onBrowse={onFileOpen}
+                  />
+                </div>
+              ) : null}
+              {visibleImages.length > 0 ? (
                 <div className={formattedContent ? 'mb-2 grid grid-cols-1 gap-2' : 'grid grid-cols-1 gap-2'}>
-                  {messageImages.map((image, index) => (
+                  {visibleImages.map((image, index) => (
                     <button
                       type="button"
                       key={`${image.name || 'image'}-${index}`}
@@ -296,12 +474,97 @@ function MessageRowV2({
                   ))}
                 </div>
               ) : null}
-              {formattedContent ? (
-                <Markdown className="prose prose-sm prose-neutral max-w-none dark:prose-invert prose-p:my-1 prose-ol:my-1 prose-ul:my-1 prose-li:my-0 min-w-0 break-words [overflow-wrap:anywhere]" projectName={selectedProject?.name}>{formattedContent}</Markdown>
+              {isEditing ? (
+                <div className="mt-1">
+                  <textarea
+                    ref={editTextareaRef}
+                    value={editDraft}
+                    onChange={(event) => setEditDraft(event.target.value)}
+                    onKeyDown={handleEditKeyDown}
+                    disabled={isEditSubmitting}
+                    autoFocus
+                    aria-label={t('edit.message', { defaultValue: 'Edit message' })}
+                    className="block min-h-[84px] w-full resize-none bg-transparent text-[14px] leading-relaxed outline-none placeholder:text-neutral-400 disabled:opacity-60 dark:text-neutral-100"
+                  />
+                  {editError ? <p className="mt-1 text-xs text-red-500">{editError}</p> : null}
+                  <div className="mt-2 flex justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsEditing(false);
+                        setEditError(null);
+                      }}
+                      disabled={isEditSubmitting}
+                      className="rounded-xl border border-neutral-200 bg-white px-3 py-1.5 text-sm font-medium text-neutral-800 transition-colors hover:bg-neutral-50 disabled:opacity-50 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100 dark:hover:bg-neutral-800"
+                    >
+                      {t('edit.cancel', { defaultValue: 'Cancel' })}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void submitEdit()}
+                      disabled={!editDraft.trim() || isEditSubmitting}
+                      className="inline-flex items-center gap-1.5 rounded-xl bg-neutral-900 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-neutral-700 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-white"
+                    >
+                      {isEditSubmitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                      {t('edit.send', { defaultValue: 'Send' })}
+                    </button>
+                  </div>
+                </div>
+              ) : formattedContent ? (
+                <Markdown className="prose prose-sm prose-neutral min-w-0 max-w-none break-words [overflow-wrap:anywhere] dark:prose-invert prose-p:my-1 prose-ol:my-1 prose-ul:my-1 prose-li:my-0" projectName={selectedProject?.name}
+          onFileOpen={onFileOpen}>{formattedContent}</Markdown>
               ) : null}
             </>
           )}
         </div>
+        {!isEditing ? (
+          <div
+            data-testid="user-message-actions"
+            className="pointer-events-none mt-1 flex h-6 items-center justify-end gap-1 pr-1 opacity-0 transition-opacity duration-150 group-hover/user-msg:pointer-events-auto group-hover/user-msg:opacity-100 group-focus-within/user-msg:pointer-events-auto group-focus-within/user-msg:opacity-100"
+          >
+            {messageTime ? (
+              <time
+                dateTime={messageTime.dateTime}
+                title={messageTime.title}
+                className="mr-1 text-xs tabular-nums text-neutral-400 dark:text-neutral-500"
+              >
+                {messageTime.label}
+              </time>
+            ) : null}
+            <CopyMarkdownButton content={String(message.content ?? '')} t={t} />
+            {canEdit && onRegenerate ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setEditDraft(String(message.content ?? ''));
+                  setEditError(null);
+                  setIsEditing(true);
+                }}
+                className="rounded p-1 text-neutral-400 transition-colors hover:text-neutral-600 dark:text-neutral-500 dark:hover:text-neutral-300"
+                aria-label={t('edit.message', { defaultValue: 'Edit message' })}
+                title={t('edit.message', { defaultValue: 'Edit message' })}
+              >
+                <Pencil className="h-3.5 w-3.5" strokeWidth={2} />
+              </button>
+            ) : null}
+            {onFork ? (
+              <ForkMessageButton
+                carriedMessageCount={forkCarriedMessageCount}
+                disabled={forkDisabled || isSessionRunning || !message.entryId || hasForkUnsupportedContent}
+                disabledReason={hasForkUnsupportedContent
+                  ? String(message.forkUnsupportedReason || t('fork.unsupportedAttachments', {
+                      defaultValue: 'Forking messages with attachments or media is not supported yet',
+                    }))
+                  : undefined}
+                onFork={() => {
+                  if (message.entryId && !hasForkUnsupportedContent) onFork(message, forkCarriedMessageCount);
+                }}
+                t={t}
+                variant="action-row"
+              />
+            ) : null}
+          </div>
+        ) : null}
         {userImageLightbox !== null && lightboxImages.length > 0 ? (
           <ImageLightbox
             images={lightboxImages}
@@ -321,7 +584,8 @@ function MessageRowV2({
           <AlertTriangle className="h-3.5 w-3.5" strokeWidth={2} />
         </div>
         <div className="min-w-0 flex-1 pt-0.5 text-[14px] leading-relaxed text-red-500">
-          <Markdown projectName={selectedProject?.name}>{formattedContent}</Markdown>
+          <Markdown projectName={selectedProject?.name}
+          onFileOpen={onFileOpen}>{formattedContent}</Markdown>
         </div>
       </div>,
     );
@@ -329,74 +593,102 @@ function MessageRowV2({
 
   if (message.isThinking) {
     if (!showThinking) return null;
-    const isThinkingStreaming = !!message.isStreaming;
-
-    if (inlineThinking) {
-      // Inline mode: unified <details> with typewriter animation + blue theme
-      return withProcessRows(
-        <div className="min-w-0 text-[14px] leading-relaxed">
-          <details className="group" open={(isThinkingStreaming ? thinkingDisplayText.length > 12 : false) || undefined}>
-            <summary className="flex cursor-pointer select-none items-center gap-1.5 text-[13px] font-medium text-blue-600/70 hover:text-blue-700 dark:text-blue-400/70 dark:hover:text-blue-300">
-              {isThinkingStreaming
-                ? <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2} />
-                : <ChevronRight className="h-3.5 w-3.5 transition-transform group-open:rotate-90" strokeWidth={2} />}
-              <span>
-                {isThinkingStreaming
-                  ? t('thinking.title', { defaultValue: 'Thinking...' })
-                  : t('thinking.completed', { defaultValue: 'Thought process' })}
-              </span>
-            </summary>
-            <div className={`mt-1.5 max-h-64 overflow-y-auto border-l-2 pl-3 text-[13px] ${
-              isThinkingStreaming
-                ? 'border-blue-400/50 text-neutral-600 dark:border-blue-500/40 dark:text-neutral-300'
-                : 'border-blue-400/30 text-neutral-600 dark:border-blue-500/30 dark:text-neutral-400'
-            }`}>
-              <Markdown projectName={selectedProject?.name} isStreaming={isThinkingStreaming}>
-                {isThinkingStreaming ? thinkingDisplayText : formattedContent}
-              </Markdown>
-            </div>
-          </details>
-        </div>,
-      );
-    }
-
-    // Default (status-bar preview mode): simple collapsible accordion
     return withProcessRows(
-      <div className="min-w-0 text-[14px] leading-relaxed">
-        <details className="group">
-          <summary className="flex cursor-pointer select-none items-center gap-1.5 text-[13px] font-medium text-neutral-500 hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200">
-            <ChevronRight className="h-3.5 w-3.5 transition-transform group-open:rotate-90" strokeWidth={2} />
-            <span>{t('thinking.completed', { defaultValue: 'Thought process' })}</span>
-          </summary>
-          <div className="mt-1.5 max-h-64 overflow-y-auto border-l-2 border-neutral-300 pl-3 text-[13px] text-neutral-500 dark:border-neutral-700 dark:text-neutral-400">
-            <Markdown projectName={selectedProject?.name}>{formattedContent}</Markdown>
-          </div>
-        </details>
-      </div>,
+      <ThinkingBlock
+        content={formattedContent}
+        isStreaming={Boolean(message.isStreaming)}
+        inline={inlineThinking}
+        projectName={selectedProject?.name}
+        onFileOpen={onFileOpen}
+      />,
     );
   }
 
   // Assistant: plain prose, no avatar and no bubble.
-  return withProcessRows(
-    <div className="min-w-0 text-[14px] leading-relaxed text-neutral-900 dark:text-neutral-100">
-      {message.isStreaming && !contentDisplayText ? (
+  const hasAssistantProse = contentDisplayText.trim().length > 0;
+  const isTextRenderingPending = contentDisplayText !== formattedContent;
+  const showStreamingCursor = Boolean(message.isStreaming && !contentDisplayText);
+  const resolvedShowAssistantActions = showAssistantActions ?? true;
+  const assistantMessageTime = resolvedShowAssistantActions
+    ? formatMessageTime(message.timestamp)
+    : null;
+  const showAssistantCopyButton = resolvedShowAssistantActions && hasAssistantProse;
+  const canRenderAssistantForkButton = Boolean(resolvedShowAssistantActions && onFork && hasAssistantProse);
+  const shouldRenderAssistantActions = Boolean(
+    assistantMessageTime || showAssistantCopyButton || canRenderAssistantForkButton,
+  );
+  const assistantForkDisabled = Boolean(
+    forkDisabled || isSessionRunning || message.isStreaming || !message.entryId,
+  );
+  const assistantBody = (hasAssistantProse || showStreamingCursor || isTextRenderingPending || assistantArtifacts.length > 0) ? (
+    <div
+      data-chat-search-render-pending={isTextRenderingPending ? 'true' : undefined}
+      className="group/assistant-msg min-w-0 text-[14px] leading-relaxed text-neutral-900 dark:text-neutral-100"
+    >
+      {showStreamingCursor ? (
         <span className="inline-block h-4 w-2 animate-pulse bg-neutral-400 dark:bg-neutral-500" />
       ) : (
-        <>
-          <Markdown className="prose prose-sm prose-neutral max-w-none dark:prose-invert prose-headings:mb-2 prose-headings:mt-4 prose-h2:text-lg prose-h3:text-base prose-p:my-2 prose-pre:my-3 prose-ol:my-2 prose-ul:my-2 prose-table:my-0 prose-hr:my-4" projectName={selectedProject?.name} isStreaming={message.isStreaming}>{contentDisplayText}</Markdown>
-          {formattedContent.trim() &&
-           (!nextMessage || nextMessage.type === 'user' || nextMessage.type === 'error') ? (
-            <div className="mt-1.5 flex justify-end">
-              <CopyMarkdownButton content={formattedContent} />
-            </div>
-          ) : null}
-        </>
+        <div
+          {...(!message.isStreaming ? {
+            'data-assistant-quote-source': '',
+            'data-assistant-quote-message-id': message.id || message.entryId || message.turnId || '',
+          } : {})}
+        >
+          <Markdown className="prose prose-sm prose-neutral max-w-none dark:prose-invert prose-headings:mb-2 prose-headings:mt-4 prose-h2:text-lg prose-h3:text-base prose-p:my-2 prose-pre:my-3 prose-ol:my-2 prose-ul:my-2 prose-table:my-0 prose-hr:my-4" projectName={selectedProject?.name}
+          onFileOpen={onFileOpen} isStreaming={Boolean(message.isStreaming) || contentDisplayText !== formattedContent} artifactFiles={assistantArtifacts}>{contentDisplayText}</Markdown>
+        </div>
       )}
-    </div>,
-  );
+      {assistantArtifacts.length > 0 ? (
+        <AgentFileArtifactGroup
+          artifacts={assistantArtifacts}
+          project={selectedProject}
+          onBrowse={onFileOpen}
+        />
+      ) : null}
+      {shouldRenderAssistantActions ? (
+        <div
+          data-testid="assistant-message-actions"
+          className="pointer-events-none mt-1.5 flex h-6 items-center justify-start gap-1 opacity-0 transition-opacity duration-150 group-hover/assistant-msg:pointer-events-auto group-hover/assistant-msg:opacity-100 group-focus-within/assistant-msg:pointer-events-auto group-focus-within/assistant-msg:opacity-100"
+        >
+          {message.model ? (
+            <span data-testid="assistant-message-model" className="mr-1 truncate text-xs text-neutral-400 dark:text-neutral-500">
+              {message.model}
+            </span>
+          ) : null}
+          {assistantMessageTime ? (
+            <time
+              dateTime={assistantMessageTime.dateTime}
+              title={assistantMessageTime.title}
+              className="mr-1 text-xs tabular-nums text-neutral-400 dark:text-neutral-500"
+            >
+              {assistantMessageTime.label}
+            </time>
+          ) : null}
+          {showAssistantCopyButton ? <CopyMarkdownButton content={formattedContent} t={t} /> : null}
+          {canRenderAssistantForkButton ? (
+            <ForkMessageButton
+              carriedMessageCount={forkCarriedMessageCount}
+              disabled={assistantForkDisabled}
+              onFork={() => {
+                if (!assistantForkDisabled && message.entryId) onFork?.(message, forkCarriedMessageCount);
+              }}
+              t={t}
+              variant="action-row"
+            />
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  ) : null;
+
+  if (!assistantBody && beforeProcessAttachments.length === 0 && afterProcessAttachments.length === 0) {
+    return null;
+  }
+
+  return withProcessRows(assistantBody);
 }
 
-function CopyMarkdownButton({ content }: { content: string }) {
+function CopyMarkdownButton({ content, t }: { content: string; t: TFunction }) {
   const [copied, setCopied] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -413,10 +705,53 @@ function CopyMarkdownButton({ content }: { content: string }) {
       type="button"
       onClick={handleClick}
       className="rounded p-1 text-neutral-400 transition-colors hover:text-neutral-600 dark:text-neutral-500 dark:hover:text-neutral-300"
-      aria-label={copied ? 'Copied' : 'Copy'}
-      title={copied ? 'Copied' : 'Copy'}
+      aria-label={copied ? t('copyMessage.copied', { defaultValue: 'Copied' }) : t('copyMessage.copy', { defaultValue: 'Copy message' })}
+      title={copied ? t('copyMessage.copied', { defaultValue: 'Copied' }) : t('copyMessage.copy', { defaultValue: 'Copy message' })}
     >
       {copied ? <Check className="h-3.5 w-3.5" strokeWidth={2} /> : <Copy className="h-3.5 w-3.5" strokeWidth={2} />}
+    </button>
+  );
+}
+
+function ForkMessageButton({
+  carriedMessageCount,
+  disabled,
+  disabledReason,
+  onFork,
+  t,
+  variant = 'user-hover',
+}: {
+  carriedMessageCount: number;
+  disabled?: boolean;
+  disabledReason?: string;
+  onFork: () => void;
+  t: TFunction;
+  variant?: 'user-hover' | 'action-row';
+}) {
+  const title = disabledReason ?? t('fork.fromHere', {
+    count: carriedMessageCount,
+    defaultValue: `Fork from here · carries ${carriedMessageCount} messages`,
+  });
+
+  return (
+    <button
+      type="button"
+      onClick={onFork}
+      disabled={disabled}
+      className={cn(
+        variant === 'user-hover'
+          ? 'mb-1 rounded-md p-1.5 text-neutral-400 opacity-0 transition-all group-hover/user-msg:opacity-100 focus-visible:opacity-100'
+          : 'rounded p-1 text-neutral-400 transition-colors hover:text-neutral-600 dark:text-neutral-500 dark:hover:text-neutral-300',
+        disabled
+          ? 'cursor-not-allowed opacity-30'
+          : variant === 'user-hover'
+            ? 'hover:bg-neutral-200/80 hover:text-neutral-700 dark:hover:bg-neutral-700 dark:hover:text-neutral-200'
+            : undefined,
+      )}
+      aria-label={title}
+      title={title}
+    >
+      <GitBranch className="h-3.5 w-3.5" strokeWidth={2} />
     </button>
   );
 }
@@ -492,6 +827,11 @@ function ProcessAttachmentRow({
       })),
     [attachment.inlineImages],
   );
+
+  // The tool row itself owns image previews when there is no enclosing group.
+  if (isSingleToolProcess(attachment.processMessages)) {
+    return renderDetail(attachment.processDetailMessages[0], 0);
+  }
 
   return (
     <div className="flex min-w-0 flex-col items-start gap-2">

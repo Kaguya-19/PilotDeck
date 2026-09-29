@@ -1,8 +1,11 @@
 import type { Gateway, GatewayChannelKey } from "../../../gateway/index.js";
+import type { CronResultDelivery } from "../../../cron/index.js";
 import type { ChannelAdapter, ChannelHandle, ChannelLogger, ChannelStartDeps } from "../protocol/ChannelAdapter.js";
+import { deliverChatCronResult } from "../protocol/ImCronDelivery.js";
 import { EmailSessionMapper } from "./EmailSessionMapper.js";
 import { renderEmailEvent } from "./email-render.js";
 import { ImElicitationHelper } from "../protocol/ImElicitationHelper.js";
+import { ImPermissionHelper } from "../protocol/ImPermissionHelper.js";
 
 let ImapFlow: any;
 let nodemailer: any;
@@ -42,6 +45,7 @@ export class EmailChannel implements ChannelAdapter {
   private defaultSubject = "Message";
   private activeChats = new Set<string>();
   private readonly elicitation = new ImElicitationHelper();
+  private readonly permissions = new ImPermissionHelper();
   private stopped = false;
 
   constructor(options: EmailChannelOptions = {}) {
@@ -136,6 +140,10 @@ export class EmailChannel implements ChannelAdapter {
     };
   }
 
+  async deliverCronResult(delivery: CronResultDelivery): Promise<boolean> {
+    return deliverChatCronResult(delivery, this.channelKey, (chatId, text) => this.sendReply(chatId, text));
+  }
+
   private async cleanupImap(): Promise<void> {
     if (this.imapClient) {
       try { await this.imapClient.logout(); } catch { /* best effort */ }
@@ -218,6 +226,33 @@ export class EmailChannel implements ChannelAdapter {
       return;
     }
 
+    if (this.permissions.hasPending(chatId) && this.gateway) {
+      let answerToken: number | undefined;
+      try {
+        const answer = await this.permissions.answerWithState(chatId, text, this.gateway);
+        answerToken = answer?.answerToken;
+        if (answer?.text) {
+          const confirmationDelivered = await this.sendReply(chatId, answer.text);
+          if (!confirmationDelivered) {
+            this.permissions.releaseAnswer(chatId, answer.answerToken);
+            return;
+          }
+          if (!answer.canAdvance && !answer.retryPrompt) return;
+          const nextPrompt = this.permissions.takeNextPrompt(chatId, answer.answerToken);
+          if (nextPrompt) {
+            const nextPromptRequestId = this.permissions.getPromptRequestId(chatId, answer.answerToken);
+
+            const delivered = await this.sendReply(chatId, nextPrompt);
+            this.permissions.confirmNextPrompt(chatId, delivered, nextPromptRequestId, answer.answerToken);
+          }
+        }
+      } catch (e) {
+        if (answerToken !== undefined) this.permissions.releaseAnswer(chatId, answerToken);
+        this.logger?.error?.(`email: permission answer error: ${e}`);
+      }
+      return;
+    }
+
     if (this.activeChats.has(chatId)) {
       this.logger?.info?.(`email: chat ${chatId} already active, skipping`);
       return;
@@ -253,6 +288,11 @@ export class EmailChannel implements ChannelAdapter {
           await this.sendReply(chatId, questionText);
           continue;
         }
+        if (event.type === "permission_request") {
+          const questionText = this.permissions.capture(chatId, sessionKey, event);
+          if (questionText) this.permissions.confirmInitialPrompt(chatId, await this.sendReply(chatId, questionText), event.requestId);
+          continue;
+        }
         const fragment = renderEmailEvent(event);
         if (fragment != null) replyText += fragment;
       }
@@ -262,6 +302,7 @@ export class EmailChannel implements ChannelAdapter {
     }
 
     this.elicitation.clear(chatId);
+    this.permissions.clearAfterTurn(chatId);
 
     const finalText = replyText.trim();
     if (finalText) {
@@ -269,8 +310,8 @@ export class EmailChannel implements ChannelAdapter {
     }
   }
 
-  private async sendReply(chatId: string, text: string): Promise<void> {
-    if (!this.transporter) return;
+  private async sendReply(chatId: string, text: string): Promise<boolean> {
+    if (!this.transporter) return false;
     try {
       await this.transporter.sendMail({
         from: this.ownAddress,
@@ -278,8 +319,10 @@ export class EmailChannel implements ChannelAdapter {
         subject: this.defaultSubject,
         text,
       });
+      return true;
     } catch (e) {
       this.logger?.error?.(`email: sendMail failed: ${e}`);
+      return false;
     }
   }
 }

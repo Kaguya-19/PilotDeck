@@ -11,8 +11,8 @@ export type AutoCompactionPolicyOptions = {
 };
 
 /**
- * Decides when the loop should call `CompactionEngine` proactively. Mirrors
- * legacy `autoCompactIfNeeded` thresholds (warn 80% / block 95%) but pushes
+ * Decides when the loop should call `CompactionEngine` proactively. Uses the
+ * staged PilotDeck thresholds (warn 80% / block 90%) but pushes
  * the actual model call out to AgentLoop (decision §3.2).
  */
 export class AutoCompactionPolicy {
@@ -22,8 +22,18 @@ export class AutoCompactionPolicy {
     this.tokenBudget = options.tokenBudget ?? new TokenBudgetManager();
   }
 
-  evaluate(messages: CanonicalMessage[], maxContextTokens: number): AutoCompactionDecision {
-    const snapshot = this.tokenBudget.evaluate(messages, maxContextTokens);
+  evaluate(
+    messages: CanonicalMessage[],
+    maxContextTokens: number,
+    options: { reservedOutputTokens?: number } = {},
+  ): AutoCompactionDecision {
+    const snapshot = this.tokenBudget.evaluate(messages, maxContextTokens, {
+      reservedOutputTokens: options.reservedOutputTokens,
+    });
+    return this.evaluateSnapshot(snapshot);
+  }
+
+  evaluateSnapshot(snapshot: TokenBudgetSnapshot): AutoCompactionDecision {
     if (snapshot.state === "blocking") {
       return { type: "trigger", snapshot, reason: "blocking_threshold" };
     }

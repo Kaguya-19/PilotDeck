@@ -1,82 +1,241 @@
-import type { AgentSession } from "../agent/index.js";
+import {
+  AgentFactoryProvider,
+  AgentRegistry,
+  type AgentHandle,
+  type AgentSession,
+} from "../agent/index.js";
+import type { CanonicalMessage } from "../model/index.js";
+import type { AgentCancelSteerResult, AgentSteerResult } from "../agent/session/SteerMailbox.js";
+import type { ManualCompactionResult } from "../agent/session/ManualCompactionController.js";
 import type { GatewaySessionInfo, ListSessionsInput, ListSessionsResult } from "./protocol/types.js";
+import type { AgentStatusMessageInput } from "../session/transcript/TranscriptWriter.js";
 
 export type GatewaySessionContext = {
   sessionKey: string;
   projectKey?: string;
   channelKey: string;
+  allowedTools?: string[];
+  disallowedTools?: string[];
 };
 
-export type GatewaySessionFactory = (context: GatewaySessionContext) => AgentSession | Promise<AgentSession>;
+export type GatewaySessionFactory = (
+  context: GatewaySessionContext,
+) => AgentSession | AgentHandle | Promise<AgentSession | AgentHandle>;
 export type GatewaySessionRecreator = (
   context: GatewaySessionContext,
   previousSession: AgentSession,
-) => AgentSession | Promise<AgentSession>;
+) => AgentSession | AgentHandle | Promise<AgentSession | AgentHandle>;
+export type GatewaySessionSetup = (
+  context: GatewaySessionContext,
+  handle: AgentHandle,
+  previousSession?: AgentSession,
+) => void | Promise<void>;
 
 export type SessionRouterOptions = {
+  /** Shared live-agent directory used by scoped consumers such as continuation managers. */
+  agents?: AgentRegistry;
   createSession: GatewaySessionFactory;
   recreateSession?: GatewaySessionRecreator;
+  setupSession?: GatewaySessionSetup;
   listSessions?: (input: ListSessionsInput) => Promise<ListSessionsResult>;
   idleSessionTimeoutMs?: number;
+  idleSweepIntervalMs?: number;
   now?: () => Date;
   /**
    * Called (fire-and-forget) when a session is evicted from the router —
    * idle sweep, explicit close, or dirty-recreate. Use this to clean up
    * per-session resources (e.g. per-session MCP runtimes / browser processes).
    */
-  onSessionEvict?: (sessionKey: string) => void;
+  onSessionEvict?: (
+    sessionKey: string,
+    reason: "idle" | "closed" | "dirty_recreate" | "shutdown",
+  ) => void;
+  onSessionIdleEvict?: (sessionKey: string, record: SessionEvictionSnapshot) => void;
 };
 
 type SessionRecord = {
-  session: AgentSession;
+  handle: AgentHandle;
   lastUsedAt: number;
   context: GatewaySessionContext;
   dirtyReason?: string;
 };
 
+export type SessionEvictionSnapshot = {
+  sessionKey: string;
+  lastUsedAt: number;
+  context: GatewaySessionContext;
+  messageCount?: number;
+};
+
+export type SessionRouterStatusAppendResult =
+  | { owner: "live"; recorded: boolean }
+  | { owner: "not_live"; recorded: false };
+
 const DEFAULT_IDLE_SESSION_TIMEOUT_MS = 30 * 60 * 1000;
+const DEFAULT_IDLE_SWEEP_INTERVAL_MS = 60 * 1000;
 
 export class SessionRouter {
   private readonly sessions = new Map<string, SessionRecord>();
+  private readonly closingSessions = new Map<string, Promise<void>>();
+  private readonly closingProjects = new Map<string, string | undefined>();
+  private readonly pausedProjects = new Set<string>();
+  private readonly creatingSessions = new Map<Promise<void>, GatewaySessionContext>();
+  readonly agents: AgentRegistry;
+  private readonly agentFactory: AgentFactoryProvider;
   private readonly inFlightTurns = new Map<string, string>();
+  /** Gateway admission reservation for a session-owned non-turn operation. */
+  private readonly inFlightMaintenance = new Set<string>();
+  private readonly pendingEvictions = new Set<Promise<void>>();
+  /** Agent publication that started before stop-new and must drain on shutdown. */
+  private readonly pendingSessionCreations = new Set<Promise<void>>();
   private readonly idleSessionTimeoutMs: number;
+  private readonly idleSweepIntervalMs: number;
   private readonly now: () => Date;
+  private readonly idleSweepTimer?: ReturnType<typeof setInterval>;
+  private isShutdown = false;
+  private shutdownPromise?: Promise<void>;
 
   constructor(private readonly options: SessionRouterOptions) {
+    this.agents = options.agents ?? new AgentRegistry({ name: "gateway-agents" });
+    this.agentFactory = new AgentFactoryProvider({ registry: this.agents });
     this.idleSessionTimeoutMs = options.idleSessionTimeoutMs ?? DEFAULT_IDLE_SESSION_TIMEOUT_MS;
+    this.idleSweepIntervalMs = options.idleSweepIntervalMs ?? DEFAULT_IDLE_SWEEP_INTERVAL_MS;
     this.now = options.now ?? (() => new Date());
+    if (this.idleSweepIntervalMs > 0) {
+      this.idleSweepTimer = setInterval(() => this.sweepIdle(), this.idleSweepIntervalMs);
+      this.idleSweepTimer.unref?.();
+    }
   }
 
-  async getOrCreate(context: GatewaySessionContext): Promise<AgentSession> {
+  async getOrCreate(context: GatewaySessionContext): Promise<AgentHandle> {
+    if (this.isShutdown) {
+      throw new Error("Session router is shut down.");
+    }
+    this.assertProjectOpen(context.projectKey);
+    const operation = this.getOrCreateActive(context);
+    const tracked = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.pendingSessionCreations.add(tracked);
+    this.creatingSessions.set(tracked, context);
+    try {
+      return await operation;
+    } finally {
+      this.pendingSessionCreations.delete(tracked);
+      this.creatingSessions.delete(tracked);
+    }
+  }
+
+  private async getOrCreateActive(context: GatewaySessionContext): Promise<AgentHandle> {
     this.sweepIdle();
+    const closing = this.closingSessions.get(context.sessionKey);
+    if (closing) await closing;
+    this.assertProjectOpen(context.projectKey);
     const cached = this.sessions.get(context.sessionKey);
     if (cached) {
+      // Tool filters shape the registry constructed for an AgentSession.
+      // Recreate only when an explicit Gateway/SDK filter changes; callers
+      // without filters retain the exact native cached-session behavior.
+      if (hasToolFilterChanged(cached.context, context)) {
+        cached.dirtyReason = "tool_filter_changed";
+      }
       cached.context = mergeSessionContext(cached.context, context);
       if (cached.dirtyReason && this.options.recreateSession) {
-        this.options.onSessionEvict?.(context.sessionKey);
-        cached.session = await this.options.recreateSession(cached.context, cached.session);
+        const previousSession = cached.handle.session;
+        const previousRecord: SessionRecord = {
+          ...cached,
+          context: { ...cached.context },
+        };
+        const replacement = await this.agentFactory.replace(
+          context.sessionKey,
+          () => this.options.recreateSession!(cached.context, previousSession),
+          {
+            setup: this.options.setupSession
+              ? (handle) => this.options.setupSession!(cached.context, handle, previousSession)
+              : undefined,
+          },
+        );
+        if (this.isShutdown) {
+          await replacement.handle.dispose("session_router_shutdown");
+          await replacement.previousDisposed;
+          throw new Error("Session router shut down during session recreation.");
+        }
+        cached.handle = replacement.handle;
         cached.dirtyReason = undefined;
+        this.emitSessionEvict(context.sessionKey, previousRecord, "dirty_recreate");
+        await replacement.previousDisposed;
       }
       cached.lastUsedAt = this.nowMs();
-      return cached.session;
+      return cached.handle;
     }
 
-    const session = await this.options.createSession(context);
+    const handle = await this.agentFactory.create(
+      context.sessionKey,
+      () => this.options.createSession(context),
+      {
+        setup: this.options.setupSession
+          ? (createdHandle) => this.options.setupSession!(context, createdHandle)
+          : undefined,
+      },
+    );
+    if (this.isShutdown) {
+      await handle.dispose("session_router_shutdown");
+      throw new Error("Session router shut down during session creation.");
+    }
+    if (context.projectKey && this.pausedProjects.has(context.projectKey)) {
+      await this.agentFactory.remove(context.sessionKey, "project_closed_during_creation");
+      throw new Error("Project is being deleted; the created session was discarded.");
+    }
     this.sessions.set(context.sessionKey, {
-      session,
+      handle,
       lastUsedAt: this.nowMs(),
       context,
     });
-    return session;
+    return handle;
   }
 
+  private assertProjectOpen(projectKey?: string): void {
+    if (projectKey && this.pausedProjects.has(projectKey)) throw new Error("Project is being deleted.");
+  }
+
+  /** Pause creation and drain only this project's runtime writers; no history scan. */
+  async closeProject(projectKey: string): Promise<string[]> {
+    this.pausedProjects.add(projectKey);
+    const creating = [...this.creatingSessions].filter(([, context]) => context.projectKey === projectKey).map(([pending]) => pending);
+    const draining = [...this.closingSessions].filter(([key]) => this.closingProjects.get(key) === projectKey).map(([, pending]) => pending);
+    await Promise.allSettled([...creating, ...draining]);
+    const keys = [...this.sessions].filter(([, record]) => record.context.projectKey === projectKey).map(([key]) => key);
+    await Promise.all([
+      ...keys.map(key => this.close(key)),
+    ]);
+    return keys;
+  }
+
+  resumeProject(projectKey: string): void { this.pausedProjects.delete(projectKey); }
+
   beginTurn(sessionKey: string, runId: string): boolean {
+    if (this.isShutdown) return false;
     this.sweepIdle();
-    if (this.inFlightTurns.has(sessionKey)) {
+    if (this.inFlightTurns.has(sessionKey) || this.inFlightMaintenance.has(sessionKey)) {
       return false;
     }
     this.inFlightTurns.set(sessionKey, runId);
     return true;
+  }
+
+  hasActiveTurn(sessionKey: string): boolean {
+    return this.inFlightTurns.has(sessionKey);
+  }
+
+  /** True when a live AgentSession currently owns this key in Gateway memory. */
+  hasSession(sessionKey: string): boolean {
+    this.sweepIdle();
+    return this.sessions.has(sessionKey);
+  }
+
+  activeTurnRunId(sessionKey: string): string | undefined {
+    return this.inFlightTurns.get(sessionKey);
   }
 
   endTurn(sessionKey: string, runId?: string): void {
@@ -92,15 +251,89 @@ export class SessionRouter {
 
   async abort(sessionKey: string, reason?: string): Promise<void> {
     const record = this.sessions.get(sessionKey);
-    record?.session.abort(reason);
+    record?.handle.abort(reason);
     if (record) {
       record.lastUsedAt = this.nowMs();
     }
   }
 
+  async seedReadState(
+    context: GatewaySessionContext,
+    input: { path: string; mtime: number },
+  ): Promise<{ applied: boolean }> {
+    this.sweepIdle();
+    if (this.inFlightTurns.has(context.sessionKey) || this.inFlightMaintenance.has(context.sessionKey)) {
+      throw new Error("Cannot seed file read state while a turn or session control is active.");
+    }
+    this.inFlightMaintenance.add(context.sessionKey);
+    try {
+      const handle = await this.getOrCreate(context);
+      if (this.inFlightTurns.has(context.sessionKey)) {
+        throw new Error("Cannot seed file read state while a turn is active.");
+      }
+      return await handle.session.seedReadState(input.path, input.mtime);
+    } finally {
+      this.inFlightMaintenance.delete(context.sessionKey);
+    }
+  }
+
+  /**
+   * Route an idle-only maintenance command to the single live session owner.
+   * This deliberately does not allocate a new session: `/compact` operates on
+   * existing durable history and must not manufacture an empty transcript.
+   */
+  async compact(sessionKey: string, options: { abortSignal?: AbortSignal; turnId?: string } = {}): Promise<ManualCompactionResult> {
+    if (this.isShutdown) {
+      throw new Error("Session router is shut down.");
+    }
+    if (this.inFlightTurns.has(sessionKey) || this.inFlightMaintenance.has(sessionKey)) {
+      throw new Error("Session has an active turn.");
+    }
+    const record = this.sessions.get(sessionKey);
+    if (!record) {
+      throw new Error("Session is not available for manual compaction.");
+    }
+    record.lastUsedAt = this.nowMs();
+    this.inFlightMaintenance.add(sessionKey);
+    try {
+      return await record.handle.compact(options);
+    } finally {
+      this.inFlightMaintenance.delete(sessionKey);
+      const current = this.sessions.get(sessionKey);
+      if (current === record) current.lastUsedAt = this.nowMs();
+    }
+  }
+
+  async steer(
+    sessionKey: string,
+    input: { turnId: string; itemId: string; message: CanonicalMessage; allowedReadFiles?: string[] },
+  ): Promise<AgentSteerResult> {
+    const record = this.sessions.get(sessionKey);
+    if (!record) return { accepted: false, reason: "no_active_turn" };
+    record.lastUsedAt = this.nowMs();
+    return record.handle.steer(input);
+  }
+
+  async cancelSteer(
+    sessionKey: string,
+    input: { turnId: string; itemId: string },
+  ): Promise<AgentCancelSteerResult> {
+    const record = this.sessions.get(sessionKey);
+    if (!record) return { cancelled: false, reason: "no_active_turn" };
+    record.lastUsedAt = this.nowMs();
+    return record.handle.cancelSteer(input);
+  }
+
   async close(sessionKey: string): Promise<void> {
-    if (this.sessions.delete(sessionKey)) {
-      this.options.onSessionEvict?.(sessionKey);
+    const record = this.sessions.get(sessionKey);
+    if (record && this.sessions.delete(sessionKey)) {
+      try {
+        await this.beginEviction(sessionKey, record, "closed");
+      } finally {
+        this.inFlightTurns.delete(sessionKey);
+      }
+    } else {
+      await this.closingSessions.get(sessionKey);
     }
   }
 
@@ -125,6 +358,13 @@ export class SessionRouter {
     return count;
   }
 
+  markSessionDirty(sessionKey: string, reason = "runtime_changed"): boolean {
+    const record = this.sessions.get(sessionKey);
+    if (!record) return false;
+    record.dirtyReason = reason;
+    return true;
+  }
+
   async list(input: ListSessionsInput = {}): Promise<ListSessionsResult> {
     if (this.options.listSessions) {
       return this.options.listSessions(input);
@@ -132,7 +372,7 @@ export class SessionRouter {
 
     return {
       sessions: [...this.sessions.entries()].map(([sessionKey, record]): GatewaySessionInfo => {
-        const snapshot = record.session.snapshot();
+        const snapshot = record.handle.snapshot();
         return {
           sessionId: snapshot.sessionId,
           sessionKey,
@@ -151,6 +391,68 @@ export class SessionRouter {
     return this.sessions.size;
   }
 
+  cachedSessionCount(): number {
+    return this.sessions.size;
+  }
+
+  snapshotSession(sessionKey: string): ReturnType<AgentSession["snapshot"]> | undefined {
+    return this.sessions.get(sessionKey)?.handle.snapshot();
+  }
+
+  /**
+   * Route a status append to the exact live AgentSession writer. The caller
+   * can use the `not_live` result to select a cold-history fallback, but must
+   * not create a second writer while this session remains published.
+   */
+  async recordAgentStatusMessage(
+    sessionKey: string,
+    turnId: string,
+    status: AgentStatusMessageInput,
+  ): Promise<SessionRouterStatusAppendResult> {
+    const record = this.sessions.get(sessionKey);
+    if (!record) return { owner: "not_live", recorded: false };
+    record.lastUsedAt = this.nowMs();
+    return {
+      owner: "live",
+      recorded: await record.handle.session.recordAgentStatusMessage(turnId, status),
+    };
+  }
+
+  shutdown(): Promise<void> {
+    if (this.shutdownPromise) return this.shutdownPromise;
+    this.isShutdown = true;
+    if (this.idleSweepTimer) {
+      clearInterval(this.idleSweepTimer);
+    }
+    const records = [...this.sessions];
+    this.sessions.clear();
+    this.inFlightTurns.clear();
+    this.inFlightMaintenance.clear();
+    this.shutdownPromise = this.finishShutdown(records);
+    return this.shutdownPromise;
+  }
+
+  private async finishShutdown(records: Array<[string, SessionRecord]>): Promise<void> {
+    // No new getOrCreate() may start after isShutdown. Wait for every
+    // publication that began before stop-new so a late factory result cannot
+    // publish a live agent after agentFactory.dispose().
+    await Promise.allSettled([...this.pendingSessionCreations]);
+    const evictions = records.map(([sessionKey, record]) =>
+      this.beginEviction(sessionKey, record, "shutdown")
+    );
+    const providerResults = await Promise.allSettled([
+      ...new Set([...this.pendingEvictions, ...evictions]),
+      this.agentFactory.dispose(),
+    ]);
+    const registryResults = await Promise.allSettled([this.agents.dispose()]);
+    const errors = [...providerResults, ...registryResults]
+      .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+      .map((result) => result.reason);
+    if (errors.length > 0) {
+      throw new AggregateError(errors, "Failed to shut down all agent sessions.");
+    }
+  }
+
   /**
    * Returns true when at least one *user* turn (not always-on / cron) is
    * in flight for the given project.  Used by the Always-On scheduler to
@@ -167,21 +469,80 @@ export class SessionRouter {
   }
 
   private sweepIdle(): void {
+    if (this.isShutdown) return;
     const now = this.nowMs();
     for (const [sessionKey, record] of this.sessions) {
-      if (this.inFlightTurns.has(sessionKey)) {
+      if (this.inFlightTurns.has(sessionKey) || this.inFlightMaintenance.has(sessionKey)) {
         continue;
       }
       if (now - record.lastUsedAt > this.idleSessionTimeoutMs) {
         this.sessions.delete(sessionKey);
-        this.options.onSessionEvict?.(sessionKey);
+        void this.beginEviction(sessionKey, record, "idle").catch((error) => {
+          console.warn(`[pilotdeck] failed to dispose idle session ${sessionKey}:`, error);
+        });
       }
+    }
+  }
+
+  private beginEviction(
+    sessionKey: string,
+    record: SessionRecord,
+    reason: "idle" | "closed" | "dirty_recreate" | "shutdown",
+  ): Promise<void> {
+    const eviction = (async () => {
+      try {
+        await this.agentFactory.remove(sessionKey, `session_${reason}`);
+      } finally {
+        this.emitSessionEvict(sessionKey, record, reason);
+      }
+    })();
+    this.closingSessions.set(sessionKey, eviction);
+    this.closingProjects.set(sessionKey, record.context.projectKey);
+    this.pendingEvictions.add(eviction);
+    void eviction.then(
+      () => this.finishEviction(sessionKey, eviction),
+      () => this.finishEviction(sessionKey, eviction),
+    );
+    return eviction;
+  }
+
+  private finishEviction(sessionKey: string, eviction: Promise<void>): void {
+    this.pendingEvictions.delete(eviction);
+    if (this.closingSessions.get(sessionKey) === eviction) {
+      this.closingSessions.delete(sessionKey);
+      this.closingProjects.delete(sessionKey);
+    }
+  }
+
+  private emitSessionEvict(
+    sessionKey: string,
+    record: SessionRecord,
+    reason: "idle" | "closed" | "dirty_recreate" | "shutdown",
+  ): void {
+    this.options.onSessionEvict?.(sessionKey, reason);
+    if (reason === "idle") {
+      this.options.onSessionIdleEvict?.(sessionKey, snapshotEvictedSession(sessionKey, record));
     }
   }
 
   private nowMs(): number {
     return this.now().getTime();
   }
+}
+
+function snapshotEvictedSession(sessionKey: string, record: SessionRecord): SessionEvictionSnapshot {
+  let messageCount: number | undefined;
+  try {
+    messageCount = record.handle.snapshot().messages.length;
+  } catch {
+    messageCount = undefined;
+  }
+  return {
+    sessionKey,
+    lastUsedAt: record.lastUsedAt,
+    context: { ...record.context },
+    ...(messageCount !== undefined ? { messageCount } : {}),
+  };
 }
 
 function mergeSessionContext(
@@ -192,5 +553,30 @@ function mergeSessionContext(
     sessionKey: next.sessionKey,
     channelKey: next.channelKey || current.channelKey,
     projectKey: current.projectKey ?? next.projectKey,
+    allowedTools: next.allowedTools ?? current.allowedTools,
+    disallowedTools: next.disallowedTools ?? current.disallowedTools,
   };
+}
+
+function hasToolFilterChanged(
+  current: GatewaySessionContext,
+  next: GatewaySessionContext,
+): boolean {
+  // `undefined` means that this turn does not update the session's tool
+  // filter. The Gateway wire format deliberately has no implicit "clear"
+  // operation, so an ordinary native turn cannot undo an SDK-set filter.
+  return (next.allowedTools !== undefined
+      && !sameOptionalStringArray(current.allowedTools, next.allowedTools))
+    || (next.disallowedTools !== undefined
+      && !sameOptionalStringArray(current.disallowedTools, next.disallowedTools));
+}
+
+function sameOptionalStringArray(left: string[] | undefined, right: string[] | undefined): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  if (left.length !== right.length) return false;
+  return left.every((value, index) => value === right[index]);
+}
+
+function sessionBusyError(message: string): Error & { code: string } {
+  return Object.assign(new Error(message), { code: "SESSION_BUSY" });
 }

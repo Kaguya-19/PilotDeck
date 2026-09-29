@@ -5,7 +5,7 @@ type LoggerLike = {
     warn?: (...args: unknown[]) => void;
     error?: (...args: unknown[]) => void;
 };
-export type EdgeClawMemoryApiType = "openai-responses" | "responses" | "openai-completions";
+export type EdgeClawMemoryApiType = "openai-responses" | "responses" | "openai-completions" | "anthropic" | "google";
 export interface EdgeClawMemoryLlmOptions {
     provider?: string;
     model?: string;

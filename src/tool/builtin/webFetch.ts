@@ -5,6 +5,7 @@
  */
 
 import type {
+  CanonicalModelError,
   CanonicalModelRequest,
   CanonicalUsage,
 } from "../../model/index.js";
@@ -25,27 +26,37 @@ import {
   getURLMarkdownContent,
   MAX_MARKDOWN_LENGTH,
   type RedirectInfo,
+  WebFetchHttpError,
+  type WebFetchHttpResult,
   truncateMarkdown,
 } from "./web/urlFetcher.js";
 import { validateURL } from "./web/urlValidation.js";
 
 function isRedirectInfo(
-  result: Awaited<ReturnType<typeof getURLMarkdownContent>>,
+  result: WebFetchHttpResult,
 ): result is RedirectInfo {
   return (result as RedirectInfo).type === "redirect";
 }
 
+export type WebFetchMode = "llm" | "raw";
+
 export type WebFetchInput = {
   url: string;
-  prompt: string;
+  prompt?: string;
+  mode?: WebFetchMode;
 };
 
 export type WebFetchOutput = {
   url: string;
   fromCache: boolean;
+  mode: WebFetchMode;
+  llmUsed: boolean;
   contentType?: string;
   bytes?: number;
   status?: number;
+  truncated?: boolean;
+  rawLength?: number;
+  returnedLength?: number;
   modelResponse?: string;
   redirect?: { redirectUrl: string; statusCode: number };
 };
@@ -53,8 +64,9 @@ export type WebFetchOutput = {
 export type CreateWebFetchToolOptions = {
   /**
    * Override the model used for content extraction. Falls back to
-   * `context.model` (provided by AgentLoop). When neither is available
-   * the tool returns the raw markdown without summarization.
+   * `context.model` (provided by AgentLoop). When neither is available,
+   * `mode: "llm"` returns an `unsupported_tool` error with a `mode: "raw"`
+   * fallback hint.
    */
   model?: PilotDeckToolModelClient;
   /** Provider id used for the secondary model call. Default: openrouter. */
@@ -63,13 +75,115 @@ export type CreateWebFetchToolOptions = {
   modelId?: string;
   /** Max output tokens for the secondary call. Default: 1024. */
   maxOutputTokens?: number;
-  /** Temperature for the secondary call. Default: 0. */
-  temperature?: number;
+  /** Test seam for replacing the low-level URL fetcher. */
+  fetchUrl?: typeof getURLMarkdownContent;
 };
 
 const DEFAULT_PROVIDER = "openrouter";
 const DEFAULT_MODEL_ID = "moonshotai/kimi-k2.6";
-const DEFAULT_MAX_OUTPUT_TOKENS = 1024;
+const DEFAULT_MAX_OUTPUT_TOKENS = 65_536;
+const DEFAULT_MODE: WebFetchMode = "llm";
+
+function resolveMode(mode: WebFetchInput["mode"]): WebFetchMode {
+  return mode ?? DEFAULT_MODE;
+}
+
+function isTruncated(rawLength: number): boolean {
+  return rawLength > MAX_MARKDOWN_LENGTH;
+}
+
+function buildHttpFetchErrorMessage(error: WebFetchHttpError): string {
+  const statusLabel = error.statusText
+    ? `${error.status} ${error.statusText}`
+    : String(error.status);
+  const lines = [`web_fetch HTTP fetch failed with status ${statusLabel} for ${error.url}.`];
+  if (isTransientHttpStatus(error.status)) {
+    lines.push(
+      "The target website is temporarily unavailable or rate limited; do not treat the error page as page content. Retry later or use another source.",
+    );
+  } else {
+    lines.push("The target URL did not return a usable page; do not treat the error page as page content.");
+  }
+  if (typeof error.retryAfterMs === "number") {
+    lines.push(`Retry-After: ${error.retryAfterMs}ms.`);
+  }
+  return lines.join(" ");
+}
+
+function isTransientHttpStatus(status: number): boolean {
+  return status === 408 || status === 429 || status >= 500;
+}
+
+function secondaryModelErrorDetails(error: CanonicalModelError): Record<string, unknown> {
+  return definedDetails({
+    stage: "secondary_model",
+    provider: error.provider,
+    protocol: error.protocol,
+    errorCode: error.code,
+    status: error.status,
+    retryable: error.retryable,
+    retryAfterMs: error.retryAfterMs,
+    userHint: error.userHint,
+  });
+}
+
+function extractCanonicalModelError(error: unknown): CanonicalModelError | undefined {
+  if (isCanonicalModelError(error)) {
+    return error;
+  }
+  if (!isRecord(error)) {
+    return undefined;
+  }
+  const nested = error.error;
+  return isCanonicalModelError(nested) ? nested : undefined;
+}
+
+function isCanonicalModelError(value: unknown): value is CanonicalModelError {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return (
+    typeof value.provider === "string" &&
+    (value.protocol === "anthropic" || value.protocol === "openai") &&
+    typeof value.code === "string" &&
+    typeof value.message === "string" &&
+    typeof value.retryable === "boolean"
+  );
+}
+
+function definedDetails(values: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(values).filter(([, value]) => value !== undefined),
+  );
+}
+
+function readStringProperty(value: unknown, key: string): string | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const property = value[key];
+  return typeof property === "string" ? property : undefined;
+}
+
+function readNumberProperty(value: unknown, key: string): number | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const property = value[key];
+  return typeof property === "number" ? property : undefined;
+}
+
+function readBooleanProperty(value: unknown, key: string): boolean | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const property = value[key];
+  return typeof property === "boolean" ? property : undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
 
 export function createWebFetchTool(
   options: CreateWebFetchToolOptions = {},
@@ -81,7 +195,7 @@ export function createWebFetchTool(
     kind: "network",
     inputSchema: {
       type: "object",
-      required: ["url", "prompt"],
+      required: ["url"],
       additionalProperties: false,
       properties: {
         url: {
@@ -91,7 +205,13 @@ export function createWebFetchTool(
         prompt: {
           type: "string",
           description:
-            "Question or extraction directive to apply to the fetched markdown. When no model client is available, the tool returns raw markdown instead of a prompted summary.",
+            'Question or extraction directive to apply to the fetched markdown. When no model client is available, retry with mode "raw" to fetch markdown without secondary model processing.',
+        },
+        mode: {
+          type: "string",
+          enum: ["llm", "raw"],
+          description:
+            'Fetch mode. "llm" (default) applies prompt with the secondary model. "raw" returns fetched markdown directly without any model processing.',
         },
       },
     },
@@ -130,6 +250,7 @@ export function createWebFetchTool(
       }
       const url = (input as Partial<WebFetchInput>).url;
       const prompt = (input as Partial<WebFetchInput>).prompt;
+      const mode = (input as Partial<WebFetchInput>).mode;
       if (typeof url !== "string" || url.length === 0) {
         return {
           ok: false,
@@ -149,26 +270,58 @@ export function createWebFetchTool(
           ],
         };
       }
-      if (typeof prompt !== "string" || prompt.length === 0) {
+      if (mode !== undefined && mode !== "llm" && mode !== "raw") {
         return {
           ok: false,
-          issues: [{ path: "prompt", code: "required", message: "prompt is required" }],
+          issues: [{ path: "mode", code: "invalid_enum", message: 'mode must be "llm" or "raw"' }],
+        };
+      }
+      const resolvedMode = resolveMode(mode);
+      if (resolvedMode === "llm" && (typeof prompt !== "string" || prompt.length === 0)) {
+        return {
+          ok: false,
+          issues: [{ path: "prompt", code: "required", message: 'prompt is required when mode is "llm"' }],
         };
       }
       return { ok: true, input };
     },
     execute: async (input, context): Promise<PilotDeckToolExecutionOutput<WebFetchOutput>> => {
-      const { url, prompt } = input;
+      const { url } = input;
+      const mode = resolveMode(input.mode);
+      const prompt = input.prompt ?? "";
       const signal = context.abortSignal ?? new AbortController().signal;
+      if (mode === "llm" && prompt.length === 0) {
+        throw new PilotDeckToolRuntimeError(
+          "invalid_tool_input",
+          'web_fetch prompt is required when mode is "llm". Use mode "raw" to fetch markdown without a secondary model.',
+        );
+      }
 
-      let httpResult: Awaited<ReturnType<typeof getURLMarkdownContent>>;
+      const fetchUrl = options.fetchUrl ?? getURLMarkdownContent;
+      let httpResult: WebFetchHttpResult;
       try {
-        httpResult = await getURLMarkdownContent(url, signal);
+        httpResult = await fetchUrl(url, signal);
       } catch (err) {
+        if (err instanceof WebFetchHttpError) {
+          throw new PilotDeckToolRuntimeError(
+            "tool_execution_failed",
+            buildHttpFetchErrorMessage(err),
+            definedDetails({
+              stage: "http_fetch",
+              status: err.status,
+              statusText: err.statusText,
+              url: err.url,
+              contentType: err.contentType,
+              retryAfterMs: err.retryAfterMs,
+              bodyPreview: err.bodyPreview,
+            }),
+          );
+        }
         const message = err instanceof Error ? err.message : String(err);
         throw new PilotDeckToolRuntimeError(
           "tool_execution_failed",
           `web_fetch failed: ${message}`,
+          { stage: "http_fetch" },
         );
       }
 
@@ -185,6 +338,8 @@ export function createWebFetchTool(
           data: {
             url,
             fromCache: false,
+            mode,
+            llmUsed: false,
             redirect: { redirectUrl: r.redirectUrl, statusCode: r.statusCode },
           },
         };
@@ -192,25 +347,35 @@ export function createWebFetchTool(
 
       const fetched = httpResult;
       const truncated = truncateMarkdown(fetched.content);
+      const rawLength = fetched.content.length;
+      const sourceTruncated = isTruncated(rawLength);
       const isPreapproved = isPreapprovedUrl(url);
 
-      const model = options.model ?? context.model;
-      if (!model) {
-        const text =
-          truncated +
-          (fetched.content.length > MAX_MARKDOWN_LENGTH
-            ? ""
-            : "");
+      if (mode === "raw") {
         return {
-          content: [{ type: "text", text }],
+          content: [{ type: "text", text: truncated }],
           data: {
             url,
             fromCache: fetched.fromCache,
+            mode,
+            llmUsed: false,
             contentType: fetched.contentType,
             bytes: fetched.bytes,
             status: fetched.code,
+            truncated: sourceTruncated,
+            rawLength,
+            returnedLength: truncated.length,
           },
         };
+      }
+
+      const model = options.model ?? context.model;
+      if (!model) {
+        throw new PilotDeckToolRuntimeError(
+          "unsupported_tool",
+          'web_fetch secondary model is not available. Retry with mode "raw" to fetch markdown without LLM processing.',
+          { stage: "secondary_model", url, mode },
+        );
       }
 
       const secondaryPrompt = makeSecondaryModelPrompt(truncated, prompt, isPreapproved);
@@ -224,7 +389,6 @@ export function createWebFetchTool(
           },
         ],
         maxOutputTokens: options.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
-        temperature: options.temperature ?? 0,
         stream: true,
         metadata: { tool: "web_fetch", url },
       };
@@ -250,7 +414,7 @@ export function createWebFetchTool(
               throw new PilotDeckToolRuntimeError(
                 "tool_execution_failed",
                 `web_fetch secondary model error: ${event.error.message}`,
-                { errorCode: event.error.code },
+                secondaryModelErrorDetails(event.error),
               );
             default:
               break;
@@ -259,21 +423,46 @@ export function createWebFetchTool(
       } catch (err) {
         if (err instanceof PilotDeckToolRuntimeError) throw err;
         const message = err instanceof Error ? err.message : String(err);
+        const modelError = extractCanonicalModelError(err);
         throw new PilotDeckToolRuntimeError(
           "tool_execution_failed",
           `web_fetch secondary model failed: ${message}`,
+          modelError
+            ? secondaryModelErrorDetails(modelError)
+            : definedDetails({
+                stage: "secondary_model",
+                message,
+                errorCode: readStringProperty(err, "code"),
+                status: readNumberProperty(err, "status"),
+                retryable: readBooleanProperty(err, "retryable"),
+                retryAfterMs: readNumberProperty(err, "retryAfterMs"),
+                userHint: readStringProperty(err, "userHint"),
+              }),
         );
       }
 
-      const finalText = modelText.length > 0 ? modelText : "[No response from secondary model]";
+      if (modelText.trim().length === 0) {
+        throw new PilotDeckToolRuntimeError(
+          "tool_execution_failed",
+          'web_fetch secondary model returned no visible text. Retry with mode "raw" to inspect the fetched markdown, or try again later.',
+          { stage: "secondary_model", url, mode },
+        );
+      }
+
+      const finalText = modelText;
       return {
         content: [{ type: "text", text: finalText }],
         data: {
           url,
           fromCache: fetched.fromCache,
+          mode,
+          llmUsed: true,
           contentType: fetched.contentType,
           bytes: fetched.bytes,
           status: fetched.code,
+          truncated: sourceTruncated,
+          rawLength,
+          returnedLength: finalText.length,
           modelResponse: finalText,
         },
       };

@@ -14,200 +14,298 @@ import {
   type AgentLoopRunResult,
 } from "../loop/AgentLoop.js";
 import type { AgentEvent } from "../protocol/events.js";
-import type {
-  CanonicalAssistantTextSummary,
-} from "./types.js";
-import type {
-  CanonicalMessage,
-  CanonicalUsage,
-} from "../../model/index.js";
 import type { AgentRuntimeConfig } from "../runtime/AgentRuntimeConfig.js";
 import type { AgentRuntimeDependencies } from "../runtime/AgentRuntimeDependencies.js";
+import {
+  AgentSessionRuntimeBundle,
+  type AgentSessionRuntimeResources,
+} from "../session/AgentSessionRuntimeBundle.js";
+import { createAgentTurnCapabilities } from "../loop/nativeAgentTurnCapabilitiesAdapter.js";
+import type { AgentTranscriptWriter } from "../../session/transcript/TranscriptWriter.js";
 import { ToolRegistry } from "../../tool/registry/ToolRegistry.js";
+import { McpRuntime, createMcpToolDefinitionsFromRuntime } from "../../mcp/index.js";
+import type { CanonicalAssistantTextSummary } from "./types.js";
 import type {
-  PilotDeckReadFileStateMap,
-  PilotDeckToolDefinition,
-  PilotDeckWriteSnapshotMap,
-} from "../../tool/index.js";
-import { ConcurrentToolScheduler } from "../../tool/scheduler/ConcurrentToolScheduler.js";
-import { ToolRuntime } from "../../tool/execution/ToolRuntime.js";
-import { PermissionRuntime } from "../../permission/index.js";
+  CanonicalMessage,
+} from "../../model/index.js";
+import { messageContent } from "../../model/protocol/clone.js";
 import {
   buildForkedMessages,
 } from "./buildForkedMessages.js";
+import type { SubagentDefinition, SubagentMcpServerConfig } from "./builtinSubagentTypes.js";
 import {
-  buildSubagentSystemPrompt,
-  type SubagentDefinition,
-} from "./builtinSubagentTypes.js";
-import {
-  applySystemPromptFilters,
   cloneReadFileState,
   cloneWriteSnapshots,
 } from "./contextInheritance.js";
+import {
+  buildSubagentRuntimeConfig,
+  createSubagentRuntimeComposition,
+} from "./SubagentRuntimeComposition.js";
+import {
+  createNativeSubagentProvider,
+  type SidechainTranscriptWriter,
+  type SubagentReport,
+  type SubagentRunRequest,
+} from "./SubagentProvider.js";
+import {
+  snapshotSubagentDescriptor,
+  type SubagentDescriptorData,
+} from "./SubagentDescriptor.js";
+import { SUBAGENT_DESCRIPTOR_METADATA_KEY } from "./SubagentDescriptorPersistence.js";
 
 
 const SUMMARY_FIELDS = ["Scope", "Result", "Key files", "Files changed", "Issues"] as const;
-const SUBAGENT_DEFAULT_MAX_TURNS = 16;
 
-export type SubAgentSessionOptions = {
-  /** The subagent preset (general-purpose / explore / plan). */
-  definition: SubagentDefinition;
-  /** Free-text directive from the parent (becomes the subagent's user prompt). */
-  directive: string;
-  /** Parent agent's runtime config (provider, model, permission mode, ...). */
-  parentConfig: AgentRuntimeConfig;
-  /** Parent agent's runtime dependencies (model, scheduler factory, ...). */
-  parentDependencies: AgentRuntimeDependencies;
-  /** Parent agent's read-file deduplication cache (cloned into the child). */
-  parentReadFileState?: PilotDeckReadFileStateMap;
-  /** Parent agent's write snapshots (cloned into the child). */
-  parentWriteSnapshots?: PilotDeckWriteSnapshotMap;
-  /** Parent session/turn scope used for forwarding child activity to hosts. */
-  parentSessionId: string;
-  parentTurnId: string;
-  /** New session id for the fork's transcript writer (C3 sidechain hook). */
-  subagentSessionId: string;
-  /** Stable subagent UUID — mirrors C3 sidechain naming. */
-  subagentId: string;
-  /** Cap on AgentLoop turns inside the fork. Defaults to 16. */
-  maxTurns?: number;
-  /** Abort signal forwarded to the child loop. */
-  abortSignal?: AbortSignal;
-  /**
-   * Optional sidechain transcript writer for C3. When provided, each
-   * AgentLoop event that produces a durable message is mirrored here. The
-   * parent transcript only gets the started/completed reference entries.
-   */
-  sidechainTranscript?: SidechainTranscriptWriter;
-};
-
-/**
- * Minimal sidechain writer surface used by SubAgentSession. Lives in this
- * module so `agent/sub` doesn't import the session storage layer directly
- * (the parent constructs the writer and passes it in).
- */
-export type SidechainTranscriptWriter = {
-  recordAcceptedInput(sessionId: string, turnId: string, messages: CanonicalMessage[]): Promise<void>;
-  recordDurableMessage(sessionId: string, turnId: string, message: CanonicalMessage): Promise<void>;
-};
-
-export type SubagentReport = {
-  subagentId: string;
-  definitionId: string;
-  /** Final assistant text (the 5-field report). */
-  markdown: string;
-  /** Parsed `Scope/Result/Key files/Files changed/Issues` summary. */
-  parsed?: CanonicalAssistantTextSummary;
-  /** Aggregate usage from the AgentLoop run. */
-  usage: CanonicalUsage;
-  /** Number of internal turns taken. */
-  turns: number;
-  durationMs: number;
-};
+export type SubAgentSessionOptions = Omit<SubagentRunRequest, "mode">;
+export type { SidechainTranscriptWriter, SubagentReport } from "./SubagentProvider.js";
 
 export class SubAgentSession {
   constructor(private readonly options: SubAgentSessionOptions) {}
 
+  /** @deprecated Compatibility surface retained for legacy parity tests. */
+  buildScopedRegistry() {
+    const composition = createSubagentRuntimeComposition({
+      definition: this.options.definition,
+      subagentId: this.options.subagentId,
+      parentSessionId: this.options.parentSessionId,
+      parentConfig: this.options.parentConfig,
+      parentDependencies: this.options.parentDependencies,
+    });
+    return composition.dependencies.tools.registry;
+  }
+
+  /** @deprecated Compatibility surface retained for legacy parity tests. */
+  createScopedRuntime() {
+    return createSubagentRuntimeComposition({
+      definition: this.options.definition,
+      subagentId: this.options.subagentId,
+      parentSessionId: this.options.parentSessionId,
+      parentConfig: this.options.parentConfig,
+      parentDependencies: this.options.parentDependencies,
+    });
+  }
+
+  /** @deprecated Compatibility surface retained for legacy parity tests. */
+  buildConfig(): AgentRuntimeConfig {
+    return buildSubagentRuntimeConfig({
+      definition: this.options.definition,
+      subagentId: this.options.subagentId,
+      parentConfig: this.options.parentConfig,
+    });
+  }
+
   async run(): Promise<SubagentReport> {
+    const providers = this.options.parentDependencies.scope?.services.subagentProviders
+      ?? this.options.parentDependencies.subagentProviders;
+    if (providers) {
+      const requested = this.options.parentDependencies.scope?.services.subagentProvider
+        ?? this.options.parentDependencies.subagentProvider;
+      const named = requested
+        ? providers.get(requested.name)
+        : providers.list().length === 1
+          ? providers.list()[0]
+          : undefined;
+      if (!named) {
+        throw new Error("Subagent provider is not uniquely selected in the current scope.");
+      }
+      const run = await providers.start(named.name, { ...this.options, mode: "one-shot" });
+      try {
+        return await run.result;
+      } finally {
+        await run.dispose("subagent_session_settled");
+      }
+    }
+    const provider = this.options.parentDependencies.scope?.services.subagentProvider
+      ?? this.options.parentDependencies.subagentProvider
+      ?? createNativeSubagentProvider();
+    const request = {
+      ...this.options,
+      mode: "one-shot" as const,
+      descriptor: snapshotSubagentDescriptor({
+        mode: "one-shot",
+        provider: provider.name,
+        definitionId: this.options.definition.id,
+      }),
+    };
+    if (provider.start) {
+      const run = await provider.start(request);
+      try {
+        return await run.result;
+      } finally {
+        await run.dispose("subagent_session_settled");
+      }
+    }
+    if (provider.run) return provider.run(request);
+    throw new Error(`Subagent provider "${provider.name}" does not support one-shot runs.`);
+  }
+
+  /**
+   * Native provider implementation. Kept public for the provider adapter and
+   * intentionally bypasses the optional provider on parent dependencies.
+   */
+  async runNative(descriptor?: SubagentDescriptorData): Promise<SubagentReport> {
     const startedAt = Date.now();
 
     const messages = this.buildInitialMessages();
-    const subRegistry = this.buildScopedRegistry();
-    const subDependencies = this.cloneDependencies(subRegistry);
-    const subConfig = this.buildConfig();
-
-    const loop = new AgentLoop(subConfig, subDependencies, {
-      readFileState: cloneReadFileState(this.options.parentReadFileState),
-      writeSnapshots: cloneWriteSnapshots(this.options.parentWriteSnapshots),
+    const scopedRuntime = createSubagentRuntimeComposition({
+      definition: this.options.definition,
+      subagentId: this.options.subagentId,
+      parentSessionId: this.options.parentSessionId,
+      parentConfig: this.options.parentConfig,
+      parentDependencies: this.options.parentDependencies,
     });
-
-    let last: AgentLoopRunResult | undefined;
-    const turnId = `${this.options.subagentId}-t0`;
-    if (this.options.sidechainTranscript) {
-      await this.options.sidechainTranscript.recordAcceptedInput(
-        this.options.subagentSessionId,
-        turnId,
-        messages,
+    const subDependencies = scopedRuntime.dependencies;
+    const subConfig = scopedRuntime.config;
+    const sidechain = this.resolveSidechainTranscript();
+    let sidechainRuntime: AgentSessionRuntimeResources | undefined;
+    let definitionMcp: McpRuntime | undefined;
+    try {
+      definitionMcp = await this.attachDefinitionMcpTools(subDependencies.tools.registry);
+      this.options.parentDependencies.subagentComposition?.configureTools?.(
+        this.options.definition,
+        subDependencies.tools.registry,
       );
-    }
-    const generator = loop.run({
-      sessionId: this.options.subagentSessionId,
-      turnId,
-      messages,
-      maxTurns: this.options.maxTurns ?? SUBAGENT_DEFAULT_MAX_TURNS,
-      abortSignal: this.options.abortSignal,
-    });
-    while (true) {
-      const next = await generator.next();
-      if (next.done) {
-        last = next.value;
-        break;
+      sidechainRuntime = sidechain?.recordSessionEvent
+        ? new AgentSessionRuntimeBundle({
+            sessionId: this.options.subagentSessionId,
+            config: subConfig,
+            dependencies: subDependencies,
+            transcript: createSidechainTranscriptWriter(sidechain),
+            ownedScope: false,
+          }).compose()
+        : undefined;
+      const executionDependencies = sidechainRuntime?.dependencies ?? subDependencies;
+      const executionCapabilities = sidechainRuntime?.capabilities
+        ?? createAgentTurnCapabilities(subConfig, executionDependencies);
+      const loop = new AgentLoop(subConfig, executionCapabilities, {
+        readFileState: cloneReadFileState(this.options.parentReadFileState),
+        writeSnapshots: cloneWriteSnapshots(this.options.parentWriteSnapshots),
+      });
+
+      let last: AgentLoopRunResult | undefined;
+      const turnId = `${this.options.subagentId}-t0`;
+      if (sidechainRuntime) {
+        await sidechainRuntime.eventRecorder.startTurn(this.options.subagentSessionId, turnId);
       }
-      const event = next.value;
-      this.forwardActivity(event);
-      if (
-        this.options.sidechainTranscript &&
-        (event.type === "assistant_message" || event.type === "tool_results_projected")
-      ) {
-        await this.options.sidechainTranscript.recordDurableMessage(
+      if (sidechain) {
+        await sidechain.recordAcceptedInput(
           this.options.subagentSessionId,
           turnId,
-          event.type === "assistant_message" ? event.message : event.message,
+          messages,
+          {
+            [SUBAGENT_DESCRIPTOR_METADATA_KEY]: descriptor ?? snapshotSubagentDescriptor({
+              mode: "one-shot",
+              provider: "pilotdeck-native",
+              definitionId: this.options.definition.id,
+            }),
+          },
         );
       }
+      const generator = loop.run({
+        sessionId: this.options.subagentSessionId,
+        turnId,
+        messages,
+        maxTurns: this.options.maxTurns,
+        abortSignal: this.options.abortSignal,
+      });
+      while (true) {
+        const next = await generator.next();
+        if (next.done) {
+          last = next.value;
+          break;
+        }
+        const event = next.value;
+        this.options.onActivity?.(event);
+        this.forwardActivity(event);
+        if (
+          sidechain &&
+          (event.type === "assistant_message" || event.type === "tool_results_projected")
+        ) {
+          await sidechain.recordDurableMessage(
+            this.options.subagentSessionId,
+            turnId,
+            event.message,
+          );
+        }
+      }
+      if (!last) {
+        throw new Error("SubAgentSession: AgentLoop returned no result");
+      }
+      await sidechainRuntime?.eventRecorder.completeTurn(last.result);
+      if (last.result.type === "aborted") {
+        throw new Error(
+          `SubAgentSession: subagent turn aborted (${last.result.stopReason})`,
+        );
+      }
+      if (last.result.type === "error") {
+        const details = last.result.errors?.map((error) => error.message).join("; ");
+        throw new Error(
+          `SubAgentSession: subagent turn failed (${last.result.stopReason})${details ? `: ${details}` : ""}`,
+        );
+      }
+      const text = extractFinalAssistantText(last.messages);
+      const parsed = parseSummary(text);
+      return {
+        subagentId: this.options.subagentId,
+        definitionId: this.options.definition.id,
+        markdown: text,
+        parsed,
+        usage: last.result.usage,
+        turns: last.result.turns,
+        durationMs: Date.now() - startedAt,
+      };
+      } finally {
+      const errors: unknown[] = [];
+      try {
+        await sidechainRuntime?.dispose();
+      } catch (error) {
+        errors.push(error);
+      }
+      try {
+        await definitionMcp?.stop();
+      } catch (error) {
+        errors.push(error);
+      }
+      try {
+        await scopedRuntime.dispose();
+      } catch (error) {
+        errors.push(error);
+      }
+      if (errors.length > 0) {
+        throw new AggregateError(errors, "Failed to dispose one-shot subagent runtime.");
+      }
     }
-    if (!last) {
-      throw new Error("SubAgentSession: AgentLoop returned no result");
-    }
-    if (last.result.type === "error") {
-      const details = last.result.errors?.map((error) => error.message).join("; ");
-      throw new Error(
-        `SubAgentSession: subagent turn failed (${last.result.stopReason})${details ? `: ${details}` : ""}`,
-      );
-    }
-    const text = extractFinalAssistantText(last.messages);
-    const parsed = parseSummary(text);
-    return {
-      subagentId: this.options.subagentId,
-      definitionId: this.options.definition.id,
-      markdown: text,
-      parsed,
-      usage: last.result.usage,
-      turns: last.result.turns,
-      durationMs: Date.now() - startedAt,
-    };
   }
 
   private buildInitialMessages(): CanonicalMessage[] {
-    return buildForkedMessages(this.options.directive);
+    return buildForkedMessages(this.options.directive, this.options.definition.initialPrompt);
   }
 
-  private buildScopedRegistry(): ToolRegistry {
-    const scoped = new ToolRegistry();
-    const allowedSet = new Set(this.options.definition.allowedTools);
-    const wildcard = allowedSet.has("*");
-    const forceReadOnly = this.options.definition.isReadOnly
-      || this.options.parentConfig.permissionMode === "plan";
-    for (const tool of this.options.parentDependencies.tools.registry.list()) {
-      if (tool.name === "enter_plan_mode" || tool.name === "exit_plan_mode") {
-        continue; // Subagents must not participate in the plan-mode workflow.
+  private resolveSidechainTranscript(): SidechainTranscriptWriter | undefined {
+    return this.options.sidechainTranscript;
+  }
+
+  /** Start only this definition's MCP endpoints and add their native tools. */
+  private async attachDefinitionMcpTools(registry: ToolRegistry): Promise<McpRuntime | undefined> {
+    const configured = this.options.definition.mcpServers;
+    if (!configured || Object.keys(configured).length === 0) return undefined;
+    const runtime = new McpRuntime(
+      Object.entries(configured).map(([id, config]) => toSubagentMcpServerSpec(id, config)),
+    );
+    try {
+      await runtime.start();
+      const allowed = new Set(this.options.definition.allowedTools);
+      const denied = new Set(this.options.definition.disallowedTools ?? []);
+      const wildcard = allowed.has("*");
+      for (const tool of await createMcpToolDefinitionsFromRuntime(runtime)) {
+        if ((!wildcard && !allowed.has(tool.name)) || denied.has(tool.name)) continue;
+        registry.registerOrReplace(tool);
       }
-      if (tool.name === "agent") {
-        continue; // Subagents must never nest-fork.
-      }
-      if (tool.name.startsWith("always_on_")) {
-        continue; // Always-On tools require a RunContext unavailable in subagents.
-      }
-      if (tool.name === "ask_user_question") {
-        continue; // Subagents have no elicitation channel.
-      }
-      if (forceReadOnly && tool.isDestructive?.({} as never) === true) {
-        continue; // S9 — read-only subagents reject destructive tools outright
-      }
-      if (!wildcard && !allowedSet.has(tool.name)) continue;
-      scoped.register(tool as PilotDeckToolDefinition);
+      return runtime;
+    } catch (error) {
+      await runtime.stop();
+      throw error;
     }
-    return scoped;
   }
 
   private forwardActivity(event: AgentEvent): void {
@@ -224,6 +322,9 @@ export class SubAgentSession {
         type: "subagent_model_event",
         ...base,
         event: event.event,
+        timeline: event.timeline,
+        blockId: event.blockId,
+        streamBoundary: event.streamBoundary,
       });
       return;
     }
@@ -235,65 +336,78 @@ export class SubAgentSession {
       });
       return;
     }
+    if (event.type === "compact_started" || event.type === "compact_completed") {
+      emit({ type: "agent_status", ...base, event: `subagent_${event.type}`, timeline: event.timeline,
+        detail: { ...event, subagentId: base.subagentId } });
+      return;
+    }
+    if (event.type === "assistant_message") {
+      for (const block of event.message.content) {
+        if ((block.type === "text" || block.type === "thinking") && block.timeline) emit({
+          type: "agent_status", ...base, event: "subagent_assistant_block", timeline: block.timeline,
+          detail: { subagentId: base.subagentId, kind: block.type, text: block.text, blockId: block.blockId },
+        });
+      }
+      return;
+    }
     if (event.type === "tool_result") {
       emit({
         type: "subagent_tool_result",
         ...base,
         result: event.result,
+        timeline: event.timeline,
       });
     }
   }
 
-  private cloneDependencies(registry: ToolRegistry): AgentRuntimeDependencies {
-    const permissionRuntime = new PermissionRuntime();
-    const toolRuntime = new ToolRuntime(
-      registry,
-      permissionRuntime,
-      this.options.parentDependencies.lifecycle,
-      this.options.parentDependencies.eventEmitter,
-    );
-    const scheduler = new ConcurrentToolScheduler(toolRuntime, registry);
-    return {
-      router: this.options.parentDependencies.router,
-      tools: { scheduler, registry },
-      context: this.options.parentDependencies.context,
-      now: this.options.parentDependencies.now,
-      uuid: this.options.parentDependencies.uuid,
-      auditRecorder: this.options.parentDependencies.auditRecorder,
-      lifecycle: this.options.parentDependencies.lifecycle,
-      subagentTranscript: this.options.parentDependencies.subagentTranscript,
-    };
-  }
+}
 
-  private buildConfig(): AgentRuntimeConfig {
-    const parent = this.options.parentConfig;
-    const subagentSystem = buildSubagentSystemPrompt(this.options.definition);
-    const filteredParentSystem = applySystemPromptFilters(
-      parent.systemPrompt ?? "",
-      this.options.definition,
-    );
-    const systemPrompt = filteredParentSystem.length > 0
-      ? `${subagentSystem}\n\n${filteredParentSystem}`
-      : subagentSystem;
+function createSidechainTranscriptWriter(
+  sidechain: NonNullable<SubAgentSessionOptions["sidechainTranscript"]>,
+): AgentTranscriptWriter {
+  const recordSessionEvent = sidechain.recordSessionEvent;
+  if (!recordSessionEvent) {
+    throw new Error("One-shot durable subagent composition requires recordSessionEvent.");
+  }
+  return {
+    recordSessionEvent: recordSessionEvent.bind(sidechain),
+    recordAcceptedInput: sidechain.recordAcceptedInput.bind(sidechain),
+    recordDurableMessage: sidechain.recordDurableMessage.bind(sidechain),
+    recordTurnResult: sidechain.recordTurnResult?.bind(sidechain) ?? (() => undefined),
+  };
+}
+
+function toSubagentMcpServerSpec(
+  id: string,
+  config: SubagentMcpServerConfig,
+): import("../../mcp/protocol/types.js").PilotDeckMcpServerSpec {
+  if (config.type === "stdio") {
     return {
-      ...parent,
-      permissionContext: {
-        ...parent.permissionContext,
-        rules: {
-          allow: parent.permissionContext.rules.allow,
-          deny: parent.permissionContext.rules.deny,
-          ask: parent.permissionContext.rules.ask,
-        },
-      },
-      systemPrompt,
-      stopOnStructuredOutput: false,
-      metadata: {
-        ...(parent.metadata ?? {}),
-        subagentId: this.options.subagentId,
-        subagentType: this.options.definition.id,
-      },
+      id,
+      transport: "stdio",
+      command: config.command,
+      ...(config.args?.length ? { args: [...config.args] } : {}),
+      ...(config.env ? { env: { ...config.env } } : {}),
+      ...(config.cwd ? { cwd: config.cwd } : {}),
+      ...(config.timeout !== undefined ? { callTimeoutMs: config.timeout } : {}),
     };
   }
+  if (config.type === "sse") {
+    return {
+      id,
+      transport: "sse",
+      url: config.url,
+      ...(config.headers ? { headers: { ...config.headers } } : {}),
+      ...(config.timeout !== undefined ? { callTimeoutMs: config.timeout } : {}),
+    };
+  }
+  return {
+    id,
+    transport: "streamable_http",
+    url: config.url,
+    ...(config.headers ? { headers: { ...config.headers } } : {}),
+    ...(config.timeout !== undefined ? { callTimeoutMs: config.timeout } : {}),
+  };
 }
 
 function extractFinalAssistantText(messages: CanonicalMessage[]): string {
@@ -301,7 +415,7 @@ function extractFinalAssistantText(messages: CanonicalMessage[]): string {
     const message = messages[i]!;
     if (message.role !== "assistant") continue;
     const parts: string[] = [];
-    for (const block of message.content) {
+    for (const block of messageContent(message)) {
       if (block.type === "text") parts.push(block.text);
     }
     if (parts.length > 0) return parts.join("\n").trim();

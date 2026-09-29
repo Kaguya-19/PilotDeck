@@ -1,10 +1,14 @@
 import { useCallback, useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { FolderOpen } from 'lucide-react';
 import { Button, Input } from '../../../shared/view/ui';
 import { browseFilesystemFolders } from '../data/workspaceApi';
 import { getSuggestionRootPath } from '../utils/pathUtils';
 import type { FolderSuggestion, WorkspaceType } from '../types';
 import FolderBrowserModal from './FolderBrowserModal';
+
+const normalizePathForSuggestionMatch = (pathValue: string) =>
+  pathValue.trim().replace(/\\/g, '/').toLowerCase();
 
 type WorkspacePathFieldProps = {
   workspaceType: WorkspaceType;
@@ -21,12 +25,13 @@ export default function WorkspacePathField({
   onChange,
   onAdvanceToConfirm,
 }: WorkspacePathFieldProps) {
+  const { t } = useTranslation();
   const [pathSuggestions, setPathSuggestions] = useState<FolderSuggestion[]>([]);
   const [showPathDropdown, setShowPathDropdown] = useState(false);
   const [showFolderBrowser, setShowFolderBrowser] = useState(false);
 
   useEffect(() => {
-    if (value.trim().length <= 2) {
+    if (value.trim().length < 2) {
       setPathSuggestions([]);
       setShowPathDropdown(false);
       return;
@@ -37,11 +42,11 @@ export default function WorkspacePathField({
       try {
         const directoryPath = getSuggestionRootPath(value);
         const result = await browseFilesystemFolders(directoryPath);
-        const normalizedInput = value.toLowerCase();
+        const normalizedInput = normalizePathForSuggestionMatch(value);
 
         const matchingSuggestions = result.suggestions
           .filter((suggestion) => {
-            const normalizedSuggestion = suggestion.path.toLowerCase();
+            const normalizedSuggestion = normalizePathForSuggestionMatch(suggestion.path);
             return (
               normalizedSuggestion.startsWith(normalizedInput) &&
               normalizedSuggestion !== normalizedInput
@@ -118,7 +123,7 @@ export default function WorkspacePathField({
           variant="outline"
           onClick={() => setShowFolderBrowser(true)}
           className="px-3"
-          title="Browse folders"
+          title={t('projectWizard.folderBrowser.browseFolders')}
           disabled={disabled}
         >
           <FolderOpen className="h-4 w-4" />
@@ -127,6 +132,7 @@ export default function WorkspacePathField({
 
       <FolderBrowserModal
         isOpen={showFolderBrowser}
+        initialPath={value}
         autoAdvanceOnSelect={workspaceType === 'existing'}
         onClose={() => setShowFolderBrowser(false)}
         onFolderSelected={handleFolderSelected}

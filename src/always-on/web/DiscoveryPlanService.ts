@@ -439,7 +439,9 @@ export class DiscoveryPlanService {
 
     const store = await readPlanStore(projectDir);
     const cyclePlans = store.plans.filter((p) => cycle.planIds.includes(p.id));
-    const hasCompleted = cyclePlans.some((p) => p.status === "completed");
+    const hasCompleted = cyclePlans.some(
+      (p) => p.status === "completed" || p.status === "completed_no_report",
+    );
     if (!hasCompleted) {
       throw makeError("Cycle has no completed plans to apply", "INVALID_STATE");
     }

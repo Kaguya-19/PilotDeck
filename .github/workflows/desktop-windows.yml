@@ -1,0 +1,96 @@
+name: Windows Installer
+
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        description: Exact source commit to build
+        required: true
+        type: string
+      release_date:
+        description: Optional release date in YYYY-MM-DD
+        required: false
+        default: ""
+        type: string
+      revision:
+        description: Zero-based same-day build revision
+        required: false
+        default: "0"
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  PILOTDECK_UPDATE_REPOSITORY: ${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      PILOTDECK_RELEASE_DATE: ${{ inputs.release_date }}
+      PILOTDECK_RELEASE_REVISION: ${{ inputs.revision }}
+      PILOTDECK_COMMIT_SHA: ${{ inputs.source_sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.32.1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.1
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify managed process ownership and crash cleanup
+        run: node --test apps/desktop/scripts/process-identity.test.mjs apps/desktop/scripts/process-scope.test.mjs
+
+      - name: Compile and verify NSIS launch paths
+        run: node apps/desktop/scripts/verify-installer.cjs
+
+      - name: Set desktop release metadata
+        run: node apps/desktop/scripts/set-ci-version.mjs
+
+      - name: Disable Windows signing
+        shell: pwsh
+        run: '"CSC_IDENTITY_AUTO_DISCOVERY=false" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append'
+
+      - name: Build Windows x64 installer
+        run: pnpm --filter pilotdeck-desktop run dist:win
+
+      - name: Verify Windows artifact
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem 'apps/desktop/dist-electron/*-setup.exe' | Select-Object -First 1
+          if (-not $installer) { throw 'Windows installer was not generated.' }
+          if ($installer.Length -le 0) { throw 'Windows installer is empty.' }
+          $env:ELECTRON_RUN_AS_NODE = '1'
+          & 'apps/desktop/dist-electron/win-unpacked/PilotDeck.exe' apps/desktop/scripts/verify-updater.cjs apps/desktop/dist-electron/win-unpacked/resources/app.asar | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged updater validation failed.' }
+          Remove-Item Env:ELECTRON_RUN_AS_NODE
+
+      - name: Prepare Windows update feed
+        shell: pwsh
+        run: |
+          if (-not (Test-Path 'apps/desktop/dist-electron/latest.yml')) { throw 'Update feed was not generated.' }
+          Move-Item 'apps/desktop/dist-electron/latest.yml' 'apps/desktop/dist-electron/latest-x64.yml'
+          if (-not (Test-Path 'apps/desktop/dist-electron/win-unpacked/resources/elevate.exe')) { throw 'Update elevation helper is missing.' }
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: pilotdeck-desktop-windows
+          overwrite: true
+          path: |
+            apps/desktop/dist-electron/*-setup.exe
+            apps/desktop/dist-electron/latest-x64.yml
+          if-no-files-found: error
+          retention-days: 14

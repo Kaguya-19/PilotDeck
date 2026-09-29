@@ -27,8 +27,7 @@ import type {
   PilotDeckToolInputSchema,
   PilotDeckToolResultContent,
 } from "../../tool/index.js";
-import type { McpClient } from "../client/McpClient.js";
-import type { McpRuntime } from "./McpRuntime.js";
+import type { McpRuntimePort } from "./McpRuntimePort.js";
 import type {
   PilotDeckMcpToolAnnotations,
   PilotDeckMcpToolSpec,
@@ -40,7 +39,7 @@ export type CreateToolDefinitionsOptions = {
 };
 
 export async function createMcpToolDefinitionsFromRuntime(
-  runtime: McpRuntime,
+  runtime: McpRuntimePort,
   options: CreateToolDefinitionsOptions = {},
 ): Promise<PilotDeckToolDefinition[]> {
   const tools = await runtime.listAllTools();
@@ -49,7 +48,7 @@ export async function createMcpToolDefinitionsFromRuntime(
 
 function buildToolDefinition(
   spec: PilotDeckMcpToolSpec,
-  runtime: McpRuntime,
+  runtime: McpRuntimePort,
   options: CreateToolDefinitionsOptions,
 ): PilotDeckToolDefinition {
   const annotations: PilotDeckMcpToolAnnotations = spec.annotations ?? {};
@@ -70,15 +69,15 @@ function buildToolDefinition(
     isDestructive: () => isDestructive,
     isOpenWorld: () => isOpenWorld,
     execute: async (input, context): Promise<PilotDeckToolExecutionOutput> => {
-      const client: McpClient | undefined = runtime.getClient(spec.serverId);
-      if (!client) {
+      const server = runtime.getServerInfo(spec.serverId);
+      if (!server) {
         throw new PilotDeckToolRuntimeError(
           "unsupported_tool",
           `MCP server ${spec.serverId} is not registered`,
         );
       }
       try {
-        const { content, isError } = await client.callTool(spec.toolName, input, {
+        const { content, isError } = await runtime.callTool(spec.serverId, spec.toolName, input, {
           signal: context.abortSignal,
           timeoutMs: options.callTimeoutMs,
         });
@@ -90,7 +89,7 @@ function buildToolDefinition(
           );
         }
         return {
-          content: marshalMcpContent(content, client.spec.transport === "stdio" ? client.spec.cwd : undefined),
+          content: marshalMcpContent(content, server.transport === "stdio" ? server.cwd : undefined),
           data: content,
           metadata: {
             mcp: { serverId: spec.serverId, toolName: spec.toolName, wireName: spec.wireName },

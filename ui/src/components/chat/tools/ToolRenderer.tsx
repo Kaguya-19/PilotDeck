@@ -1,7 +1,10 @@
+import { useTranslation } from 'react-i18next';
 import React, { memo, useMemo, useCallback } from 'react';
 import type { Project } from '../../../types/app';
 import type { SubagentChildTool } from '../types/types';
 import { getCanonicalToolName, getToolConfig } from './configs/toolConfigs';
+import { getActiveAssembly } from '../../../composition/runtime';
+import type { Contribution } from '../../../composition/contracts';
 import { OneLineDisplay, CollapsibleDisplay, ToolDiffViewer, MarkdownContent, FileListContent, TodoListContent, TaskListContent, TextContent, QuestionAnswerContent, SubagentContainer, PlanApprovedCard } from './components';
 
 type DiffLine = {
@@ -16,23 +19,36 @@ interface ToolRendererProps {
   toolResult?: any;
   toolId?: string;
   mode: 'input' | 'result';
+  contentOnly?: boolean;
   onFileOpen?: (filePath: string, diffInfo?: any) => void;
   createDiff?: (oldStr: string, newStr: string) => DiffLine[];
   selectedProject?: Project | null;
   autoExpandTools?: boolean;
-  showRawParameters?: boolean;
-  rawToolInput?: string;
+  expansionKey?: string;
+  isToolSectionExpanded?: (sectionKey: string, defaultExpanded?: boolean) => boolean;
+  onToolSectionExpandedChange?: (sectionKey: string, expanded: boolean) => void;
   isSubagentContainer?: boolean;
   subagentState?: {
     childTools: SubagentChildTool[];
     currentToolIndex: number;
     isComplete: boolean;
+    isFailed?: boolean;
   };
 }
 
 type ToolRendererErrorBoundaryState = {
   error: Error | null;
 };
+
+function ToolRenderError({ toolName }: { toolName: string }) {
+  const { t } = useTranslation('common');
+  return (
+    <div className="my-1 rounded-lg border border-amber-200 bg-amber-50/70 px-3 py-2 text-xs text-amber-800 dark:border-amber-800/50 dark:bg-amber-950/20 dark:text-amber-200">
+      <div className="font-medium">{t('uiText.toolRenderFailed')}</div>
+      <div className="mt-0.5 opacity-80">{toolName}</div>
+    </div>
+  );
+}
 
 class ToolRendererErrorBoundary extends React.Component<
   { toolName: string; toolId?: string; children: React.ReactNode },
@@ -64,12 +80,7 @@ class ToolRendererErrorBoundary extends React.Component<
 
   render() {
     if (this.state.error) {
-      return (
-        <div className="my-1 rounded-lg border border-amber-200 bg-amber-50/70 px-3 py-2 text-xs text-amber-800 dark:border-amber-800/50 dark:bg-amber-950/20 dark:text-amber-200">
-          <div className="font-medium">Tool output could not be rendered.</div>
-          <div className="mt-0.5 opacity-80">{this.props.toolName}</div>
-        </div>
-      );
+      return <ToolRenderError toolName={this.props.toolName} />;
     }
 
     return this.props.children;
@@ -123,17 +134,24 @@ const ToolRendererInner: React.FC<ToolRendererProps> = ({
   toolResult,
   toolId,
   mode,
+  contentOnly = false,
   onFileOpen,
   createDiff,
   selectedProject,
   autoExpandTools = false,
-  showRawParameters = false,
-  rawToolInput,
+  expansionKey,
+  isToolSectionExpanded,
+  onToolSectionExpandedChange,
   isSubagentContainer,
   subagentState
 }) => {
+  const { t } = useTranslation('common');
   const canonicalToolName = getCanonicalToolName(toolName);
-  const config = getToolConfig(toolName);
+  const customRenderer = useMemo<Contribution | null>(() => {
+    const assembly = getActiveAssembly();
+    return assembly?.toolRenderers.find((candidate) => candidate.toolNames?.includes(toolName) || candidate.toolNames?.includes(canonicalToolName)) ?? null;
+  }, [canonicalToolName, toolName]);
+  const config = getToolConfig(toolName, t);
   const displayConfig: any = mode === 'input' ? config.input : config.result;
 
   const parsedData = useMemo(() => {
@@ -166,6 +184,18 @@ const ToolRendererInner: React.FC<ToolRendererProps> = ({
         subagentState={subagentState}
       />
     );
+  }
+
+  if (customRenderer) {
+    const CustomRenderer = customRenderer.component;
+    return <CustomRenderer
+      sessionId={toolId}
+      toolName={toolName}
+      toolInput={toolInput}
+      toolResult={toolResult}
+      mode={mode}
+      host={{ selectedProject }}
+    />;
   }
 
   if (!displayConfig) return null;
@@ -212,6 +242,9 @@ const ToolRendererInner: React.FC<ToolRendererProps> = ({
     const defaultOpen = displayConfig.defaultOpen !== undefined
       ? displayConfig.defaultOpen
       : autoExpandTools;
+    const expanded = expansionKey
+      ? isToolSectionExpanded?.(expansionKey, defaultOpen)
+      : undefined;
 
     const contentProps = toObject(safeCall(
       'content props getter',
@@ -246,7 +279,7 @@ const ToolRendererInner: React.FC<ToolRendererProps> = ({
         break;
 
       case 'markdown':
-        contentComponent = <MarkdownContent content={contentProps.content || ''} />;
+        contentComponent = <MarkdownContent content={contentProps.content || ''} onFileOpen={onFileOpen} />;
         break;
 
       case 'file-list':
@@ -320,6 +353,8 @@ const ToolRendererInner: React.FC<ToolRendererProps> = ({
       }
     }
 
+    if (contentOnly) return contentComponent;
+
     // For edit tools, make the title (filename) clickable to open the file
     const handleTitleClick = (canonicalToolName === 'Edit' || canonicalToolName === 'Write' || canonicalToolName === 'ApplyPatch') && contentProps.filePath && onFileOpen
       ? () => onFileOpen(contentProps.filePath, {
@@ -334,9 +369,11 @@ const ToolRendererInner: React.FC<ToolRendererProps> = ({
         toolId={toolId}
         title={title}
         defaultOpen={defaultOpen}
+        open={expanded}
+        onOpenChange={expansionKey && onToolSectionExpandedChange
+          ? (nextExpanded) => onToolSectionExpandedChange(expansionKey, nextExpanded)
+          : undefined}
         onTitleClick={handleTitleClick}
-        showRawParameters={mode === 'input' && showRawParameters}
-        rawContent={rawToolInput}
         toolCategory={getToolCategory(canonicalToolName)}
       >
         {contentComponent}

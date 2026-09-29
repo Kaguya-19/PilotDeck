@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 
-export type ToastKind = 'success' | 'error' | 'info';
+export type ToastKind = 'success' | 'error' | 'info' | 'warning';
 
 export type Toast = {
   id: number;
@@ -73,6 +73,8 @@ function ToastContainer({ toasts, onDismiss }: { toasts: Toast[]; onDismiss: (id
               ? 'bg-red-500/90 text-white'
               : toast.kind === 'success'
                 ? 'bg-emerald-500/90 text-white'
+                : toast.kind === 'warning'
+                  ? 'bg-amber-500/90 text-neutral-950'
                 : 'bg-neutral-800/90 text-neutral-100'
           }`}
         >

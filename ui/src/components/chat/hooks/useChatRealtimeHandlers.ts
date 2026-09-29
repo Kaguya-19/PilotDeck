@@ -1,9 +1,27 @@
+import { isTimelineMessage, type TimelinePosition } from '../../../stores/sessionTimeline';
 import { useCallback, useEffect, useRef } from 'react';
 import type { Dispatch, MutableRefObject, SetStateAction } from 'react';
-import type { ClaudeWorkStatus, CompactProgress, PendingPermissionRequest, PilotDeckWorkStatus } from '../types/types';
+import type {
+  ClaudeWorkStatus,
+  CompactProgress,
+  PendingPermissionRequest,
+  PilotDeckWorkStatus,
+  SessionRuntimeState,
+} from '../types/types';
 import type { Project, ProjectSession, SessionProvider } from '../../../types/app';
-import type { SessionStore, NormalizedMessage } from '../../../stores/useSessionStore';
+import {
+  getUnpersistedRealtimeTurnMessages,
+  normalizeCompactionMessage,
+  isRealtimeMessageRepresentedOnServer,
+  type SessionStore,
+  type NormalizedMessage,
+} from '../../../stores/useSessionStore';
 import { useWebSocket } from '../../../contexts/WebSocketContext';
+import {
+  buildSessionStatusRequestIfIdle,
+  invalidateSessionStatusResponses,
+  shouldAcceptSessionStatusResponse,
+} from '../sessionStatusProtocol';
 
 type PendingViewSession = {
   sessionId: string | null;
@@ -11,6 +29,9 @@ type PendingViewSession = {
 };
 
 type LatestChatMessage = {
+  timeline?: TimelinePosition;
+  streamBoundary?: NormalizedMessage["streamBoundary"];
+  streamState?: "open" | "closed";
   type?: string;
   kind?: string;
   data?: any;
@@ -18,6 +39,7 @@ type LatestChatMessage = {
   delta?: string;
   sessionId?: string;
   session_id?: string;
+  runId?: string;
   requestId?: string;
   toolName?: string;
   input?: unknown;
@@ -27,7 +49,10 @@ type LatestChatMessage = {
   toolId?: string;
   result?: any;
   exitCode?: number;
-  isProcessing?: boolean;
+  isProcessing?: boolean | null;
+  activeRunId?: string | null;
+  expectedActiveRunId?: string | null;
+  statusRequestId?: number | null;
   actualSessionId?: string;
   event?: string;
   status?: any;
@@ -48,8 +73,241 @@ type LatestChatMessage = {
   tokenBudget?: unknown;
   newSessionId?: string;
   aborted?: boolean;
+  terminal?: boolean;
   [key: string]: any;
 };
+
+function normalizeAssistantStreamText(value?: string): string {
+  return typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '';
+}
+
+function getMessageRunId(message: { runId?: unknown }): string | undefined {
+  return typeof message.runId === 'string' && message.runId.trim()
+    ? message.runId.trim()
+    : undefined;
+}
+
+// assembleModelMessage assigns <response ID>:<channel>:<ordinal>. The two
+// channels of one response may alternate, including within a single chunk.
+function streamResponseId(blockId?: string): string | undefined {
+  return blockId?.match(/^(.*):(?:thinking|text):\d+$/)?.[1];
+}
+
+function getSessionStatusActiveRunId(message: LatestChatMessage): string | undefined {
+  if (typeof message.activeRunId === 'string' && message.activeRunId.trim()) {
+    return message.activeRunId.trim();
+  }
+  if (!Array.isArray(message.activeTurnMessages)) return undefined;
+  const activeFrame = message.activeTurnMessages.find((frame) => {
+    const runId = getMessageRunId(frame);
+    return Boolean(runId && !runId.startsWith('subagent:'));
+  });
+  return activeFrame ? getMessageRunId(activeFrame) : undefined;
+}
+
+function parseAssistantStreamTimestamp(value?: string): number | null {
+  if (!value) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function isCompatibleAssistantStreamRun(incoming: NormalizedMessage, existing: NormalizedMessage): boolean {
+  if (incoming.blockId || existing.blockId) return incoming.blockId === existing.blockId
+    && getMessageRunId(incoming) === getMessageRunId(existing);
+  if (incoming.runId != null && existing.runId != null) return incoming.runId === existing.runId;
+  const isActiveStream = existing.kind === 'stream_delta' && String(existing.id || '').startsWith('__streaming_');
+  if (!isActiveStream) return false;
+  const incomingTimestamp = parseAssistantStreamTimestamp(incoming.timestamp);
+  const existingTimestamp = parseAssistantStreamTimestamp(existing.timestamp);
+  if (incomingTimestamp == null || existingTimestamp == null) return false;
+  return Math.abs(incomingTimestamp - existingTimestamp) <= 10_000;
+}
+
+export function getDuplicateAssistantStreamTextState(
+  incoming: NormalizedMessage,
+  realtimeMessages: NormalizedMessage[],
+): { isDuplicate: boolean; hasActiveStream: boolean; activeStreamRunId?: string | null } {
+  if (incoming.kind !== 'text' || incoming.role !== 'assistant') {
+    return { isDuplicate: false, hasActiveStream: false };
+  }
+
+  const incomingText = normalizeAssistantStreamText(incoming.content);
+  if (!incomingText) {
+    return { isDuplicate: false, hasActiveStream: false };
+  }
+
+  let hasActiveStream = false;
+  let activeStreamRunId: string | null | undefined;
+  const isDuplicate = realtimeMessages.some((message) => {
+    const isAssistantText = message.kind === 'text' && message.role === 'assistant';
+    const isActiveStream = message.kind === 'stream_delta' && String(message.id || '').startsWith('__streaming_');
+    if (!isAssistantText && !isActiveStream) return false;
+    if (isAssistantText && (incoming.runId == null || message.runId == null)) return false;
+    if (!isCompatibleAssistantStreamRun(incoming, message)) return false;
+    if (normalizeAssistantStreamText(message.content) !== incomingText) return false;
+    if (isActiveStream) {
+      hasActiveStream = true;
+      activeStreamRunId = message.runId ?? null;
+    }
+    return true;
+  });
+
+  return { isDuplicate, hasActiveStream, activeStreamRunId };
+}
+
+type ActiveTurnReplayState = {
+  merged?: NormalizedMessage[];
+  realtimeMessages?: NormalizedMessage[];
+  serverMessages?: NormalizedMessage[];
+};
+
+function getKnownCompactions(message: NormalizedMessage, state: ActiveTurnReplayState): NormalizedMessage[] {
+  if (message.kind !== 'compact_boundary' || !message.compactionId) return [];
+  return [...(state.realtimeMessages || []), ...(state.serverMessages || []), ...(state.merged || [])].filter(existing =>
+    existing.compactionId === message.compactionId && getMessageRunId(existing) === getMessageRunId(message));
+}
+
+type VolatileReplayBlock = {
+  kind: 'stream_delta' | 'thinking';
+  messages: LatestChatMessage[];
+  text: string;
+  runId?: string;
+  blockId?: string;
+};
+
+function isRenderedVolatileBlockCandidate(
+  block: VolatileReplayBlock,
+  message: NormalizedMessage,
+): boolean {
+  const blockText = normalizeAssistantStreamText(block.text);
+  if (!blockText) return false;
+
+  const messageRunId = getMessageRunId(message);
+  if (block.runId && messageRunId && block.runId !== messageRunId) {
+    return false;
+  }
+  if (block.blockId || message.blockId) {
+    return block.blockId === message.blockId
+      && normalizeAssistantStreamText(message.content).startsWith(blockText);
+  }
+
+  if (block.kind === 'stream_delta') {
+    const isAssistantText = message.kind === 'text' && message.role === 'assistant';
+    const isActiveStream = message.kind === 'stream_delta' && String(message.id || '').startsWith('__streaming_');
+    if (!isAssistantText && !isActiveStream) return false;
+  } else if (message.kind !== 'thinking') {
+    return false;
+  }
+
+  return normalizeAssistantStreamText(message.content) === blockText;
+}
+
+function hasRenderedVolatileReplayBlock(
+  block: VolatileReplayBlock,
+  state: ActiveTurnReplayState,
+): boolean {
+  const messages = [
+    ...(state.realtimeMessages || []),
+    ...(state.serverMessages || []),
+  ];
+  return messages.some((message) => isRenderedVolatileBlockCandidate(block, message));
+}
+
+function hasRenderedNonVolatileReplayMessage(
+  message: LatestChatMessage,
+  state: ActiveTurnReplayState,
+): boolean {
+  const renderedMessages = [
+    ...(state.realtimeMessages || []),
+    ...(state.serverMessages || []),
+  ];
+  if (renderedMessages.length === 0) return false;
+  return isRealtimeMessageRepresentedOnServer(
+    message as NormalizedMessage,
+    renderedMessages,
+  );
+}
+
+export function getActiveTurnReplayMessagesToApply(
+  activeTurnMessages: LatestChatMessage[],
+  state: ActiveTurnReplayState = {},
+  options: { skipVolatile?: boolean } = {},
+): LatestChatMessage[] {
+  if (!Array.isArray(activeTurnMessages) || activeTurnMessages.length === 0) {
+    return [];
+  }
+
+  const output: LatestChatMessage[] = [];
+  let block: VolatileReplayBlock | null = null;
+  const blockKey = (message: { runId?: unknown; blockId?: string; kind?: string }) =>
+    JSON.stringify([getMessageRunId(message), message.blockId, message.kind]);
+  const identifiedBlocks = new Map<string, VolatileReplayBlock>();
+  // Interleaved channels are not adjacent in the replay. Compare the complete
+  // identified block with history, then retain/skip all of its original frames.
+  for (const message of activeTurnMessages) {
+    if (message.timeline || !message.blockId || (message.kind !== 'thinking' && message.kind !== 'stream_delta')) continue;
+    const key = blockKey(message);
+    const aggregate = identifiedBlocks.get(key) ?? {
+      kind: message.kind, messages: [], text: '', runId: getMessageRunId(message), blockId: message.blockId,
+    };
+    aggregate.text += typeof message.content === 'string' ? message.content : '';
+    identifiedBlocks.set(key, aggregate);
+  }
+
+  const flushBlock = () => {
+    if (!block) return;
+    const aggregate = block.blockId ? identifiedBlocks.get(blockKey(block)) : undefined;
+    if (!options.skipVolatile && !hasRenderedVolatileReplayBlock(aggregate ?? block, state)) {
+      output.push(...block.messages);
+    }
+    block = null;
+  };
+
+  for (const rawMessage of activeTurnMessages) {
+    const message = normalizeCompactionMessage(rawMessage as NormalizedMessage);
+    if (isTimelineMessage(message as NormalizedMessage)) { flushBlock(); output.push(message); continue; }
+    const kind = String(message?.kind || '');
+    if (kind === 'thinking' || kind === 'stream_delta') {
+      if (block && (block.kind !== kind || block.blockId !== message.blockId)) {
+        flushBlock();
+      }
+      if (!block) {
+        block = {
+          kind: kind as 'thinking' | 'stream_delta',
+          messages: [],
+          text: '',
+          runId: getMessageRunId(message),
+          blockId: message.blockId,
+        };
+      }
+      block.messages.push(message);
+      block.text += typeof message.content === 'string' ? message.content : '';
+      block.runId ??= getMessageRunId(message);
+      continue;
+    }
+
+    if (kind === 'stream_end') {
+      if (block?.kind === 'stream_delta') {
+        block.messages.push(message);
+        block.runId ??= getMessageRunId(message);
+        flushBlock();
+      }
+      continue;
+    }
+
+    flushBlock();
+    const knownCompacts = getKnownCompactions(message, state);
+    if (knownCompacts.length > 0) {
+      if (message.compactState !== 'running'
+        && !knownCompacts.some(existing => normalizeCompactionMessage(existing).compactState === 'completed')) output.push(message);
+    } else if (!hasRenderedNonVolatileReplayMessage(message, state)) {
+      output.push(message);
+    }
+  }
+
+  flushBlock();
+  return output;
+}
 
 
 function getExplicitSessionId(msg: LatestChatMessage): string | null {
@@ -67,6 +325,20 @@ function resolveSessionId(
     return fallbackSessionId.trim();
   }
   return null;
+}
+
+/**
+ * A selected conversation always takes precedence over the last loaded id.
+ * During a session switch React can render once with the new selection while
+ * `currentSessionId` still points at the previous conversation. Treating both
+ * ids as active lets a status frame from the previous conversation overwrite
+ * the status (including compaction progress) of the newly selected one.
+ */
+export function isSessionForActiveView(
+  sessionId: string,
+  activeViewSessionId: string | null,
+): boolean {
+  return sessionId === activeViewSessionId;
 }
 
 function warnDroppedFrame(msg: LatestChatMessage): void {
@@ -91,6 +363,9 @@ interface UseChatRealtimeHandlersArgs {
   currentSessionId: string | null;
   setCurrentSessionId: (sessionId: string | null) => void;
   setIsLoading: (loading: boolean) => void;
+  setSessionRuntimeState: (state: SessionRuntimeState) => void;
+  activeRunId: string | null;
+  setActiveRunId: (runId: string | null) => void;
   setCanAbortSession: (canAbort: boolean) => void;
   setIsAborting: (aborting: boolean) => void;
   setClaudeStatus: (status: ClaudeWorkStatus | null) => void;
@@ -117,6 +392,9 @@ export function useChatRealtimeHandlers({
   currentSessionId,
   setCurrentSessionId,
   setIsLoading,
+  setSessionRuntimeState,
+  activeRunId,
+  setActiveRunId,
   setCanAbortSession,
   setIsAborting,
   setClaudeStatus,
@@ -133,10 +411,49 @@ export function useChatRealtimeHandlers({
   onWebSocketReconnect,
   sessionStore,
 }: UseChatRealtimeHandlersArgs) {
-  const { subscribe } = useWebSocket();
+  const { sendMessage, subscribe } = useWebSocket();
 
   // Track which sessions have active thinking (just a boolean flag now)
   const thinkingBySessionRef = useRef<Map<string, boolean>>(new Map());
+  // Dedup volatile active-turn replay chunks across reconnect/status polls.
+  const activeTurnReplaySignatureRef = useRef<Map<string, string>>(new Map());
+  const sessionStatusRetryTimersRef = useRef<Map<string, number>>(new Map());
+  const activeRunIdRef = useRef<string | null>(activeRunId);
+  activeRunIdRef.current = activeRunId;
+  const updateActiveRunId = useCallback((runId: string | null) => {
+    activeRunIdRef.current = runId;
+    setActiveRunId(runId);
+  }, [setActiveRunId]);
+  const clearSessionStatusRetry = useCallback((sessionId: string) => {
+    const timer = sessionStatusRetryTimersRef.current.get(sessionId);
+    if (timer === undefined) return;
+    window.clearTimeout(timer);
+    sessionStatusRetryTimersRef.current.delete(sessionId);
+  }, []);
+  const scheduleSessionStatusRetry = useCallback((
+    sessionId: string,
+    expectedActiveRunId: string | null,
+  ) => {
+    if (sessionStatusRetryTimersRef.current.has(sessionId)) return;
+    const timer = window.setTimeout(() => {
+      sessionStatusRetryTimersRef.current.delete(sessionId);
+      const request = buildSessionStatusRequestIfIdle({
+        sessionId,
+        provider,
+        expectedActiveRunId,
+        includeActiveTurnMessages: true,
+      });
+      if (request) sendMessage(request);
+    }, 1200);
+    sessionStatusRetryTimersRef.current.set(sessionId, timer);
+  }, [provider, sendMessage]);
+
+  useEffect(() => () => {
+    for (const timer of sessionStatusRetryTimersRef.current.values()) {
+      window.clearTimeout(timer);
+    }
+    sessionStatusRetryTimersRef.current.clear();
+  }, []);
 
   const handleMessage = useCallback((latestMessage: LatestChatMessage, fallbackSessionId?: string | null) => {
     if (!latestMessage) return;
@@ -151,7 +468,7 @@ export function useChatRealtimeHandlers({
     /*  Legacy messages (no `kind` field) — handle and return           */
     /* ---------------------------------------------------------------- */
 
-    const msg = latestMessage as any;
+    let msg: LatestChatMessage = latestMessage;
     const clearAccumulators = () => {
       thinkingBySessionRef.current.clear();
     };
@@ -162,6 +479,13 @@ export function useChatRealtimeHandlers({
       switch (messageType) {
         case 'websocket-reconnected':
           clearAccumulators();
+          for (const timer of sessionStatusRetryTimersRef.current.values()) {
+            window.clearTimeout(timer);
+          }
+          sessionStatusRetryTimersRef.current.clear();
+          if (activeViewSessionId) {
+            invalidateSessionStatusResponses(activeViewSessionId);
+          }
           onWebSocketReconnect?.();
           return;
 
@@ -174,23 +498,132 @@ export function useChatRealtimeHandlers({
           return;
         }
 
+        case 'session-turn-replaced': {
+          const replacedSessionId = resolveSessionId(msg);
+          const replacedTurnId = typeof msg.replacedTurnId === 'string'
+            ? msg.replacedTurnId.trim()
+            : '';
+          const replacementRunId = typeof msg.replacementRunId === 'string'
+            ? msg.replacementRunId.trim()
+            : '';
+          if (!replacedSessionId || !replacedTurnId || !replacementRunId) return;
+
+          clearAccumulators();
+          sessionStore.setActiveSession(replacedSessionId);
+          sessionStore.replaceLastTurn?.(
+            replacedSessionId,
+            replacedTurnId,
+            {
+              id: `local_${replacementRunId}`,
+              sessionId: replacedSessionId,
+              timestamp: new Date().toISOString(),
+              provider,
+              kind: 'text',
+              role: 'user',
+              content: typeof msg.content === 'string' ? msg.content : '',
+              images: Array.isArray(msg.images)
+                ? msg.images.flatMap((image) => {
+                    if (typeof image === 'string') return image ? [image] : [];
+                    return image && typeof image.data === 'string' ? [image.data] : [];
+                  })
+                : [],
+              attachments: Array.isArray(msg.attachments) ? msg.attachments : [],
+              runId: replacementRunId,
+              turnId: replacementRunId,
+            },
+          );
+          setPendingPermissionRequests((previous) => (
+            previous.filter((request) => request.sessionId !== replacedSessionId)
+          ));
+          if (isSessionForActiveView(replacedSessionId, activeViewSessionId)) {
+            updateActiveRunId(replacementRunId);
+            setSessionRuntimeState('running');
+            setIsLoading(true);
+            setCanAbortSession(true);
+            setIsAborting(false);
+            setClaudeStatus(null);
+            setPilotDeckStatus(null);
+          }
+          onSessionProcessing?.(replacedSessionId);
+          return;
+        }
+
         case 'session-status': {
           const statusSessionId = msg.sessionId;
           if (!statusSessionId) return;
-          const isCurrentSession =
-            statusSessionId === currentSessionId || (selectedSession && statusSessionId === selectedSession.id);
+          if (!shouldAcceptSessionStatusResponse(statusSessionId, msg.statusRequestId)) return;
+          const isCurrentSession = isSessionForActiveView(statusSessionId, activeViewSessionId);
+          if (
+            isCurrentSession
+            && activeRunIdRef.current
+            && msg.expectedActiveRunId !== activeRunIdRef.current
+          ) {
+            return;
+          }
+          if (msg.isProcessing === null && isCurrentSession) {
+            scheduleSessionStatusRetry(
+              statusSessionId,
+              typeof msg.expectedActiveRunId === 'string' && msg.expectedActiveRunId.trim()
+                ? msg.expectedActiveRunId.trim()
+                : null,
+            );
+          } else {
+            clearSessionStatusRetry(statusSessionId);
+          }
+          const statusActiveRunId = getSessionStatusActiveRunId(msg);
+
+          if (isCurrentSession && (msg.status || msg.isProcessing === true) && statusActiveRunId) {
+            updateActiveRunId(statusActiveRunId);
+          }
 
           if (isCurrentSession && Array.isArray(msg.activeTurnMessages) && msg.activeTurnMessages.length > 0) {
             clearAccumulators();
-            // Only replay messages that have stable IDs and can be deduped
-            // against server data (tool_use by toolId, tool_result/status by id).
-            // Skip thinking, stream_delta, stream_end — these create messages
-            // with generated IDs that can't be matched to server copies,
-            // causing duplication. fetchFromServer provides authoritative copies.
-            const skipKinds = new Set(['thinking', 'stream_delta', 'stream_end']);
-            for (const activeTurnMessage of msg.activeTurnMessages) {
-              if (skipKinds.has(activeTurnMessage.kind)) continue;
+            const slot = sessionStore.getSessionSlot?.(statusSessionId);
+            const hasLiveStreaming = Boolean(slot?.realtimeMessages?.some((message) => (
+              message.id === `__streaming_${statusSessionId}`
+              || message.id.startsWith(`__streaming_${statusSessionId}_`)
+              || message.id === `__streaming_thinking_${statusSessionId}`
+              || message.id.startsWith(`__streaming_thinking_${statusSessionId}_`)
+            )));
+            const replayedToolIds = new Set(
+              (slot?.realtimeMessages || [])
+                .filter((message) => message.kind === 'tool_use' && typeof message.toolId === 'string')
+                .map((message) => message.toolId as string),
+            );
+            const activeTurnToolIds = new Set(
+              msg.activeTurnMessages
+                .filter((message) => message?.kind === 'tool_use' && typeof message?.toolId === 'string')
+                .map((message) => message.toolId as string),
+            );
+            const hasReplayedCurrentTurnToolUse = activeTurnToolIds.size > 0
+              && [...activeTurnToolIds].some((toolId) => replayedToolIds.has(toolId));
+            const volatileSignature = msg.activeTurnMessages
+              .filter((message) => ['thinking', 'stream_delta', 'stream_end'].includes(String(message?.kind)))
+              .map((message) => `${message.kind}:${message.id || ''}:${message.content || ''}`)
+              .join('||');
+            const previousVolatileSignature = activeTurnReplaySignatureRef.current.get(statusSessionId);
+            const hasSeenSameVolatileReplay = Boolean(
+              volatileSignature && previousVolatileSignature === volatileSignature,
+            );
+            // Replay active-turn snapshots only for content this tab has not
+            // already rendered. Volatile stream/thinking chunks are grouped
+            // into blocks so a status poll cannot re-feed an already-finalized
+            // assistant text back into the streaming accumulator.
+            const skipVolatileReplay =
+              hasLiveStreaming || hasReplayedCurrentTurnToolUse || hasSeenSameVolatileReplay;
+            const activeTurnMessagesToApply = getActiveTurnReplayMessagesToApply(
+              msg.activeTurnMessages,
+              {
+                realtimeMessages: slot?.realtimeMessages || [],
+                serverMessages: slot?.serverMessages || [],
+              },
+              { skipVolatile: skipVolatileReplay },
+            );
+            for (const activeTurnMessage of activeTurnMessagesToApply) {
               handleMessage(activeTurnMessage, statusSessionId);
+            }
+            if (volatileSignature) {
+              activeTurnReplaySignatureRef.current.set(statusSessionId, volatileSignature);
             }
           }
 
@@ -206,14 +639,22 @@ export function useChatRealtimeHandlers({
           const status = msg.status;
           if (status) {
             if (!isCurrentSession) return;
+            const compactProgress = status.compactProgress || status.compact_progress || null;
+            if (compactProgress?.compaction_id && statusActiveRunId) {
+              // A reconnect may provide only current status, without the start
+              // event. Restore the same entity; completed history wins over it.
+              handleMessage({ kind: 'status', sessionId: statusSessionId, runId: statusActiveRunId,
+                provider, timestamp: new Date().toISOString(), compactProgress }, statusSessionId);
+            }
             const statusInfo = {
-              text: status.text || 'Working...',
+              text: compactProgress?.compaction_id ? 'Working...' : status.text || 'Working...',
               tokens: status.tokens || 0,
               can_interrupt: status.can_interrupt !== undefined ? status.can_interrupt : true,
-              compactProgress: status.compactProgress || status.compact_progress || null,
+              compactProgress: compactProgress?.compaction_id ? null : compactProgress,
             };
             setClaudeStatus(statusInfo);
             setPilotDeckStatus(statusInfo);
+            setSessionRuntimeState('running');
             setIsLoading(true);
             setCanAbortSession(statusInfo.can_interrupt);
             return;
@@ -224,14 +665,28 @@ export function useChatRealtimeHandlers({
           }
 
           // Legacy isProcessing format from check-session-status
-          if (msg.isProcessing) {
+          if (msg.isProcessing === true) {
             onSessionProcessing?.(statusSessionId);
-            if (isCurrentSession) { setIsLoading(true); setCanAbortSession(true); }
+            if (isCurrentSession) {
+              setSessionRuntimeState('running');
+              setIsLoading(true);
+              setCanAbortSession(true);
+            }
             return;
           }
+          if (msg.isProcessing === null) {
+            if (isCurrentSession) {
+              setSessionRuntimeState('synchronizing');
+            }
+            return;
+          }
+          if (msg.isProcessing !== false) return;
+          sessionStore.cancelRunningActivities(statusSessionId);
           onSessionInactive?.(statusSessionId);
           onSessionNotProcessing?.(statusSessionId);
           if (isCurrentSession) {
+            updateActiveRunId(null);
+            setSessionRuntimeState('inactive');
             setIsLoading(false);
             setCanAbortSession(false);
             setClaudeStatus(null);
@@ -255,15 +710,29 @@ export function useChatRealtimeHandlers({
       warnDroppedFrame(msg);
       return;
     }
+    msg = normalizeCompactionMessage({ ...msg, sessionId: sid } as NormalizedMessage);
+    // A replay must be idempotent before any stream-finalization side effects.
+    // Completion may enrich a running row, but an already-known boundary
+    // cannot end a newer answer that happens to be streaming now.
+    const knownCompacts = msg.timeline ? [] : getKnownCompactions(msg as NormalizedMessage, sessionStore.getSessionSlot?.(sid) || {});
+    if (knownCompacts.length > 0 && (msg.compactState === 'running'
+      || knownCompacts.some(message => normalizeCompactionMessage(message).compactState === 'completed'))) return;
+    const msgRunId = typeof msg.runId === 'string' && msg.runId.trim() ? msg.runId.trim() : undefined;
+    const streamKey = msgRunId ? `${sid}_${msgRunId}` : sid;
 
     if (!getExplicitSessionId(msg) && fallbackSessionId) {
       warnResolvedSessionId(msg, sid);
     }
 
-    const isForActiveView =
-      sid === currentSessionId ||
-      sid === selectedSession?.id ||
-      sid === activeViewSessionId;
+    const isForActiveView = isSessionForActiveView(sid, activeViewSessionId);
+    const isTerminalError = msg.kind === 'error' && msg.terminal === true;
+    const isTerminalForSupersededRun = Boolean(
+      isForActiveView &&
+      activeRunIdRef.current &&
+      msgRunId &&
+      activeRunIdRef.current !== msgRunId &&
+      (msg.kind === 'complete' || isTerminalError),
+    );
 
     // Ensure the store's activeSession matches so notify() triggers re-renders.
     // Without this, the RAF scheduler silently drops notifications for
@@ -271,6 +740,31 @@ export function useChatRealtimeHandlers({
     // until some other state change (like clicking stop) triggers a re-render.
     if (isForActiveView) {
       sessionStore.setActiveSession(sid);
+    }
+
+    const orderedFrame = isTimelineMessage(msg as NormalizedMessage);
+    if (orderedFrame) {
+      const gap = sessionStore.applyTimelineMessage(sid, msg as NormalizedMessage);
+      if (gap) scheduleSessionStatusRetry(sid, msgRunId ?? null);
+      // Ordered content does not enter the legacy stream accumulator or matcher.
+      if (msg.kind === 'stream_delta' || msg.kind === 'thinking' || msg.kind === 'text' || msg.isSubagentDetail) return;
+    }
+    if (msg.kind === 'stream_end' || msg.kind === 'complete' || isTerminalError) {
+      sessionStore.closeTimeline(sid, msgRunId, msg.kind === 'complete' || isTerminalError,
+        msg.isSubagentDetail ? String(msg.subagentId) : undefined, msg.streamBoundary);
+    }
+
+    if (msg.kind === 'text' && msg.role === 'user') {
+      // A mid-turn steer is a real user-message boundary inside the same
+      // runId. Close the preceding assistant blocks so the next model call
+      // starts fresh instead of appending into the old streaming rows.
+      if (msg.isSteer) {
+        sessionStore.finalizeStreamingThinking(sid, msgRunId);
+        sessionStore.finalizeStreaming(sid, msgRunId);
+      }
+      if (thinkingBySessionRef.current.has(sid)) {
+        thinkingBySessionRef.current.delete(sid);
+      }
     }
 
     if (msg.kind === 'agent_activity') {
@@ -284,6 +778,7 @@ export function useChatRealtimeHandlers({
         msg.phase === 'subagent' &&
         ['completed', 'failed', 'cancelled'].includes(String(msg.state || ''))
       ) {
+        sessionStore.closeTimeline(sid, getMessageRunId({ runId: msg.parentRunId }), true, activitySubagentId);
         sessionStore.finalizeSubagentDetailThinking?.(sid, activitySubagentId);
         sessionStore.finalizeSubagentDetailStreaming?.(sid, activitySubagentId);
       }
@@ -328,20 +823,41 @@ export function useChatRealtimeHandlers({
       return;
     }
 
+    // Close a channel on its next block, or both channels on a new response.
+    // A thinking delta must not cut the text channel of the same response.
+    if (msg.blockId && (msg.kind === 'stream_delta' || msg.kind === 'thinking')) {
+      const slot = sessionStore.getSessionSlot?.(sid);
+      const activeText = slot?.realtimeMessages.find(message => message.id === `__streaming_${streamKey}`);
+      const activeThinking = slot?.realtimeMessages.find(message => message.id === `__streaming_thinking_${streamKey}`);
+      const responseId = streamResponseId(msg.blockId);
+      const isNewResponse = (blockId?: string) => Boolean(responseId
+        && streamResponseId(blockId) && streamResponseId(blockId) !== responseId);
+      if (activeText && (msg.kind === 'stream_delta'
+        ? activeText.blockId !== msg.blockId : isNewResponse(activeText.blockId))) {
+        sessionStore.finalizeStreaming(sid, msgRunId);
+      }
+      if (activeThinking && (msg.kind === 'thinking'
+        ? activeThinking.blockId !== msg.blockId : isNewResponse(activeThinking.blockId))) {
+        sessionStore.finalizeStreamingThinking(sid, msgRunId);
+        thinkingBySessionRef.current.delete(sid);
+      }
+    }
+
     // --- Streaming: direct accumulation (no smoother animation) ---
     if (msg.kind === 'stream_delta') {
       const text = msg.content || '';
       if (!text) return;
-      // Content starting means thinking is done
-      if (thinkingBySessionRef.current.has(sid)) {
+      // Legacy frames have no channel identity. Identified responses keep
+      // thinking available until their boundary, since it may resume later.
+      if (!streamResponseId(msg.blockId) && thinkingBySessionRef.current.has(sid)) {
         thinkingBySessionRef.current.delete(sid);
-        sessionStore.finalizeStreamingThinking(sid);
+        sessionStore.finalizeStreamingThinking(sid, msgRunId);
       }
       const slot = sessionStore.getSessionSlot?.(sid);
-      const streamId = `__streaming_${sid}`;
+      const streamId = `__streaming_${streamKey}`;
       const existing = slot?.realtimeMessages.find((m: any) => m.id === streamId);
       const currentText = existing?.content || '';
-      sessionStore.updateStreaming(sid, currentText + text, provider);
+      sessionStore.updateStreaming(sid, currentText + text, provider, msgRunId, msg.model, msg.blockId);
       return;
     }
 
@@ -353,10 +869,10 @@ export function useChatRealtimeHandlers({
       thinkingBySessionRef.current.set(sid, true as any);
       // Read current thinking content and append delta
       const slot = sessionStore.getSessionSlot?.(sid);
-      const streamId = `__streaming_thinking_${sid}`;
+      const streamId = `__streaming_thinking_${streamKey}`;
       const existing = slot?.realtimeMessages.find((m: any) => m.id === streamId);
       const currentText = existing?.content || '';
-      sessionStore.updateStreamingThinking(sid, currentText + text, provider);
+      sessionStore.updateStreamingThinking(sid, currentText + text, provider, msgRunId, msg.blockId);
       return;
     }
 
@@ -365,30 +881,30 @@ export function useChatRealtimeHandlers({
       // Finalize thinking if still active
       if (thinkingBySessionRef.current.has(sid)) {
         thinkingBySessionRef.current.delete(sid);
-        sessionStore.finalizeStreamingThinking(sid);
+        sessionStore.finalizeStreamingThinking(sid, msgRunId);
       }
-      sessionStore.finalizeStreaming(sid);
+      sessionStore.finalizeStreaming(sid, msgRunId);
       return;
     }
 
     // Only route certain message kinds to the store append logic.
     const flushKinds = new Set([
-      'tool_use', 'tool_result', 'text', 'complete', 'error', 'permission_request',
+      'tool_use', 'tool_result', 'text', 'complete', 'error', 'permission_request', 'compact_boundary',
     ]);
-    if (flushKinds.has(msg.kind as string)) {
+    if (knownCompacts.length === 0 && flushKinds.has(msg.kind as string) && (msg.kind !== 'error' || isTerminalError)) {
       // Finalize thinking if still active (model moved past thinking)
-      if (thinkingBySessionRef.current.has(sid)) {
+      if (!isTerminalForSupersededRun && thinkingBySessionRef.current.has(sid)) {
         thinkingBySessionRef.current.delete(sid);
-        sessionStore.finalizeStreamingThinking(sid);
+        sessionStore.finalizeStreamingThinking(sid, msgRunId);
       }
-      // Finalize content stream on tool_use / complete / error.
+      // Finalize content stream on tool_use / complete / terminal error.
       // The gateway may not send stream_end, so tool_use is the
       // reliable signal that the text block has ended.
-      if (msg.kind === 'tool_use' || msg.kind === 'complete' || msg.kind === 'error') {
-        sessionStore.finalizeStreaming(sid);
+      if (msg.kind === 'tool_use' || msg.kind === 'complete' || msg.kind === 'error' || msg.kind === 'compact_boundary') {
+        sessionStore.finalizeStreaming(sid, msgRunId);
       }
       if (msg.kind === 'complete' || msg.kind === 'error') {
-        sessionStore.finalizeStreamingThinking(sid);
+        sessionStore.finalizeStreamingThinking(sid, msgRunId);
       }
     }
 
@@ -397,17 +913,36 @@ export function useChatRealtimeHandlers({
     // The streaming pipeline (stream_delta → stream_end → finalizeStreaming)
     // already creates a text message in realtimeMessages. If the backend also
     // sends a standalone 'text' message with the same content, skip it.
-    const isDuplicateStreamText =
-      msg.kind === 'text' && msg.role === 'assistant' &&
-      sessionStore.getSessionSlot?.(sid)?.realtimeMessages.some(
-        (m) => m.kind === 'text' && m.role === 'assistant' && m.content === (msg as NormalizedMessage).content,
-      );
-    if (!isDuplicateStreamText) {
+    const duplicateStreamTextState = getDuplicateAssistantStreamTextState(
+      msg as NormalizedMessage,
+      sessionStore.getSessionSlot?.(sid)?.realtimeMessages ?? [],
+    );
+    if (duplicateStreamTextState.hasActiveStream) {
+      sessionStore.finalizeStreaming(sid, duplicateStreamTextState.activeStreamRunId ?? undefined);
+    }
+    if (!orderedFrame && !duplicateStreamTextState.isDuplicate) {
       sessionStore.appendRealtime(sid, msg as NormalizedMessage);
     }
 
     // --- UI side effects for specific kinds ---
     switch (msg.kind) {
+      case 'file_artifacts': {
+        if (isForActiveView && selectedProject?.name && Array.isArray(msg.artifacts)) {
+          for (const artifact of msg.artifacts) {
+            if (!artifact || typeof artifact.path !== 'string' || !artifact.path.trim()) continue;
+            window.dispatchEvent(new CustomEvent('pilotdeck:file-updated', {
+              detail: {
+                sessionId: sid,
+                projectName: selectedProject.name,
+                filePath: artifact.path,
+                operation: artifact.operation,
+              },
+            }));
+          }
+        }
+        break;
+      }
+
       case 'session_created': {
         const newSessionId = msg.newSessionId;
         if (!newSessionId) break;
@@ -434,16 +969,23 @@ export function useChatRealtimeHandlers({
       }
 
       case 'complete': {
+        if (isTerminalForSupersededRun) break;
         if (sid) {
+          clearSessionStatusRetry(sid);
+          invalidateSessionStatusResponses(sid);
+          activeTurnReplaySignatureRef.current.delete(sid);
           // Finalize both thinking and content streams
           if (thinkingBySessionRef.current.has(sid)) {
             thinkingBySessionRef.current.delete(sid);
           }
-          sessionStore.finalizeStreamingThinking(sid);
-          sessionStore.finalizeStreaming(sid);
+          sessionStore.finalizeStreamingThinking(sid, msgRunId);
+          sessionStore.finalizeStreaming(sid, msgRunId);
+          sessionStore.cancelRunningActivities(sid);
         }
 
         if (isForActiveView) {
+          updateActiveRunId(null);
+          setSessionRuntimeState('inactive');
           setIsLoading(false);
           setCanAbortSession(false);
           setIsAborting(false);
@@ -456,20 +998,39 @@ export function useChatRealtimeHandlers({
           );
           onSessionInactive?.(sid);
           onSessionNotProcessing?.(sid);
+          window.dispatchEvent(new CustomEvent('pilotdeck:agent-turn-complete', {
+            detail: {
+              sessionId: sid,
+              projectName: selectedProject?.name,
+              projectPath: selectedProject?.fullPath || selectedProject?.path || '',
+            },
+          }));
 
           // Auto-refresh from server to align with canonical message order.
-          // During streaming, messages may arrive out of order (e.g. content
-          // stream created before tool_use). The server has the authoritative
-          // copy with correct ordering. Retry if server hasn't committed yet.
+          // `turn_completed` is delivered before the transcript generator has
+          // necessarily committed every current-turn entry. A non-empty history
+          // is therefore not proof that this turn is durable (long sessions are
+          // always non-empty). Retry while any renderable realtime row from this
+          // run is still absent from the server projection.
           const doRefresh = (attempt: number) => {
             sessionStore.refreshFromServer(sid, { provider, projectName: selectedProject?.name, projectPath: selectedProject?.fullPath || selectedProject?.path || '' }).then(() => {
               const slot = sessionStore.getSessionSlot?.(sid);
-              if (slot && slot.serverMessages.length === 0 && attempt < 5) {
-                setTimeout(() => doRefresh(attempt + 1), 1500 * attempt);
+              const pendingCurrentTurn = slot
+                ? getUnpersistedRealtimeTurnMessages(
+                    slot.realtimeMessages,
+                    slot.serverMessages,
+                    msgRunId,
+                  )
+                : [];
+              const needsRetry = msgRunId
+                ? pendingCurrentTurn.length > 0
+                : Boolean(slot && slot.serverMessages.length === 0);
+              if (needsRetry && attempt < 5) {
+                setTimeout(() => doRefresh(attempt + 1), 500 * attempt);
               }
             });
           };
-          doRefresh(1);
+          setTimeout(() => doRefresh(1), 150);
         }
 
         // Handle aborted case
@@ -499,7 +1060,29 @@ export function useChatRealtimeHandlers({
       }
 
       case 'error': {
+        if (!isTerminalError) {
+          if (isForActiveView) {
+            setSessionRuntimeState('synchronizing');
+          }
+          invalidateSessionStatusResponses(sid);
+          const request = buildSessionStatusRequestIfIdle({
+            sessionId: sid,
+            provider,
+            expectedActiveRunId: activeRunIdRef.current,
+            includeActiveTurnMessages: true,
+          });
+          if (request) sendMessage(request);
+          break;
+        }
+        if (isTerminalForSupersededRun) break;
+        if (sid) {
+          clearSessionStatusRetry(sid);
+          invalidateSessionStatusResponses(sid);
+          sessionStore.cancelRunningActivities(sid);
+        }
         if (isForActiveView) {
+          updateActiveRunId(null);
+          setSessionRuntimeState('inactive');
           setIsLoading(false);
           setCanAbortSession(false);
           setIsAborting(false);
@@ -507,6 +1090,7 @@ export function useChatRealtimeHandlers({
           setPilotDeckStatus(null);
         }
         if (sid) {
+          activeTurnReplaySignatureRef.current.delete(sid);
           onSessionInactive?.(sid);
           onSessionNotProcessing?.(sid);
           sessionStore.refreshFromServer(sid, { provider, projectName: selectedProject?.name, projectPath: selectedProject?.fullPath || selectedProject?.path || '' });
@@ -515,13 +1099,15 @@ export function useChatRealtimeHandlers({
       }
 
       case 'permission_request': {
-        if (!msg.requestId) break;
+        const requestId = msg.requestId;
+        if (!requestId) break;
         const isForCurrentSession = isForActiveView;
         if (!isForCurrentSession) break;
+        onSessionProcessing?.(sid);
         setPendingPermissionRequests((prev) => {
-          if (prev.some((r: PendingPermissionRequest) => r.requestId === msg.requestId)) return prev;
+          if (prev.some((r: PendingPermissionRequest) => r.requestId === requestId)) return prev;
           return [...prev, {
-            requestId: msg.requestId,
+            requestId,
             toolName: msg.toolName || 'UnknownTool',
             input: msg.input,
             context: msg.context,
@@ -545,6 +1131,16 @@ export function useChatRealtimeHandlers({
       }
 
       case 'status': {
+        if (msg.text === 'started' && msgRunId) {
+          clearSessionStatusRetry(sid);
+          invalidateSessionStatusResponses(sid);
+          if (isForActiveView) {
+            updateActiveRunId(msgRunId);
+          }
+        }
+        if (msg.text && msg.text !== 'token_budget' && msg.text !== 'clear_status') {
+          onSessionProcessing?.(sid);
+        }
         if (!isForActiveView) break;
         if (msg.text === 'token_budget' && msg.tokenBudget) {
           setTokenBudget(msg.tokenBudget as Record<string, unknown>);
@@ -572,7 +1168,11 @@ export function useChatRealtimeHandlers({
       }
 
       case 'compact_boundary': {
+        onSessionProcessing?.(sid);
         if (isForActiveView) {
+          if (msg.tokenBudget) {
+            setTokenBudget(msg.tokenBudget as Record<string, unknown>);
+          }
           setClaudeStatus(null);
           setPilotDeckStatus(null);
           setIsLoading(true);
@@ -588,10 +1188,15 @@ export function useChatRealtimeHandlers({
     }
   }, [
     provider,
+    sendMessage,
+    clearSessionStatusRetry,
+    scheduleSessionStatusRetry,
     selectedSession,
     currentSessionId,
     setCurrentSessionId,
     setIsLoading,
+    setSessionRuntimeState,
+    updateActiveRunId,
     setCanAbortSession,
     setIsAborting,
     setClaudeStatus,

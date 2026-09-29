@@ -80,7 +80,7 @@ export class DiscoveryPlanStore {
     if (update.status !== undefined) {
       target.status = update.status;
       const raw = target as Record<string, unknown>;
-      if ("executionStatus" in raw && (update.status === "completed" || update.status === "failed")) {
+      if ("executionStatus" in raw && (update.status === "completed" || update.status === "completed_no_report" || update.status === "failed")) {
         raw.executionStatus = update.status;
       }
     }

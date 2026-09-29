@@ -9,9 +9,11 @@ import {
 
 export function buildPilotDeckToolPermissionEntry(toolName?: string, toolInput?: unknown) {
   if (!toolName) return null;
+  const fileWriteToolName = normalizeFileWriteToolName(toolName);
+  if (fileWriteToolName) return buildFileWritePermissionEntry(fileWriteToolName, toolInput);
   if (toolName !== 'Bash' && toolName !== 'bash') return toolName;
 
-  const parsed = safeJsonParse(toolInput);
+  const parsed = parseToolInputRecord(toolInput);
   const command = typeof parsed?.command === 'string' ? parsed.command.trim() : '';
   if (!command) return 'bash';
 
@@ -22,6 +24,43 @@ export function buildPilotDeckToolPermissionEntry(toolName?: string, toolInput?:
     return `bash:${tokens[0]} ${tokens[1]}:*`;
   }
   return `bash:${tokens[0]}:*`;
+}
+
+function normalizeFileWriteToolName(toolName: string) {
+  if (toolName === 'write_file' || toolName === 'Write') return 'write_file';
+  if (toolName === 'edit_file' || toolName === 'Edit') return 'edit_file';
+  return null;
+}
+
+function buildFileWritePermissionEntry(toolName: 'write_file' | 'edit_file', toolInput: unknown) {
+  const parsed = parseToolInputRecord(toolInput);
+  const filePath = typeof parsed?.file_path === 'string' ? parsed.file_path.trim() : '';
+  if (!isAbsoluteFilePath(filePath)) return null;
+  const parent = dirnameForPermission(filePath);
+  if (!parent) return null;
+  return `${toolName}:${parent.endsWith('/') || parent.endsWith('\\') ? `${parent}*` : `${parent}/*`}`;
+}
+
+function parseToolInputRecord(toolInput: unknown): Record<string, unknown> | null {
+  if (toolInput && typeof toolInput === 'object' && !Array.isArray(toolInput)) {
+    return toolInput as Record<string, unknown>;
+  }
+  return safeJsonParse(toolInput);
+}
+
+function isAbsoluteFilePath(filePath: string) {
+  return filePath.startsWith('/') || /^[A-Za-z]:[\\/]/.test(filePath);
+}
+
+function dirnameForPermission(filePath: string) {
+  const normalized = filePath.replace(/\\/g, '/').replace(/\/+$/, '') || '/';
+  const driveMatch = /^([A-Za-z]:)(\/.*)?$/.exec(normalized);
+  const value = driveMatch ? `${driveMatch[1]}${driveMatch[2] ?? '/'}` : normalized;
+  const index = value.lastIndexOf('/');
+  if (index < 0) return '';
+  if (index === 0) return '/';
+  if (/^[A-Za-z]:\/[^/]*$/.test(value)) return `${value.slice(0, 2)}/`;
+  return value.slice(0, index);
 }
 
 export function formatToolInputForDisplay(input: unknown) {
@@ -46,19 +85,31 @@ const PERMISSION_ERROR_CODES = new Set<string>([
   'permission_cancelled',
 ]);
 
-export function isPlanModeToolDeny(message: ChatMessage | null | undefined): boolean {
+export function isReadOnlyModeToolDeny(message: ChatMessage | null | undefined): boolean {
   if (!message?.toolResult?.isError) return false;
   const errorCode = typeof message.toolResult.errorCode === 'string'
     ? message.toolResult.errorCode
     : '';
-  if (errorCode === 'plan_mode_violation' || errorCode === 'plan_mode_denied') {
+  if (
+    errorCode === 'plan_mode_violation' ||
+    errorCode === 'plan_mode_denied' ||
+    errorCode === 'ask_mode_violation' ||
+    errorCode === 'ask_mode_denied'
+  ) {
     return true;
   }
   const content = typeof message.toolResult.content === 'string'
     ? message.toolResult.content
     : '';
-  return /\[PLAN_MODE_VIOLATION\]/i.test(content) || /plan mode denies side-effecting tool\b/i.test(content);
+  return (
+    /\[PLAN_MODE_VIOLATION\]/i.test(content) ||
+    /plan mode denies side-effecting tool\b/i.test(content) ||
+    /\[ASK_MODE_VIOLATION\]/i.test(content) ||
+    /ask mode denies side-effecting tool\b/i.test(content)
+  );
 }
+
+export const isPlanModeToolDeny = isReadOnlyModeToolDeny;
 
 export function getPilotDeckPermissionSuggestion(
   message: ChatMessage | null | undefined,
@@ -68,7 +119,7 @@ export function getPilotDeckPermissionSuggestion(
   // PermissionContext, so the "Permission added" affordance is useful
   // regardless of which model is selected.
   if (!message?.toolResult?.isError) return null;
-  if (isPlanModeToolDeny(message)) return null;
+  if (isReadOnlyModeToolDeny(message)) return null;
 
   // Only offer the rule-grant affordance for genuine permission failures.
   // For historical / replayed messages without an `errorCode` we fall back to
@@ -92,10 +143,12 @@ export function grantPilotDeckToolPermission(entry: string | null): PermissionGr
   const settings = getPilotDeckSettings();
   const alreadyAllowed = settings.allowedTools.includes(entry);
   const nextAllowed = alreadyAllowed ? settings.allowedTools : [...settings.allowedTools, entry];
+  const nextAsk = settings.askTools.filter((tool) => tool !== entry);
   const nextDisallowed = settings.disallowedTools.filter((tool) => tool !== entry);
   const updatedSettings = {
     ...settings,
     allowedTools: nextAllowed,
+    askTools: nextAsk,
     disallowedTools: nextDisallowed,
     lastUpdated: new Date().toISOString(),
   };
@@ -103,6 +156,7 @@ export function grantPilotDeckToolPermission(entry: string | null): PermissionGr
   safeLocalStorage.setItem(PILOTDECK_SETTINGS_KEY, JSON.stringify(updatedSettings));
   savePilotDeckPermissionSettings({
     allowedTools: nextAllowed,
+    askTools: nextAsk,
     disallowedTools: nextDisallowed,
   }).catch((error) => {
     console.error('Failed to persist granted permission to backend:', error);

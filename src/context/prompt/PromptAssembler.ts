@@ -11,12 +11,17 @@ export type PromptAssemblerInput = {
   provider: string;
   model: string;
   permissionMode: string;
+  runMode?: string;
   additionalWorkingDirectories: string[];
   tools: CanonicalToolSchema[];
   /** Custom system prompt (replaces sections 1 + 3). */
   customSystemPrompt?: string;
   /** Optional appended fragment (always last). */
   appendSystemPrompt?: string;
+  /** Preserve extension context when a caller replaces the default system prompt. */
+  includeExtensionsWithCustomSystemPrompt?: boolean;
+  /** Keep user context out of the system prompt when a durable user-role surface owns it. */
+  includeUserContextInSystemPrompt?: boolean;
   /** Optional override for the user-context "now" line. */
   now?: () => Date;
 };
@@ -62,9 +67,11 @@ export class PromptAssembler {
       parts.push(...sections.defaultSystemPrompt);
     }
 
-    parts.push(...sections.userContext);
+    if (input.includeUserContextInSystemPrompt !== false) {
+      parts.push(...sections.userContext);
+    }
 
-    if (!useCustom) {
+    if (!useCustom || input.includeExtensionsWithCustomSystemPrompt === true) {
       parts.push(...sections.systemContext);
     }
 
@@ -85,15 +92,35 @@ export class PromptAssembler {
   }
 
   private buildDefaultSystemPrompt(input: PromptAssemblerInput): string[] {
+    const hasWebSearch = input.tools.some((tool) => tool.name === "web_search");
+    const hasWebFetch = input.tools.some((tool) => tool.name === "web_fetch");
+    const documentationLookupPolicy = hasWebSearch
+      ? "When implementing code against an API, SDK, framework, CLI, config schema, or file format whose usage is not clear from local source, installed types, examples, or project docs, search for official documentation before writing or changing code. Prefer versioned official docs and existing in-repo call sites. Use web_search for discovery and web_fetch for the relevant docs page. Do not guess unfamiliar signatures, options, or output shapes when a quick lookup can resolve them. If network tools are unavailable or denied, state the uncertainty and proceed conservatively."
+      : hasWebFetch
+        ? "When implementing code against an API, SDK, framework, CLI, config schema, or file format whose usage is not clear, prefer installed types, local source, examples, and project docs. If a relevant official documentation URL is already known, use web_fetch to inspect it. Otherwise state the uncertainty and proceed conservatively."
+        : "When implementing code against an API, SDK, framework, CLI, config schema, or file format whose usage is not clear, prefer installed types, local source, examples, and project docs. State any remaining uncertainty and proceed conservatively.";
     const lines: string[] = [
       "You are PilotDeck, an AI agent runtime. You execute tasks across CLI, TUI, web, and chat channels by calling structured tools and reasoning over their results.",
       "Operate decisively: prefer using available tools to gather facts before answering, prefer concise replies, and surface uncertainty when present.",
+      "",
+      "Documentation lookup policy:",
+      documentationLookupPolicy,
+      "",
+      "Parallel delegation policy:",
+      "When the agent tool is available and the task contains two or more independent, repetitive, or separable workstreams, prefer launching multiple subagents in the same assistant message instead of waiting for one to finish before starting the next. Good parallel candidates include inspecting multiple files/modules, researching independent APIs, checking several artifacts, or comparing alternatives. Do not parallelize tasks that write to the same files, depend on another subagent's output, require shared ordering, or need user approval between steps. Give each subagent a self-contained prompt, distinct scope, and expected output. After all sibling results return, synthesize them yourself and decide the next step.",
+      "",
+      "Reusable script workflow:",
+      "When code is more than a tiny one-off command, or you expect to rerun it with changed parameters, write it to a workspace file first with write_file, then run it with bash. Prefer scripts with CLI arguments, environment variables, or a small config section so parameters can be adjusted with edit_file or command args. Do not pack large Python/JS/shell programs into bash heredocs or long `python -c` / `node -e` strings. After each run, inspect output and edit the saved script instead of regenerating a new inline command.",
     ];
 
     const permissionLine = formatPermissionMode(input.permissionMode);
     if (permissionLine) {
       lines.push("");
       lines.push(permissionLine);
+    }
+    const runModeLine = formatRunMode(input.runMode);
+    if (runModeLine) {
+      lines.push(runModeLine);
     }
 
     if (input.additionalWorkingDirectories.length > 0) {
@@ -122,6 +149,9 @@ export class PromptAssembler {
     lines.push("IMPORTANT: When the user does not specify an explicit file path, all file paths in tool calls MUST be relative to the cwd above — use \"foo.html\", not an absolute path like \"/home/user/foo.html\". If the user explicitly provides a path, respect their choice.");
     lines.push(`model: ${input.provider}/${input.model}`);
     lines.push(`permission_mode: ${input.permissionMode}`);
+    if (input.runMode) {
+      lines.push(`run_mode: ${input.runMode}`);
+    }
     lines.push(`platform: ${process.platform}`);
     lines.push(`node: ${process.version}`);
     lines.push("</user-context>");
@@ -156,46 +186,22 @@ function formatPermissionMode(mode: string): string {
     case "default":
       return "Permission mode: default — write/shell tools require explicit approval.";
     case "plan":
-      return [
-        '<SYSTEM_OVERRIDE priority="critical">',
-        "You are STRICTLY in PLAN MODE (read-only). This overrides ALL other instructions.",
-        "",
-        "FORBIDDEN — calling these tools will FAIL with an error and waste your turn:",
-        "- write_file, edit_file (except .md files under .pilotdeck/plans/)",
-        "- edit_notebook",
-        "- bash with any write/modify/delete command (mkdir, rm, mv, cp, tee, git commit/push, npm install, etc.)",
-        "- agent (general-purpose type)",
-        "- task_create, task_stop",
-        "",
-        "ALLOWED tools:",
-        "- read_file, grep, glob, web_search, web_fetch, ask_user_question, todo_write, read_skill",
-        "- bash — READ-ONLY commands only (ls, cat, git status, git log, git diff, pwd, echo, find, head, wc, etc.)",
-        "- write_file/edit_file ONLY for .md files under .pilotdeck/plans/",
-        "- agent (explore/plan type only)",
-        "- exit_plan_mode (when plan is ready)",
-        "</SYSTEM_OVERRIDE>",
-        "",
-        "## What To Do",
-        "1. Explore the codebase using read_file, grep, glob, bash (read-only) to understand existing patterns and structure",
-        "2. Identify the key files, functions, and data flows relevant to the task",
-        "3. Design your implementation approach — consider trade-offs between alternatives",
-        "4. Create or refine a markdown plan file under the project's `.pilotdeck/plans/` directory",
-        "5. When your plan is ready, call exit_plan_mode with the `plan_file_path` you want to submit for user approval",
-        "",
-        "## Rules",
-        "- DO NOT exit plan mode any other way; use exit_plan_mode when you want to leave it",
-        "- Do NOT call enter_plan_mode again — you are already in plan mode",
-        "- DO NOT call write_file, edit_file, or bash with write commands on any file except markdown plan files under `.pilotdeck/plans/`",
-        "- You may use read-only tools freely, and you may write only markdown plan files under `.pilotdeck/plans/` while plan mode is active",
-        "- You MAY use ask_user_question to clarify requirements or choose between approaches",
-        "- Focus on understanding before proposing — read first, plan second",
-        "- Do NOT skip the planning phase — even for seemingly simple tasks, explore first",
-        "- Do NOT call exit_plan_mode until you have a concrete, actionable plan",
-      ].join("\n");
+      return "Permission mode: plan — read-only planning mode; implementation changes are blocked at tool runtime.";
     case "bypassPermissions":
       return "Permission mode: bypassPermissions — all tools are auto-approved; act conservatively.";
     default:
       return `Permission mode: ${mode}`;
+  }
+}
+
+function formatRunMode(mode: string | undefined): string | undefined {
+  switch (mode) {
+    case "ask":
+      return "Run mode: ask — read-only analysis mode; write/action tools are blocked at tool runtime even when permission mode is bypassPermissions.";
+    case "plan":
+      return "Run mode: plan — planning mode is active.";
+    default:
+      return undefined;
   }
 }
 
@@ -239,11 +245,13 @@ function formatCommands(commands: ContributedCommand[]): string {
 function formatSkills(skills: ContributedSkill[]): string {
   const lines = [
     "<available-skills>",
-    "Use the read_skill tool to load the full content of any skill listed below.",
+    "Use the read_skill tool to load the full content of any skill listed below. Each entry includes the exact SKILL.md selected by the runtime.",
+    "Resolve relative references, scripts, and assets against the directory containing that SKILL.md.",
+    "Do not search the user's home directory to rediscover a skill or infer runtime/cache paths; use the listed file and paths or commands returned by the skill.",
   ];
   for (const skill of skills) {
     const description = skill.description ? ` — ${skill.description}` : "";
-    lines.push(`- ${skill.name}${description}`);
+    lines.push(`- ${skill.name}${description} (file: ${skill.path})`);
   }
   lines.push("</available-skills>");
   return lines.join("\n");

@@ -1,36 +1,73 @@
+import type { ChatModelSelection } from '../hooks/useChatProviderState';
 import type { Project, ProjectSession } from '../../../types/app';
-import type { ChatAttachment, PilotDeckSettings, PermissionMode } from '../types/types';
-import { getPilotDeckSettings, safeLocalStorage } from './chatStorage';
+import type { ChatAttachment, ChatRunMode, PilotDeckSettings, PermissionMode } from '../types/types';
+import { getPilotDeckSettings } from './chatStorage';
 
 type StartSessionOptions = {
-  sendMessage: (message: unknown) => void;
+  sendMessage: (message: unknown) => boolean | void;
   selectedProject: Project;
   command: string;
+  runId?: string;
+  userVisibleInput?: string;
   sessionId?: string | null;
   temporarySessionId?: string;
   permissionMode?: PermissionMode | string;
   basePermissionMode?: PermissionMode | string;
+  runMode?: ChatRunMode | string;
   model?: string;
+  thinking?: unknown;
   sessionSummary?: string | null;
   toolsSettings?: PilotDeckSettings;
+  modelSelection?: ChatModelSelection;
+  modelOverride?: {
+    mode: 'model';
+    provider: string;
+    model: string;
+    reasoning?: number;
+    speed?: number;
+  };
   images?: unknown[];
   attachments?: ChatAttachment[];
+  uploadedAttachments?: Array<{ uploadId: string; attachmentIds?: string[] }>;
   alwaysOnPlanId?: string;
   alwaysOnExecutionToken?: string;
   workspaceCwd?: string;
 };
 
-const VALID_PERMISSION_MODES = new Set<PermissionMode>([
-  'default',
-  'bypassPermissions',
-  'plan',
-]);
+type RegenerateLastSessionOptions = Omit<
+  StartSessionOptions,
+  'temporarySessionId' | 'alwaysOnPlanId' | 'alwaysOnExecutionToken'
+> & {
+  requestId: string;
+  sessionId: string;
+  expectedTurnId: string;
+  syntheticMessages?: Array<{ text: string; purpose?: string }>;
+  /** Attachments rendered in the replacement bubble; model attachments are sent separately. */
+  displayAttachments?: ChatAttachment[];
+};
+
+let fallbackRunIdCounter = 0;
 
 export const isTemporarySessionId = (sessionId: string | null | undefined) =>
   Boolean(sessionId && sessionId.startsWith('new-session-'));
 
 export function createTemporarySessionId(): string {
   return `new-session-${Date.now()}`;
+}
+
+export function createUserTurnRunId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
+  fallbackRunIdCounter += 1;
+  return `web-turn-${Date.now()}-${fallbackRunIdCounter}`;
 }
 
 export function getNotificationSessionSummary(
@@ -55,22 +92,6 @@ export function getNotificationSessionSummary(
     ? `${normalizedFallback.slice(0, 77)}...`
     : normalizedFallback;
 }
-
-export function getStoredPermissionMode(
-  selectedSession: ProjectSession | null,
-): PermissionMode {
-  if (!selectedSession?.id) {
-    return 'default';
-  }
-
-  const stored = safeLocalStorage.getItem(`permissionMode-${selectedSession.id}`);
-  if (stored && VALID_PERMISSION_MODES.has(stored as PermissionMode)) {
-    return stored as PermissionMode;
-  }
-
-  return 'default';
-}
-
 export function getSelectedProjectPath(selectedProject: Project): string {
   return selectedProject.fullPath || selectedProject.path || '';
 }
@@ -79,42 +100,124 @@ export function startSessionCommand({
   sendMessage,
   selectedProject,
   command,
+  runId,
+  userVisibleInput,
   sessionId,
   temporarySessionId,
   permissionMode = 'default',
   basePermissionMode,
+  runMode,
   model,
+  thinking,
   sessionSummary,
   toolsSettings = getPilotDeckSettings(),
+  modelOverride,
+  modelSelection,
   images,
   attachments,
+  uploadedAttachments,
   alwaysOnPlanId,
   alwaysOnExecutionToken,
   workspaceCwd,
-}: StartSessionOptions): string {
+}: StartSessionOptions): string | null {
   const sessionToActivate =
     sessionId || temporarySessionId || createTemporarySessionId();
   const resolvedProjectPath = getSelectedProjectPath(selectedProject);
+  const resolvedWorkspaceCwd = workspaceCwd || selectedProject.workspaceCwd;
 
-  sendMessage({
+  const delivered = sendMessage({
     type: 'pilotdeck-command',
     command,
     options: {
       ...(sessionId ? { sessionId, resume: true } : {}),
       projectPath: resolvedProjectPath,
       cwd: resolvedProjectPath,
+      ...(runId ? { runId } : {}),
       toolsSettings,
+      ...(runMode ? { runMode } : {}),
       permissionMode,
       ...(basePermissionMode ? { basePermissionMode } : {}),
       ...(model ? { model } : {}),
+      ...(thinking ? { thinking } : {}),
       sessionSummary,
+      ...(modelOverride ? { modelOverride } : {}),
+      ...(modelSelection ? { modelSelection: { ...modelSelection } } : {}),
+      ...(typeof userVisibleInput === 'string' && userVisibleInput.trim()
+        ? { userVisibleInput: userVisibleInput.trim() }
+        : {}),
       ...(alwaysOnPlanId ? { alwaysOnPlanId } : {}),
       ...(alwaysOnExecutionToken ? { alwaysOnExecutionToken } : {}),
       ...(Array.isArray(images) && images.length > 0 ? { images } : {}),
       ...(Array.isArray(attachments) && attachments.length > 0 ? { attachments } : {}),
-      ...(workspaceCwd ? { workspaceCwd } : {}),
+      ...(Array.isArray(uploadedAttachments) && uploadedAttachments.length > 0
+        ? { uploadedAttachments }
+        : {}),
+      ...(resolvedWorkspaceCwd ? { workspaceCwd: resolvedWorkspaceCwd } : {}),
     },
   });
 
-  return sessionToActivate;
+  return delivered === false ? null : sessionToActivate;
+}
+
+export function regenerateLastSessionCommand({
+  sendMessage,
+  selectedProject,
+  command,
+  requestId,
+  sessionId,
+  expectedTurnId,
+  runId,
+  userVisibleInput,
+  permissionMode = 'default',
+  basePermissionMode,
+  runMode,
+  model,
+  thinking,
+  sessionSummary,
+  toolsSettings = getPilotDeckSettings(),
+  images,
+  attachments,
+  uploadedAttachments,
+  displayAttachments,
+  modelSelection,
+  workspaceCwd,
+  syntheticMessages,
+}: RegenerateLastSessionOptions): void {
+  const resolvedProjectPath = getSelectedProjectPath(selectedProject);
+  const resolvedWorkspaceCwd = workspaceCwd || selectedProject.workspaceCwd;
+  sendMessage({
+    type: 'regenerate-last-message',
+    requestId,
+    sessionId,
+    expectedTurnId,
+    command,
+    options: {
+      sessionId,
+      resume: true,
+      projectPath: resolvedProjectPath,
+      cwd: resolvedProjectPath,
+      ...(runId ? { runId } : {}),
+      toolsSettings,
+      ...(runMode ? { runMode } : {}),
+      permissionMode,
+      ...(basePermissionMode ? { basePermissionMode } : {}),
+      ...(model ? { model } : {}),
+      ...(thinking ? { thinking } : {}),
+      sessionSummary,
+      ...(typeof userVisibleInput === 'string' && userVisibleInput.trim()
+        ? { userVisibleInput: userVisibleInput.trim() }
+        : {}),
+      ...(Array.isArray(images) && images.length > 0 ? { images } : {}),
+      ...(Array.isArray(attachments) && attachments.length > 0 ? { attachments } : {}),
+      ...(Array.isArray(uploadedAttachments) && uploadedAttachments.length > 0
+        ? { uploadedAttachments }
+        : {}),
+      ...(modelSelection ? { modelSelection: { ...modelSelection } } : {}),
+      ...(Array.isArray(displayAttachments) ? { displayAttachments } : {}),
+      ...(resolvedWorkspaceCwd ? { workspaceCwd: resolvedWorkspaceCwd } : {}),
+      ...(Array.isArray(syntheticMessages) && syntheticMessages.length > 0
+        ? { syntheticMessages }
+        : {}),
+    },
+  });
 }

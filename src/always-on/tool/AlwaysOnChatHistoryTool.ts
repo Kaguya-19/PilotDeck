@@ -1,11 +1,8 @@
-import { join } from "node:path";
 import { PilotDeckToolRuntimeError } from "../../tool/protocol/errors.js";
 import type { PilotDeckToolDefinition } from "../../tool/protocol/types.js";
-import { getPilotProjectChatDir } from "../../pilot/paths.js";
-import { readTranscript } from "../../session/transcript/TranscriptReader.js";
 import { replayTranscriptEntries } from "../../session/transcript/TranscriptReplay.js";
-import { sanitizeSessionIdForPath } from "../../session/storage/ProjectSessionStorage.js";
-import { listProjectSessions } from "../../session/storage/SessionList.js";
+import type { SessionCatalogPort } from "../../session/catalog/SessionCatalogPort.js";
+import type { SessionTranscriptReaderPort } from "../../session/history/SessionTranscriptReaderPort.js";
 import type { AlwaysOnRunContextRegistry } from "../runtime/AlwaysOnRunContextRegistry.js";
 
 export type AlwaysOnChatHistoryInput = {
@@ -27,6 +24,10 @@ export type AlwaysOnChatHistoryOutput = {
 
 export type CreateAlwaysOnChatHistoryToolOptions = {
   runContexts: AlwaysOnRunContextRegistry;
+  /** Application-selected read-only catalog used only for session metadata. */
+  sessionCatalog: SessionCatalogPort;
+  /** Application-selected durable transcript reader. */
+  sessionTranscriptReader: SessionTranscriptReaderPort;
 };
 
 export const ALWAYS_ON_CHAT_HISTORY_TOOL_NAME = "always_on_read_chat_history";
@@ -44,6 +45,7 @@ export function createAlwaysOnChatHistoryTool(
       "Use the sessionId from the chat digest in the discovery prompt to expand a session of interest. " +
       "Only available during Always-On discovery (Phase 1).",
     kind: "session",
+    requiredRuntimeCapabilities: ["always_on_run_context"],
     inputSchema: {
       type: "object",
       required: ["sessionId"],
@@ -68,10 +70,11 @@ export function createAlwaysOnChatHistoryTool(
 
       const realSessionId = ctx.chatSessionAliases?.get(input.sessionId) ?? input.sessionId;
 
-      const chatDir = getPilotProjectChatDir(ctx.projectKey, ctx.paths.pilotHome);
-      const transcriptPath = join(chatDir, `${sanitizeSessionIdForPath(realSessionId)}.jsonl`);
-
-      const { entries, diagnostics } = await readTranscript(transcriptPath);
+      const { entries, diagnostics } = await options.sessionTranscriptReader.read({
+        projectRoot: ctx.projectKey,
+        pilotHome: ctx.paths.pilotHome,
+        sessionId: realSessionId,
+      });
       if (entries.length === 0) {
         const reason = diagnostics.length > 0
           ? diagnostics[0].message
@@ -82,9 +85,9 @@ export function createAlwaysOnChatHistoryTool(
         );
       }
 
-      const { messages, metadata } = replayTranscriptEntries(entries);
+      const { messages, metadata } = replayTranscriptEntries([...entries]);
 
-      const sessions = await listProjectSessions({
+      const sessions = await options.sessionCatalog.list({
         projectRoot: ctx.projectKey,
         pilotHome: ctx.paths.pilotHome,
         includeInternal: false,

@@ -1,6 +1,8 @@
 import type { PilotDeckHooksSettings } from "../../hooks/protocol/settings.js";
 import type { PromptContribution } from "../../contributions/PromptContribution.js";
+import type { HookContribution } from "../../contributions/HookContribution.js";
 import type { RouterContribution } from "../../contributions/RouterContribution.js";
+import type { ToolContribution } from "../../contributions/ToolContribution.js";
 import type { LoadedPluginCommand } from "../loading/PluginCommandLoader.js";
 import type { PilotDeckPluginManifest } from "./manifest.js";
 
@@ -22,5 +24,11 @@ export type PilotDeckLoadedPlugin = {
    * test-injected plugins. Disk-loaded JSON plugins cannot provide functions.
    */
   promptContributions?: PromptContribution[];
+  /** Programmatic tools registered into a session-owned ToolRegistry. */
+  toolContributions?: ToolContribution[];
+  /** Programmatic hooks merged into the session-owned HookRuntime snapshot. */
+  hookContributions?: HookContribution[];
   routerContributions?: RouterContribution[];
+  /** Optional teardown for programmatic plugins owned by a runtime scope. */
+  dispose?: () => void | Promise<void>;
 };

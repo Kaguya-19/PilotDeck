@@ -66,7 +66,8 @@ async function getGitRemoteUrl(repoPath) {
   return new Promise((resolve, reject) => {
     const gitProcess = spawn('git', ['config', '--get', 'remote.origin.url'], {
       cwd: repoPath,
-      stdio: ['pipe', 'pipe', 'pipe']
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: process.platform === 'win32'
     });
 
     let stdout = '';
@@ -224,7 +225,8 @@ async function getCommitMessages(projectPath, limit = 5) {
   return new Promise((resolve, reject) => {
     const gitProcess = spawn('git', ['log', `-${limit}`, '--pretty=format:%s'], {
       cwd: projectPath,
-      stdio: ['pipe', 'pipe', 'pipe']
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: process.platform === 'win32'
     });
 
     let stdout = '';
@@ -375,7 +377,8 @@ async function cloneGitHubRepo(githubUrl, githubToken = null, projectPath) {
 
       // Execute git clone
       const gitProcess = spawn('git', ['clone', '--depth', '1', cloneUrl, cloneDir], {
-        stdio: ['pipe', 'pipe', 'pipe']
+        stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: process.platform === 'win32'
       });
 
       let stdout = '';
@@ -1000,7 +1003,8 @@ router.post('/', validateExternalApiKey, async (req, res) => {
           console.log('🔄 Creating local branch...');
           const checkoutProcess = spawn('git', ['checkout', '-b', finalBranchName], {
             cwd: finalProjectPath,
-            stdio: 'pipe'
+            stdio: 'pipe',
+            windowsHide: process.platform === 'win32'
           });
 
           await new Promise((resolve, reject) => {
@@ -1016,7 +1020,8 @@ router.post('/', validateExternalApiKey, async (req, res) => {
                   console.log(`ℹ️ Branch '${finalBranchName}' already exists locally, checking out...`);
                   const checkoutExisting = spawn('git', ['checkout', finalBranchName], {
                     cwd: finalProjectPath,
-                    stdio: 'pipe'
+                    stdio: 'pipe',
+                    windowsHide: process.platform === 'win32'
                   });
                   checkoutExisting.on('close', (checkoutCode) => {
                     if (checkoutCode === 0) {
@@ -1037,7 +1042,8 @@ router.post('/', validateExternalApiKey, async (req, res) => {
           console.log('🔄 Pushing branch to remote...');
           const pushProcess = spawn('git', ['push', '-u', 'origin', finalBranchName], {
             cwd: finalProjectPath,
-            stdio: 'pipe'
+            stdio: 'pipe',
+            windowsHide: process.platform === 'win32'
           });
 
           await new Promise((resolve, reject) => {

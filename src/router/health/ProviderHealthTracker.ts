@@ -32,17 +32,20 @@ export class ProviderHealthTracker {
   private readonly openThreshold: number;
   private readonly openDurationMs: number;
   private readonly windowSize: number;
+  private readonly now: () => number;
 
   constructor(options?: {
     degradeThreshold?: number;
     openThreshold?: number;
     openDurationMs?: number;
     windowSize?: number;
+    now?: () => number;
   }) {
     this.degradeThreshold = options?.degradeThreshold ?? DEFAULT_DEGRADE_THRESHOLD;
     this.openThreshold = options?.openThreshold ?? DEFAULT_OPEN_THRESHOLD;
     this.openDurationMs = options?.openDurationMs ?? DEFAULT_OPEN_DURATION_MS;
     this.windowSize = options?.windowSize ?? DEFAULT_WINDOW_SIZE;
+    this.now = options?.now ?? Date.now;
   }
 
   private getOrCreate(providerId: string): ProviderRecord {
@@ -72,7 +75,7 @@ export class ProviderHealthTracker {
     if (rec.consecutiveFailures >= this.openThreshold) {
       if (rec.state !== "open") {
         rec.state = "open";
-        rec.openedAt = Date.now();
+        rec.openedAt = this.now();
       }
     } else if (rec.consecutiveFailures >= this.degradeThreshold) {
       if (rec.state === "healthy") {
@@ -81,14 +84,14 @@ export class ProviderHealthTracker {
     }
     if (rec.state === "half_open") {
       rec.state = "open";
-      rec.openedAt = Date.now();
+      rec.openedAt = this.now();
     }
   }
 
   getState(providerId: string): ProviderHealthState {
     const rec = this.records.get(providerId);
     if (!rec) return "healthy";
-    if (rec.state === "open" && Date.now() - rec.openedAt >= this.openDurationMs) {
+    if (rec.state === "open" && this.now() - rec.openedAt >= this.openDurationMs) {
       rec.state = "half_open";
     }
     return rec.state;

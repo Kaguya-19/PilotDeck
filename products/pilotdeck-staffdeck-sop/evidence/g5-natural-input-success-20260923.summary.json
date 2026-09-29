@@ -1,0 +1,627 @@
+{
+  "status": "passed",
+  "published": {
+    "sopId": "project_delivery_plan",
+    "version": "1.0.1",
+    "nodes": 4,
+    "edges": 4
+  },
+  "discovery": {
+    "endpoint": "http://127.0.0.1:16224/api/v1",
+    "agentId": "agent_tenant_demo_overall",
+    "timeoutMs": 120000
+  },
+  "firstBusinessTool": {
+    "toolName": "read_file",
+    "ok": true
+  },
+  "runtimeBinding": {
+    "skillId": "project_delivery_plan",
+    "version": "1.0.1",
+    "name": "项目推进计划整理（G5 复核）"
+  },
+  "selectedState": {
+    "skillId": "project_delivery_plan",
+    "nodeTransitions": [
+      "build_plan",
+      "confirm_scope",
+      "finalize_plan"
+    ]
+  },
+  "terminal": {
+    "status": "completed",
+    "activeStep": "finalize_plan",
+    "scopeConfirmed": true
+  },
+  "handoff": {
+    "waitId": "8bc7c292-0419-4c61-8975-10d8b8305700",
+    "kind": "handoff",
+    "stepId": "confirm_scope",
+    "reloadedSameWaitId": true
+  },
+  "approval": {
+    "accepted": true,
+    "duplicateReplay": true,
+    "source": "human"
+  },
+  "traceKeys": [
+    "duplicate",
+    "ordinaryTurns",
+    "postResumeTurns",
+    "reload",
+    "resume",
+    "service"
+  ],
+  "service": [
+    {
+      "kind": "discovery",
+      "path": "/api/v1/agents/agent_tenant_demo_overall/sops:route",
+      "outcome": "response",
+      "status": 200,
+      "elapsedMs": 20539,
+      "response": {
+        "selected_sop_id": "project_delivery_plan",
+        "ok": null,
+        "outcome": null
+      }
+    },
+    {
+      "kind": "lifecycle",
+      "path": "/healthz",
+      "outcome": "response",
+      "status": 200,
+      "elapsedMs": 5,
+      "response": {
+        "selected_sop_id": null,
+        "ok": null,
+        "outcome": null
+      }
+    },
+    {
+      "kind": "lifecycle",
+      "path": "/v1/sop/prepare",
+      "outcome": "response",
+      "status": 200,
+      "elapsedMs": 7,
+      "response": {
+        "selected_sop_id": null,
+        "ok": true,
+        "outcome": "completed"
+      }
+    },
+    {
+      "kind": "lifecycle",
+      "path": "/v1/sop/prepare",
+      "outcome": "response",
+      "status": 200,
+      "elapsedMs": 2,
+      "response": {
+        "selected_sop_id": null,
+        "ok": true,
+        "outcome": "completed"
+      }
+    },
+    {
+      "kind": "lifecycle",
+      "path": "/v1/sop/prepare",
+      "outcome": "response",
+      "status": 200,
+      "elapsedMs": 3,
+      "response": {
+        "selected_sop_id": null,
+        "ok": true,
+        "outcome": "completed"
+      }
+    },
+    {
+      "kind": "lifecycle",
+      "path": "/v1/sop/prepare",
+      "outcome": "response",
+      "status": 200,
+      "elapsedMs": 4,
+      "response": {
+        "selected_sop_id": null,
+        "ok": true,
+        "outcome": "completed"
+      }
+    },
+    {
+      "kind": "lifecycle",
+      "path": "/v1/sop/prepare",
+      "outcome": "response",
+      "status": 200,
+      "elapsedMs": 2,
+      "response": {
+        "selected_sop_id": null,
+        "ok": true,
+        "outcome": "completed"
+      }
+    },
+    {
+      "kind": "lifecycle",
+      "path": "/v1/sop/prepare",
+      "outcome": "response",
+      "status": 200,
+      "elapsedMs": 2,
+      "response": {
+        "selected_sop_id": null,
+        "ok": true,
+        "outcome": "completed"
+      }
+    },
+    {
+      "kind": "lifecycle",
+      "path": "/v1/sop/prepare",
+      "outcome": "response",
+      "status": 200,
+      "elapsedMs": 3,
+      "response": {
+        "selected_sop_id": null,
+        "ok": true,
+        "outcome": "completed"
+      }
+    },
+    {
+      "kind": "lifecycle",
+      "path": "/v1/sop/prepare",
+      "outcome": "response",
+      "status": 200,
+      "elapsedMs": 3,
+      "response": {
+        "selected_sop_id": null,
+        "ok": true,
+        "outcome": "completed"
+      }
+    },
+    {
+      "kind": "lifecycle",
+      "path": "/v1/sop/prepare",
+      "outcome": "response",
+      "status": 200,
+      "elapsedMs": 2,
+      "response": {
+        "selected_sop_id": null,
+        "ok": true,
+        "outcome": "completed"
+      }
+    },
+    {
+      "kind": "lifecycle",
+      "path": "/v1/sop/submit",
+      "outcome": "response",
+      "status": 200,
+      "elapsedMs": 25,
+      "response": {
+        "selected_sop_id": null,
+        "ok": true,
+        "outcome": "completed"
+      }
+    },
+    {
+      "kind": "lifecycle",
+      "path": "/v1/sop/prepare",
+      "outcome": "response",
+      "status": 200,
+      "elapsedMs": 5,
+      "response": {
+        "selected_sop_id": null,
+        "ok": true,
+        "outcome": "completed"
+      }
+    },
+    {
+      "kind": "lifecycle",
+      "path": "/v1/sop/prepare",
+      "outcome": "response",
+      "status": 200,
+      "elapsedMs": 3,
+      "response": {
+        "selected_sop_id": null,
+        "ok": true,
+        "outcome": "completed"
+      }
+    },
+    {
+      "kind": "lifecycle",
+      "path": "/v1/sop/prepare",
+      "outcome": "response",
+      "status": 200,
+      "elapsedMs": 4,
+      "response": {
+        "selected_sop_id": null,
+        "ok": true,
+        "outcome": "completed"
+      }
+    },
+    {
+      "kind": "lifecycle",
+      "path": "/v1/sop/prepare",
+      "outcome": "response",
+      "status": 200,
+      "elapsedMs": 3,
+      "response": {
+        "selected_sop_id": null,
+        "ok": true,
+        "outcome": "completed"
+      }
+    },
+    {
+      "kind": "lifecycle",
+      "path": "/v1/sop/prepare",
+      "outcome": "response",
+      "status": 200,
+      "elapsedMs": 2,
+      "response": {
+        "selected_sop_id": null,
+        "ok": true,
+        "outcome": "completed"
+      }
+    },
+    {
+      "kind": "lifecycle",
+      "path": "/v1/sop/prepare",
+      "outcome": "response",
+      "status": 200,
+      "elapsedMs": 3,
+      "response": {
+        "selected_sop_id": null,
+        "ok": true,
+        "outcome": "completed"
+      }
+    },
+    {
+      "kind": "lifecycle",
+      "path": "/v1/sop/prepare",
+      "outcome": "response",
+      "status": 200,
+      "elapsedMs": 20,
+      "response": {
+        "selected_sop_id": null,
+        "ok": true,
+        "outcome": "completed"
+      }
+    },
+    {
+      "kind": "lifecycle",
+      "path": "/v1/sop/prepare",
+      "outcome": "response",
+      "status": 200,
+      "elapsedMs": 3,
+      "response": {
+        "selected_sop_id": null,
+        "ok": true,
+        "outcome": "completed"
+      }
+    },
+    {
+      "kind": "lifecycle",
+      "path": "/v1/sop/prepare",
+      "outcome": "response",
+      "status": 200,
+      "elapsedMs": 4,
+      "response": {
+        "selected_sop_id": null,
+        "ok": true,
+        "outcome": "completed"
+      }
+    },
+    {
+      "kind": "lifecycle",
+      "path": "/v1/sop/prepare",
+      "outcome": "response",
+      "status": 200,
+      "elapsedMs": 4,
+      "response": {
+        "selected_sop_id": null,
+        "ok": true,
+        "outcome": "completed"
+      }
+    },
+    {
+      "kind": "lifecycle",
+      "path": "/v1/sop/prepare",
+      "outcome": "response",
+      "status": 200,
+      "elapsedMs": 4,
+      "response": {
+        "selected_sop_id": null,
+        "ok": true,
+        "outcome": "completed"
+      }
+    },
+    {
+      "kind": "lifecycle",
+      "path": "/v1/sop/prepare",
+      "outcome": "response",
+      "status": 200,
+      "elapsedMs": 3,
+      "response": {
+        "selected_sop_id": null,
+        "ok": true,
+        "outcome": "completed"
+      }
+    },
+    {
+      "kind": "lifecycle",
+      "path": "/v1/sop/submit",
+      "outcome": "response",
+      "status": 200,
+      "elapsedMs": 4,
+      "response": {
+        "selected_sop_id": null,
+        "ok": true,
+        "outcome": "completed"
+      }
+    },
+    {
+      "kind": "lifecycle",
+      "path": "/healthz",
+      "outcome": "response",
+      "status": 200,
+      "elapsedMs": 3,
+      "response": {
+        "selected_sop_id": null,
+        "ok": null,
+        "outcome": null
+      }
+    },
+    {
+      "kind": "lifecycle",
+      "path": "/v1/sop/prepare",
+      "outcome": "response",
+      "status": 200,
+      "elapsedMs": 3,
+      "response": {
+        "selected_sop_id": null,
+        "ok": true,
+        "outcome": "completed"
+      }
+    },
+    {
+      "kind": "lifecycle",
+      "path": "/v1/sop/prepare",
+      "outcome": "response",
+      "status": 200,
+      "elapsedMs": 4,
+      "response": {
+        "selected_sop_id": null,
+        "ok": true,
+        "outcome": "completed"
+      }
+    },
+    {
+      "kind": "lifecycle",
+      "path": "/v1/sop/prepare",
+      "outcome": "response",
+      "status": 200,
+      "elapsedMs": 4,
+      "response": {
+        "selected_sop_id": null,
+        "ok": true,
+        "outcome": "completed"
+      }
+    },
+    {
+      "kind": "lifecycle",
+      "path": "/v1/sop/submit",
+      "outcome": "response",
+      "status": 200,
+      "elapsedMs": 11,
+      "response": {
+        "selected_sop_id": null,
+        "ok": true,
+        "outcome": "completed"
+      }
+    },
+    {
+      "kind": "lifecycle",
+      "path": "/v1/sop/prepare",
+      "outcome": "response",
+      "status": 200,
+      "elapsedMs": 4,
+      "response": {
+        "selected_sop_id": null,
+        "ok": true,
+        "outcome": "completed"
+      }
+    },
+    {
+      "kind": "lifecycle",
+      "path": "/v1/sop/prepare",
+      "outcome": "response",
+      "status": 200,
+      "elapsedMs": 4,
+      "response": {
+        "selected_sop_id": null,
+        "ok": true,
+        "outcome": "completed"
+      }
+    },
+    {
+      "kind": "lifecycle",
+      "path": "/v1/sop/prepare",
+      "outcome": "response",
+      "status": 200,
+      "elapsedMs": 4,
+      "response": {
+        "selected_sop_id": null,
+        "ok": true,
+        "outcome": "completed"
+      }
+    },
+    {
+      "kind": "lifecycle",
+      "path": "/v1/sop/submit",
+      "outcome": "response",
+      "status": 422,
+      "elapsedMs": 5,
+      "response": {
+        "selected_sop_id": null,
+        "ok": false,
+        "outcome": "failed"
+      }
+    },
+    {
+      "kind": "lifecycle",
+      "path": "/v1/sop/prepare",
+      "outcome": "response",
+      "status": 200,
+      "elapsedMs": 4,
+      "response": {
+        "selected_sop_id": null,
+        "ok": true,
+        "outcome": "completed"
+      }
+    },
+    {
+      "kind": "lifecycle",
+      "path": "/v1/sop/prepare",
+      "outcome": "response",
+      "status": 200,
+      "elapsedMs": 4,
+      "response": {
+        "selected_sop_id": null,
+        "ok": true,
+        "outcome": "completed"
+      }
+    },
+    {
+      "kind": "lifecycle",
+      "path": "/v1/sop/prepare",
+      "outcome": "response",
+      "status": 200,
+      "elapsedMs": 3,
+      "response": {
+        "selected_sop_id": null,
+        "ok": true,
+        "outcome": "completed"
+      }
+    },
+    {
+      "kind": "lifecycle",
+      "path": "/v1/sop/submit",
+      "outcome": "response",
+      "status": 200,
+      "elapsedMs": 6,
+      "response": {
+        "selected_sop_id": null,
+        "ok": true,
+        "outcome": "completed"
+      }
+    }
+  ],
+  "ordinary": [
+    {
+      "index": 1,
+      "status": "active",
+      "node": "build_plan",
+      "slots": {
+        "project_goal": "交付真实 SOP 运行验证",
+        "current_stage": "验证",
+        "known_blockers": "无"
+      },
+      "events": [
+        {
+          "type": "tool_call_finished",
+          "toolName": "read_file",
+          "ok": true,
+          "errorCode": null
+        },
+        {
+          "type": "tool_call_finished",
+          "toolName": "bash",
+          "ok": false,
+          "errorCode": "tool_not_found"
+        },
+        {
+          "type": "tool_call_finished",
+          "toolName": "submit_step_result",
+          "ok": true,
+          "errorCode": null
+        }
+      ]
+    },
+    {
+      "index": 2,
+      "status": "handoff",
+      "node": "confirm_scope",
+      "slots": {
+        "project_goal": "交付真实 SOP 运行验证",
+        "current_stage": "验证",
+        "known_blockers": "无"
+      },
+      "events": [
+        {
+          "type": "tool_call_finished",
+          "toolName": "read_file",
+          "ok": false,
+          "errorCode": "permission_denied"
+        },
+        {
+          "type": "tool_call_finished",
+          "toolName": "read_file",
+          "ok": false,
+          "errorCode": "permission_denied"
+        },
+        {
+          "type": "tool_call_finished",
+          "toolName": "read_file",
+          "ok": false,
+          "errorCode": "permission_denied"
+        },
+        {
+          "type": "tool_call_finished",
+          "toolName": "read_file",
+          "ok": false,
+          "errorCode": "permission_denied"
+        },
+        {
+          "type": "tool_call_finished",
+          "toolName": "read_file",
+          "ok": false,
+          "errorCode": "permission_denied"
+        },
+        {
+          "type": "tool_call_finished",
+          "toolName": "submit_step_result",
+          "ok": true,
+          "errorCode": null
+        }
+      ]
+    }
+  ],
+  "post": [
+    {
+      "index": 1,
+      "status": "active",
+      "node": "finalize_plan",
+      "events": [
+        {
+          "type": "tool_call_finished",
+          "toolName": "submit_step_result",
+          "ok": true,
+          "errorCode": null
+        }
+      ]
+    },
+    {
+      "index": 2,
+      "status": "completed",
+      "node": "finalize_plan",
+      "events": [
+        {
+          "type": "tool_call_finished",
+          "toolName": "submit_step_result",
+          "ok": false,
+          "errorCode": "tool_execution_failed"
+        },
+        {
+          "type": "tool_call_finished",
+          "toolName": "submit_step_result",
+          "ok": true,
+          "errorCode": null
+        }
+      ]
+    }
+  ]
+}

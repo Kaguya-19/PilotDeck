@@ -1,15 +1,60 @@
 {
+  "copyBlock": {
+    "plainText": "Plain text",
+    "wrap": "Wrap code",
+    "code": "Copy code",
+    "table": "Copy table",
+    "tableMarkdown": "Copy table as Markdown",
+    "copied": "Copied",
+    "failed": "Copy failed. Try again."
+  },
   "codeBlock": {
     "copy": "Copy",
     "copied": "Copied",
     "copyCode": "Copy code"
+  },
+  "workspace": {
+    "emptyTitle": "Ask PilotDeck about this project",
+    "emptyDescription": "Reference a workspace file with @ when you want it included."
+  },
+  "inputQueue": {
+    "sending": "Sending",
+    "label": "Queued messages",
+    "resume": "Continue",
+    "pausedAfterStop": "You stopped the current response, so the queue is paused",
+    "pausedAfterFailure": "The previous response failed, so the queue is paused",
+    "pausedAfterRestart": "Queued messages were restored and are paused",
+    "pausedAfterUncertainDelivery": "A message may already have been sent before restart. Retry only if needed",
+    "retryUncertain": "Retry",
+    "deliveryUncertain": "Delivery status uncertain",
+    "attachmentOnly": "Attachment message",
+    "steer": "Adjust direction",
+    "steerHint": "Add this message at the next safe boundary of the current response",
+    "delete": "Delete queued message",
+    "more": "More queue actions",
+    "moveToFront": "Move to front",
+    "resumeFailed": "Failed to resume the queue.",
+    "steerFailed": "The message remains queued.",
+    "deleteFailed": "Failed to delete the queued message.",
+    "moveFailed": "Failed to reorder the queue."
   },
   "copyMessage": {
     "copy": "Copy message",
     "copied": "Message copied",
     "selectFormat": "Select copy format",
     "copyAsMarkdown": "Copy as markdown",
-    "copyAsText": "Copy as text"
+    "copyAsText": "Copy as text",
+    "markdownShort": "MD",
+    "textShort": "TXT"
+  },
+  "edit": {
+    "message": "Edit message",
+    "cancel": "Cancel",
+    "send": "Send",
+    "failed": "Could not edit this message.",
+    "cancelled": "Message edit was cancelled.",
+    "missingTarget": "The last message can no longer be edited.",
+    "timeout": "Editing timed out. Please try again."
   },
   "messageTypes": {
     "user": "U",
@@ -23,7 +68,12 @@
   },
   "toolUseError": {
     "title": "Tool error",
-    "description": ""
+    "description": "",
+    "webSearchNotConfigured": {
+      "title": "Web Search Not Ready",
+      "description": "The search API key is missing or invalid. Please go to Settings -> Config -> Search to check your search provider and API key.",
+      "openSettings": "Go to Settings"
+    }
   },
   "setupRequired": {
     "title": "Configuration needed",
@@ -36,6 +86,7 @@
     "label": "Context compacted",
     "level": "Level {{level}}",
     "tokens": "{{tokens}} tokens before compact",
+    "tokensAfter": "{{before}} → {{after}} tokens",
     "stages": {
       "context_collapse": "Context collapse",
       "session_memory": "Session memory compaction",
@@ -47,15 +98,19 @@
   "working": {
     "default": "Working",
     "processing": "Processing",
-    "thinking": "thinking",
+    "thinking": "Thinking...",
+    "waitingForModel": "Waiting for model response...",
     "callingModel": "Calling model...",
     "executingTool": "Running tool...",
     "generating": "Generating response",
     "compacting": "Compacting context...",
+    "compactFailed": "Context compaction failed",
+    "compactCancelled": "Context compaction stopped",
     "compactingLevel": "Triggering level {{level}} compaction: {{label}}",
     "waitingForPermission": "Waiting for permission",
     "retrying": "Reconnecting {{attempt}}/{{max}}{{delay}}",
-    "waitingForSubagent": "Waiting for subagent"
+    "waitingForSubagent": "Waiting for subagent",
+    "waitingForWebFetch": "Fetching web content..."
   },
   "process": {
     "summary": {
@@ -147,7 +202,8 @@
   "thinking": {
     "title": "Thinking...",
     "completed": "Thought process",
-    "emoji": "💭 Thinking..."
+    "emoji": "💭 Thinking...",
+    "liveContentLabel": "Live thinking content"
   },
   "json": {
     "response": "JSON Response"
@@ -159,6 +215,18 @@
     "retry": "Retry in this chat to use the tool.",
     "error": "Unable to grant this chat permission. Please try again.",
     "openSettings": "Open settings"
+  },
+  "permissionBanner": {
+    "title": "Permission required",
+    "titleCount": "Permission required ({{count}})",
+    "tool": "Tool:",
+    "allowRule": "Allow rule:",
+    "viewToolInput": "View tool input",
+    "viewToolInputs": "View {{count}} tool inputs",
+    "allowOnce": "Allow once",
+    "allowRemember": "Allow & remember",
+    "allowSaved": "Allow (saved)",
+    "deny": "Deny"
   },
   "todo": {
     "updated": "Todo list has been updated successfully",
@@ -219,10 +287,46 @@
     "placeholder": "Type / for commands, @ for files, or ask {{provider}} anything...",
     "placeholderDefault": "Type your message...",
     "disabled": "Input disabled",
+    "uploading": "Uploading…",
+    "uploadComplete": "Upload complete",
+    "retryUpload": "Retry",
+    "cancelUpload": "Cancel upload {{file}}",
+    "removeAttachment": "Remove attachment {{file}}",
+    "attachmentOnlyPrompt": "Please review the attached file(s).",
+    "projectOnlyPrompt": "Please review the selected project content.",
+    "skillOnlyPrompt": "Please use the selected skills to complete the task.",
+    "contextFolder": "Folder",
+    "contextFile": "File",
+    "projectContextTitle": "Referenced project content:",
     "attachFiles": "Attach files",
     "attachImages": "Attach images",
     "mentionFile": "Mention a file",
     "slashCommand": "Run a slash command",
+    "projectFiles": "Reference project content",
+    "projectFilesCount_one": "{{count}} item",
+    "projectFilesCount_other": "{{count}} items",
+    "projectFilesAriaLabel": "Project content available to reference",
+    "projectFilesLoading": "Loading project files…",
+    "projectFilesEmpty": "No matching project content",
+    "projectFilesLoadingMore": "Load more…",
+    "projectPathMissing": "The current project path is unavailable.",
+    "projectFilesNonJson": "The project files service returned an invalid response ({{contentType}}). Restart the backend service.",
+    "projectFilesLoadFailedStatus": "Failed to load project files ({{status}}).",
+    "projectFilesLoadFailed": "Failed to load project files.",
+    "selectedFilesAndSkills": "Selected files, skills, and commands",
+    "removeSelectedFile": "Remove {{name}}",
+    "removeSelectedSkill": "Remove {{name}}",
+    "removeSelectedCommand": "Remove {{name}}",
+    "removeSelectedRunMode": "Remove {{name}}",
+    "remove": "Remove",
+    "addContext": "Add files or skills",
+    "files": "Files",
+    "filesAndFoldersDescription": "Add local content as task context",
+    "folders": "Folders",
+    "foldersDescription": "Keep folder structure and upload all content",
+    "skills": "Skills",
+    "noSkills": "No skills available",
+    "searchSkills": "Search skills",
     "send": "Send",
     "stop": "Stop",
     "hintText": {
@@ -233,20 +337,84 @@
     "showAllCommands": "Show all commands",
     "clearInput": "Clear input",
     "scrollToBottom": "Scroll to bottom",
+    "contextStatusTitle": "Context window",
+    "contextStatusUsed": "{{used}} tokens used out of {{total}}.",
+    "contextStatus": "{{percentLabel}} used. {{used}} tokens used out of {{total}}. Auto compact runs near the limit.",
+    "contextStatusBlocking": "{{percentLabel}} used. {{used}} tokens used out of {{total}}. Auto compact ran, but the context is still at the protection threshold.",
+    "contextStatusAutoCompact": "Auto compact runs when the conversation approaches the configured limit.",
+    "contextStatusBlockingBody": "Compaction ran, but the context is still at the protection threshold.",
+    "contextStatusUnknown": "Context usage unknown. It will appear after the next model response.",
+    "contextStatusUnknownBody": "No token budget has been reported yet. It will appear after the next model response.",
     "permissions": {
       "default": "Default Permissions",
       "defaultDescription": "Ask before risky operations",
       "bypassPermissions": "Full Access",
       "bypassPermissionsDescription": "Skip confirmations and allow full access",
-      "change": "Select permission mode"
+      "change": "Select permission mode",
+      "saveFailed": "Unable to load or save permissions. Please retry before sending.",
+      "retry": "Retry"
     },
     "runModes": {
       "agent": "Agent",
       "plan": "Plan",
+      "ask": "Ask",
       "change": "Select run mode",
       "agentDescription": "Directly process and execute the task",
-      "planDescription": "Generate a plan first, then execute after confirmation"
-    }
+      "planDescription": "Generate a plan first, then execute after confirmation",
+      "askDescription": "Only answers questions without modifying files"
+    },
+    "models": {
+      "select": "Select model",
+      "auto": "Auto",
+      "change": "Select model",
+      "search": "Search models",
+      "empty": "No matching models",
+      "advanced": "Advanced settings",
+      "reasoning": "Reasoning",
+      "speed": "Speed",
+      "reasoningLevels": {
+        "off": "Off",
+        "light": "Light",
+        "low": "Low",
+        "medium": "Medium",
+        "high": "High",
+        "xhigh": "Xhigh",
+        "max": "Max",
+        "default": "Default"
+      },
+      "reasoningMenuLevels": {
+        "default": "Default",
+        "low": "Low",
+        "medium": "Medium",
+        "high": "High",
+        "xhigh": "Xhigh",
+        "max": "Max"
+      },
+      "speedLevels": {
+        "standard": "Standard",
+        "fast": "Fast"
+      },
+      "backToModels": "Back to models"
+    },
+    "sending": "Sending...",
+    "queueSend": "Queue message",
+    "stopping": "Stopping..."
+  },
+  "documentReferences": {
+    "defaultPrompt": "Please answer based on the document selection I quoted.",
+    "pages": "p. {{pages}}",
+    "pageUnknown": "page unknown",
+    "remove": "Remove reference",
+    "open": "Open {{name}}"
+  },
+  "replyQuotes": {
+    "addToChat": "Add to PilotDeck chat",
+    "chip": "{{count}} quotes",
+    "chip_one": "{{count}} quote",
+    "chip_other": "{{count}} quotes",
+    "remove": "Remove this quote",
+    "removeAll": "Remove all quotes",
+    "panelLabel": "Quoted assistant replies"
   },
   "commandMenu": {
     "empty": "No commands available",
@@ -257,7 +425,10 @@
       "project": "Project",
       "user": "User",
       "other": "Other"
-    }
+    },
+    "title": "Commands",
+    "search": "Search",
+    "ariaLabel": "Available commands"
   },
   "thinkingMode": {
     "selector": {
@@ -314,6 +485,8 @@
     }
   },
   "session": {
+    "loadFailedTitle": "Could not load this conversation",
+    "retryLoad": "Retry",
     "continue": {
       "title": "Continue your conversation",
       "description": "Ask questions about your code, request changes, or get help with development tasks"
@@ -325,13 +498,33 @@
     "messages": {
       "showingOf": "Showing {{shown}} of {{total}} messages",
       "scrollToLoad": "Scroll up to load more",
-      "showingLast": "Showing last {{count}} messages ({{total}} total)",
+      "showingLast": "Showing last {{visibleCount}} of {{total}}",
       "loadEarlier": "Load earlier messages",
       "loadAll": "Load all messages",
       "loadingAll": "Loading all messages...",
       "allLoaded": "All messages loaded",
       "perfWarning": "All messages loaded — scrolling may be slower. Click \"Scroll to bottom\" to restore performance."
-    }
+    },
+    "scroll": {
+      "returnToLatest": "Back to latest"
+    },
+    "readonlyTranscript": "This transcript is read-only."
+  },
+  "loading": "Loading...",
+  "emptyChat": {
+    "title": "Start a new conversation",
+    "noProject": "Pick a project from the sidebar",
+    "emptySessionTitle": "No displayable messages in this conversation",
+    "emptySessionDescription": "This conversation exists, but it does not contain messages that can be rendered here.",
+    "readonlyBackgroundTitle": "No displayable messages in this task transcript",
+    "readonlyBackgroundDescription": "This read-only background task transcript only contains records the chat view cannot display.",
+    "prompts": {
+      "plan": "Plan a refactor for this project",
+      "summary": "Summarize recent changes",
+      "review": "Review the most recent file I touched"
+    },
+    "readonlyTranscriptTitle": "No displayable messages in this read-only transcript",
+    "readonlyTranscriptDescription": "This read-only transcript only contains records the chat view cannot display."
   },
   "shell": {
     "selectProject": {
@@ -406,7 +599,142 @@
       "completed": "Completed",
       "stopped": "Stopped",
       "thinking": "Thinking",
-      "executingTool": "Executing {{toolName}}"
+      "executingTool": "Executing {{toolName}}",
+      "connecting": "Connecting…"
+    }
+  },
+  "agentStatus": {
+    "modelRequestFailed": {
+      "message": "{{providerMessage}}\n\nSee the suggested action below.",
+      "actions": {
+        "settingsDefault": "Check Settings → Model Provider and verify the selected provider, base URL, API key, model name, and timeoutMs. If the provider is slow or the network is unstable, increase timeoutMs or check provider status.",
+        "auth": "Update the API key or access permissions for {{provider}} in Settings → Model Provider, or run pilotdeck setup.",
+        "modelNotFound": "Choose a valid model for {{provider}} in Settings → Model Provider, or add it under model.providers.<id>.models in pilotdeck.yaml.",
+        "timeout": "Increase timeoutMs for {{provider}} in Settings → Model Provider → Advanced, or check local network/proxy and provider status.",
+        "streamIdleTimeout": "Increase streamIdleTimeoutMs for {{provider}} in Settings → Model Provider → Advanced, or check local network/proxy and provider status.",
+        "rateLimit": "Wait for the provider rate limit to reset, reduce concurrency, or switch to another provider/model in Settings.",
+        "billing": "Top up billing/quota on the provider API side, or switch to another provider/model in Settings.",
+        "contextOverflow": "Run /compact, start a new session, remove large attachments, or switch to a larger-context model in Settings.",
+        "payloadTooLarge": "Reduce attachments/context size, run /compact, or start a new session before retrying.",
+        "maxOutput": "Increase max output tokens in Settings → Model Provider, or ask the agent to split the answer into smaller parts.",
+        "imageTooLarge": "Resize or remove large images, then retry.",
+        "providerRetry": "Retry later, check provider API status, or switch to another provider/model in Settings if it repeats."
+      }
+    },
+    "emptyResponse": {
+      "message": "The model returned empty content repeatedly, so this turn has stopped. Try again later or increase max output tokens.",
+      "hint": "Increase max output tokens in Settings → Model Provider, retry with a shorter prompt, or check whether this provider/model supports the requested output format."
+    },
+    "maxTurns": {
+      "message": "Reached the maximum number of turns ({{maxTurns}}), so this turn has stopped. Increase maxTurns or split the task into smaller steps and try again.",
+      "hint": "Increase maxTurns in local config if this task legitimately needs more agent steps, or split the task into smaller prompts and try again."
+    },
+    "maxOutputRecoveryExhausted": {
+      "message": "Output token recovery was exhausted, so the visible response may be incomplete. Increase max output tokens or split the task into smaller steps and try again.",
+      "hint": "Increase max output tokens in Settings → Model Provider, or ask the agent to split the answer into smaller parts."
+    },
+    "structuredOutputCompleted": {
+      "message": "Structured output was returned, so this turn has completed."
+    },
+    "contentFilter": {
+      "message": "The response may be incomplete because the model stopped due to content filtering.",
+      "hint": "Retry with a narrower request or adjust the prompt to avoid filtered content; if this seems wrong, check the provider API policy/status for the selected model."
+    },
+    "unknownFinishReason": {
+      "message": "The model stream ended without a normal finish reason, so the response may be incomplete.",
+      "hint": "Retry the turn; if it repeats, check provider API status/logs for stream finish reasons and verify the selected provider/model in Settings → Model Provider."
+    },
+    "turnAborted": {
+      "message": "This turn was aborted before completion.",
+      "hint": "Retry when you are ready to continue. If this was unexpected, check whether you clicked Stop, switched sessions during a run, or lost the gateway connection."
+    },
+    "toolCallRecoveryExhausted": {
+      "message": "{{message}}",
+      "hint": "Retry with a shorter prompt, ask the agent to split large tool inputs into smaller steps, or switch to a model with stronger tool-calling support in Settings → Model Provider."
+    }
+  },
+  "workspacePicker": {
+    "select": "Select workspace",
+    "search": "Search projects",
+    "newProject": "New project",
+    "generalConversation": "General conversation",
+    "empty": "No matching projects",
+    "selectRequired": "Select a workspace to send"
+  },
+  "welcome": {
+    "greetingWithProject": "What do you want us to build in {{project}}?",
+    "noProject": "What's on the plan today?"
+  },
+  "fork": {
+    "missingTarget": "Cannot fork this message.",
+    "ready": "Fork created — edit the prompt and send when ready.",
+    "failed": "Fork failed.",
+    "emptyTitle": "New branch ready",
+    "emptyDescription": "This branch starts from the beginning of the original conversation. The forked prompt is waiting in the composer — edit it and send to continue here.",
+    "banner": "Forked from {{parent}}",
+    "unsupportedAttachments": "Forking messages with attachments or media is not supported yet",
+    "fromHere": "Fork from here · carries {{count}} messages"
+  },
+  "common": {
+    "remove": "Remove"
+  },
+  "fileArtifacts": {
+    "updatedSinceMessage": "This file has changed since this message. Open the current version?",
+    "browseTitle": "Browse",
+    "browse": "Browse {{name}}",
+    "download": "Download / save a copy",
+    "downloadName": "Download {{name}}",
+    "reference": "Reference in chat",
+    "referenceName": "Reference {{name}} in chat",
+    "incomplete": "Task incomplete",
+    "generated": "Generated this turn",
+    "updated": "Updated this turn",
+    "collapse": "Collapse",
+    "showAll": "View all {{count}} files"
+  },
+  "toolDisplay": {
+    "copyCommand": "Copy command",
+    "collapse": "Limit height",
+    "full": "Expand fully",
+    "copy": "Copy",
+    "details": "Tool details",
+    "output": "Output",
+    "success": "Success",
+    "failed": "Failed",
+    "exitCode": "Exit {{code}}",
+    "executing": "Running…",
+    "actionRequired": "Action required",
+    "noResult": "No result recorded",
+    "noOutput": "No output",
+    "fileContent": "File content",
+    "changes": "Changes",
+    "noChanges": "No changes",
+    "running": {
+      "command": "Running",
+      "write": "Writing",
+      "edit": "Editing",
+      "read": "Reading",
+      "search": "Searching",
+      "tool": "Using",
+      "skill": "Reading skill"
+    },
+    "pending": {
+      "command": "Command",
+      "write": "Write",
+      "edit": "Edit",
+      "read": "Read",
+      "search": "Search",
+      "tool": "Tool",
+      "skill": "Read skill"
+    },
+    "done": {
+      "command": "Ran",
+      "write": "Wrote",
+      "edit": "Edited",
+      "read": "Read",
+      "search": "Searched",
+      "tool": "Used",
+      "skill": "Read skill"
     }
   }
 }

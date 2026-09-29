@@ -1,0 +1,1 @@
+"""PilotDeck DOCX skill implementation."""

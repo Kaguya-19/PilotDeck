@@ -1,0 +1,36 @@
+{
+  "status": "passed",
+  "permissionMode": "default",
+  "provider": "provider1",
+  "model": "qwen3.6-flash-distill",
+  "configuredDefinitionsPath": "products/pilotdeck-staffdeck-sop/evidence/g5-pilotdeck-page-published-1.2.1.json",
+  "published": {
+    "sopId": "project_delivery_plan",
+    "version": "1.2.1",
+    "nodes": 4,
+    "edges": 4
+  },
+  "inputContract": "ordinary project-delivery requests; no SOP tool name or result status in user messages",
+  "capabilityFilter": ["read_file", "submit_step_result"],
+  "firstBusinessTool": { "toolName": "read_file", "ok": true },
+  "selectedState": {
+    "skillId": "project_delivery_plan",
+    "nodeTransitions": ["n1_collect", "confirm_scope", "finalize_plan"]
+  },
+  "handoff": {
+    "waitId": "6de20f4e-6f53-4856-b423-3b10456433a0",
+    "kind": "handoff",
+    "stepId": "confirm_scope",
+    "reloadedSameWaitId": true
+  },
+  "approval": {
+    "accepted": true,
+    "duplicateReplay": true,
+    "source": "human"
+  },
+  "terminal": {
+    "status": "completed",
+    "activeStep": "finalize_plan",
+    "scopeConfirmed": true
+  }
+}

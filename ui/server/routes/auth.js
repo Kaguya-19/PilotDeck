@@ -6,6 +6,13 @@ import { DISABLE_LOCAL_AUTH } from '../constants/config.js';
 
 const router = express.Router();
 
+// PilotDeck is a single-user deployment. The owner is the only supported
+// module administrator; this is an explicit host policy, separate from any
+// StaffDeck service credential or module availability check.
+function publicUser(user) {
+  return user ? { id: user.id, username: user.username, is_admin: process.env.PILOTDECK_MODULE_ADMIN !== '0' } : user;
+}
+
 // Check auth status and setup requirements
 router.get('/status', async (req, res) => {
   try {
@@ -14,12 +21,14 @@ router.get('/status', async (req, res) => {
         needsSetup: false,
         isAuthenticated: true,
         authDisabled: true,
+        moduleAdmin: process.env.PILOTDECK_MODULE_ADMIN !== '0',
       });
     }
     const hasUsers = await userDb.hasUsers();
     res.json({ 
       needsSetup: !hasUsers,
-      isAuthenticated: false // Will be overridden by frontend if token exists
+      isAuthenticated: false, // Will be overridden by frontend if token exists
+      moduleAdmin: process.env.PILOTDECK_MODULE_ADMIN !== '0',
     });
   } catch (error) {
     console.error('Auth status error:', error);
@@ -71,7 +80,7 @@ router.post('/register', async (req, res) => {
 
       res.json({
         success: true,
-        user: { id: user.id, username: user.username },
+        user: publicUser(user),
         token
       });
     } catch (error) {
@@ -122,7 +131,7 @@ router.post('/login', async (req, res) => {
     
     res.json({
       success: true,
-      user: { id: user.id, username: user.username },
+      user: publicUser(user),
       token
     });
     
@@ -135,7 +144,7 @@ router.post('/login', async (req, res) => {
 // Get current user (protected route)
 router.get('/user', authenticateToken, (req, res) => {
   res.json({
-    user: req.user
+    user: publicUser(req.user)
   });
 });
 

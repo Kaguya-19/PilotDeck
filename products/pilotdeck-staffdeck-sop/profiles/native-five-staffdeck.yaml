@@ -1,0 +1,90 @@
+schemaVersion: 1
+agent:
+  model: provider1/qwen3.6-flash-distill
+model:
+  providers:
+    provider1:
+      protocol: openai
+      url: ${PILOTDECK_REAL_MODEL_BASE_URL}
+      apiKey: ${PILOTDECK_REAL_MODEL_API_KEY}
+      models:
+        qwen3.6-flash-distill:
+          capabilities:
+            supportsToolUse: true
+webui:
+  staffdeckCopy:
+    enabled: true
+    contract: staffdeck.enterprise-copy/v1
+    methods: [list_agents, list_knowledge_bases, list_skills, import_resources]
+    endpointEnv: STAFFDECK_FORMAL_API_ORIGIN
+    tenantIdEnv: STAFFDECK_COPY_TENANT_ID
+    actorUserIdEnv: STAFFDECK_COPY_ACTOR_USER_ID
+    targetAgentIdEnv: STAFFDECK_COPY_TARGET_AGENT_ID
+    pilotDeckUserIdEnv: STAFFDECK_COPY_PILOTDECK_USER_ID
+    userTokenEnv: STAFFDECK_COPY_USER_TOKEN
+modules:
+  # The five PilotDeck owners stay native.  Only StaffDeck-owned services
+  # cross a process boundary in this delivery profile.
+  agentLoop: { enabled: true, provider: pilotdeck }
+  skills: { enabled: true, provider: pilotdeck }
+  tools: { enabled: true, provider: pilotdeck }
+  context: { enabled: true, provider: pilotdeck }
+  modelProvider: { enabled: true, provider: pilotdeck }
+  knowledge:
+    enabled: true
+    implementationId: staffdeck.knowledge
+    contract: staffdeck.knowledge/v1
+    transport: module-http-v2
+    endpoint: http://knowledge-runtime:8090
+    manifestPath: /module-manifest
+    callPath: /v2/module/call
+    methods:
+      - list_bases
+      - create_base
+      - get_base
+      - update_base
+      - delete_base
+      - list_versions
+      - sync_base
+      - publish_version
+      - rollback_version
+      - list_documents
+      - get_document
+      - import_document
+      - import_okf
+      - update_document
+      - delete_document
+      - list_document_buckets
+      - update_bucket
+      - list_bucket_chunks
+      - update_chunk
+      - get_job
+      - list_jobs
+      - cancel_job
+      - list_okf_concepts
+      - get_okf_concept
+      - upsert_okf_concept
+      - export_okf
+      - lint_okf
+      - list_discoveries
+      - confirm_discovery
+      - reject_discovery
+      - query
+      - resolve_citation
+  sop:
+    enabled: true
+    implementationId: staffdeck.portable-sop
+    contract: sop.lifecycle/v2
+    transport: sop-http-v2
+    endpoint: http://sop-runtime:8091
+    manifestPath: /healthz
+    definitionsPath: ../sops/operator-approval.yaml
+    defaultSopId: operator_approval
+    timeoutMs: 30000
+    management:
+      enabled: true
+      endpointEnv: STAFFDECK_SOP_MANAGEMENT_ENDPOINT
+      apiKeyEnv: STAFFDECK_SOP_MANAGEMENT_API_KEY
+      credentialIdEnv: STAFFDECK_SOP_MANAGEMENT_CREDENTIAL_ID
+      agentIdEnv: STAFFDECK_COPY_TARGET_AGENT_ID
+      methods: [list, create, get_draft, replace_draft, validate, publish, archive, list_versions, get_version, rollback]

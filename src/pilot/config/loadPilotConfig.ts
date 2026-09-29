@@ -5,12 +5,18 @@ import { parseCronConfig } from "../../cron/config/parseCronConfig.js";
 import { parseModelConfig } from "../../model/config/parseModelConfig.js";
 import { isRecord } from "../../model/config/schema.js";
 import { ModelConfigError } from "../../model/protocol/errors.js";
-import { getPilotConfigFilePath, getPilotMemoryRootDir, resolvePilotHome } from "../paths.js";
+import {
+  getPilotConfigFilePath,
+  getPilotMemoryRootDir,
+  getPilotProjectConfigFilePath,
+  resolvePilotHome,
+} from "../paths.js";
 import { sha256, stableStringify } from "./hash.js";
 import { mergeConfigSources } from "./merge.js";
 import { parseMemoryConfig } from "./parseMemoryConfig.js";
 import { parseAdaptersConfig, parseGatewayConfig } from "./parseGatewayConfig.js";
 import { parseToolsConfig } from "./parseToolsConfig.js";
+import { parseModulesConfig } from "./parseModulesConfig.js";
 import { parseRouterConfig } from "../../router/config/parseRouterConfig.js";
 import { redactConfig } from "./redact.js";
 import {
@@ -26,11 +32,31 @@ import {
   type PilotRawConfig,
   type PilotTelemetryConfig,
 } from "./types.js";
+import {
+  DEFAULT_RUNTIME_CONTEXT_SURFACE,
+  isRuntimeContextSurface,
+} from "../../context/RuntimeContextSurface.js";
+import {
+  DEFAULT_INTERACTION_PROFILE_NAME,
+  isInteractionProfileName,
+} from "../../interaction/InteractionProfile.js";
+import {
+  DEFAULT_SANDBOX_MODE,
+  SANDBOX_MODES,
+  isSandboxMode,
+  resolveSandboxMode,
+} from "../../tool/execution-world/SandboxPort.js";
 
 const SUPPORTED_SCHEMA_VERSION = 1;
 const ENV_CONFIG_OVERRIDES = [
   ["PILOT_AGENT_MODEL", ["agent", "model"]],
 ] as const;
+
+export function resolvePilotConfigPath(options: PilotConfigLoadOptions = {}): string {
+  const env = options.env ?? process.env;
+  const envConfigPath = env.PILOTDECK_CONFIG_PATH?.trim();
+  return options.configPath ?? envConfigPath ?? getPilotConfigFilePath(resolvePilotHome(env));
+}
 
 export function loadPilotConfig(options: PilotConfigLoadOptions = {}): PilotConfigSnapshot {
   const env = options.env ?? process.env;
@@ -49,8 +75,19 @@ export function loadPilotConfig(options: PilotConfigLoadOptions = {}): PilotConf
     });
   }
 
-  const defaultConfigPath = getPilotConfigFilePath(pilotHome);
+  const defaultConfigPath = resolvePilotConfigPath(options);
   const defaultConfig = readYamlSource(defaultConfigPath, "default", 10, loadedAt, diagnostics, sources);
+
+  // Project configuration is a Gateway-host-owned source. It is resolved
+  // before environment overrides so a process-level deployment policy can
+  // still take precedence. A missing project file is intentionally a no-op,
+  // preserving the historical global-config-only behavior.
+  const projectConfigPath = options.projectRoot
+    ? getPilotProjectConfigFilePath(options.projectRoot)
+    : undefined;
+  const projectConfig = projectConfigPath
+    ? readYamlSource(projectConfigPath, "project", 20, loadedAt, diagnostics, sources)
+    : undefined;
 
   const envConfig = readEnvOverrides(env);
   if (envConfig) {
@@ -63,7 +100,7 @@ export function loadPilotConfig(options: PilotConfigLoadOptions = {}): PilotConf
     });
   }
 
-  const rawConfig = mergeConfigSources(defaultConfig, envConfig) as PilotRawConfig;
+  const rawConfig = mergeConfigSources(defaultConfig, projectConfig, envConfig) as PilotRawConfig;
   validateTopLevel(rawConfig, diagnostics);
   const schemaVersion = parseSchemaVersion(rawConfig.schemaVersion, diagnostics);
 
@@ -124,6 +161,7 @@ export function loadPilotConfig(options: PilotConfigLoadOptions = {}): PilotConf
   const alwaysOn = parseAlwaysOnConfig(rawConfig.alwaysOn, diagnostics);
   const cron = parseCronConfig(rawConfig.cron, diagnostics);
   const tools = parseToolsConfig(rawConfig.tools, diagnostics);
+  const modules = parseModulesConfig(rawConfig.modules, pilotHome, diagnostics);
   const telemetry = parseTelemetryConfig(rawConfig.telemetry);
   const proxy = parseProxyConfig(rawConfig, diagnostics);
   throwConfigErrorIfFatal(diagnostics);
@@ -141,6 +179,7 @@ export function loadPilotConfig(options: PilotConfigLoadOptions = {}): PilotConf
     tools,
     telemetry,
     proxy,
+    modules,
   });
   return deepFreeze({
     version: options.version ?? 1,
@@ -162,6 +201,7 @@ export function loadPilotConfig(options: PilotConfigLoadOptions = {}): PilotConf
       ...(tools ? { tools } : {}),
       telemetry,
       ...(proxy ? { proxy } : {}),
+      ...(modules ? { modules } : {}),
     },
   });
 }
@@ -314,6 +354,7 @@ function validateTopLevel(rawConfig: PilotRawConfig, diagnostics: PilotConfigDia
     // config without producing diagnostic noise.
     "webui",
     "telemetry",
+    "modules",
   ]);
   for (const key of Object.keys(rawConfig)) {
     if (!allowedKeys.has(key)) {
@@ -346,8 +387,12 @@ function parseAgent(
   }
 
   const model = parseAgentModelSelection(rawAgent.model, "agent.model", modelConfig, diagnostics);
-  const subagents = parseAgentSubagents(rawAgent.subagents, diagnostics);
+  const sandboxMode = parseSandboxMode(rawAgent.sandboxMode, diagnostics);
+  const runtimeContextSurface = parseRuntimeContextSurface(rawAgent.runtimeContextSurface, diagnostics);
+  const interactionProfile = parseInteractionProfile(rawAgent.interactionProfile, diagnostics);
+  const subagents = parseAgentSubagents(rawAgent.subagents, modelConfig, diagnostics);
   const maxContextTokens = readOptionalPositiveInteger(rawAgent.maxContextTokens, "agent.maxContextTokens");
+  const maxOutputTokens = readOptionalPositiveInteger(rawAgent.maxOutputTokens, "agent.maxOutputTokens");
   const thinking = parseAgentThinking(rawAgent.thinking);
   if (rawAgent.fallbackModel !== undefined) {
     diagnostics.push({
@@ -363,10 +408,62 @@ function parseAgent(
 
   return {
     model,
+    sandboxMode,
+    ...(runtimeContextSurface ? { runtimeContextSurface } : {}),
+    ...(interactionProfile ? { interactionProfile } : {}),
     ...(maxContextTokens !== undefined ? { maxContextTokens } : {}),
+    ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
     ...(thinking ? { thinking } : {}),
     ...(subagents ? { subagents } : {}),
   };
+}
+
+function parseSandboxMode(
+  value: unknown,
+  diagnostics: PilotConfigDiagnostic[],
+): NonNullable<PilotAgentConfig["sandboxMode"]> {
+  if (value === undefined || value === null) return DEFAULT_SANDBOX_MODE;
+  if (isSandboxMode(value)) return value;
+  diagnostics.push({
+    code: "CONFIG_AGENT_SANDBOX_MODE_INVALID",
+    severity: "warning",
+    message: `agent.sandboxMode must be ${SANDBOX_MODES.join(", ")}; using ${DEFAULT_SANDBOX_MODE}.`,
+    path: "agent.sandboxMode",
+    recoverable: true,
+  });
+  return resolveSandboxMode(value);
+}
+
+function parseInteractionProfile(
+  value: unknown,
+  diagnostics: PilotConfigDiagnostic[],
+): PilotAgentConfig["interactionProfile"] {
+  if (value === undefined || value === null) return DEFAULT_INTERACTION_PROFILE_NAME;
+  if (isInteractionProfileName(value)) return value;
+  diagnostics.push({
+    code: "CONFIG_AGENT_INTERACTION_PROFILE_INVALID",
+    severity: "warning",
+    message: "agent.interactionProfile must be interactive, headless, or disabled; using the interactive profile default.",
+    path: "agent.interactionProfile",
+    recoverable: true,
+  });
+  return DEFAULT_INTERACTION_PROFILE_NAME;
+}
+
+function parseRuntimeContextSurface(
+  value: unknown,
+  diagnostics: PilotConfigDiagnostic[],
+): PilotAgentConfig["runtimeContextSurface"] {
+  if (value === undefined || value === null) return DEFAULT_RUNTIME_CONTEXT_SURFACE;
+  if (isRuntimeContextSurface(value)) return value;
+  diagnostics.push({
+    code: "CONFIG_AGENT_RUNTIME_CONTEXT_SURFACE_INVALID",
+    severity: "warning",
+    message: "agent.runtimeContextSurface must be system_prompt or user_message; using the system_prompt profile default.",
+    path: "agent.runtimeContextSurface",
+    recoverable: true,
+  });
+  return DEFAULT_RUNTIME_CONTEXT_SURFACE;
 }
 
 function parseAgentThinking(value: unknown): PilotAgentConfig["thinking"] | undefined {
@@ -381,6 +478,7 @@ function parseAgentThinking(value: unknown): PilotAgentConfig["thinking"] | unde
 
 function parseAgentSubagents(
   value: unknown,
+  modelConfig: ReturnType<typeof parseModel>,
   diagnostics: PilotConfigDiagnostic[],
 ): PilotAgentConfig["subagents"] | undefined {
   if (value === undefined) {
@@ -390,7 +488,18 @@ function parseAgentSubagents(
     throw new PilotConfigError("CONFIG_AGENT_SUBAGENTS_INVALID", "agent.subagents must be an object.");
   }
   for (const key of Object.keys(value)) {
-    if (key !== "timeoutMs") {
+    if (
+      key === "params" &&
+      !(isRecord(value.params) && Object.keys(value.params).length === 0)
+    ) {
+      diagnostics.push({
+        code: "CONFIG_AGENT_SUBAGENTS_PARAMS_UNSUPPORTED",
+        severity: "warning",
+        message: "agent.subagents.params is not supported and will be ignored.",
+        path: "agent.subagents.params",
+        recoverable: true,
+      });
+    } else if (key !== "timeoutMs" && key !== "maxDepth" && key !== "default" && key !== "params") {
       diagnostics.push({
         code: "CONFIG_AGENT_UNKNOWN_FIELD",
         severity: "warning",
@@ -400,8 +509,85 @@ function parseAgentSubagents(
       });
     }
   }
+  let defaultModel: PilotAgentModelSelection | undefined;
+  if (value.default !== undefined && value.default !== null) {
+    if (typeof value.default === "string" && value.default.trim() === "inherit") {
+      defaultModel = undefined;
+    } else {
+      defaultModel = parseSubagentDefaultModelSelection(
+        value.default,
+        modelConfig,
+        diagnostics,
+      );
+    }
+  }
+  const maxDepth = readOptionalNonNegativeInteger(value.maxDepth, "agent.subagents.maxDepth");
   return {
+    ...(defaultModel ? { default: defaultModel } : {}),
     timeoutMs: readOptionalPositiveInteger(value.timeoutMs, "agent.subagents.timeoutMs"),
+    maxDepth: readOptionalNonNegativeInteger(value.maxDepth, "agent.subagents.maxDepth"),
+  };
+}
+
+function parseSubagentDefaultModelSelection(
+  value: unknown,
+  modelConfig: ReturnType<typeof parseModel>,
+  diagnostics: PilotConfigDiagnostic[],
+): PilotAgentModelSelection | undefined {
+  const path = "agent.subagents.default";
+  if (typeof value !== "string" || value.trim().length === 0) {
+    diagnostics.push({
+      code: "CONFIG_AGENT_SUBAGENT_MODEL_INVALID",
+      severity: "warning",
+      message: `${path} must be inherit or a provider/model string. Inheriting agent.model instead.`,
+      path,
+      recoverable: true,
+    });
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  const separatorIndex = trimmed.indexOf("/");
+  const providerId = separatorIndex >= 0 ? trimmed.slice(0, separatorIndex) : "";
+  const modelId = separatorIndex >= 0 ? trimmed.slice(separatorIndex + 1) : "";
+  if (!providerId || !modelId) {
+    diagnostics.push({
+      code: "CONFIG_AGENT_SUBAGENT_MODEL_INVALID",
+      severity: "warning",
+      message: `${path} must use provider/model format. Inheriting agent.model instead.`,
+      path,
+      recoverable: true,
+    });
+    return undefined;
+  }
+
+  const provider = modelConfig.providers[providerId];
+  if (!provider) {
+    diagnostics.push({
+      code: "CONFIG_AGENT_SUBAGENT_PROVIDER_NOT_FOUND",
+      severity: "warning",
+      message: `${path} references unknown provider ${providerId}. Inheriting agent.model instead.`,
+      path,
+      recoverable: true,
+    });
+    return undefined;
+  }
+
+  if (!provider.models[modelId]) {
+    diagnostics.push({
+      code: "CONFIG_AGENT_SUBAGENT_MODEL_NOT_FOUND",
+      severity: "warning",
+      message: `${path} references unknown model ${modelId} for provider ${providerId}. Inheriting agent.model instead.`,
+      path,
+      recoverable: true,
+    });
+    return undefined;
+  }
+
+  return {
+    id: trimmed,
+    provider: providerId,
+    model: modelId,
   };
 }
 
@@ -505,7 +691,17 @@ function parseModel(
   diagnostics: PilotConfigDiagnostic[],
 ) {
   try {
-    return parseModelConfig(rawModel, { env });
+    return parseModelConfig(rawModel, {
+      env,
+      onInvalidProvider: (providerId, error) => diagnostics.push({
+        code: `MODEL_${error.code.toUpperCase()}`,
+        severity: "warning",
+        message: error.message,
+        path: `model.providers.${providerId}`,
+        hint: "This provider was excluded from the runtime. Correct its settings to enable it.",
+        recoverable: true,
+      }),
+    });
   } catch (error) {
     if (error instanceof ModelConfigError) {
       diagnostics.push({
@@ -601,6 +797,16 @@ function readOptionalPositiveInteger(value: unknown, path: string): number | und
   }
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
     throw new PilotConfigError("CONFIG_INVALID_VALUE", `${path} must be a positive integer.`);
+  }
+  return Math.floor(value);
+}
+
+function readOptionalNonNegativeInteger(value: unknown, path: string): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    throw new PilotConfigError("CONFIG_INVALID_VALUE", `${path} must be a non-negative integer.`);
   }
   return Math.floor(value);
 }
